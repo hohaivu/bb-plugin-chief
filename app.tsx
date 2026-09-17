@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   definePluginApp,
+  experimental_ProviderModelPicker as ProviderModelPicker,
   useBbNavigate,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
-import type { rpcContract } from "./server";
+import type { ModelConfiguration, ModelSelection, rpcContract } from "./server";
+
+const ROLES = [
+  { role: "chief", label: "Chief", hint: "Supervises and decides." },
+  { role: "worker", label: "Worker", hint: "Implements delegated work." },
+  { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
+] as const;
 
 function Crown() {
   return (
@@ -75,6 +82,125 @@ function StartChief({ projectId }: { projectId: string | null }) {
   );
 }
 
+function ChiefModelSettings() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [configuration, setConfiguration] = useState<ModelConfiguration | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      setConfiguration(await rpc.call("modelConfiguration", null));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [rpc]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useCallback(
+    (hostId: string, role: (typeof ROLES)[number]["role"], selection: ModelSelection | null) => {
+      setError(null);
+      setConfiguration((current) => current && {
+        hosts: current.hosts.map((host) =>
+          host.hostId === hostId ? { ...host, selections: { ...host.selections, [role]: selection } } : host,
+        ),
+      });
+      void rpc.call("setRoleModel", { hostId, role, selection }).catch((cause) => {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        void load();
+      });
+    },
+    [load, rpc],
+  );
+
+  if (!configuration && isLoading) {
+    return <p className="text-sm text-muted-foreground">Scanning machines for providers and models…</p>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">
+          Chief, its workers, and its reviewers can each run on their own model. A role without a
+          selection uses BB&apos;s own default for the project.
+        </p>
+        <button
+          type="button"
+          disabled={isLoading}
+          onClick={() => void load()}
+          className="h-7 shrink-0 cursor-pointer rounded-md border border-input px-3 text-xs font-medium disabled:opacity-50"
+        >
+          {isLoading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+      {configuration?.hosts.map((host) => (
+        <div key={host.hostId} className="rounded-lg border border-border p-3">
+          <div className="text-sm font-medium text-foreground">
+            {host.hostName}
+            {host.connected ? null : " · disconnected"}
+          </div>
+          {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
+          {ROLES.map(({ role, label, hint }) => {
+            const selection = host.selections[role];
+            const value = selection ?? host.fallback;
+            return (
+              <div key={role} className="mt-3 flex flex-wrap items-center gap-3">
+                <div className="w-24 shrink-0">
+                  <div className="text-sm text-foreground">{label}</div>
+                  <div className="text-xs text-muted-foreground">{hint}</div>
+                </div>
+                {value ? (
+                  <ProviderModelPicker
+                    value={value}
+                    routing={{ kind: "host", hostId: host.hostId }}
+                    disabled={!host.connected}
+                    onChange={(next) => save(host.hostId, role, {
+                      providerId: next.providerId,
+                      model: next.model,
+                      reasoningLevel: next.reasoningLevel,
+                    })}
+                  />
+                ) : (
+                  <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
+                )}
+                {selection ? (
+                  <>
+                    {host.unusable.includes(role) ? (
+                      <span className="text-xs text-destructive">
+                        This machine cannot serve that model; spawning on BB&apos;s default.
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => save(host.hostId, role, null)}
+                      className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
+                    >
+                      Use BB default
+                    </button>
+                  </>
+                ) : (
+                  <span className="text-xs text-muted-foreground">Not set · BB picks the model</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      {configuration?.hosts.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No machines are enrolled yet.</p>
+      ) : null}
+    </div>
+  );
+}
+
 function ChiefHeaderBadge({
   threadId,
   isCompactViewport,
@@ -132,6 +258,12 @@ export default definePluginApp((app) => {
     id: "start-chief",
     title: "Chief",
     component: StartChief,
+  });
+  app.slots.settingsSection({
+    id: "models",
+    title: "Chief models by machine",
+    description: "Live provider and model choices scanned from each enrolled machine.",
+    component: ChiefModelSettings,
   });
   app.slots.experimental_threadHeaderAction({
     id: "chief-role",

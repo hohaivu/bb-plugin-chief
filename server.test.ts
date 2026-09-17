@@ -25,7 +25,19 @@ function configurationContext(threadId: string, projectId = "proj_1"): PluginAge
   };
 }
 
-async function setup() {
+function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDefault = false) {
+  return {
+    id: model,
+    model,
+    displayName: model,
+    description: "",
+    isDefault,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: reasoningEfforts.map((reasoningEffort) => ({ reasoningEffort, description: "" })),
+  };
+}
+
+async function setup(options: { hostStatus?: string; providerAvailable?: boolean } = {}) {
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
   let sendFailures = 0;
@@ -46,7 +58,22 @@ async function setup() {
         get: async ({ projectId }: { projectId: string }) => ({ id: projectId, name: projectId === "proj_1" ? "Asha" : "Second", kind: "standard" }),
         fileContent: async () => { throw new Error("missing"); },
       },
-      hosts: { list: async () => [{ id: "host_1", name: "Local", status: "connected" }] },
+      hosts: { list: async () => [{ id: "host_1", name: "Local", status: options.hostStatus ?? "connected" }] },
+      environments: { get: async ({ environmentId }: { environmentId: string }) => ({ id: environmentId, hostId: "host_1" }) },
+      providers: {
+        list: async () => [
+          { id: "codex", displayName: "Codex", available: options.providerAvailable ?? true },
+          { id: "claude-code", displayName: "Claude Code", available: true },
+        ],
+        models: async (args?: { providerId?: string }) => ({
+          modelLoadError: null,
+          providers: [],
+          selectedOnlyModels: [],
+          models: args?.providerId === "claude-code"
+            ? [catalogModel("claude-opus-5", ["medium", "high"], true)]
+            : [catalogModel("gpt-6-astra", ["medium", "high"], true), catalogModel("gpt-6-mini", ["medium"])],
+        }),
+      },
       threads: {
         spawn: async (args: any) => {
           spawned.push(args);
@@ -403,6 +430,98 @@ describe("Chief backend", () => {
     const service = state.harness.behavior.runService("supervisor");
     service.controller.abort();
     await expect(service.done).resolves.toBeUndefined();
+  });
+
+  test("spawns on BB defaults until a machine and role are given a model", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    expect(state.spawned[0]).not.toHaveProperty("providerId");
+    expect(state.spawned[1]).not.toHaveProperty("model");
+  });
+
+  test("spawns each role on the model picked for its machine", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "chief",
+      selection: { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" },
+    });
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "worker",
+      selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+    });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" });
+
+    expect(state.spawned[0]).toMatchObject({ providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" });
+    expect(state.spawned[1]).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
+    // The reviewer has no selection of its own and stays on the BB default.
+    expect(state.spawned[2]).not.toHaveProperty("providerId");
+  });
+
+  test("falls back to the BB default when a picked model left the machine's catalog", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "chief",
+      selection: { providerId: "codex", model: "gpt-5-retired", reasoningLevel: "high" },
+    });
+    await start(state);
+    expect(state.spawned[0]).not.toHaveProperty("providerId");
+    expect(state.spawned[0]).not.toHaveProperty("model");
+
+    // Settings must admit the pick is dead rather than showing a model no spawn uses.
+    const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
+    expect(configuration.hosts[0]!.unusable).toEqual(["chief"]);
+  });
+
+  test("keeps a picked model whose reasoning level is no longer supported, at the model's own default", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "chief",
+      selection: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "high" },
+    });
+    await start(state);
+    expect(state.spawned[0]).toMatchObject({ providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" });
+  });
+
+  test("reports each machine's scanned fallback and stored selections", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "worker",
+      selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+    });
+    const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
+    expect(configuration.hosts).toEqual([{
+      hostId: "host_1",
+      hostName: "Local",
+      connected: true,
+      error: null,
+      fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" },
+      selections: {
+        chief: null,
+        worker: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+        reviewer: null,
+      },
+      unusable: [],
+    }]);
+
+    await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "worker", selection: null });
+    const cleared = await state.harness.behavior.callRpc("modelConfiguration", null);
+    expect(cleared.hosts[0]!.selections.worker).toBeNull();
+  });
+
+  test("explains a machine with no signed-in provider instead of offering a model", async () => {
+    const state = await setup({ providerAvailable: false });
+    const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
+    // claude-code is still available, so the scan falls through to it.
+    expect(configuration.hosts[0]!.fallback).toEqual({ providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "medium" });
+
+    const disconnected = await setup({ hostStatus: "disconnected" });
+    const offline = await disconnected.harness.behavior.callRpc("modelConfiguration", null);
+    expect(offline.hosts[0]).toMatchObject({ connected: false, fallback: null });
+    expect(offline.hosts[0]!.error).toContain("disconnected");
   });
 
   test("imports only public SDK surfaces", async () => {

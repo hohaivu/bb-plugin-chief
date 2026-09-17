@@ -87,3 +87,49 @@ test("marks Chief conversations with a compact header badge", async () => {
     expect(rendered.getByLabelText("Chief supervisor").textContent).toContain("Chief"),
   );
 });
+
+test("picks a scanned model per role and clears back to the BB default", async () => {
+  expect(app.settingsSections).toHaveLength(1);
+  const configuration = {
+    hosts: [{
+      hostId: "host_1",
+      hostName: "Local",
+      connected: true,
+      error: null,
+      fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
+      selections: {
+        chief: { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const },
+        worker: null,
+        reviewer: null,
+      },
+      unusable: [],
+    }],
+  };
+  const rendered = renderSlot<Record<string, never>, typeof rpcContract>(
+    app.settingsSections[0]!,
+    {},
+    {
+      rpc: {
+        status: () => emptyStatus,
+        start: () => ({ threadId: "thr_1", created: false }),
+        create: () => ({ threadId: "thr_1", created: true }),
+        modelConfiguration: () => configuration,
+        setRoleModel: () => ({ ok: true as const }),
+      },
+    },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+
+  await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(2);
+
+  fireEvent.click(rendered.getByRole("button", { name: "Use BB default" }));
+
+  await vi.waitFor(() =>
+    expect(rendered.rpcCalls).toContainEqual({
+      method: "setRoleModel",
+      input: { hostId: "host_1", role: "chief", selection: null },
+    }),
+  );
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(3);
+});

@@ -27,16 +27,18 @@ Put `chief.md` at the project root. Chief reads it through BB's project file API
 
 ```sh
 bb plugin config chief set chiefProject proj_...
-bb plugin config chief set chiefProvider codex
-bb plugin config chief set chiefModel gpt-5.4
-bb plugin config chief set workerProvider claude-code
-bb plugin config chief set workerModel claude-sonnet-4-6
-bb plugin config chief set reviewerProvider codex
-bb plugin config chief set reviewerModel gpt-5.4
 bb plugin config chief set stallMinutes 30
 ```
 
-Provider/model fields may be empty to use BB defaults. Chief, worker, and reviewer reasoning are independent select settings. `chiefProject` is the default used outside an existing project context; it does not limit Chief to one project.
+`chiefProject` is the default used outside an existing project context; it does not limit Chief to one project.
+
+### Models
+
+Settings → **Chief models by machine** scans every enrolled machine for its signed-in providers
+and their live model catalogs, and lets you pick a provider, model, and reasoning level per role:
+Chief, worker, and reviewer. A role without a selection spawns on BB's own default for the
+project, and a selection the machine can no longer serve (signed out, model retired) falls back
+to that default rather than failing the spawn.
 
 ## CLI
 
