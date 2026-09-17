@@ -46,6 +46,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   const live = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const sent: any[] = [];
   const spawned: any[] = [];
+  const catalogReads: (string | undefined)[] = [];
   const { bb, harness } = createFakePluginHost({
     pluginId: "chief",
     agentSkillIds: ["chief", "chief-worker"],
@@ -65,14 +66,17 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           { id: "codex", displayName: "Codex", available: options.providerAvailable ?? true },
           { id: "claude-code", displayName: "Claude Code", available: true },
         ],
-        models: async (args?: { providerId?: string }) => ({
-          modelLoadError: null,
-          providers: [],
-          selectedOnlyModels: [],
-          models: args?.providerId === "claude-code"
-            ? [catalogModel("claude-opus-5", ["medium", "high"], true)]
-            : [catalogModel("gpt-6-astra", ["medium", "high"], true), catalogModel("gpt-6-mini", ["medium"])],
-        }),
+        models: async (args?: { providerId?: string }) => {
+          catalogReads.push(args?.providerId);
+          return {
+            modelLoadError: null,
+            providers: [],
+            selectedOnlyModels: [],
+            models: args?.providerId === "claude-code"
+              ? [catalogModel("claude-opus-5", ["medium", "high"], true)]
+              : [catalogModel("gpt-6-astra", ["medium", "high"], true), catalogModel("gpt-6-mini", ["medium"])],
+          };
+        },
       },
       threads: {
         spawn: async (args: any) => {
@@ -140,6 +144,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     spawned,
     sent,
     live,
+    catalogReads,
     section: () => section,
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
@@ -510,6 +515,20 @@ describe("Chief backend", () => {
     await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "worker", selection: null });
     const cleared = await state.harness.behavior.callRpc("modelConfiguration", null);
     expect(cleared.hosts[0]!.selections.worker).toBeNull();
+  });
+
+  test("scans a machine's provider once no matter how many roles picked it", async () => {
+    const state = await setup();
+    for (const role of ["chief", "worker", "reviewer"]) {
+      await state.harness.behavior.callRpc("setRoleModel", {
+        hostId: "host_1", role,
+        selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+      });
+    }
+    state.catalogReads.length = 0;
+    await state.harness.behavior.callRpc("modelConfiguration", null);
+    // Three roles and the picker's own seed share one provider: one catalog read.
+    expect(state.catalogReads).toEqual(["codex"]);
   });
 
   test("explains a machine with no signed-in provider instead of offering a model", async () => {

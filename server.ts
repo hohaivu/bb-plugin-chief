@@ -434,8 +434,23 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
+  type Catalog = (providerId: string) => ReturnType<typeof modelCatalog>;
+
+  /** One scan per provider per request: three roles on one provider must not cost three reads. */
+  function catalogReader(hostId: string): Catalog {
+    const pending = new Map<string, ReturnType<typeof modelCatalog>>();
+    return (providerId) => {
+      const started = pending.get(providerId) ?? modelCatalog(hostId, providerId);
+      pending.set(providerId, started);
+      return started;
+    };
+  }
+
   /** The first signed-in provider's default model: what the picker starts from. */
-  async function hostFallback(hostId: string): Promise<{ fallback: ModelSelection | null; error: string | null }> {
+  async function hostFallback(
+    hostId: string,
+    read: Catalog = catalogReader(hostId),
+  ): Promise<{ fallback: ModelSelection | null; error: string | null }> {
     try {
       const providers = await discover(
         (signal) => bb.sdk.providers.list({ hostId, signal }),
@@ -443,7 +458,7 @@ export default async function plugin(bb: BbPluginApi) {
       );
       const provider = providers.find((candidate) => candidate.available);
       if (!provider) return { fallback: null, error: "No signed-in provider on this machine." };
-      const catalog = await modelCatalog(hostId, provider.id);
+      const catalog = await read(provider.id);
       if (catalog.modelLoadError !== null) {
         return { fallback: null, error: `Model catalog is not available (${catalog.modelLoadError.code}).` };
       }
@@ -462,9 +477,13 @@ export default async function plugin(bb: BbPluginApi) {
    * The stored pick as the machine can serve it today, or null when it cannot.
    * Settings and the spawn sites share this so what the user sees is what runs.
    */
-  async function usableSelection(hostId: string, selection: ModelSelection): Promise<ModelSelection | null> {
+  async function usableSelection(
+    hostId: string,
+    selection: ModelSelection,
+    read: Catalog = catalogReader(hostId),
+  ): Promise<ModelSelection | null> {
     try {
-      const catalog = await modelCatalog(hostId, selection.providerId);
+      const catalog = await read(selection.providerId);
       if (catalog.modelLoadError !== null) {
         throw new Error(`model catalog is not available (${catalog.modelLoadError.code})`);
       }
@@ -1116,21 +1135,25 @@ export default async function plugin(bb: BbPluginApi) {
         };
         // A connected machine can answer for its own picks, so say which ones it
         // would refuse instead of showing a model the next spawn will ignore.
-        const unusable = connected
-          ? (await Promise.all(roleSchema.options.map(async (role) => {
-              const selection = selections[role];
-              return selection && !(await usableSelection(host.id, selection)) ? role : null;
-            }))).filter((role) => role !== null)
-          : [];
+        // One reader for the whole host: roles sharing a provider scan it once.
+        const read = catalogReader(host.id);
+        const [scan, flagged] = await Promise.all([
+          connected
+            ? hostFallback(host.id, read)
+            : { fallback: null, error: "Machine is disconnected; its model catalog is unavailable." },
+          Promise.all(roleSchema.options.map(async (role) => {
+            const selection = selections[role];
+            if (!connected || !selection) return null;
+            return (await usableSelection(host.id, selection, read)) ? null : role;
+          })),
+        ]);
         return {
           hostId: host.id,
           hostName: host.name,
           connected,
-          ...(connected
-            ? await hostFallback(host.id)
-            : { fallback: null, error: "Machine is disconnected; its model catalog is unavailable." }),
+          ...scan,
           selections,
-          unusable,
+          unusable: flagged.filter((role): role is Role => role !== null),
         };
       })),
     }),

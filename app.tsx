@@ -109,7 +109,15 @@ function ChiefModelSettings() {
       setError(null);
       setConfiguration((current) => current && {
         hosts: current.hosts.map((host) =>
-          host.hostId === hostId ? { ...host, selections: { ...host.selections, [role]: selection } } : host,
+          host.hostId === hostId
+            ? {
+                ...host,
+                selections: { ...host.selections, [role]: selection },
+                // The picker only offers models this machine serves, so a fresh
+                // pick clears the stale "cannot serve that model" warning.
+                unusable: host.unusable.filter((stale) => stale !== role),
+              }
+            : host,
         ),
       });
       void rpc.call("setRoleModel", { hostId, role, selection }).catch((cause) => {
