@@ -723,7 +723,16 @@ export default async function plugin(bb: BbPluginApi) {
   /** A failed auto-review must never swallow the alert Chief is waiting for. */
   async function autoReview(row: ManagedRow) {
     try {
-      return await startReview(row.thread_id);
+      const review = await startReview(row.thread_id);
+      const reviewer = review.created ? null : roles.get(review.threadId);
+      // The worker fixed what the review found and reported ready again. Its
+      // finished reviewer has to look again, or the fix cycle ships unreviewed.
+      if (!reviewer || BUSY_STATUSES.has(reviewer.state)) return { ...review, resumed: false };
+      await continueThread(
+        review.threadId,
+        "The worker reported ready again. Re-check the current worktree, including everything changed since your last report, and send Chief a fresh verdict with chief_report.",
+      );
+      return { ...review, resumed: true };
     } catch (error) {
       bb.log.warn(`Could not auto-start a review for ${row.thread_id}: ${String(error)}`);
       return null;
@@ -921,7 +930,7 @@ export default async function plugin(bb: BbPluginApi) {
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
       ...(detail ? [`Detail: ${detail}`] : []),
       review
-        ? `Independent review “${review.title}” (${review.threadId}) is running in this worktree. Read its report before completing this work.`
+        ? `Independent review “${review.title}” (${review.threadId}) ${review.resumed ? "has been asked to re-check the latest changes" : "is running in this worktree"}. Read its report before completing this work.`
         : pending
           ? "Its review could not be started automatically. Start one with chief_review before completing this work."
           : "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",

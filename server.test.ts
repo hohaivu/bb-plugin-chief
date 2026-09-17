@@ -417,6 +417,35 @@ describe("Chief backend", () => {
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
   });
 
+  test("sends the finished reviewer back after the worker fixes what it found", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const ready = async () => {
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Ready for review",
+      }, { threadId: worker.threadId, projectId: "proj_1" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: state.live.get(worker.threadId)!,
+        lastAssistantText: "done",
+      });
+    };
+    await ready();
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals are off by the discount",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Fix the discount"]);
+
+    await ready();
+
+    // One reviewer, but it must be asked again — a fix cycle cannot ship unreviewed.
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
+    expect(state.sent.filter((entry) => entry.threadId === reviewer.threadId).at(-1).input[0].text)
+      .toContain("Re-check the current worktree");
+    expect(state.sent.at(-1).input[0].text).toContain("re-check the latest changes");
+  });
+
   test("enforces agent-tool authorization at execution time", async () => {
     const state = await setup();
     const chief = await start(state);
