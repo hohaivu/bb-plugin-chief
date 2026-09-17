@@ -175,7 +175,8 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark verified work complete.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
-- A worker report is evidence, not proof. Review meaningful or high-risk changes independently.
+- A worker report is evidence, not proof. Every worker that reports ready gets an independent review automatically; read that reviewer's verdict before completing its work.
+- Start extra reviews with chief_review whenever a change is risky enough to deserve a second pass.
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete; let the user archive it when desired.`;
 
@@ -553,7 +554,8 @@ export default async function plugin(bb: BbPluginApi) {
     const prompt = [
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
-      "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, start independent reviews when warranted, and mark work complete only after verification.",
+      "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
+      "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "", "## Project rules", rules,
       "", "Acknowledge the operating rules briefly, inspect the roster, and wait for work.",
@@ -718,6 +720,16 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** A failed auto-review must never swallow the alert Chief is waiting for. */
+  async function autoReview(row: ManagedRow) {
+    try {
+      return await startReview(row.thread_id);
+    } catch (error) {
+      bb.log.warn(`Could not auto-start a review for ${row.thread_id}: ${String(error)}`);
+      return null;
+    }
+  }
+
   async function markComplete(threadId: string, result?: string) {
     const row = roles.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker or reviewer ${threadId}.`);
@@ -800,7 +812,9 @@ export default async function plugin(bb: BbPluginApi) {
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
-      "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+      row.role === "worker" && params.state === "ready"
+        ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
+        : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
     const delivered = await alertChief(current, `report:${now}:${randomUUID()}`, summary);
     if (!delivered) {
@@ -899,10 +913,18 @@ export default async function plugin(bb: BbPluginApi) {
     );
     reloadRoles();
     const current = roles.get(thread.id)!;
+    // Ready work earns its reviewer without Chief having to ask for one; Chief
+    // still owns the verdict. Only now is the worker idle enough to review.
+    const pending = current.role === "worker" && current.state === "ready";
+    const review = pending ? await autoReview(current) : null;
     await alertChief(current, `${kind}:${row.active_cycle}`, [
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
       ...(detail ? [`Detail: ${detail}`] : []),
-      "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
+      review
+        ? `Independent review “${review.title}” (${review.threadId}) is running in this worktree. Read its report before completing this work.`
+        : pending
+          ? "Its review could not be started automatically. Start one with chief_review before completing this work."
+          : "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
     ].join("\n"));
   }
 

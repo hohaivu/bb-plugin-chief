@@ -393,6 +393,30 @@ describe("Chief backend", () => {
     expect(state.spawned.at(-1).prompt).toContain("read-only review");
   });
 
+  test("reviews a ready worker without Chief asking for it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals fixed and covered by a test",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    const review = state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals");
+    expect(review).toHaveLength(1);
+    expect(review[0].environment).toEqual({ type: "reuse", environmentId: "env_worker" });
+    // Chief must learn the review exists, or it completes the work before the verdict.
+    expect(state.sent.at(-1).input[0].text).toContain("Read its report before completing");
+    // A second idle event must not spawn a second reviewer.
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
+  });
+
   test("enforces agent-tool authorization at execution time", async () => {
     const state = await setup();
     const chief = await start(state);

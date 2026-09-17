@@ -15,7 +15,8 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 3. Chief delegates clearly titled work to a worker in its own managed worktree.
 4. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 5. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled. Alerts use a durable SQLite outbox and retry after transient delivery failures.
-6. Chief inspects live status and bounded output, continues safe reversible work, starts one read-only review after a worker is idle, marks verified non-running work complete, and escalates only genuine decisions.
+6. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts one read-only reviewer in its worktree and tells Chief to wait for that verdict. Chief can start further reviews itself with `chief_review`.
+7. Chief inspects live status and bounded output, continues safe reversible work, marks verified non-running work complete, and escalates only genuine decisions.
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
 
