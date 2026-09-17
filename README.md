@@ -30,7 +30,9 @@ bb plugin config chief set chiefProject proj_...
 bb plugin config chief set stallMinutes 30
 ```
 
-`chiefProject` is the default used outside an existing project context; it does not limit Chief to one project.
+`chiefProject` is the default used outside an existing project context — including the **Start Chief**
+button on the root New thread screen, which bb gives no project of its own. It does not limit Chief to
+one project.
 
 ### Models
 

@@ -4,6 +4,7 @@ import {
   experimental_ProviderModelPicker as ProviderModelPicker,
   useBbNavigate,
   useRpc,
+  useSettings,
 } from "@get-bb/plugin-sdk/app";
 import type { ModelConfiguration, ModelSelection, rpcContract } from "./server";
 
@@ -31,21 +32,27 @@ function Crown() {
 function StartChief({ projectId }: { projectId: string | null }) {
   const navigate = useBbNavigate();
   const rpc = useRpc<typeof rpcContract>();
+  const { values } = useSettings();
   const [isLaunching, setIsLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // The slot only carries a project on a project route; the root New thread
+  // screen has none, so fall back to the configured default Chief project.
+  const configured = values?.chiefProject;
+  const target = projectId ?? (typeof configured === "string" && configured ? configured : null);
+
   const launch = useCallback(async () => {
-    if (!projectId || isLaunching) return;
+    if (!target || isLaunching) return;
     setError(null);
     setIsLaunching(true);
     try {
-      const result = await rpc.call("create", { projectId });
+      const result = await rpc.call("create", { projectId: target });
       navigate.toThread(result.threadId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       setIsLaunching(false);
     }
-  }, [isLaunching, navigate, projectId, rpc]);
+  }, [isLaunching, navigate, target, rpc]);
 
   return (
     <div className="rounded-lg border border-border bg-card text-card-foreground">
@@ -55,13 +62,17 @@ function StartChief({ projectId }: { projectId: string | null }) {
             <p role="alert" className="text-destructive">
               {error}
             </p>
-          ) : (
+          ) : projectId ? (
             <p>Create an independent supervisor for this project. You can start more than one.</p>
+          ) : target ? (
+            <p>No project is in view here, so this starts a Chief in your default Chief project.</p>
+          ) : (
+            <p>Open a project, or set a default Chief project in Settings, to start one from here.</p>
           )}
         </div>
         <button
           type="button"
-          disabled={!projectId || isLaunching}
+          disabled={!target || isLaunching}
           onClick={() => void launch()}
           className="inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-input bg-transparent px-3 text-xs font-medium text-foreground transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
         >
