@@ -12,6 +12,7 @@ const RULES_FILE = "chief.md";
 const RECONCILE_INTERVAL_MS = 30_000;
 const MAX_ALERT_LENGTH = 3_000;
 const MAX_RESULT_LENGTH = 8_000;
+const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const roleSchema = z.enum(["chief", "worker", "reviewer"]);
@@ -38,6 +39,31 @@ const reasoningSchema = z.enum([
   "ultra",
   "ultracode",
 ]);
+const modelSelectionSchema = z.object({
+  providerId: z.string().trim().min(1),
+  model: z.string().trim().min(1),
+  reasoningLevel: reasoningSchema,
+});
+export type ModelSelection = z.infer<typeof modelSelectionSchema>;
+
+const modelConfigurationSchema = z.object({
+  hosts: z.array(z.object({
+    hostId: z.string(),
+    hostName: z.string(),
+    connected: z.boolean(),
+    /** A valid starting point for the picker when a role has no selection. */
+    fallback: modelSelectionSchema.nullable(),
+    error: z.string().nullable(),
+    selections: z.object({
+      chief: modelSelectionSchema.nullable(),
+      worker: modelSelectionSchema.nullable(),
+      reviewer: modelSelectionSchema.nullable(),
+    }),
+    /** Roles whose stored pick this machine can no longer serve, so spawns use BB's default. */
+    unusable: z.array(roleSchema),
+  })),
+});
+export type ModelConfiguration = z.infer<typeof modelConfigurationSchema>;
 
 const managedThreadSchema = z.object({
   threadId: z.string(),
@@ -97,6 +123,18 @@ export const rpcContract = defineRpcContract({
     input: z.object({ projectId: z.string().trim().min(1) }).strict(),
     output: z.object({ threadId: z.string(), created: z.literal(true) }).strict(),
   },
+  modelConfiguration: {
+    input: z.null(),
+    output: modelConfigurationSchema,
+  },
+  setRoleModel: {
+    input: z.object({
+      hostId: z.string().trim().min(1),
+      role: roleSchema,
+      selection: modelSelectionSchema.nullable(),
+    }).strict(),
+    output: z.object({ ok: z.literal(true) }).strict(),
+  },
 });
 
 interface ManagedRow {
@@ -137,7 +175,8 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark verified work complete.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
-- A worker report is evidence, not proof. Review meaningful or high-risk changes independently.
+- A worker report is evidence, not proof. Every worker that reports ready gets an independent review automatically; read that reviewer's verdict before completing its work.
+- Start extra reviews with chief_review whenever a change is risky enough to deserve a second pass.
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete; let the user archive it when desired.`;
 
@@ -174,15 +213,6 @@ function bullets(values?: string[]) {
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     chiefProject: { type: "project", label: "Default Chief project" },
-    chiefProvider: { type: "string", label: "Chief provider", default: "" },
-    chiefModel: { type: "string", label: "Chief model", default: "" },
-    chiefReasoning: { type: "select", label: "Chief reasoning", options: reasoningSchema.options, default: "high" },
-    workerProvider: { type: "string", label: "Worker provider", default: "" },
-    workerModel: { type: "string", label: "Worker model", default: "" },
-    workerReasoning: { type: "select", label: "Worker reasoning", options: reasoningSchema.options, default: "high" },
-    reviewerProvider: { type: "string", label: "Reviewer provider", default: "" },
-    reviewerModel: { type: "string", label: "Reviewer model", default: "" },
-    reviewerReasoning: { type: "select", label: "Reviewer reasoning", options: reasoningSchema.options, default: "high" },
     stallMinutes: { type: "string", label: "Stall threshold (minutes)", default: "30" },
   });
 
@@ -220,6 +250,15 @@ export default async function plugin(bb: BbPluginApi) {
       created_at INTEGER NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS alert_outbox_pending ON alert_outbox (delivered_at, created_at)`,
+    `CREATE TABLE IF NOT EXISTS chief_models (
+      host_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('chief','worker','reviewer')),
+      provider_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      reasoning_level TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (host_id, role)
+    )`,
   ]);
 
   const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC`);
@@ -237,6 +276,9 @@ export default async function plugin(bb: BbPluginApi) {
   );
   const pendingAlerts = db.prepare(
     `SELECT * FROM alert_outbox WHERE delivered_at IS NULL ORDER BY created_at ASC LIMIT 100`,
+  );
+  const roleModelRow = db.prepare<[string, string]>(
+    `SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`,
   );
   let roles = new Map<string, ManagedRow>();
   const rulesCache = new Map<string, string>();
@@ -334,15 +376,141 @@ export default async function plugin(bb: BbPluginApi) {
     catch { return projectId; }
   }
 
-  function execution(values: Awaited<ReturnType<typeof settings.get>>, role: "chief" | "worker" | "reviewer") {
-    const providerId = values[`${role}Provider`];
-    const model = values[`${role}Model`];
-    const reasoningLevel = values[`${role}Reasoning`] as z.infer<typeof reasoningSchema>;
-    return {
-      ...(providerId ? { providerId } : {}),
-      ...(model ? { model } : {}),
-      ...(reasoningLevel ? { reasoningLevel } : {}),
+  type Role = z.infer<typeof roleSchema>;
+
+  function readRoleModel(hostId: string, role: Role): ModelSelection | null {
+    const row = roleModelRow.get(hostId, role) as
+      | { provider_id: string; model: string; reasoning_level: string }
+      | undefined;
+    if (!row) return null;
+    const parsed = modelSelectionSchema.safeParse({
+      providerId: row.provider_id,
+      model: row.model,
+      reasoningLevel: row.reasoning_level,
+    });
+    return parsed.success ? parsed.data : null;
+  }
+
+  function writeRoleModel(hostId: string, role: Role, selection: ModelSelection | null) {
+    if (!selection) {
+      db.prepare(`DELETE FROM chief_models WHERE host_id=? AND role=?`).run(hostId, role);
+      return;
+    }
+    db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(host_id, role) DO UPDATE SET provider_id=excluded.provider_id, model=excluded.model,
+        reasoning_level=excluded.reasoning_level, updated_at=excluded.updated_at`).run(
+      hostId, role, selection.providerId, selection.model, selection.reasoningLevel, Date.now(),
+    );
+  }
+
+  // Discovery must never outlive the plugin or hang a spawn behind an
+  // unreachable machine, so every catalog read is aborted on both.
+  const discoveryLifetime = new AbortController();
+  bb.onDispose(() => discoveryLifetime.abort());
+
+  function discover<T>(run: (signal: AbortSignal) => Promise<T>, label: string) {
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    discoveryLifetime.signal.addEventListener("abort", stop, { once: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return Promise.race([
+      run(controller.signal),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          stop();
+          reject(new Error(`${label} timed out after ${MODEL_DISCOVERY_TIMEOUT_MS / 1_000} seconds.`));
+        }, MODEL_DISCOVERY_TIMEOUT_MS);
+      }),
+    ]).finally(() => {
+      clearTimeout(timer);
+      discoveryLifetime.signal.removeEventListener("abort", stop);
+    });
+  }
+
+  function modelCatalog(hostId: string, providerId?: string) {
+    return discover(
+      (signal) => bb.sdk.providers.models({ hostId, ...(providerId ? { providerId } : {}), signal }),
+      "Model discovery",
+    );
+  }
+
+  type Catalog = (providerId: string) => ReturnType<typeof modelCatalog>;
+
+  /** One scan per provider per request: three roles on one provider must not cost three reads. */
+  function catalogReader(hostId: string): Catalog {
+    const pending = new Map<string, ReturnType<typeof modelCatalog>>();
+    return (providerId) => {
+      const started = pending.get(providerId) ?? modelCatalog(hostId, providerId);
+      pending.set(providerId, started);
+      return started;
     };
+  }
+
+  /** The first signed-in provider's default model: what the picker starts from. */
+  async function hostFallback(
+    hostId: string,
+    read: Catalog = catalogReader(hostId),
+  ): Promise<{ fallback: ModelSelection | null; error: string | null }> {
+    try {
+      const providers = await discover(
+        (signal) => bb.sdk.providers.list({ hostId, signal }),
+        "Provider discovery",
+      );
+      const provider = providers.find((candidate) => candidate.available);
+      if (!provider) return { fallback: null, error: "No signed-in provider on this machine." };
+      const catalog = await read(provider.id);
+      if (catalog.modelLoadError !== null) {
+        return { fallback: null, error: `Model catalog is not available (${catalog.modelLoadError.code}).` };
+      }
+      const model = catalog.models.find((candidate) => candidate.isDefault) ?? catalog.models[0];
+      if (!model) return { fallback: null, error: "This machine reported no models." };
+      return {
+        fallback: { providerId: provider.id, model: model.model, reasoningLevel: model.defaultReasoningEffort },
+        error: null,
+      };
+    } catch (error) {
+      return { fallback: null, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * The stored pick as the machine can serve it today, or null when it cannot.
+   * Settings and the spawn sites share this so what the user sees is what runs.
+   */
+  async function usableSelection(
+    hostId: string,
+    selection: ModelSelection,
+    read: Catalog = catalogReader(hostId),
+  ): Promise<ModelSelection | null> {
+    try {
+      const catalog = await read(selection.providerId);
+      if (catalog.modelLoadError !== null) {
+        throw new Error(`model catalog is not available (${catalog.modelLoadError.code})`);
+      }
+      const model = catalog.models.find((candidate) => candidate.model === selection.model);
+      if (!model) throw new Error("the machine no longer offers that model");
+      const reasoningLevel = model.supportedReasoningEfforts.some(
+        (effort) => effort.reasoningEffort === selection.reasoningLevel,
+      ) ? selection.reasoningLevel : model.defaultReasoningEffort;
+      return { ...selection, reasoningLevel };
+    } catch (error) {
+      bb.log.warn(
+        `Chief model ${selection.providerId}/${selection.model} is unusable on ${hostId}; using the BB default instead: ${String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Spawn arguments for a role. No selection, an unknown host, or a selection
+   * the machine can no longer serve all fall through to BB's own defaults —
+   * a stale pick must not block the work.
+   */
+  async function execution(role: Role, hostId: string | null) {
+    const selection = hostId === null ? null : readRoleModel(hostId, role);
+    if (!hostId || !selection) return {};
+    return (await usableSelection(hostId, selection)) ?? {};
   }
 
   async function defaultHostId() {
@@ -352,12 +520,32 @@ export default async function plugin(bb: BbPluginApi) {
     return host.id;
   }
 
+  /** The machine a role's thread will actually run on, or null when unknown. */
+  async function projectHostId(projectId: string) {
+    try {
+      const project = await bb.sdk.projects.get({ projectId });
+      const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+      return source?.hostId ?? await defaultHostId();
+    } catch (error) {
+      bb.log.warn(`Could not resolve the machine for ${projectId}: ${String(error)}`);
+      return null;
+    }
+  }
+
+  async function environmentHostId(environmentId: string) {
+    try {
+      return (await bb.sdk.environments.get({ environmentId })).hostId;
+    } catch (error) {
+      bb.log.warn(`Could not resolve the machine for ${environmentId}: ${String(error)}`);
+      return null;
+    }
+  }
+
   function chiefForProject(projectId: string) {
     return (activeChiefForProject.get(projectId) as ManagedRow | undefined) ?? null;
   }
 
   async function spawnChief(target: string, previous?: ManagedRow) {
-    const values = await settings.get();
     const sectionId = await ensureSection();
     const name = await projectName(target);
     const rules = await readRules(target);
@@ -366,7 +554,8 @@ export default async function plugin(bb: BbPluginApi) {
     const prompt = [
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
-      "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, start independent reviews when warranted, and mark work complete only after verification.",
+      "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
+      "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "", "## Project rules", rules,
       "", "Acknowledge the operating rules briefly, inspect the roster, and wait for work.",
@@ -377,7 +566,7 @@ export default async function plugin(bb: BbPluginApi) {
       sectionId,
       visibility: "visible",
       title,
-      ...execution(values, "chief"),
+      ...(await execution("chief", await projectHostId(target))),
       prompt,
     });
     if (previous && previous.thread_id !== thread.id) {
@@ -449,17 +638,18 @@ export default async function plugin(bb: BbPluginApi) {
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
+    const hostId = await defaultHostId();
     const thread = await bb.sdk.threads.spawn({
       projectId,
       environment: {
         type: "host",
-        hostId: await defaultHostId(),
+        hostId,
         workspace: { type: "managed-worktree", baseBranch: { kind: "default" } },
       },
       sectionId,
       visibility: "visible",
       title: params.title,
-      ...execution(values, "worker"),
+      ...(await execution("worker", hostId)),
       prompt,
     });
     insertThread({ threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, title: params.title, state: "starting", status: thread.status });
@@ -498,7 +688,6 @@ export default async function plugin(bb: BbPluginApi) {
       if (BUSY_STATUSES.has(live.status)) throw new Error(`Worker ${workerThreadId} is ${live.status}; wait until it is idle before starting a review.`);
       if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
       if (!live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
-      const values = await settings.get();
       const sectionId = await ensureSection();
       const rules = await readRules(worker.project_id);
       const title = `Review · ${worker.title}`;
@@ -517,7 +706,7 @@ export default async function plugin(bb: BbPluginApi) {
         sectionId,
         visibility: "visible",
         title,
-        ...execution(values, "reviewer"),
+        ...(await execution("reviewer", await environmentHostId(live.environmentId))),
         prompt,
       });
       insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status });
@@ -528,6 +717,25 @@ export default async function plugin(bb: BbPluginApi) {
       return await start;
     } finally {
       reviewStarts.delete(workerThreadId);
+    }
+  }
+
+  /** A failed auto-review must never swallow the alert Chief is waiting for. */
+  async function autoReview(row: ManagedRow) {
+    try {
+      const review = await startReview(row.thread_id);
+      const reviewer = review.created ? null : roles.get(review.threadId);
+      // The worker fixed what the review found and reported ready again. Its
+      // finished reviewer has to look again, or the fix cycle ships unreviewed.
+      if (!reviewer || BUSY_STATUSES.has(reviewer.state)) return { ...review, resumed: false };
+      await continueThread(
+        review.threadId,
+        "The worker reported ready again. Re-check the current worktree, including everything changed since your last report, and send Chief a fresh verdict with chief_report.",
+      );
+      return { ...review, resumed: true };
+    } catch (error) {
+      bb.log.warn(`Could not auto-start a review for ${row.thread_id}: ${String(error)}`);
+      return null;
     }
   }
 
@@ -613,7 +821,9 @@ export default async function plugin(bb: BbPluginApi) {
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
-      "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+      row.role === "worker" && params.state === "ready"
+        ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
+        : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
     const delivered = await alertChief(current, `report:${now}:${randomUUID()}`, summary);
     if (!delivered) {
@@ -712,10 +922,18 @@ export default async function plugin(bb: BbPluginApi) {
     );
     reloadRoles();
     const current = roles.get(thread.id)!;
+    // Ready work earns its reviewer without Chief having to ask for one; Chief
+    // still owns the verdict. Only now is the worker idle enough to review.
+    const pending = current.role === "worker" && current.state === "ready";
+    const review = pending ? await autoReview(current) : null;
     await alertChief(current, `${kind}:${row.active_cycle}`, [
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
       ...(detail ? [`Detail: ${detail}`] : []),
-      "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
+      review
+        ? `Independent review “${review.title}” (${review.threadId}) ${review.resumed ? "has been asked to re-check the latest changes" : "is running in this worktree"}. Read its report before completing this work.`
+        : pending
+          ? "Its review could not be started automatically. Start one with chief_review before completing this work."
+          : "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
     ].join("\n"));
   }
 
@@ -938,6 +1156,42 @@ export default async function plugin(bb: BbPluginApi) {
     status: () => ({ sectionId: storedSectionId(), threads: [...roles.values()].map(toManaged) }),
     start: ({ projectId }) => ensureChief(projectId ?? undefined),
     create: ({ projectId }) => createChief(projectId),
+    modelConfiguration: async () => ({
+      hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
+        const connected = host.status === "connected";
+        const selections = {
+          chief: readRoleModel(host.id, "chief"),
+          worker: readRoleModel(host.id, "worker"),
+          reviewer: readRoleModel(host.id, "reviewer"),
+        };
+        // A connected machine can answer for its own picks, so say which ones it
+        // would refuse instead of showing a model the next spawn will ignore.
+        // One reader for the whole host: roles sharing a provider scan it once.
+        const read = catalogReader(host.id);
+        const [scan, flagged] = await Promise.all([
+          connected
+            ? hostFallback(host.id, read)
+            : { fallback: null, error: "Machine is disconnected; its model catalog is unavailable." },
+          Promise.all(roleSchema.options.map(async (role) => {
+            const selection = selections[role];
+            if (!connected || !selection) return null;
+            return (await usableSelection(host.id, selection, read)) ? null : role;
+          })),
+        ]);
+        return {
+          hostId: host.id,
+          hostName: host.name,
+          connected,
+          ...scan,
+          selections,
+          unusable: flagged.filter((role): role is Role => role !== null),
+        };
+      })),
+    }),
+    setRoleModel: ({ hostId, role, selection }) => {
+      writeRoleModel(hostId, role, selection);
+      return { ok: true as const };
+    },
   });
 
   const usage = [

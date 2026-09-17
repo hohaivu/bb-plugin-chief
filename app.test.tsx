@@ -50,6 +50,48 @@ test("creates a fresh Chief from the project-aware New Thread screen", async () 
   ]);
 });
 
+test("falls back to the default Chief project on the projectless root screen", async () => {
+  const rendered = renderSlot<{ projectId: string | null }, typeof rpcContract>(
+    app.homepageSections[0]!,
+    { projectId: null },
+    {
+      settings: { chiefProject: "proj_default" },
+      rpc: {
+        status: () => emptyStatus,
+        start: () => ({ threadId: "thr_existing", created: false }),
+        create: ({ projectId }) => ({ threadId: `thr_${projectId}_new`, created: true }),
+      },
+    },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+
+  // The copy must admit which project it is about to use, since the screen shows none.
+  expect(rendered.getByText(/default Chief project/)).toBeTruthy();
+  fireEvent.click(rendered.getByRole("button", { name: "Start Chief" }));
+
+  await vi.waitFor(() =>
+    expect(rendered.rpcCalls).toEqual([{ method: "create", input: { projectId: "proj_default" } }]),
+  );
+});
+
+test("asks for a project when the root screen has no default", async () => {
+  const rendered = renderSlot<{ projectId: string | null }, typeof rpcContract>(
+    app.homepageSections[0]!,
+    { projectId: null },
+    {
+      rpc: {
+        status: () => emptyStatus,
+        start: () => ({ threadId: "thr_existing", created: false }),
+        create: () => ({ threadId: "thr_new", created: true }),
+      },
+    },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+
+  expect(rendered.getByRole("button", { name: "Start Chief" })).toHaveProperty("disabled", true);
+  expect(rendered.getByText(/set a default Chief project in Settings/)).toBeTruthy();
+});
+
 test("marks Chief conversations with a compact header badge", async () => {
   expect(app.threadHeaderActions).toHaveLength(1);
   const chief = {
@@ -86,4 +128,50 @@ test("marks Chief conversations with a compact header badge", async () => {
   await vi.waitFor(() =>
     expect(rendered.getByLabelText("Chief supervisor").textContent).toContain("Chief"),
   );
+});
+
+test("picks a scanned model per role and clears back to the BB default", async () => {
+  expect(app.settingsSections).toHaveLength(1);
+  const configuration = {
+    hosts: [{
+      hostId: "host_1",
+      hostName: "Local",
+      connected: true,
+      error: null,
+      fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
+      selections: {
+        chief: { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const },
+        worker: null,
+        reviewer: null,
+      },
+      unusable: [],
+    }],
+  };
+  const rendered = renderSlot<Record<string, never>, typeof rpcContract>(
+    app.settingsSections[0]!,
+    {},
+    {
+      rpc: {
+        status: () => emptyStatus,
+        start: () => ({ threadId: "thr_1", created: false }),
+        create: () => ({ threadId: "thr_1", created: true }),
+        modelConfiguration: () => configuration,
+        setRoleModel: () => ({ ok: true as const }),
+      },
+    },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+
+  await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(2);
+
+  fireEvent.click(rendered.getByRole("button", { name: "Use BB default" }));
+
+  await vi.waitFor(() =>
+    expect(rendered.rpcCalls).toContainEqual({
+      method: "setRoleModel",
+      input: { hostId: "host_1", role: "chief", selection: null },
+    }),
+  );
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(3);
 });
