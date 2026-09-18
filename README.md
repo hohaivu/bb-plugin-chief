@@ -43,6 +43,22 @@ Chief, worker, and reviewer. A role without a selection spawns on BB's own defau
 project, and a selection the machine can no longer serve (signed out, model retired) falls back
 to that default rather than failing the spawn.
 
+### Jev review scoring
+
+Reviewers can score a change on 19 engineering-quality dimensions — correctness, coupling,
+changeability, security, and so on — through the `chief_score` tool. The reviewer picks the base
+branch to compare against (the open PR's base, else main/master) and Chief diffs the whole
+worktree against it, uncommitted work included. Scoring the same worker against the same base
+twice reports which dimensions improved and which regressed.
+
+Settings → **Jev review scoring**. Enter an AI Gateway API key, press **Check connection**, then
+turn the toggle on. The toggle stays off until a check succeeds for the exact key and model in
+force; changing either one, or a failed check, closes the gate again. This is enforced on the
+server, so setting `jevEnabled` through the CLI cannot skip the check.
+
+The score is evidence for the reviewer to confirm or reject against the code it read — never a
+completion gate.
+
 ## CLI
 
 ```sh

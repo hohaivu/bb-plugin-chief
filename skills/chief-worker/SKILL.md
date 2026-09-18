@@ -16,3 +16,4 @@ Own the assigned outcome in your existing BB thread and worktree.
 - Reviewers are read-only unless Chief sends a continuation that explicitly authorizes a repair pass.
 - If report delivery fails, the report remains queued for automatic retry; surface the delivery error rather than claiming Chief received it.
 - Do not ask the user directly from this thread. Chief decides whether evidence requires escalation in the visible Chief supervisor thread.
+- When `chief_score` is offered, read the change yourself first, then score once against the branch this work merges into. The score is one model's read of the diff: report which of its points you confirmed and which you reject.
