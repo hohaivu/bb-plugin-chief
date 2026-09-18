@@ -596,8 +596,23 @@ describe("Chief backend", () => {
     expect(offline.hosts[0]!.error).toContain("disconnected");
   });
 
+  test("keeps Jev scoring off until a check succeeds for the current key and model", async () => {
+    const state = await setup();
+    const chiefId = (await start(state)).threadId;
+    const worker = await delegate(state, chiefId);
+    const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
+
+    // Turning the toggle on without a passing check is a claim, not a gate pass.
+    await state.harness.behavior.setSettings({ jevApiKey: "gw_key", jevEnabled: true });
+    expect(await state.harness.behavior.callRpc("jevStatus", null)).toMatchObject({ hasKey: true, verified: false, enabled: false });
+    const ungated = await state.harness.behavior.resolveAgentConfiguration(configurationContext(review.threadId));
+    expect(ungated.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
+    await expect(state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId }))
+      .rejects.toThrow(/Jev scoring is off/);
+  });
+
   test("imports only public SDK surfaces", async () => {
-    const result = await experimental_scanPublicSdkOnly(dirname(fileURLToPath(import.meta.url)), { allow: [/^vitest$/, /^react$/, /^@testing-library\/react$/] });
+    const result = await experimental_scanPublicSdkOnly(dirname(fileURLToPath(import.meta.url)), { allow: [/^vitest$/, /^react$/, /^@testing-library\/react$/, /^ai$/, /^@ai-sdk\//] });
     expect(result.violations).toEqual([]);
     expect(result.privateDependencies).toEqual([]);
   });
