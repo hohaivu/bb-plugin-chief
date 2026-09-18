@@ -625,6 +625,36 @@ describe("Chief backend", () => {
     expect(state.spawned[1].prompt).not.toContain("## Git workflow");
   });
 
+  test("refuses a second live worker on a branch another one already holds", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { branch: "feature/fix-checkout-totals" });
+
+    // A second worktree cannot check the branch out, so this has to fail here, not in git.
+    const result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals again", "--mission", "Correct and verify totals",
+      "--branch", "feature/fix-checkout-totals", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("already carries the active worker");
+    expect(state.spawned).toHaveLength(2);
+
+    // Once that worker is complete the branch is free again.
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, { threadId: chief.threadId, projectId: "proj_1" });
+    await delegate(state, chief.threadId, "Fix checkout totals follow-up", undefined, { branch: "feature/fix-checkout-totals" });
+    expect(state.spawned).toHaveLength(3);
+  });
+
+  test("tells the worker the forge is Chief's even when only a pull request was created", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    // Branch creation can fail after the draft PR exists; the constraint still has to reach the worker.
+    await delegate(state, chief.threadId, "Fix checkout totals", undefined, { prUrl: "https://github.com/acme/shop/pull/8" });
+    expect(state.spawned[1].prompt).toContain("## Git workflow");
+    expect(state.spawned[1].prompt).toContain("https://github.com/acme/shop/pull/8");
+    expect(state.spawned[1].prompt).toContain("Do not create, merge, or mark ready any pull request");
+  });
+
   test("records the branch and forge links on the thread and shows them in the roster and inspect", async () => {
     const state = await setup();
     const chief = await start(state);

@@ -234,7 +234,7 @@ Jev scoring is available to you through chief_score. Use it once per review pass
 
 You choose the base branch to compare against. Pick the branch this change actually merges into:
 1. If the worktree has an open pull request, use its base (\`gh pr view --json baseRefName -q .baseRefName\`).
-2. Otherwise use the branch the environment was forked from, if it is a real branch.
+2. Otherwise use the branch the environment was forked from, if it is a real branch and not the one the work is committed on — a task branch compared against itself yields an empty diff.
 3. Otherwise use the repository's default branch (main or master).
 
 Score against the same base on every pass for one worker; only then does the improved/regressed comparison mean anything. If you deliberately change the base, say so in your report and treat that score as a fresh baseline.
@@ -770,6 +770,15 @@ export default async function plugin(bb: BbPluginApi) {
     if (!projectId) throw new Error("No Chief project is configured.");
     const chief = caller?.role === "chief" ? caller : chiefForProject(projectId);
     if (!chief || chief.state === "complete") throw new Error("Start Chief for this project before delegating work.");
+    // One task branch carries one active worker: a second worktree cannot check out a
+    // branch another one already holds, and the spawn would fail with a raw git error.
+    const holder = params.branch
+      ? [...roles.values()].find((row) => row.role === "worker" && row.state !== "complete"
+        && row.project_id === projectId && row.branch === params.branch)
+      : undefined;
+    if (holder) {
+      throw new Error(`Branch ${params.branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
+    }
     const sectionId = await ensureSection();
     const rules = await readRules(projectId);
     const prompt = [
@@ -778,12 +787,12 @@ export default async function plugin(bb: BbPluginApi) {
       "", "## Success criteria", bullets(params.successCriteria),
       "", "## Constraints", bullets(params.constraints),
       ...(params.context ? ["", "## Context", params.context] : []),
-      ...(params.branch ? [
+      ...(params.branch || params.issueUrl || params.prUrl ? [
         "", "## Git workflow",
-        `Your worktree is based on ${params.branch}. Check that branch out and commit your work there.`,
+        ...(params.branch ? [`Your worktree is based on ${params.branch}. Check that branch out and commit your work there.`] : []),
         ...(params.issueUrl ? [`Tracking issue: ${params.issueUrl}`] : []),
         ...(params.prUrl ? [`Draft pull request: ${params.prUrl}`] : []),
-        "Do not create, merge, or mark ready any pull request — Chief owns the forge. Commit and push to the task branch, then report ready.",
+        "Do not create, merge, or mark ready any pull request — Chief owns the forge. Commit and push your work, then report ready.",
       ] : []),
       "", "## Project rules", rules,
       "", "## Working contract",

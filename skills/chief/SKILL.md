@@ -51,7 +51,7 @@ You own the forge — the worker never touches it. Run these from your own shell
 
    The empty starting commit exists because a draft PR cannot open from a branch identical to its base, and a squash merge would erase a real placeholder commit anyway.
 
-   **Invariant: one task branch carries one active worker at a time.** Two concurrent workers need two branches, because the second worktree could not check the same branch out. Give re-delegated or split work its own slug.
+   **Invariant: one task branch carries one active worker at a time.** Two concurrent workers need two branches, because the second worktree could not check the same branch out. `chief_delegate` refuses a branch an active worker already holds; give re-delegated or split work its own slug and its own pull request.
 
    If the push fails, keep the local branch and delegate anyway; the worker still commits to the right branch.
 4. **Draft pull request** from the task branch into the base. Include a tracking line **only when step 2 produced an issue URL** — when the issue was skipped, omit the line entirely rather than emitting a literal `Tracking: <issue url>` placeholder:
