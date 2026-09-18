@@ -27,24 +27,50 @@ You own the forge — the worker never touches it. Run these from your own shell
 **Every forge step is best-effort and must never block delegation.** A missing CLI, an unauthenticated CLI, a repository with issues disabled, or any other forge failure means you skip that step, still create the branch locally, still delegate, and tell the user once what was skipped. Never stall a delegation on forge paperwork, and never ask the user to fix the forge before the work starts.
 
 1. **Detect the forge.** `git remote get-url origin`. A `github.com` host means `gh`; anything else, try `glab`. If neither CLI is installed or authenticated, skip to step 3 and delegate with `branch` only.
-2. **Tracking issue.** Search by exact title first so re-delegating the same task does not open a duplicate:
-   - GitHub: `gh issue list --search "<title> in:title" --state all --json number,title,url`, then `gh issue create --title "<title>" --body "<mission summary>"`.
-   - GitLab: `glab issue list --all --search "<title>" --in title -F urls`, then `glab issue create -t "<title>" -d "<mission summary>"` (passing both title and description keeps it non-interactive).
-   - A repository with issues disabled fails here with `the repository has disabled issues`. That is expected on such projects: skip the issue, delegate without `issueUrl`, and say so once.
-3. **Task branch.** Slug the title into `feature/<slug-of-title>` and, if the branch does not already exist, create it off the current base with an empty starting commit so the branch has something to point at — a draft PR cannot open from a branch identical to its base, and a squash merge would erase a real placeholder commit anyway:
+2. **Tracking issue.** Search first, and match the title for **exact equality** before deciding — a bare term search returns near matches, so "create if nothing obvious came back" opens a second issue every time the same task is re-delegated. Ask for titles, not just URLs, and compare:
+   - GitHub: `gh issue list --search "<title>" --state all --json number,title,url --jq '.[] | select(.title == "<title>") | .url'`. Empty output, and only then: `gh issue create --title "<title>" --body "<mission summary>"`.
+   - GitLab: `glab issue list --all --search "<title>" --in title -O json`, keep only entries whose `.title` equals `<title>` exactly, and reuse that `.web_url`. Otherwise `glab issue create -t "<title>" -d "<mission summary>"` (passing both title and description keeps it non-interactive).
+   - A repository with issues disabled fails here with `the repository has disabled issues`. That is not an error to report as a failure — see the worked example below, since it is the common case.
+3. **Task branch.** Slug the title into `feature/<slug-of-title>`. If the branch does not already exist, create it **without ever checking it out**, using git's plumbing:
    ```sh
-   git switch -c feature/<slug> <base>
-   git commit --allow-empty -m "Start <title>"
+   BASE=$(git rev-parse --abbrev-ref HEAD)
+   TREE=$(git rev-parse "$BASE^{tree}")
+   START=$(git commit-tree "$TREE" -p "$BASE" -m "Start: <title>")
+   git branch feature/<slug> "$START"
    git push -u origin feature/<slug>
    ```
+   Do not "simplify" this into `git switch -c` plus a switch back. Plumbing is the point: your checkout never moves, so a branch the worker is about to use is never held by you, and no failure between the create and the push can strand you on it. A checkout-based version breaks every delegation — the worker's worktree cannot check out a branch already used by another worktree (`fatal: 'feature/x' is already used by worktree at …`), and a switch-back that an agent skips once leaves Chief on the task branch.
+
+   The empty starting commit exists because a draft PR cannot open from a branch identical to its base, and a squash merge would erase a real placeholder commit anyway.
+
+   **Invariant: one task branch carries one active worker at a time.** Two concurrent workers need two branches, because the second worktree could not check the same branch out. Give re-delegated or split work its own slug.
+
    If the push fails, keep the local branch and delegate anyway; the worker still commits to the right branch.
-4. **Draft pull request** from the task branch into the base, linked to the issue:
-   - GitHub: `gh pr create --draft --base <base> --head feature/<slug> --title "<title>" --body "Tracking: <issue url>"`.
-   - GitLab: `glab mr create --draft --source-branch feature/<slug> --target-branch <base> -t "<title>" -d "Tracking: <issue url>" --yes`.
+4. **Draft pull request** from the task branch into the base. Include a tracking line **only when step 2 produced an issue URL** — when the issue was skipped, omit the line entirely rather than emitting a literal `Tracking: <issue url>` placeholder:
+   - GitHub: `gh pr create --draft --base <base> --head feature/<slug> --title "<title>" --body "<body>"`.
+   - GitLab: `glab mr create --draft --source-branch feature/<slug> --target-branch <base> -t "<title>" -d "<body>" --yes`.
 5. **Delegate** with `chief_delegate`, passing `branch`, and `issueUrl`/`prUrl` for whichever steps succeeded. The worker's worktree is based on that branch, it commits there, and its brief tells it not to create, merge, or mark ready any pull request.
 6. **Ready for review only after the work is verified and reviewed** — never before the reviewer's verdict:
    - GitHub: `gh pr ready <number>`.
    - GitLab: `glab mr update <branch> --ready`.
+
+### Worked example: a repository with issues disabled
+
+This is the ordinary case, not the exception — many repositories, including this plugin's own, have issues turned off. Nothing here is an error:
+
+```sh
+gh issue list --search "Fix checkout totals" --state all --json number,title,url --jq '...'
+# → the repository has disabled issues
+```
+
+Skip the issue and carry on. The draft PR opens with no tracking line, and the delegation goes out with `branch` and `prUrl` but no `issueUrl`:
+
+```sh
+gh pr create --draft --base main --head feature/fix-checkout-totals \
+  --title "Fix checkout totals" --body "Corrects and verifies order totals."
+```
+
+Tell the user once, in a clause rather than a paragraph — "issues are disabled on this repo, so there's no tracking issue" — and never ask them to enable issues before the work starts.
 
 ### Diagnosing a forge auth failure
 
