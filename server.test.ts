@@ -7,7 +7,7 @@ import {
   experimental_scanPublicSdkOnly,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import plugin from "./server";
+import plugin, { capDiff } from "./server";
 
 const disposals: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -609,6 +609,35 @@ describe("Chief backend", () => {
     expect(ungated.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     await expect(state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId }))
       .rejects.toThrow(/Jev scoring is off/);
+  });
+
+  test("keeps a byte-safe prefix of a patch too large to fit whole", async () => {
+    // A single oversized patch used to be dropped outright, handing Jev an empty
+    // diff to score and persisting the meaningless result.
+    const huge = { patch: "a".repeat(5_000), truncated: false };
+    const alone = capDiff([huge], 1_000);
+    expect(alone.truncated).toBe(true);
+    expect(Buffer.byteLength(alone.diff, "utf8")).toBe(1_000);
+
+    // Whatever fits stays whole; the overflowing patch contributes its prefix, and the
+    // joining newline is charged against the budget rather than spilling past it.
+    const mixed = capDiff([{ patch: "abc", truncated: false }, huge], 1_000);
+    expect(mixed.diff.startsWith("abc\n")).toBe(true);
+    expect(Buffer.byteLength(mixed.diff, "utf8")).toBe(1_000);
+
+    // No combination of whole and cut patches may exceed the cap.
+    for (const cap of [1, 2, 4, 7, 64, 999]) {
+      for (const input of [[huge], [{ patch: "abc", truncated: false }, huge], [{ patch: "ab", truncated: false }, { patch: "cd", truncated: false }]]) {
+        expect(Buffer.byteLength(capDiff(input, cap).diff, "utf8")).toBeLessThanOrEqual(cap);
+      }
+    }
+
+    // Cutting inside a multi-byte character drops it rather than mangling it.
+    const multibyte = capDiff([{ patch: "\u00e9".repeat(10), truncated: false }], 5);
+    expect(multibyte.diff).toBe("\u00e9\u00e9");
+
+    // collectDiff rejects this rather than scoring nothing.
+    expect(capDiff([{ patch: "", truncated: false }], 1_000).diff).toBe("");
   });
 
   test("imports only public SDK surfaces", async () => {

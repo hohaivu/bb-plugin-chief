@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 import {
   defineRpcContract,
   type BbPluginApi,
@@ -240,6 +241,36 @@ function parseArgs(argv: string[]) {
     all: (name: string) => flags.get(name) ?? [],
     bool: (name: string) => flags.get(name)?.[0] === "true",
   };
+}
+
+/** Keeps as much of the diff as the budget allows, joining separator included, so the
+ * result never exceeds maxBytes. A patch that does not fit whole is cut to its byte
+ * prefix rather than dropped: one oversized file must still be reviewable, and dropping
+ * it would hand Jev an empty diff to score. Exported for tests. */
+export function capDiff(patches: readonly { patch: string; truncated: boolean }[], maxBytes: number) {
+  const parts: string[] = [];
+  let size = 0;
+  let truncated = false;
+  for (const patch of patches) {
+    if (patch.truncated) truncated = true;
+    const separator = parts.length === 0 ? 0 : 1;
+    const bytes = Buffer.from(patch.patch, "utf8");
+    if (size + separator + bytes.byteLength > maxBytes) {
+      truncated = true;
+      // StringDecoder drops a trailing partial UTF-8 sequence instead of
+      // emitting a replacement character mid-identifier.
+      // Clamped: a full budget plus the separator makes this negative, and
+      // subarray reads a negative end as an offset from the buffer's end —
+      // handing back all but the last byte of the patch.
+      const room = Math.max(0, maxBytes - size - separator);
+      const prefix = new StringDecoder("utf8").write(bytes.subarray(0, room));
+      if (prefix) parts.push(prefix);
+      break;
+    }
+    parts.push(patch.patch);
+    size += separator + bytes.byteLength;
+  }
+  return { diff: parts.join("\n"), truncated };
 }
 
 function clip(value: string, limit = MAX_ALERT_LENGTH) {
@@ -1172,20 +1203,9 @@ export default async function plugin(bb: BbPluginApi) {
     const patches = await bb.sdk.environments.diffPatch({ environmentId, paths, target: { type: "all", mergeBaseBranch: baseBranch } });
     if (patches.outcome !== "available") throw new Error(`Cannot diff against ${baseBranch}: ${diffFailure(patches)}`);
 
-    const parts: string[] = [];
-    let size = 0;
-    let truncated = false;
-    for (const patch of patches.patches) {
-      if (patch.truncated) truncated = true;
-      const bytes = Buffer.byteLength(patch.patch, "utf8");
-      if (size + bytes > JEV_MAX_DIFF_BYTES) {
-        truncated = true;
-        break;
-      }
-      parts.push(patch.patch);
-      size += bytes;
-    }
-    return { diff: parts.join("\n"), fileCount: paths.length, truncated };
+    const { diff, truncated } = capDiff(patches.patches, JEV_MAX_DIFF_BYTES);
+    if (diff.trim() === "") throw new Error(`The diff against ${baseBranch} carries no reviewable text.`);
+    return { diff, fileCount: paths.length, truncated };
   }
 
   function diffFailure(result: { outcome: "not_applicable" | "unavailable"; message?: string; failure?: { message: string } }) {
