@@ -27,6 +27,13 @@ const GENERATED_OR_LOCK_PATTERN =
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const roleSchema = z.enum(["chief", "worker", "reviewer"]);
+/** A worker's tier, chosen by Chief at delegation time. Separate from the
+ * lifecycle role above: every tier is still a "worker" for role-gated tools,
+ * lifecycle alerts, and the managed_threads role CHECK. */
+const tierSchema = z.enum(["junior", "senior"]);
+/** The role key chief_models stores a per-machine model pick under: the
+ * lifecycle roles, but with "worker" split into its two tiers. */
+const modelRoleSchema = z.enum(["chief", "junior", "senior", "reviewer"]);
 const stateSchema = z.enum([
   "starting",
   "pending",
@@ -67,11 +74,12 @@ const modelConfigurationSchema = z.object({
     error: z.string().nullable(),
     selections: z.object({
       chief: modelSelectionSchema.nullable(),
-      worker: modelSelectionSchema.nullable(),
+      junior: modelSelectionSchema.nullable(),
+      senior: modelSelectionSchema.nullable(),
       reviewer: modelSelectionSchema.nullable(),
     }),
     /** Roles whose stored pick this machine can no longer serve, so spawns use BB's default. */
-    unusable: z.array(roleSchema),
+    unusable: z.array(modelRoleSchema),
   })),
 });
 export type ModelConfiguration = z.infer<typeof modelConfigurationSchema>;
@@ -99,6 +107,9 @@ const delegateParams = z.object({
   successCriteria: z.array(z.string().trim().min(1).max(1_000)).max(30).optional(),
   constraints: z.array(z.string().trim().min(1).max(1_000)).max(30).optional(),
   context: z.string().trim().max(12_000).optional(),
+  tier: tierSchema.default("senior").describe(
+    "junior for trivial, mechanical, or already-specified bounded work (rename, typo, formatting, a function/endpoint whose shape is decided, tests for existing behavior, a localized fix whose cause is already understood); senior for everything else (unknown-cause debugging, design or refactor across modules, security/auth/concurrency/data-migration/money logic, ambiguous scope, high blast radius). When unsure, senior. Junior still needs a brief specific enough that a weaker model can finish it in one pass.",
+  ),
 });
 
 const optionalReport = z.object({
@@ -151,7 +162,7 @@ export const rpcContract = defineRpcContract({
   setRoleModel: {
     input: z.object({
       hostId: z.string().trim().min(1),
-      role: roleSchema,
+      role: modelRoleSchema,
       selection: modelSelectionSchema.nullable(),
     }).strict(),
     output: z.object({ ok: z.literal(true) }).strict(),
@@ -169,6 +180,7 @@ export const rpcContract = defineRpcContract({
 interface ManagedRow {
   thread_id: string;
   role: z.infer<typeof roleSchema>;
+  tier: z.infer<typeof tierSchema> | null;
   project_id: string;
   chief_thread_id: string | null;
   worker_thread_id: string | null;
@@ -352,6 +364,24 @@ export default async function plugin(bb: BbPluginApi) {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (worker_thread_id, base_branch)
     )`,
+    `ALTER TABLE managed_threads ADD COLUMN tier TEXT`,
+    // SQLite cannot ALTER a CHECK constraint, so the 'worker'/'chief'/'reviewer'
+    // key becomes 'junior'/'senior'/'chief'/'reviewer' via a table rebuild.
+    // Existing picks under 'worker' survive as 'senior'.
+    `CREATE TABLE chief_models_new (
+      host_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('chief','junior','senior','reviewer')),
+      provider_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      reasoning_level TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (host_id, role)
+    )`,
+    `INSERT INTO chief_models_new (host_id, role, provider_id, model, reasoning_level, updated_at)
+      SELECT host_id, CASE role WHEN 'worker' THEN 'senior' ELSE role END, provider_id, model, reasoning_level, updated_at
+      FROM chief_models`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_new RENAME TO chief_models`,
   ]);
 
   const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC`);
@@ -415,18 +445,19 @@ export default async function plugin(bb: BbPluginApi) {
     title: string;
     state?: ManagedRow["state"];
     status?: string | null;
+    tier?: ManagedRow["tier"];
   }) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, title,
-      state, status, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, tier, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       chief_thread_id=excluded.chief_thread_id, worker_thread_id=excluded.worker_thread_id,
-      title=excluded.title, state=excluded.state, status=excluded.status, updated_at=excluded.updated_at`).run(
+      title=excluded.title, state=excluded.state, status=excluded.status, tier=excluded.tier, updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.title, input.state ?? "starting",
-      input.status ?? "starting", input.state === "active" ? now : null,
+      input.status ?? "starting", input.tier ?? null, input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
     reloadRoles();
@@ -474,9 +505,9 @@ export default async function plugin(bb: BbPluginApi) {
     catch { return projectId; }
   }
 
-  type Role = z.infer<typeof roleSchema>;
+  type ModelRole = z.infer<typeof modelRoleSchema>;
 
-  function readRoleModel(hostId: string, role: Role): ModelSelection | null {
+  function readRoleModel(hostId: string, role: ModelRole): ModelSelection | null {
     const row = roleModelRow.get(hostId, role) as
       | { provider_id: string; model: string; reasoning_level: string }
       | undefined;
@@ -489,7 +520,7 @@ export default async function plugin(bb: BbPluginApi) {
     return parsed.success ? parsed.data : null;
   }
 
-  function writeRoleModel(hostId: string, role: Role, selection: ModelSelection | null) {
+  function writeRoleModel(hostId: string, role: ModelRole, selection: ModelSelection | null) {
     if (!selection) {
       db.prepare(`DELETE FROM chief_models WHERE host_id=? AND role=?`).run(hostId, role);
       return;
@@ -605,7 +636,7 @@ export default async function plugin(bb: BbPluginApi) {
    * the machine can no longer serve all fall through to BB's own defaults —
    * a stale pick must not block the work.
    */
-  async function execution(role: Role, hostId: string | null) {
+  async function execution(role: ModelRole, hostId: string | null) {
     const selection = hostId === null ? null : readRoleModel(hostId, role);
     if (!hostId || !selection) return {};
     return (await usableSelection(hostId, selection)) ?? {};
@@ -653,6 +684,7 @@ export default async function plugin(bb: BbPluginApi) {
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
       "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
+      "Every delegation picks a tier: junior for trivial, mechanical, or already-specified bounded work (rename, typo, formatting, a function or endpoint whose shape is decided, tests for existing behavior, a localized fix whose cause is already understood); senior for everything else (unknown-cause debugging, design or refactor across modules, security/auth/concurrency/data-migration/money logic, ambiguous scope, high blast radius). When unsure, use senior. Junior is not a vaguer brief — it is a brief specific enough that a weaker model can finish it in one pass; if the mission cannot name the cause or the intended shape, route senior instead.",
       "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "", "## Project rules", rules,
@@ -747,10 +779,10 @@ export default async function plugin(bb: BbPluginApi) {
       sectionId,
       visibility: "visible",
       title: params.title,
-      ...(await execution("worker", hostId)),
+      ...(await execution(params.tier, hostId)),
       prompt,
     });
-    insertThread({ threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, title: params.title, state: "starting", status: thread.status });
+    insertThread({ threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, title: params.title, state: "starting", status: thread.status, tier: params.tier });
     return { threadId: thread.id, title: params.title, projectId };
   }
 
@@ -1129,6 +1161,7 @@ export default async function plugin(bb: BbPluginApi) {
     return [
       `Thread: ${row.title} (${threadId})`,
       `Role: ${row.role}`,
+      ...(row.tier ? [`Tier: ${row.tier}`] : []),
       `Persisted state: ${row.state}`,
       `Live status: ${liveStatus ?? "unknown"}`,
       ...(row.result ? [`Result: ${clip(row.result, 2_000)}`] : []),
@@ -1295,7 +1328,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!caller || caller.role !== "chief") throw new Error("chief_roster requires a registered Chief thread.");
       const rows = rosterForChief(caller.thread_id, includeComplete);
       return rows.length ? rows.map((row) => [
-        `${row.role} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
+        `${row.role}${row.tier ? ` (${row.tier})` : ""} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
         ...(row.result ? [`result: ${clip(row.result, 1_000)}`] : []),
         ...(row.blocker ? [`blocker: ${clip(row.blocker, 600)}`] : []),
         ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 600)}`] : []),
@@ -1420,7 +1453,8 @@ export default async function plugin(bb: BbPluginApi) {
         const connected = host.status === "connected";
         const selections = {
           chief: readRoleModel(host.id, "chief"),
-          worker: readRoleModel(host.id, "worker"),
+          junior: readRoleModel(host.id, "junior"),
+          senior: readRoleModel(host.id, "senior"),
           reviewer: readRoleModel(host.id, "reviewer"),
         };
         // A connected machine can answer for its own picks, so say which ones it
@@ -1431,7 +1465,7 @@ export default async function plugin(bb: BbPluginApi) {
           connected
             ? hostFallback(host.id, read)
             : { fallback: null, error: "Machine is disconnected; its model catalog is unavailable." },
-          Promise.all(roleSchema.options.map(async (role) => {
+          Promise.all(modelRoleSchema.options.map(async (role) => {
             const selection = selections[role];
             if (!connected || !selection) return null;
             return (await usableSelection(host.id, selection, read)) ? null : role;
@@ -1443,7 +1477,7 @@ export default async function plugin(bb: BbPluginApi) {
           connected,
           ...scan,
           selections,
-          unusable: flagged.filter((role): role is Role => role !== null),
+          unusable: flagged.filter((role): role is ModelRole => role !== null),
         };
       })),
     }),
@@ -1461,7 +1495,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief start [--project proj_id] [--json]",
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--tier junior|senior] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--allow-edits] [--json]",
     "  bb chief review <worker-thread-id> [--focus \"…\"] [--json]",
@@ -1476,7 +1510,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "start", summary: "Start or return the latest Chief for a project", usage: "bb chief start [--project proj_id] [--json]" },
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--tier junior|senior] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--allow-edits] [--json]" },
       { name: "review", summary: "Start or return a read-only review for an idle worker", usage: "bb chief review <worker-thread-id> [--focus \"…\"] [--json]" },
@@ -1530,6 +1564,7 @@ export default async function plugin(bb: BbPluginApi) {
           const parsed = delegateParams.safeParse({
             title: args.one("title"), mission: args.one("mission"),
             successCriteria: args.all("criteria"), constraints: args.all("constraint"), context: args.one("context"),
+            tier: args.one("tier"),
           });
           if (!parsed.success) return fail(`Invalid delegate brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await delegate(parsed.data, context.threadId);

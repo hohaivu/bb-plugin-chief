@@ -39,9 +39,13 @@ one project.
 
 Settings → **Chief models by machine** scans every enrolled machine for its signed-in providers
 and their live model catalogs, and lets you pick a provider, model, and reasoning level per role:
-Chief, worker, and reviewer. A role without a selection spawns on BB's own default for the
-project, and a selection the machine can no longer serve (signed out, model retired) falls back
-to that default rather than failing the spawn.
+Chief, junior worker, senior worker, and reviewer. A role without a selection spawns on BB's own
+default for the project, and a selection the machine can no longer serve (signed out, model
+retired) falls back to that default rather than failing the spawn.
+
+Every delegation picks a worker tier — junior or senior — and each tier can run on its own model.
+Junior fits trivial, mechanical, or already-specified bounded work; senior covers everything else.
+See [`skills/chief/SKILL.md`](skills/chief/SKILL.md) for how Chief chooses.
 
 ### Jev review scoring
 
@@ -66,7 +70,7 @@ bb chief status [--project proj_...] [--json]
 bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--json]
+bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--tier junior|senior] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--allow-edits] [--json]
 bb chief review thr_worker [--focus "..."] [--json]
