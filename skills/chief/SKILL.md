@@ -60,7 +60,7 @@ You own the forge — the worker never touches it. Run these from your own shell
 5. **Delegate** with `chief_delegate`, passing `branch`, and `issueUrl`/`prUrl` for whichever steps succeeded. The worker's worktree is based on that branch, it commits there, and its brief tells it not to create, merge, or mark ready any pull request.
 6. **Ready for review only after the work is verified and reviewed** — never before the reviewer's verdict:
    - GitHub: `gh pr ready <number>`.
-   - GitLab: `glab mr update <branch> --ready`.
+   - GitLab: `glab mr update <branch> --ready --yes` (`--yes` skips the confirmation prompt, same as issue creation).
 
 ### Worked example: a repository with issues disabled
 
