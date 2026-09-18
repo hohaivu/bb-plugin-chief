@@ -175,10 +175,14 @@ async function delegate(
   chiefThreadId: string,
   title = "Fix checkout totals",
   tier?: "junior" | "senior",
+  forge?: { branch?: string; issueUrl?: string; prUrl?: string },
 ) {
   const result = await state.harness.behavior.runCli([
     "delegate", "--title", title, "--mission", "Correct and verify totals", "--criteria", "Regression passes",
     ...(tier ? ["--tier", tier] : []),
+    ...(forge?.branch ? ["--branch", forge.branch] : []),
+    ...(forge?.issueUrl ? ["--issue-url", forge.issueUrl] : []),
+    ...(forge?.prUrl ? ["--pr-url", forge.prUrl] : []),
     "--json",
   ], { threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
   expect(result.exitCode).toBe(0);
@@ -590,6 +594,55 @@ describe("Chief backend", () => {
     await state.harness.behavior.callRpc("modelConfiguration", null);
     // Three roles and the picker's own seed share one provider: one catalog read.
     expect(state.catalogReads).toEqual(["codex"]);
+  });
+
+  test("bases the worker's worktree on the task branch Chief created", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+      branch: "feature/fix-checkout-totals",
+      issueUrl: "https://github.com/acme/shop/issues/7",
+      prUrl: "https://github.com/acme/shop/pull/8",
+    });
+    expect(state.spawned[1].environment.workspace).toEqual({
+      type: "managed-worktree",
+      baseBranch: { kind: "named", name: "feature/fix-checkout-totals" },
+    });
+    // The forge stays Chief's: the brief has to say so, or the worker opens its own PR.
+    expect(state.spawned[1].prompt).toContain("Your worktree is based on feature/fix-checkout-totals");
+    expect(state.spawned[1].prompt).toContain("https://github.com/acme/shop/issues/7");
+    expect(state.spawned[1].prompt).toContain("Do not create, merge, or mark ready any pull request");
+  });
+
+  test("keeps the project default base when a delegation names no branch", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    expect(state.spawned[1].environment.workspace).toEqual({
+      type: "managed-worktree",
+      baseBranch: { kind: "default" },
+    });
+    expect(state.spawned[1].prompt).not.toContain("## Git workflow");
+  });
+
+  test("records the branch and forge links on the thread and shows them in the roster and inspect", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+      branch: "feature/fix-checkout-totals",
+      issueUrl: "https://github.com/acme/shop/issues/7",
+      prUrl: "https://github.com/acme/shop/pull/8",
+    });
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(roster).toContain("branch: feature/fix-checkout-totals");
+    expect(roster).toContain("issue: https://github.com/acme/shop/issues/7");
+    expect(roster).toContain("pr: https://github.com/acme/shop/pull/8");
+
+    const detail = String(await state.harness.behavior.callAgentTool("chief_inspect", { threadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(detail).toContain("Branch: feature/fix-checkout-totals");
+    expect(detail).toContain("Issue: https://github.com/acme/shop/issues/7");
+    expect(detail).toContain("Pull request: https://github.com/acme/shop/pull/8");
   });
 
   test("defaults an unspecified delegation to the senior tier", async () => {
