@@ -611,11 +611,15 @@ describe("Chief backend", () => {
     expect(state.spawned[1]).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
   });
 
-  test("falls back to the BB default when a junior pick leaves the machine's catalog", async () => {
+  test("falls back to the BB default when a junior pick leaves the machine's catalog, never to the senior pick", async () => {
     const state = await setup();
     await state.harness.behavior.callRpc("setRoleModel", {
       hostId: "host_1", role: "junior",
       selection: { providerId: "codex", model: "gpt-5-retired", reasoningLevel: "high" },
+    });
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "senior",
+      selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const chief = await start(state);
     await delegate(state, chief.threadId, "Fix typo", "junior");
