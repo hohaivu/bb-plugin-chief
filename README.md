@@ -12,11 +12,12 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 
 1. Open BB's project-aware **New Thread** screen and click **Start Chief**. Each click creates and opens a fresh independent Chief for that project; the CLI remains available for automation.
 2. Talk to `Chief · <project name>` in the normal thread UI.
-3. Chief delegates clearly titled work to a worker in its own managed worktree.
-4. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
-5. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled. Alerts use a durable SQLite outbox and retry after transient delivery failures.
-6. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts one read-only reviewer in its worktree and tells Chief to wait for that verdict. Chief can start further reviews itself with `chief_review`.
-7. Chief inspects live status and bounded output, continues safe reversible work, marks verified non-running work complete, and escalates only genuine decisions.
+3. Chief owns the forge: before delegating it opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit, and opens a draft pull request from that branch into the base. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
+4. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
+5. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
+6. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled. Alerts use a durable SQLite outbox and retry after transient delivery failures.
+7. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts one read-only reviewer in its worktree and tells Chief to wait for that verdict. Chief can start further reviews itself with `chief_review`.
+8. Chief inspects live status and bounded output, continues safe reversible work, marks verified non-running work complete, and escalates only genuine decisions.
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
 
@@ -47,6 +48,16 @@ Every delegation picks a worker tier — junior or senior — and each tier can 
 Junior fits trivial, mechanical, or already-specified bounded work; senior covers everything else.
 See [`skills/chief/SKILL.md`](skills/chief/SKILL.md) for how Chief chooses.
 
+### Git workflow
+
+`chief_delegate` takes three optional forge fields alongside the brief: `branch` bases the worker's
+managed worktree on that branch instead of the project default, and `issueUrl` and `prUrl` are
+recorded with the thread and shown in `chief_roster` and `chief_inspect`. The plugin never runs
+`git`, `gh`, or `glab` itself — the BB plugin SDK exposes no shell — so Chief runs those commands
+from its own thread and passes the results in. Both GitHub (`gh`) and GitLab (`glab`) are covered;
+the exact procedure, including what to skip when a forge step fails, is the **Git workflow** section
+of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
+
 ### Jev review scoring
 
 Reviewers can score a change on 19 engineering-quality dimensions — correctness, coupling,
@@ -70,7 +81,7 @@ bb chief status [--project proj_...] [--json]
 bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--tier junior|senior] [--json]
+bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--tier junior|senior] [--branch feature/...] [--issue-url ...] [--pr-url ...] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--allow-edits] [--json]
 bb chief review thr_worker [--focus "..."] [--json]

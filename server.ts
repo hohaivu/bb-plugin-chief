@@ -110,6 +110,11 @@ const delegateParams = z.object({
   tier: tierSchema.default("senior").describe(
     "junior for trivial, mechanical, or already-specified bounded work (rename, typo, formatting, a function/endpoint whose shape is decided, tests for existing behavior, a localized fix whose cause is already understood); senior for everything else (unknown-cause debugging, design or refactor across modules, security/auth/concurrency/data-migration/money logic, ambiguous scope, high blast radius). When unsure, senior. Junior still needs a brief specific enough that a weaker model can finish it in one pass.",
   ),
+  branch: z.string().trim().min(1).max(300).optional().describe(
+    "The task branch Chief already created and pushed. The worktree is based on it and the worker commits there. Omit to base the worktree on the project default.",
+  ),
+  issueUrl: z.string().trim().min(1).max(500).optional().describe("URL of the tracking issue Chief opened for this task, when the forge has issues."),
+  prUrl: z.string().trim().min(1).max(500).optional().describe("URL of the draft pull request Chief opened from the task branch. The worker never marks it ready."),
 });
 
 const optionalReport = z.object({
@@ -181,6 +186,9 @@ interface ManagedRow {
   thread_id: string;
   role: z.infer<typeof roleSchema>;
   tier: z.infer<typeof tierSchema> | null;
+  branch: string | null;
+  issue_url: string | null;
+  pr_url: string | null;
   project_id: string;
   chief_thread_id: string | null;
   worker_thread_id: string | null;
@@ -226,7 +234,7 @@ Jev scoring is available to you through chief_score. Use it once per review pass
 
 You choose the base branch to compare against. Pick the branch this change actually merges into:
 1. If the worktree has an open pull request, use its base (\`gh pr view --json baseRefName -q .baseRefName\`).
-2. Otherwise use the branch the environment was forked from, if it is a real branch.
+2. Otherwise use the branch the environment was forked from, if it is a real branch and not the one the work is committed on — a task branch compared against itself yields an empty diff.
 3. Otherwise use the repository's default branch (main or master).
 
 Score against the same base on every pass for one worker; only then does the improved/regressed comparison mean anything. If you deliberately change the base, say so in your report and treat that score as a fresh baseline.
@@ -382,6 +390,9 @@ export default async function plugin(bb: BbPluginApi) {
       FROM chief_models`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_new RENAME TO chief_models`,
+    `ALTER TABLE managed_threads ADD COLUMN branch TEXT`,
+    `ALTER TABLE managed_threads ADD COLUMN issue_url TEXT`,
+    `ALTER TABLE managed_threads ADD COLUMN pr_url TEXT`,
   ]);
 
   const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC`);
@@ -446,18 +457,23 @@ export default async function plugin(bb: BbPluginApi) {
     state?: ManagedRow["state"];
     status?: string | null;
     tier?: ManagedRow["tier"];
+    branch?: string | null;
+    issueUrl?: string | null;
+    prUrl?: string | null;
   }) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, title,
-      state, status, tier, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, tier, branch, issue_url, pr_url, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       chief_thread_id=excluded.chief_thread_id, worker_thread_id=excluded.worker_thread_id,
-      title=excluded.title, state=excluded.state, status=excluded.status, tier=excluded.tier, updated_at=excluded.updated_at`).run(
+      title=excluded.title, state=excluded.state, status=excluded.status, tier=excluded.tier,
+      branch=excluded.branch, issue_url=excluded.issue_url, pr_url=excluded.pr_url, updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.title, input.state ?? "starting",
-      input.status ?? "starting", input.tier ?? null, input.state === "active" ? now : null,
+      input.status ?? "starting", input.tier ?? null, input.branch ?? null,
+      input.issueUrl ?? null, input.prUrl ?? null, input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
     reloadRoles();
@@ -685,6 +701,7 @@ export default async function plugin(bb: BbPluginApi) {
       "",
       "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
       "Every delegation picks a tier: junior for trivial, mechanical, or already-specified bounded work (rename, typo, formatting, a function or endpoint whose shape is decided, tests for existing behavior, a localized fix whose cause is already understood); senior for everything else (unknown-cause debugging, design or refactor across modules, security/auth/concurrency/data-migration/money logic, ambiguous scope, high blast radius). When unsure, use senior. Junior is not a vaguer brief — it is a brief specific enough that a weaker model can finish it in one pass; if the mission cannot name the cause or the intended shape, route senior instead.",
+      "You own the forge for every delegation: before delegating, create the tracking issue, the task branch, and a draft pull request, then pass branch, issueUrl and prUrl to chief_delegate, and mark the PR ready only after the work is verified. The full procedure, including what to skip when a forge step fails, is in the chief skill's Git workflow section.",
       "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "", "## Project rules", rules,
@@ -753,6 +770,15 @@ export default async function plugin(bb: BbPluginApi) {
     if (!projectId) throw new Error("No Chief project is configured.");
     const chief = caller?.role === "chief" ? caller : chiefForProject(projectId);
     if (!chief || chief.state === "complete") throw new Error("Start Chief for this project before delegating work.");
+    // One task branch carries one active worker: a second worktree cannot check out a
+    // branch another one already holds, and the spawn would fail with a raw git error.
+    const holder = params.branch
+      ? [...roles.values()].find((row) => row.role === "worker" && row.state !== "complete"
+        && row.project_id === projectId && row.branch === params.branch)
+      : undefined;
+    if (holder) {
+      throw new Error(`Branch ${params.branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
+    }
     const sectionId = await ensureSection();
     const rules = await readRules(projectId);
     const prompt = [
@@ -761,6 +787,13 @@ export default async function plugin(bb: BbPluginApi) {
       "", "## Success criteria", bullets(params.successCriteria),
       "", "## Constraints", bullets(params.constraints),
       ...(params.context ? ["", "## Context", params.context] : []),
+      ...(params.branch || params.issueUrl || params.prUrl ? [
+        "", "## Git workflow",
+        ...(params.branch ? [`Your worktree is based on ${params.branch}. Check that branch out and commit your work there.`] : []),
+        ...(params.issueUrl ? [`Tracking issue: ${params.issueUrl}`] : []),
+        ...(params.prUrl ? [`Draft pull request: ${params.prUrl}`] : []),
+        "Do not create, merge, or mark ready any pull request — Chief owns the forge. Commit and push your work, then report ready.",
+      ] : []),
       "", "## Project rules", rules,
       "", "## Working contract",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
@@ -774,7 +807,10 @@ export default async function plugin(bb: BbPluginApi) {
       environment: {
         type: "host",
         hostId,
-        workspace: { type: "managed-worktree", baseBranch: { kind: "default" } },
+        workspace: {
+          type: "managed-worktree",
+          baseBranch: params.branch ? { kind: "named" as const, name: params.branch } : { kind: "default" as const },
+        },
       },
       sectionId,
       visibility: "visible",
@@ -782,7 +818,11 @@ export default async function plugin(bb: BbPluginApi) {
       ...(await execution(params.tier, hostId)),
       prompt,
     });
-    insertThread({ threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, title: params.title, state: "starting", status: thread.status, tier: params.tier });
+    insertThread({
+      threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, title: params.title,
+      state: "starting", status: thread.status, tier: params.tier,
+      branch: params.branch, issueUrl: params.issueUrl, prUrl: params.prUrl,
+    });
     return { threadId: thread.id, title: params.title, projectId };
   }
 
@@ -1162,6 +1202,9 @@ export default async function plugin(bb: BbPluginApi) {
       `Thread: ${row.title} (${threadId})`,
       `Role: ${row.role}`,
       ...(row.tier ? [`Tier: ${row.tier}`] : []),
+      ...(row.branch ? [`Branch: ${row.branch}`] : []),
+      ...(row.issue_url ? [`Issue: ${row.issue_url}`] : []),
+      ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
       `Persisted state: ${row.state}`,
       `Live status: ${liveStatus ?? "unknown"}`,
       ...(row.result ? [`Result: ${clip(row.result, 2_000)}`] : []),
@@ -1329,6 +1372,9 @@ export default async function plugin(bb: BbPluginApi) {
       const rows = rosterForChief(caller.thread_id, includeComplete);
       return rows.length ? rows.map((row) => [
         `${row.role}${row.tier ? ` (${row.tier})` : ""} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
+        ...(row.branch ? [`branch: ${row.branch}`] : []),
+        ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
+        ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
         ...(row.result ? [`result: ${clip(row.result, 1_000)}`] : []),
         ...(row.blocker ? [`blocker: ${clip(row.blocker, 600)}`] : []),
         ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 600)}`] : []),
@@ -1495,7 +1541,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief start [--project proj_id] [--json]",
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--tier junior|senior] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--tier junior|senior] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--allow-edits] [--json]",
     "  bb chief review <worker-thread-id> [--focus \"…\"] [--json]",
@@ -1510,7 +1556,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "start", summary: "Start or return the latest Chief for a project", usage: "bb chief start [--project proj_id] [--json]" },
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--tier junior|senior] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--tier junior|senior] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--allow-edits] [--json]" },
       { name: "review", summary: "Start or return a read-only review for an idle worker", usage: "bb chief review <worker-thread-id> [--focus \"…\"] [--json]" },
@@ -1543,6 +1589,12 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "adopt") {
           const threadId = args.one("thread") ?? args.positional[0];
           if (!threadId) return fail("adopt requires --thread <thread-id>");
+          // Adoption rewrites the row in place, so re-adopting a worker would
+          // discard the branch and forge links its open PR depends on.
+          const registered = roles.get(threadId);
+          if (registered && registered.role !== "chief") {
+            return fail(`Thread ${threadId} is already a managed ${registered.role} (“${registered.title}”). Adopting it would discard its branch, forge links, and report.`);
+          }
           const thread = await bb.sdk.threads.get({ threadId });
           const sectionId = await ensureSection();
           const title = `Chief · ${await projectName(thread.projectId)}`;
@@ -1565,6 +1617,7 @@ export default async function plugin(bb: BbPluginApi) {
             title: args.one("title"), mission: args.one("mission"),
             successCriteria: args.all("criteria"), constraints: args.all("constraint"), context: args.one("context"),
             tier: args.one("tier"),
+            branch: args.one("branch"), issueUrl: args.one("issue-url"), prUrl: args.one("pr-url"),
           });
           if (!parsed.success) return fail(`Invalid delegate brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await delegate(parsed.data, context.threadId);
