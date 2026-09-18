@@ -1580,6 +1580,12 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "adopt") {
           const threadId = args.one("thread") ?? args.positional[0];
           if (!threadId) return fail("adopt requires --thread <thread-id>");
+          // Adoption rewrites the row in place, so re-adopting a worker would
+          // discard the branch and forge links its open PR depends on.
+          const registered = roles.get(threadId);
+          if (registered && registered.role !== "chief") {
+            return fail(`Thread ${threadId} is already a managed ${registered.role} (“${registered.title}”). Adopting it would discard its branch, forge links, and report.`);
+          }
           const thread = await bb.sdk.threads.get({ threadId });
           const sectionId = await ensureSection();
           const title = `Chief · ${await projectName(thread.projectId)}`;

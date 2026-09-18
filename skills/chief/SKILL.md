@@ -29,16 +29,24 @@ You own the forge — the worker never touches it. Run these from your own shell
 1. **Detect the forge.** `git remote get-url origin`. A `github.com` host means `gh`; anything else, try `glab`. If neither CLI is installed or authenticated, skip to step 3 and delegate with `branch` only.
 2. **Tracking issue.** Search first, and match the title for **exact equality** before deciding — a bare term search returns near matches, so "create if nothing obvious came back" opens a second issue every time the same task is re-delegated. Ask for titles, not just URLs, and compare:
    - GitHub: `gh issue list --search "<title>" --state all --json number,title,url --jq '.[] | select(.title == "<title>") | .url'`. Empty output, and only then: `gh issue create --title "<title>" --body "<mission summary>"`.
-   - GitLab: `glab issue list --all --search "<title>" --in title -O json`, keep only entries whose `.title` equals `<title>` exactly, and reuse that `.web_url`. Otherwise `glab issue create -t "<title>" -d "<mission summary>"` (passing both title and description keeps it non-interactive).
+   - GitLab: `glab issue list --all --search "<title>" --in title -O json`, keep only entries whose `.title` equals `<title>` exactly, and reuse that `.web_url`. Otherwise `glab issue create -t "<title>" -d "<mission summary>" --yes` (`--yes` skips the submit confirmation; without it the command blocks on a prompt).
    - A repository with issues disabled fails here with `the repository has disabled issues`. That is not an error to report as a failure — see the worked example below, since it is the common case.
-3. **Task branch.** Slug the title into `feature/<slug-of-title>`. If the branch does not already exist, create it **without ever checking it out**, using git's plumbing:
+3. **Task branch.** Slug the title into `feature/<slug-of-title>`. If the branch does not already exist, create it **without ever checking it out**, cutting it from the project default branch:
    ```sh
-   BASE=$(git rev-parse --abbrev-ref HEAD)
-   TREE=$(git rev-parse "$BASE^{tree}")
-   START=$(git commit-tree "$TREE" -p "$BASE" -m "Start: <title>")
+   git fetch origin
+   # The project default — never `git rev-parse HEAD`, which is Chief's own thread branch.
+   BASE=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+   # Unset in some clones; `git remote set-head origin -a` repairs it for next time.
+   [ -n "$BASE" ] || BASE=$(git rev-parse --verify -q origin/main >/dev/null && echo main || echo master)
+
+   TREE=$(git rev-parse "origin/$BASE^{tree}")
+   START=$(git commit-tree "$TREE" -p "origin/$BASE" -m "Start: <title>")
    git branch feature/<slug> "$START"
    git push -u origin feature/<slug>
    ```
+   Resolve `BASE` explicitly and cut from `origin/$BASE`, never from local `HEAD`. Chief does not sit on the default branch — it runs on its own BB thread branch, something like `bb/chief-<project>-thr_…`. Reading `HEAD` would cut every task branch from that throwaway branch and point every draft PR at it.
+
+   To stack deliberately on an open PR's branch, pass that branch as `BASE` **as an explicit choice**, and target the draft PR at it too. Stacking is a decision you make and state; it is never the ambient value of `HEAD`.
    Do not "simplify" this into `git switch -c` plus a switch back. Plumbing is the point: your checkout never moves, so a branch the worker is about to use is never held by you, and no failure between the create and the push can strand you on it. A checkout-based version breaks every delegation — the worker's worktree cannot check out a branch already used by another worktree (`fatal: 'feature/x' is already used by worktree at …`), and a switch-back that an agent skips once leaves Chief on the task branch.
 
    The empty starting commit exists because a draft PR cannot open from a branch identical to its base, and a squash merge would erase a real placeholder commit anyway.

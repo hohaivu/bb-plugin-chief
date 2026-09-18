@@ -645,6 +645,26 @@ describe("Chief backend", () => {
     expect(detail).toContain("Pull request: https://github.com/acme/shop/pull/8");
   });
 
+  test("refuses to adopt a managed worker, keeping its branch and forge links intact", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+      branch: "feature/fix-checkout-totals",
+      issueUrl: "https://github.com/acme/shop/issues/7",
+      prUrl: "https://github.com/acme/shop/pull/8",
+    });
+
+    const result = await state.harness.behavior.runCli(["adopt", "--thread", worker.threadId, "--json"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("already a managed worker");
+
+    // The row has to survive intact: an open draft PR hangs off these links.
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(roster).toContain("branch: feature/fix-checkout-totals");
+    expect(roster).toContain("pr: https://github.com/acme/shop/pull/8");
+    expect(roster).toContain("worker (senior)");
+  });
+
   test("defaults an unspecified delegation to the senior tier", async () => {
     const state = await setup();
     const chief = await start(state);
