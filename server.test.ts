@@ -170,9 +170,16 @@ async function start(state: Awaited<ReturnType<typeof setup>>, projectId = "proj
   return JSON.parse(result.stdout!) as { threadId: string; created: boolean };
 }
 
-async function delegate(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, title = "Fix checkout totals") {
+async function delegate(
+  state: Awaited<ReturnType<typeof setup>>,
+  chiefThreadId: string,
+  title = "Fix checkout totals",
+  tier?: "junior" | "senior",
+) {
   const result = await state.harness.behavior.runCli([
-    "delegate", "--title", title, "--mission", "Correct and verify totals", "--criteria", "Regression passes", "--json",
+    "delegate", "--title", title, "--mission", "Correct and verify totals", "--criteria", "Regression passes",
+    ...(tier ? ["--tier", tier] : []),
+    "--json",
   ], { threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
   expect(result.exitCode).toBe(0);
   return JSON.parse(result.stdout!) as { threadId: string; projectId: string };
@@ -505,7 +512,7 @@ describe("Chief backend", () => {
       selection: { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" },
     });
     await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "worker",
+      hostId: "host_1", role: "senior",
       selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const chief = await start(state);
@@ -547,7 +554,7 @@ describe("Chief backend", () => {
   test("reports each machine's scanned fallback and stored selections", async () => {
     const state = await setup();
     await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "worker",
+      hostId: "host_1", role: "senior",
       selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
@@ -559,20 +566,21 @@ describe("Chief backend", () => {
       fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" },
       selections: {
         chief: null,
-        worker: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+        junior: null,
+        senior: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
         reviewer: null,
       },
       unusable: [],
     }]);
 
-    await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "worker", selection: null });
+    await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "senior", selection: null });
     const cleared = await state.harness.behavior.callRpc("modelConfiguration", null);
-    expect(cleared.hosts[0]!.selections.worker).toBeNull();
+    expect(cleared.hosts[0]!.selections.senior).toBeNull();
   });
 
   test("scans a machine's provider once no matter how many roles picked it", async () => {
     const state = await setup();
-    for (const role of ["chief", "worker", "reviewer"]) {
+    for (const role of ["chief", "junior", "senior", "reviewer"]) {
       await state.harness.behavior.callRpc("setRoleModel", {
         hostId: "host_1", role,
         selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
@@ -582,6 +590,68 @@ describe("Chief backend", () => {
     await state.harness.behavior.callRpc("modelConfiguration", null);
     // Three roles and the picker's own seed share one provider: one catalog read.
     expect(state.catalogReads).toEqual(["codex"]);
+  });
+
+  test("defaults an unspecified delegation to the senior tier", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    const roster = await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" });
+    expect(JSON.stringify(roster)).toContain("worker (senior)");
+  });
+
+  test("spawns a junior delegation on the junior model selection", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "junior",
+      selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+    });
+    const chief = await start(state);
+    await delegate(state, chief.threadId, "Fix typo", "junior");
+    expect(state.spawned[1]).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
+  });
+
+  test("falls back to the BB default when a junior pick leaves the machine's catalog, never to the senior pick", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "junior",
+      selection: { providerId: "codex", model: "gpt-5-retired", reasoningLevel: "high" },
+    });
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "senior",
+      selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+    });
+    const chief = await start(state);
+    await delegate(state, chief.threadId, "Fix typo", "junior");
+    expect(state.spawned[1]).not.toHaveProperty("providerId");
+    expect(state.spawned[1]).not.toHaveProperty("model");
+
+    const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
+    expect(configuration.hosts[0]!.unusable).toEqual(["junior"]);
+  });
+
+  test("migration rewrites an existing worker model pick to senior, preserving provider/model/reasoning", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief", agentSkillIds: ["chief", "chief-worker"] });
+    const db = bb.storage.database();
+    db.exec(`CREATE TABLE chief_models (
+      host_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('chief','worker','reviewer')),
+      provider_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      reasoning_level TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (host_id, role)
+    )`);
+    db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run("host_1", "worker", "codex", "gpt-6-astra", "high", Date.now());
+
+    await plugin(bb);
+    disposals.push(() => harness.lifecycle.dispose());
+
+    const rewritten = db.prepare(`SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`).get("host_1", "senior");
+    expect(rewritten).toEqual({ provider_id: "codex", model: "gpt-6-astra", reasoning_level: "high" });
+    const stale = db.prepare(`SELECT * FROM chief_models WHERE role=?`).get("worker");
+    expect(stale).toBeUndefined();
   });
 
   test("explains a machine with no signed-in provider instead of offering a model", async () => {

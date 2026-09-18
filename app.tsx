@@ -10,7 +10,8 @@ import type { JevStatus, ModelConfiguration, ModelSelection, rpcContract } from 
 
 const ROLES = [
   { role: "chief", label: "Chief", hint: "Supervises and decides." },
-  { role: "worker", label: "Worker", hint: "Implements delegated work." },
+  { role: "junior", label: "Junior worker", hint: "Trivial, mechanical, already-specified bounded work." },
+  { role: "senior", label: "Senior worker", hint: "Everything else Chief delegates." },
   { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
 ] as const;
 
