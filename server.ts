@@ -7,6 +7,7 @@ import {
   type PluginCliResult,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { forgeInitScript } from "./forge";
 import { pingGateway, runEvaluation } from "./jev/gateway";
 import { getMetricDefinition } from "./jev/transform";
 import { evaluationSchema, type Evaluation, type MetricKey } from "./jev/types";
@@ -28,6 +29,9 @@ const TRUNCATED_DIFF_NOTE =
 /** Lock files and generated output drown a real diff in noise nobody reviews. */
 const GENERATED_OR_LOCK_PATTERN =
   /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum|.*\.generated\.[a-z]+|.*\.min\.js)$/;
+/** One wording for the reviewer's read-only rule, said when the review starts and
+ * again on every continuation — the two places an edit instruction could arrive. */
+const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const roleSchema = z.enum(["chief", "worker", "reviewer"]);
@@ -114,8 +118,10 @@ const delegateParams = z.object({
   successCriteria: z.array(z.string().trim().min(1).max(1_000)).max(30).optional(),
   constraints: z.array(z.string().trim().min(1).max(1_000)).max(30).optional(),
   context: z.string().trim().max(12_000).optional(),
+  // The policy behind this choice lives in the chief skill, which is loaded into
+  // every Chief turn. Here it stays a one-line gloss of the two enum values.
   tier: tierSchema.default("senior").describe(
-    "junior for trivial, mechanical, or already-specified bounded work (rename, typo, formatting, a function/endpoint whose shape is decided, tests for existing behavior, a localized fix whose cause is already understood); senior for everything else (unknown-cause debugging, design or refactor across modules, security/auth/concurrency/data-migration/money logic, ambiguous scope, high blast radius). When unsure, senior. Junior still needs a brief specific enough that a weaker model can finish it in one pass.",
+    "junior for trivial, mechanical, or already-specified bounded work; senior for everything else. When unsure, senior.",
   ),
   branch: z.string().trim().min(1).max(300).optional().describe(
     "The task branch Chief already created and pushed. The worktree is based on it and the worker commits there. Omit to base the worktree on the project default.",
@@ -409,6 +415,18 @@ export default async function plugin(bb: BbPluginApi) {
     // The brief a worker was delegated with, so its reviewer can judge the change
     // against the same standard instead of an unanchored one.
     `ALTER TABLE managed_threads ADD COLUMN brief TEXT`,
+    // Finding 8 asks whether the applicability gate really abstains on thin diffs
+    // instead of guessing. jev_scores only keeps the latest evaluation per worker
+    // and base, so the answer has to be counted as the scores are produced.
+    // ponytail: aggregate counters, not one row per pass — no slicing by project,
+    // diff size, or truncation. Add a column pair if the total hides the answer.
+    `CREATE TABLE IF NOT EXISTS jev_metric_stats (
+      metric TEXT PRIMARY KEY,
+      samples INTEGER NOT NULL,
+      abstained INTEGER NOT NULL,
+      score_sum REAL NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
   ]);
 
   const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC`);
@@ -433,6 +451,12 @@ export default async function plugin(bb: BbPluginApi) {
   const previousScore = db.prepare<[string, string]>(
     `SELECT evaluation FROM jev_scores WHERE worker_thread_id=? AND base_branch=?`,
   );
+  const recordMetric = db.prepare<[string, number, number, number]>(
+    `INSERT INTO jev_metric_stats (metric, samples, abstained, score_sum, updated_at) VALUES (?, 1, ?, ?, ?)
+     ON CONFLICT(metric) DO UPDATE SET samples=samples+1, abstained=abstained+excluded.abstained,
+       score_sum=score_sum+excluded.score_sum, updated_at=excluded.updated_at`,
+  );
+  const metricStats = db.prepare(`SELECT * FROM jev_metric_stats ORDER BY metric ASC`);
   let roles = new Map<string, ManagedRow>();
   // bb.agents.configure is synchronous, so the gate's answer has to be on hand.
   let jevActive = false;
@@ -710,19 +734,19 @@ export default async function plugin(bb: BbPluginApi) {
   async function spawnChief(target: string, previous?: ManagedRow) {
     const sectionId = await ensureSection();
     const name = await projectName(target);
-    const rules = await readRules(target);
+    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
+    // the rules into every Chief turn, so the spawn prompt does not repeat them.
+    await readRules(target);
     const count = (chiefCountForProject.get(target) as { count: number }).count;
     const title = count === 0 ? `Chief · ${name}` : `Chief · ${name} · ${count + 1}`;
     const prompt = [
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
       "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
-      "Every delegation picks a tier: junior for trivial, mechanical, or already-specified bounded work (rename, typo, formatting, a function or endpoint whose shape is decided, tests for existing behavior, a localized fix whose cause is already understood); senior for everything else (unknown-cause debugging, design or refactor across modules, security/auth/concurrency/data-migration/money logic, ambiguous scope, high blast radius). When unsure, use senior. Junior is not a vaguer brief — it is a brief specific enough that a weaker model can finish it in one pass; if the mission cannot name the cause or the intended shape, route senior instead.",
-      "You own the forge for every delegation: before delegating, create the tracking issue, the task branch, and a draft pull request, then pass branch, issueUrl and prUrl to chief_delegate, and mark the PR ready only after the work is verified. The full procedure, including what to skip when a forge step fails, is in the chief skill's Git workflow section.",
+      "You own the forge for every delegation: run chief_forge_init, run the script it returns from the project checkout, and pass the branch, issueUrl and prUrl it prints to chief_delegate. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
       "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
-      "", "## Project rules", rules,
-      "", "Acknowledge the operating rules briefly, inspect the roster, and wait for work.",
+      "", "Acknowledge the operating rules you were given briefly, inspect the roster, and wait for work.",
     ].join("\n");
     const thread = await bb.sdk.threads.spawn({
       projectId: target,
@@ -852,7 +876,7 @@ export default async function plugin(bb: BbPluginApi) {
     const row = roles.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker or reviewer ${threadId}.`);
     const text = row.role === "reviewer"
-      ? `Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.\n\n${instruction}`
+      ? `${REVIEW_ONLY}\n\n${instruction}`
       : instruction;
     await bb.sdk.threads.send({
       threadId,
@@ -886,7 +910,7 @@ export default async function plugin(bb: BbPluginApi) {
       const prompt = [
         `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
         focus ? `Review focus: ${focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
-        "This is a read-only review. Do not modify files; report what has to change instead.",
+        REVIEW_ONLY,
         "Inspect the actual worktree and evidence; do not rely only on the worker's claims.",
         `Report your findings to Chief thread ${worker.chief_thread_id} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
         "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
@@ -1362,7 +1386,31 @@ export default async function plugin(bb: BbPluginApi) {
       ON CONFLICT(worker_thread_id, base_branch) DO UPDATE SET evaluation=excluded.evaluation, updated_at=excluded.updated_at`).run(
       workerThreadId, baseBranch, JSON.stringify(evaluation), Date.now(),
     );
+    recordMetrics(evaluation);
     return formatEvaluation(evaluation, { baseBranch, fileCount, truncated, hadPrevious: previous !== undefined });
+  }
+
+  function recordMetrics(evaluation: Evaluation) {
+    const now = Date.now();
+    db.transaction(() => {
+      for (const [metric, value] of Object.entries(evaluation.metrics) as [MetricKey, Evaluation["metrics"][MetricKey]][]) {
+        recordMetric.run(metric, value.applicable ? 0 : 1, value.score ?? 0, now);
+      }
+    })();
+  }
+
+  function metricAbstention() {
+    return (metricStats.all() as { metric: string; samples: number; abstained: number; score_sum: number }[])
+      .map((row) => ({
+        metric: row.metric,
+        samples: row.samples,
+        abstained: row.abstained,
+        abstainedPercent: Math.round((row.abstained / row.samples) * 100),
+        meanScore: row.samples > row.abstained
+          ? Math.round((row.score_sum / (row.samples - row.abstained)) * 10) / 10
+          : null,
+      }))
+      .sort((left, right) => right.abstainedPercent - left.abstainedPercent || left.metric.localeCompare(right.metric));
   }
 
   function formatEvaluation(
@@ -1393,6 +1441,27 @@ export default async function plugin(bb: BbPluginApi) {
     return lines.join("\n");
   }
 
+  bb.agents.registerTool({
+    name: "chief_forge_init",
+    description: "Build the forge pre-flight for one task — tracking issue, task branch, draft pull request — as one script to run before chief_delegate.",
+    parameters: z.object({
+      title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
+      base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request."),
+      body: z.string().trim().min(1).max(4_000).optional().describe("Short summary for the issue and pull request body."),
+    }),
+    async execute(params, context) {
+      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      if (!caller || caller.role !== "chief" || ["complete", "archived", "deleted"].includes(caller.state)) {
+        throw new Error("chief_forge_init requires an active registered Chief thread.");
+      }
+      const { branch, script } = forgeInitScript(params);
+      return [
+        "Run this from the project checkout, verbatim. Every value is already substituted and quoted, every forge step is best-effort, and your own checkout never moves:",
+        "", "```sh", script, "```", "",
+        `The last line is CHIEF_FORGE branch=… base=… issue_url=… pr_url=…. Pass those to chief_delegate as branch, issueUrl and prUrl, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, and an empty branch means the cut failed, so delegate without one and the worktree uses the project default. Neither is a failure to report as one. The branch will be ${branch}.`,
+      ].join("\n");
+    },
+  });
   bb.agents.registerTool({
     name: "chief_delegate",
     description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree.",
@@ -1516,7 +1585,7 @@ export default async function plugin(bb: BbPluginApi) {
     const rules = rulesCache.get(row.project_id) ?? BUILT_IN_RULES;
     if (row.role === "chief") {
       return {
-        tools: ["chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete"],
+        tools: ["chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete"],
         skills: ["chief"],
         instructions: `You are the registered Chief supervisor for ${context.project.name}. Use ordinary visible BB threads and drive managed work through completion.\n\n${rules}`,
       };
@@ -1590,6 +1659,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief review <worker-thread-id> [--focus \"…\"] [--json]",
     "  bb chief complete <thread-id> [--result \"…\"] [--json]",
+    "  bb chief jev-stats [--json]",
   ].join("\n");
 
   bb.cli.register({
@@ -1605,6 +1675,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "review", summary: "Start or return a read-only review for an idle worker", usage: "bb chief review <worker-thread-id> [--focus \"…\"] [--json]" },
       { name: "complete", summary: "Mark verified, non-running managed work complete", usage: "bb chief complete <thread-id> [--result \"…\"] [--json]" },
+      { name: "jev-stats", summary: "Show how often each Jev dimension abstained instead of scoring", usage: "bb chief jev-stats [--json]" },
     ],
     async run(argv: string[], context: PluginCliContext): Promise<PluginCliResult> {
       const [command, ...rest] = argv;
@@ -1686,6 +1757,22 @@ export default async function plugin(bb: BbPluginApi) {
           if (!workerThreadId) return fail("review requires <worker-thread-id>");
           const result = await startReview(workerThreadId, args.one("focus"));
           return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}.`);
+        }
+        if (command === "jev-stats") {
+          const rows = metricAbstention();
+          if (!rows.length) return ok([], "No Jev scores recorded yet.");
+          const width = Math.max(...rows.map((row) => row.metric.length));
+          return ok(rows, [
+            "dimension".padEnd(width) + "  samples  abstained  mean score",
+            ...rows.map((row) => [
+              row.metric.padEnd(width),
+              String(row.samples).padStart(7),
+              `${row.abstainedPercent}%`.padStart(9),
+              (row.meanScore === null ? "—" : row.meanScore.toFixed(1)).padStart(10),
+            ].join("  ")),
+            "",
+            "A dimension that rarely abstains on thin diffs is scoring what it cannot see.",
+          ].join("\n"));
         }
         if (command === "complete") {
           const threadId = args.positional[0];
