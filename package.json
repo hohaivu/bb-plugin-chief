@@ -15,7 +15,7 @@
   "type": "module",
   "scripts": {
     "build": "bb plugin build",
-    "test": "vitest run server.test.ts app.test.tsx"
+    "test": "vitest run server.test.ts app.test.tsx forge.test.ts"
   },
   "engines": {
     "bb": ">=0.41",

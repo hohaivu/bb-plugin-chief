@@ -12,7 +12,7 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 
 1. Open BB's project-aware **New Thread** screen and click **Start Chief**. Each click creates and opens a fresh independent Chief for that project; the CLI remains available for automation.
 2. Talk to `Chief · <project name>` in the normal thread UI.
-3. Chief owns the forge: before delegating it opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit, and opens a draft pull request from that branch into the base. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
+3. Chief owns the forge: `chief_forge_init` returns one ready-to-run script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. Chief runs the script and reads the `CHIEF_FORGE branch=… issue_url=… pr_url=…` line it prints. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
 4. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
 5. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 6. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled. Alerts use a durable SQLite outbox and retry after transient delivery failures.
@@ -53,9 +53,9 @@ See [`skills/chief/SKILL.md`](skills/chief/SKILL.md) for how Chief chooses.
 `chief_delegate` takes three optional forge fields alongside the brief: `branch` bases the worker's
 managed worktree on that branch instead of the project default, and `issueUrl` and `prUrl` are
 recorded with the thread and shown in `chief_roster` and `chief_inspect`. The plugin never runs
-`git`, `gh`, or `glab` itself — the BB plugin SDK exposes no shell — so Chief runs those commands
-from its own thread and passes the results in. Both GitHub (`gh`) and GitLab (`glab`) are covered;
-the exact procedure, including what to skip when a forge step fails, is the **Git workflow** section
+`git`, `gh`, or `glab` itself — the BB plugin SDK exposes no shell — so `chief_forge_init` generates
+the script, with every value substituted and quoted, and Chief runs it from its own thread. Both GitHub (`gh`) and GitLab (`glab`) are covered;
+the surrounding policy, including what to skip when a forge step fails, is the **Git workflow** section
 of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 
 ### Jev review scoring
@@ -74,6 +74,11 @@ server, so setting `jevEnabled` through the CLI cannot skip the check.
 The score is evidence for the reviewer to confirm or reject against the code it read — never a
 completion gate.
 
+Every scored dimension is counted as it is produced. `bb chief jev-stats` reports how often each of
+the 19 dimensions answered its applicability question with no — the number to look at before
+deciding whether a dimension that cannot be judged from a diff needs fuller context or should be
+dropped.
+
 ## CLI
 
 ```sh
@@ -86,9 +91,10 @@ bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief review thr_worker [--focus "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
+bb chief jev-stats [--json]
 ```
 
-Agent tools expose the lifecycle: `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer `chief_report`.
+Agent tools expose the lifecycle: `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer `chief_report`.
 
 ## Build and verify
 

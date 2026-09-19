@@ -411,7 +411,7 @@ describe("Chief backend", () => {
     expect(first.exitCode).toBe(0);
     expect(second.exitCode).toBe(0);
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
-    expect(state.spawned.at(-1).prompt).toContain("read-only review");
+    expect(state.spawned.at(-1).prompt).toContain("Remain review-only");
   });
 
   test("reviews a ready worker without Chief asking for it", async () => {
@@ -616,11 +616,69 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete"]);
     expect(chief.skills).toEqual(["chief"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker"]);
     expect(ordinary.tools).toEqual([]);
+  });
+
+  test("hands Chief a forge script instead of the plumbing to reassemble", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const script = await state.harness.behavior.callAgentTool(
+      "chief_forge_init",
+      { title: "Fix checkout totals" },
+      { threadId: chief.threadId, projectId: "proj_1" },
+    ) as string;
+    expect(script).toContain("TITLE='Fix checkout totals'");
+    expect(script).toContain("BRANCH='feature/fix-checkout-totals'");
+    expect(script).toContain("git commit-tree");
+    expect(script).toContain("CHIEF_FORGE branch=%s");
+    // A worker must never be able to open branches and pull requests of its own.
+    const worker = await delegate(state, chief.threadId);
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_forge_init", { title: "Sneak one in" }, { threadId: worker.threadId, projectId: "proj_1" },
+    )).rejects.toThrow(/active registered Chief/);
+  });
+
+  test("says the tier policy and the project rules once", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const prompt = state.spawned[0].prompt as string;
+    // Both live in what bb.agents.configure puts into every Chief turn: the chief
+    // skill and the rules. A second copy in the spawn prompt is one that can drift.
+    expect(prompt).not.toContain("## Project rules");
+    expect(prompt).not.toContain("high blast radius");
+    expect(prompt).toContain("chief_forge_init");
+    const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(configured.instructions).toContain("Chief operating rules");
+  });
+
+  test("counts how often each Jev dimension abstained instead of scoring", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
+    jev.pingGateway.mockResolvedValue(undefined);
+    jev.runEvaluation.mockResolvedValue({
+      metrics: Object.fromEntries(metricKeys.map((key) => [
+        key,
+        key === "correctness" ? { applicable: true, score: 8, confidence: 0.8 } : { applicable: false },
+      ])),
+      priorities: [],
+    });
+    await state.harness.behavior.setSettings({ jevApiKey: "gw_key" });
+    expect((await state.harness.behavior.callRpc("jevCheck", null)).ok).toBe(true);
+    await state.harness.behavior.setSettings({ jevEnabled: true });
+    await state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId });
+
+    const stats = JSON.parse((await state.harness.behavior.runCli(["jev-stats", "--json"])).stdout!) as
+      { metric: string; samples: number; abstainedPercent: number; meanScore: number | null }[];
+    expect(stats).toHaveLength(metricKeys.length);
+    expect(stats.find((row) => row.metric === "correctness")).toMatchObject({ samples: 1, abstainedPercent: 0, meanScore: 8 });
+    expect(stats.find((row) => row.metric === "projectStructure")).toMatchObject({ abstainedPercent: 100, meanScore: null });
+    expect((await state.harness.behavior.runCli(["jev-stats"])).stdout).toContain("abstained");
   });
 
   test("stops the supervisor service cleanly on abort", async () => {
