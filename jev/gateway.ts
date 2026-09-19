@@ -8,7 +8,14 @@ import { buildQuestions } from "./questions";
 import { transform } from "./transform";
 import type { Evaluation } from "./types";
 
-export type JevState = { task?: string; diff?: string; repositoryContext?: string };
+export type JevState = {
+  task?: string;
+  diff?: string;
+  repositoryContext?: string;
+  /** Set only when the diff was cut to fit, so the applicability gate can abstain
+   * instead of scoring absent code as missing implementation. */
+  diffTruncated?: string;
+};
 
 export type GatewayOptions = { apiKey: string; model: string; timeoutMs: number };
 
