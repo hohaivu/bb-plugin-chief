@@ -21,6 +21,10 @@ const JEV_DEFAULT_MODEL = "typesafe-ai/jev";
 const JEV_PING_TIMEOUT_MS = 30_000;
 const JEV_SCORE_TIMEOUT_MS = 180_000;
 const JEV_MAX_DIFF_BYTES = 96 * 1024;
+/** Scoring a cut diff without saying so reads as missing implementation, and the
+ * change is penalised for bytes that were never sent. */
+const TRUNCATED_DIFF_NOTE =
+  "This diff was cut to fit a size budget: later files and hunks are missing from this state. Judge only what is present, and when a dimension depends on seeing the whole change, answer no to its applicability question instead of penalising the code that was omitted.";
 /** Lock files and generated output drown a real diff in noise nobody reviews. */
 const GENERATED_OR_LOCK_PATTERN =
   /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum|.*\.generated\.[a-z]+|.*\.min\.js)$/;
@@ -31,6 +35,9 @@ const roleSchema = z.enum(["chief", "worker", "reviewer"]);
  * lifecycle role above: every tier is still a "worker" for role-gated tools,
  * lifecycle alerts, and the managed_threads role CHECK. */
 const tierSchema = z.enum(["junior", "senior"]);
+/** A reviewer's structured judgement. Chief routes on this field instead of
+ * parsing a ship-or-fix opinion out of the report prose. */
+const verdictSchema = z.enum(["approve", "request_changes"]);
 /** The role key chief_models stores a per-machine model pick under: the
  * lifecycle roles, but with "worker" split into its two tiers. */
 const modelRoleSchema = z.enum(["chief", "junior", "senior", "reviewer"]);
@@ -126,6 +133,9 @@ const optionalReport = z.object({
 const readyReport = z.object({
   state: z.literal("ready"),
   result: z.string().trim().min(1).max(MAX_RESULT_LENGTH),
+  verdict: verdictSchema.optional().describe(
+    "Required in a review thread: approve when the change can ship as it stands, request_changes when the worker must fix something. Workers leave this unset.",
+  ),
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
 });
@@ -198,6 +208,8 @@ interface ManagedRow {
   result: string | null;
   blocker: string | null;
   recommendation: string | null;
+  verdict: z.infer<typeof verdictSchema> | null;
+  brief: string | null;
   active_since: number | null;
   active_cycle: number;
   stall_alerted_cycle: number | null;
@@ -393,6 +405,10 @@ export default async function plugin(bb: BbPluginApi) {
     `ALTER TABLE managed_threads ADD COLUMN branch TEXT`,
     `ALTER TABLE managed_threads ADD COLUMN issue_url TEXT`,
     `ALTER TABLE managed_threads ADD COLUMN pr_url TEXT`,
+    `ALTER TABLE managed_threads ADD COLUMN verdict TEXT`,
+    // The brief a worker was delegated with, so its reviewer can judge the change
+    // against the same standard instead of an unanchored one.
+    `ALTER TABLE managed_threads ADD COLUMN brief TEXT`,
   ]);
 
   const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC`);
@@ -457,6 +473,7 @@ export default async function plugin(bb: BbPluginApi) {
     state?: ManagedRow["state"];
     status?: string | null;
     tier?: ManagedRow["tier"];
+    brief?: string | null;
     branch?: string | null;
     issueUrl?: string | null;
     prUrl?: string | null;
@@ -464,15 +481,15 @@ export default async function plugin(bb: BbPluginApi) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, title,
-      state, status, tier, branch, issue_url, pr_url, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, tier, brief, branch, issue_url, pr_url, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       chief_thread_id=excluded.chief_thread_id, worker_thread_id=excluded.worker_thread_id,
       title=excluded.title, state=excluded.state, status=excluded.status, tier=excluded.tier,
-      branch=excluded.branch, issue_url=excluded.issue_url, pr_url=excluded.pr_url, updated_at=excluded.updated_at`).run(
+      brief=excluded.brief, branch=excluded.branch, issue_url=excluded.issue_url, pr_url=excluded.pr_url, updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.title, input.state ?? "starting",
-      input.status ?? "starting", input.tier ?? null, input.branch ?? null,
+      input.status ?? "starting", input.tier ?? null, input.brief ?? null, input.branch ?? null,
       input.issueUrl ?? null, input.prUrl ?? null, input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
@@ -781,12 +798,17 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const sectionId = await ensureSection();
     const rules = await readRules(projectId);
-    const prompt = [
-      `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
-      "", "## Mission", params.mission,
+    // One rendering of the brief: the worker reads it now, and its reviewer reads
+    // the same text later instead of guessing what the change was asked to do.
+    const brief = [
+      "## Mission", params.mission,
       "", "## Success criteria", bullets(params.successCriteria),
       "", "## Constraints", bullets(params.constraints),
       ...(params.context ? ["", "## Context", params.context] : []),
+    ].join("\n");
+    const prompt = [
+      `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
+      "", brief,
       ...(params.branch || params.issueUrl || params.prUrl ? [
         "", "## Git workflow",
         ...(params.branch ? [`Your worktree is based on ${params.branch}. Check that branch out and commit your work there.`] : []),
@@ -820,17 +842,17 @@ export default async function plugin(bb: BbPluginApi) {
     });
     insertThread({
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, title: params.title,
-      state: "starting", status: thread.status, tier: params.tier,
+      state: "starting", status: thread.status, tier: params.tier, brief,
       branch: params.branch, issueUrl: params.issueUrl, prUrl: params.prUrl,
     });
     return { threadId: thread.id, title: params.title, projectId };
   }
 
-  async function continueThread(threadId: string, instruction: string, allowEdits = false) {
+  async function continueThread(threadId: string, instruction: string) {
     const row = roles.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker or reviewer ${threadId}.`);
     const text = row.role === "reviewer"
-      ? `${allowEdits ? "Chief explicitly authorizes a repair pass: edits are allowed for this instruction only." : "Remain review-only: do not modify files."}\n\n${instruction}`
+      ? `Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.\n\n${instruction}`
       : instruction;
     await bb.sdk.threads.send({
       threadId,
@@ -838,7 +860,7 @@ export default async function plugin(bb: BbPluginApi) {
       input: [{ type: "text", text: clip(text, MAX_RESULT_LENGTH), mentions: [] }],
       senderThreadId: row.chief_thread_id ?? undefined,
     });
-    db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL,
+    db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
       active_since=?, active_cycle=active_cycle+1, stall_alerted_cycle=NULL, updated_at=? WHERE thread_id=?`).run(
       Date.now(), Date.now(), threadId,
     );
@@ -864,10 +886,15 @@ export default async function plugin(bb: BbPluginApi) {
       const prompt = [
         `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
         focus ? `Review focus: ${focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
-        "This is a read-only review. Do not modify files unless Chief later sends an explicit repair instruction authorizing edits.",
+        "This is a read-only review. Do not modify files; report what has to change instead.",
         "Inspect the actual worktree and evidence; do not rely only on the worker's claims.",
-        `Report findings and a ship/fix verdict to Chief thread ${worker.chief_thread_id} using chief_report with state ready.`,
+        `Report your findings to Chief thread ${worker.chief_thread_id} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
         "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
+        ...(worker.brief ? [
+          "", "## The brief this work was given", clip(worker.brief, 6_000),
+          "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
+        ] : []),
+        ...(worker.result ? ["", "## What the worker reported", clip(worker.result, 2_000)] : []),
         "", "## Project rules", rules,
       ].join("\n");
       const thread = await bb.sdk.threads.spawn({
@@ -978,22 +1005,37 @@ export default async function plugin(bb: BbPluginApi) {
     if (["complete", "archived", "deleted"].includes(row.state)) {
       throw new Error(`Managed thread ${threadId} is ${row.state} and can no longer report.`);
     }
+    const verdict = params.state === "ready" ? params.verdict ?? null : null;
+    if (row.role === "reviewer" && params.state === "ready" && !verdict) {
+      throw new Error('A reviewer\'s ready report must carry a verdict: "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
+    }
     const now = Date.now();
-    db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
+    db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
       params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
-      params.recommendation ?? null, now, threadId,
+      params.recommendation ?? null, verdict, now, threadId,
     );
     reloadRoles();
     const current = roles.get(threadId)!;
+    // ponytail: active_cycle counts the times a thread started working, which for a
+    // reviewer is its review rounds. It can drift by one, and it only nudges an
+    // escalation rather than gating anything — a dedicated counter if that changes.
+    const deadlocked = verdict === "request_changes" && row.active_cycle >= 2;
     const summary = [
       `${row.role === "reviewer" ? "Reviewer" : "Worker"} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
+      ...(verdict ? [`Verdict: ${verdict}`] : []),
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
-      row.role === "worker" && params.state === "ready"
-        ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
-        : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+      verdict === "approve"
+        ? "The reviewer approves. Complete this work, then mark the pull request ready."
+        : deadlocked
+          ? `The reviewer still requires changes after ${row.active_cycle} review rounds. This pair is not converging: escalate to the user with both positions and your recommendation instead of funding another round.`
+          : verdict === "request_changes"
+            ? "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
+            : row.role === "worker" && params.state === "ready"
+              ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
+              : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
     const delivered = await alertChief(current, `report:${now}:${randomUUID()}`, summary);
     if (!delivered) {
@@ -1210,6 +1252,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.result ? [`Result: ${clip(row.result, 2_000)}`] : []),
       ...(row.blocker ? [`Blocker: ${clip(row.blocker, 1_000)}`] : []),
       ...(row.recommendation ? [`Recommendation: ${clip(row.recommendation, 1_000)}`] : []),
+      ...(row.verdict ? [`Verdict: ${row.verdict}`] : []),
       `Last assistant output:\n${output ? clip(output, 4_000) : "(none available)"}`,
     ].join("\n");
   }
@@ -1310,6 +1353,7 @@ export default async function plugin(bb: BbPluginApi) {
         task: worker?.title ?? reviewer.title,
         diff,
         repositoryContext: await readRules(reviewer.project_id),
+        ...(truncated ? { diffTruncated: TRUNCATED_DIFF_NOTE } : {}),
       },
       previous,
     );
@@ -1378,6 +1422,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(row.result ? [`result: ${clip(row.result, 1_000)}`] : []),
         ...(row.blocker ? [`blocker: ${clip(row.blocker, 600)}`] : []),
         ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 600)}`] : []),
+        ...(row.verdict ? [`verdict: ${row.verdict}`] : []),
       ].join("\n  ")).join("\n") : "No managed threads for this project.";
     },
   });
@@ -1396,20 +1441,19 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_continue",
-    description: "Send or queue a concrete next instruction to a managed worker or reviewer. Reviewer edits require allowEdits=true.",
+    description: "Send or queue a concrete next instruction to a managed worker or reviewer. Reviewers stay read-only; send a repair to the worker instead.",
     parameters: z.object({
       threadId: z.string(),
       instruction: z.string().trim().min(1).max(MAX_RESULT_LENGTH),
-      allowEdits: z.boolean().optional().describe("Explicitly authorize a reviewer repair pass; false keeps it review-only."),
     }),
-    async execute({ threadId, instruction, allowEdits }, context) {
+    async execute({ threadId, instruction }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       const target = roles.get(threadId);
       if (!caller || caller.role !== "chief" || !target || !belongsToChief(target, caller.thread_id)) {
         throw new Error(`No managed thread ${threadId} for this Chief.`);
       }
-      await continueThread(threadId, instruction, allowEdits);
-      return `Continued ${threadId}${allowEdits ? " with explicit repair authorization" : ""}.`;
+      await continueThread(threadId, instruction);
+      return `Continued ${threadId}.`;
     },
   });
   bb.agents.registerTool({
@@ -1442,7 +1486,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_report",
-    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation.",
+    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict.",
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
@@ -1543,7 +1587,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--tier junior|senior] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]",
     "  bb chief inspect <thread-id>",
-    "  bb chief continue <thread-id> --instruction \"…\" [--allow-edits] [--json]",
+    "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief review <worker-thread-id> [--focus \"…\"] [--json]",
     "  bb chief complete <thread-id> [--result \"…\"] [--json]",
   ].join("\n");
@@ -1558,7 +1602,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--tier junior|senior] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
-      { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--allow-edits] [--json]" },
+      { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "review", summary: "Start or return a read-only review for an idle worker", usage: "bb chief review <worker-thread-id> [--focus \"…\"] [--json]" },
       { name: "complete", summary: "Mark verified, non-running managed work complete", usage: "bb chief complete <thread-id> [--result \"…\"] [--json]" },
     ],
@@ -1634,7 +1678,7 @@ export default async function plugin(bb: BbPluginApi) {
           const threadId = args.positional[0];
           const instruction = args.one("instruction");
           if (!threadId || !instruction) return fail("continue requires <thread-id> and --instruction");
-          await continueThread(threadId, instruction, args.bool("allow-edits"));
+          await continueThread(threadId, instruction);
           return ok({ threadId }, `Continued ${threadId}.`);
         }
         if (command === "review") {

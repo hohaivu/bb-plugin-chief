@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import {
   createFakePluginHost,
@@ -8,6 +8,10 @@ import {
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
 import plugin, { capDiff } from "./server";
+import { metricKeys } from "./jev/types";
+
+const jev = vi.hoisted(() => ({ pingGateway: vi.fn(), runEvaluation: vi.fn() }));
+vi.mock("./jev/gateway", () => jev);
 
 const disposals: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -42,6 +46,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   let spawnIndex = 0;
   let sendFailures = 0;
   let getFailures = new Map<string, number>();
+  let patch = "diff --git a/totals.ts b/totals.ts\n+const total = subtotal - discount;";
   let updateFailures = new Map<string, number>();
   const live = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const sent: any[] = [];
@@ -60,7 +65,11 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         fileContent: async () => { throw new Error("missing"); },
       },
       hosts: { list: async () => [{ id: "host_1", name: "Local", status: options.hostStatus ?? "connected" }] },
-      environments: { get: async ({ environmentId }: { environmentId: string }) => ({ id: environmentId, hostId: "host_1" }) },
+      environments: {
+        get: async ({ environmentId }: { environmentId: string }) => ({ id: environmentId, hostId: "host_1" }),
+        diffFiles: async () => ({ outcome: "available", files: [{ path: "totals.ts" }] }),
+        diffPatch: async () => ({ outcome: "available", patches: [{ patch, truncated: false }] }),
+      },
       providers: {
         list: async () => [
           { id: "codex", displayName: "Codex", available: options.providerAvailable ?? true },
@@ -149,6 +158,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
+    setPatch(next: string) { patch = next; },
     addLive(threadId: string, projectId: string, title = "Existing thread") {
       live.set(threadId, makeThreadResponse({
         id: threadId,
@@ -444,7 +454,7 @@ describe("Chief backend", () => {
     await ready();
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Totals are off by the discount",
+      state: "ready", result: "Totals are off by the discount", verdict: "request_changes",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
     await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Fix the discount"]);
 
@@ -455,6 +465,125 @@ describe("Chief backend", () => {
     expect(state.sent.filter((entry) => entry.threadId === reviewer.threadId).at(-1).input[0].text)
       .toContain("Re-check the current worktree");
     expect(state.sent.at(-1).input[0].text).toContain("re-check the latest changes");
+  });
+
+  test("routes on a reviewer's structured verdict and names a pair that stops converging", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const ready = async () => {
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Ready for review",
+      }, { threadId: worker.threadId, projectId: "proj_1" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: state.live.get(worker.threadId)!,
+        lastAssistantText: "done",
+      });
+    };
+    await ready();
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer.threadId)! });
+
+    // A rejection must be a field, not prose Chief has to parse back out.
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "The discount is still applied twice",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" })).rejects.toThrow(/verdict/);
+
+    const reject = async () => state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "The discount is still applied twice", verdict: "request_changes",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    await reject();
+    expect(state.sent.at(-1).input[0].text).toContain("Verdict: request_changes");
+    expect(state.sent.at(-1).input[0].text).toContain("Continue the worker");
+    expect(state.sent.at(-1).input[0].text).not.toContain("not converging");
+    expect(JSON.stringify(await state.harness.behavior.callAgentTool(
+      "chief_inspect", { threadId: reviewer.threadId }, { threadId: chief.threadId },
+    ))).toContain("Verdict: request_changes");
+
+    // Second round on the same objection: Chief is told to escalate, not to fund a third.
+    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Fix the discount"]);
+    await ready();
+    await reject();
+    expect(state.sent.at(-1).input[0].text).toContain("not converging");
+    expect(state.sent.at(-1).input[0].text).toContain("escalate to the user");
+  });
+
+  test("tells Chief to complete work its reviewer approved", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Confirmed against the regression test", verdict: "approve",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    expect(state.sent.at(-1).input[0].text).toContain("Verdict: approve");
+    expect(state.sent.at(-1).input[0].text).toContain("mark the pull request ready");
+  });
+
+  test("hands the reviewer the brief and report the work was judged against", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals fixed and covered by a test",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    const review = state.spawned.find((entry: any) => entry.title === "Review · Fix checkout totals");
+    // Without the brief the reviewer scores the change against a standard nobody set.
+    expect(review.prompt).toContain("Correct and verify totals");
+    expect(review.prompt).toContain("Regression passes");
+    expect(review.prompt).toContain("Totals fixed and covered by a test");
+  });
+
+  test("keeps reviewers read-only however the continuation is phrased", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
+    // The removed --allow-edits flag must not resurface as an unreviewed edit path.
+    await state.harness.behavior.runCli(["continue", review.threadId, "--instruction", "Fix it yourself", "--allow-edits"]);
+    const text = state.sent.filter((entry: any) => entry.threadId === review.threadId).at(-1).input[0].text;
+    expect(text).toContain("Remain review-only");
+    expect(text).not.toContain("edits are allowed");
+    const chiefTools = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(JSON.stringify(chiefTools.tools.find((tool: any) => tool.name === "chief_continue"))).not.toContain("allowEdits");
+  });
+
+  test("tells Jev when the diff it scores was cut short", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
+    jev.pingGateway.mockResolvedValue(undefined);
+    // Stored and re-read on the next pass, so it has to satisfy the real schema.
+    jev.runEvaluation.mockResolvedValue({
+      metrics: Object.fromEntries(metricKeys.map((key) => [
+        key,
+        key === "correctness" ? { applicable: true, score: 8, confidence: 0.8 } : { applicable: false },
+      ])),
+      priorities: [],
+    });
+    await state.harness.behavior.setSettings({ jevApiKey: "gw_key" });
+    expect((await state.harness.behavior.callRpc("jevCheck", null)).ok).toBe(true);
+    await state.harness.behavior.setSettings({ jevEnabled: true });
+
+    await state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId });
+    expect(jev.runEvaluation.mock.calls.at(-1)![1]).not.toHaveProperty("diffTruncated");
+
+    // A diff cut to fit reads as missing implementation unless the scorer is told.
+    state.setPatch("x".repeat(200 * 1024));
+    await state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId });
+    expect(jev.runEvaluation.mock.calls.at(-1)![1].diffTruncated).toContain("cut to fit");
   });
 
   test("enforces agent-tool authorization at execution time", async () => {
