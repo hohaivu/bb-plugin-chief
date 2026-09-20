@@ -32,9 +32,11 @@ const GENERATED_OR_LOCK_PATTERN =
 /** One wording for the reviewer's read-only rule, said when the review starts and
  * again on every continuation — the two places an edit instruction could arrive. */
 const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
+/** Same for a planner: said when the plan starts and again on every continuation. */
+const PLAN_ONLY = "Remain read-only: do not create, modify, or delete files. A worker implements the plan in its own worktree.";
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
-const roleSchema = z.enum(["chief", "worker", "reviewer"]);
+const roleSchema = z.enum(["chief", "planner", "worker", "reviewer"]);
 /** A worker's tier, chosen by Chief at delegation time. Separate from the
  * lifecycle role above: every tier is still a "worker" for role-gated tools,
  * lifecycle alerts, and the managed_threads role CHECK. */
@@ -44,7 +46,7 @@ const tierSchema = z.enum(["junior", "senior"]);
 const verdictSchema = z.enum(["approve", "request_changes"]);
 /** The role key chief_models stores a per-machine model pick under: the
  * lifecycle roles, but with "worker" split into its two tiers. */
-const modelRoleSchema = z.enum(["chief", "junior", "senior", "reviewer"]);
+const modelRoleSchema = z.enum(["chief", "planner", "junior", "senior", "reviewer"]);
 const stateSchema = z.enum([
   "starting",
   "pending",
@@ -85,6 +87,7 @@ const modelConfigurationSchema = z.object({
     error: z.string().nullable(),
     selections: z.object({
       chief: modelSelectionSchema.nullable(),
+      planner: modelSelectionSchema.nullable(),
       junior: modelSelectionSchema.nullable(),
       senior: modelSelectionSchema.nullable(),
       reviewer: modelSelectionSchema.nullable(),
@@ -129,6 +132,10 @@ const delegateParams = z.object({
   issueUrl: z.string().trim().min(1).max(500).optional().describe("URL of the tracking issue Chief opened for this task, when the forge has issues."),
   prUrl: z.string().trim().min(1).max(500).optional().describe("URL of the draft pull request Chief opened from the task branch. The worker never marks it ready."),
 });
+
+/** A planner is briefed on the same problem as a worker, minus the criteria and
+ * constraints it is being asked to propose. */
+const planParams = delegateParams.pick({ title: true, mission: true, context: true });
 
 const optionalReport = z.object({
   state: z.enum(["active", "idle", "failed"]),
@@ -259,6 +266,11 @@ Score against the same base on every pass for one worker; only then does the imp
 
 In your report to Chief, state the base you used, which findings you confirmed against the code, and which scored points you reject and why.`;
 
+/** Planning is a decision point, not a relay: the plan is worth a thread only because
+ * Chief reads it before any worktree is spent on it. */
+const PLANNER_CHIEF_INSTRUCTIONS =
+  "Planning is on. For work that is not obviously small, use chief_plan first. Read the returned plan, correct it with chief_continue or escalate a genuine decision to the user, then call chief_delegate with the agreed plan in its context. A plan is never implementation: only a worker changes code.";
+
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
   const flags = new Map<string, string[]>();
@@ -319,27 +331,9 @@ function bullets(values?: string[]) {
   return values?.length ? values.map((value) => `- ${value}`).join("\n") : "- None stated.";
 }
 
-export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
-    chiefProject: { type: "project", label: "Default Chief project" },
-    stallMinutes: { type: "string", label: "Stall threshold (minutes)", default: "30" },
-    jevApiKey: {
-      type: "string",
-      label: "AI Gateway API key",
-      description: "Needed for Jev scoring. Check the connection below before enabling it.",
-      secret: true,
-    },
-    jevModel: { type: "string", label: "Jev model", default: JEV_DEFAULT_MODEL },
-    jevEnabled: {
-      type: "boolean",
-      label: "Let reviewers score changes with Jev",
-      description: "Stays off until a connection check succeeds for the current key and model.",
-      default: false,
-    },
-  });
-
-  const db = bb.storage.database();
-  bb.storage.migrate(db, [
+/** Append-only: the host records each statement's hash by index and rejects a changed
+ * or reordered one. Exported so the upgrade path can be tested on a real database. */
+export const MIGRATIONS = [
     `CREATE TABLE IF NOT EXISTS plugin_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS managed_threads (
       thread_id TEXT PRIMARY KEY,
@@ -427,7 +421,81 @@ export default async function plugin(bb: BbPluginApi) {
       score_sum REAL NOT NULL,
       updated_at INTEGER NOT NULL
     )`,
-  ]);
+    // Admitting the planner role means widening two CHECK constraints, and SQLite
+    // cannot drop one. Both tables are rebuilt; the statements above keep their old
+    // text because migrations are append-only. Column order matches the live table,
+    // ALTER-added columns last, which is what SELECT * relies on.
+    `CREATE TABLE managed_threads_v2 (
+      thread_id TEXT PRIMARY KEY,
+      role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer')),
+      project_id TEXT NOT NULL,
+      chief_thread_id TEXT,
+      worker_thread_id TEXT,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      status TEXT,
+      result TEXT,
+      blocker TEXT,
+      recommendation TEXT,
+      active_since INTEGER,
+      active_cycle INTEGER NOT NULL DEFAULT 0,
+      stall_alerted_cycle INTEGER,
+      lifecycle_alert_key TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      tier TEXT,
+      branch TEXT,
+      issue_url TEXT,
+      pr_url TEXT,
+      verdict TEXT,
+      brief TEXT
+    )`,
+    `INSERT INTO managed_threads_v2 SELECT * FROM managed_threads`,
+    `DROP TABLE managed_threads`,
+    `ALTER TABLE managed_threads_v2 RENAME TO managed_threads`,
+    // Dropping the table dropped its index with it.
+    `CREATE INDEX IF NOT EXISTS managed_threads_chief ON managed_threads (chief_thread_id, created_at)`,
+    `CREATE TABLE chief_models_v3 (
+      host_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('chief','planner','junior','senior','reviewer')),
+      provider_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      reasoning_level TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (host_id, role)
+    )`,
+    `INSERT INTO chief_models_v3 SELECT * FROM chief_models`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_v3 RENAME TO chief_models`,
+];
+
+export default async function plugin(bb: BbPluginApi) {
+  const settings = bb.settings.define({
+    chiefProject: { type: "project", label: "Default Chief project" },
+    stallMinutes: { type: "string", label: "Stall threshold (minutes)", default: "30" },
+    plannerEnabled: {
+      type: "boolean",
+      label: "Plan before delegating",
+      description: "Lets Chief send work to a read-only planner first, read the plan, and delegate it.",
+      default: false,
+    },
+    jevApiKey: {
+      type: "string",
+      label: "AI Gateway API key",
+      description: "Needed for Jev scoring. Check the connection below before enabling it.",
+      secret: true,
+    },
+    jevModel: { type: "string", label: "Jev model", default: JEV_DEFAULT_MODEL },
+    jevEnabled: {
+      type: "boolean",
+      label: "Let reviewers score changes with Jev",
+      description: "Stays off until a connection check succeeds for the current key and model.",
+      default: false,
+    },
+  });
+
+  const db = bb.storage.database();
+  bb.storage.migrate(db, MIGRATIONS);
 
   const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC`);
   const activeChiefForProject = db.prepare<[string]>(
@@ -460,6 +528,7 @@ export default async function plugin(bb: BbPluginApi) {
   let roles = new Map<string, ManagedRow>();
   // bb.agents.configure is synchronous, so the gate's answer has to be on hand.
   let jevActive = false;
+  let plannerActive = false;
   const rulesCache = new Map<string, string>();
   const alertDeliveries = new Map<string, Promise<boolean>>();
   const reviewStarts = new Map<string, Promise<{ threadId: string; title: string; workerThreadId: string; created: boolean }>>();
@@ -731,6 +800,24 @@ export default async function plugin(bb: BbPluginApi) {
     return (activeChiefForProject.get(projectId) as ManagedRow | undefined) ?? null;
   }
 
+  /** The Chief a spawn request belongs to: the calling Chief itself, or the active
+   * one for the caller's project. Planning and delegation resolve it the same way. */
+  async function owningChief(callerThreadId?: string | null) {
+    const caller = callerThreadId ? roles.get(callerThreadId) : undefined;
+    const projectId = caller?.project_id ?? (await settings.get()).chiefProject;
+    if (!projectId) throw new Error("No Chief project is configured.");
+    const chief = caller?.role === "chief" ? caller : chiefForProject(projectId);
+    if (!chief || chief.state === "complete") throw new Error("Start Chief for this project first.");
+    return { chief, projectId };
+  }
+
+  /** bb.agents.configure is synchronous and can only read the cached copy, so every
+   * read refreshes it. Spawning a planner gates on this live call, never on the cache. */
+  async function plannerEnabled() {
+    plannerActive = (await settings.get()).plannerEnabled;
+    return plannerActive;
+  }
+
   async function spawnChief(target: string, previous?: ManagedRow) {
     const sectionId = await ensureSection();
     const name = await projectName(target);
@@ -743,6 +830,7 @@ export default async function plugin(bb: BbPluginApi) {
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
       "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
+      ...((await plannerEnabled()) ? [PLANNER_CHIEF_INSTRUCTIONS] : []),
       "You own the forge for every delegation: run chief_forge_init, run the script it returns from the project checkout, and pass the branch, issueUrl and prUrl it prints to chief_delegate. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
       "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
@@ -804,13 +892,44 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** A plan is read-only work in the project's own checkout: no worktree is spent
+   * until Chief has read the plan and chosen to delegate it. */
+  async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
+    if (!(await plannerEnabled())) {
+      throw new Error("Planning is off. Turn on “Plan before delegating” in Chief's settings, or delegate this work directly.");
+    }
+    const { chief, projectId } = await owningChief(callerThreadId);
+    const sectionId = await ensureSection();
+    const rules = await readRules(projectId);
+    const title = `Plan · ${params.title}`;
+    const prompt = [
+      `You are the managed planner for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
+      "", "## Problem", params.mission,
+      ...(params.context ? ["", "## Context", params.context] : []),
+      "", "## Project rules", rules,
+      "", "## Working contract",
+      "- Read the code this change would touch and trace the real flow before proposing anything. A plan naming the wrong files is worse than no plan.",
+      `- ${PLAN_ONLY}`,
+      "- Report with chief_report state ready, the plan as its result: the files and functions to change, the steps in order, success criteria a worker can verify, real constraints, and the risks.",
+      "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
+      "- A blocked report must include the blocker and your recommended decision or next action.",
+      "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
+    ].join("\n");
+    const thread = await bb.sdk.threads.spawn({
+      projectId,
+      environment: { type: "project-default" },
+      sectionId,
+      visibility: "visible",
+      title,
+      ...(await execution("planner", await projectHostId(projectId))),
+      prompt,
+    });
+    insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, title, state: "starting", status: thread.status });
+    return { threadId: thread.id, title, projectId };
+  }
+
   async function delegate(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
-    const caller = callerThreadId ? roles.get(callerThreadId) : undefined;
-    const values = await settings.get();
-    const projectId = caller?.project_id ?? values.chiefProject;
-    if (!projectId) throw new Error("No Chief project is configured.");
-    const chief = caller?.role === "chief" ? caller : chiefForProject(projectId);
-    if (!chief || chief.state === "complete") throw new Error("Start Chief for this project before delegating work.");
+    const { chief, projectId } = await owningChief(callerThreadId);
     // One task branch carries one active worker: a second worktree cannot check out a
     // branch another one already holds, and the spawn would fail with a raw git error.
     const holder = params.branch
@@ -874,10 +993,13 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function continueThread(threadId: string, instruction: string) {
     const row = roles.get(threadId);
-    if (!row || row.role === "chief") throw new Error(`No managed worker or reviewer ${threadId}.`);
+    if (!row || row.role === "chief") throw new Error(`No managed worker, planner, or reviewer ${threadId}.`);
+    // Planners and reviewers both stay out of the files; only a worker edits.
     const text = row.role === "reviewer"
       ? `${REVIEW_ONLY}\n\n${instruction}`
-      : instruction;
+      : row.role === "planner"
+        ? `${PLAN_ONLY}\n\n${instruction}`
+        : instruction;
     await bb.sdk.threads.send({
       threadId,
       mode: "queue-if-active",
@@ -1025,7 +1147,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function report(threadId: string, params: z.infer<typeof reportParams>) {
     const row = roles.get(threadId);
-    if (!row || row.role === "chief") throw new Error("chief_report is available only in managed worker and reviewer threads.");
+    if (!row || row.role === "chief") throw new Error("chief_report is available only in managed worker, planner, and reviewer threads.");
     if (["complete", "archived", "deleted"].includes(row.state)) {
       throw new Error(`Managed thread ${threadId} is ${row.state} and can no longer report.`);
     }
@@ -1045,7 +1167,7 @@ export default async function plugin(bb: BbPluginApi) {
     // escalation rather than gating anything — a dedicated counter if that changes.
     const deadlocked = verdict === "request_changes" && row.active_cycle >= 2;
     const summary = [
-      `${row.role === "reviewer" ? "Reviewer" : "Worker"} report from ${row.title} (${threadId})`,
+      `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
       ...(verdict ? [`Verdict: ${verdict}`] : []),
       ...(params.result ? [`Result: ${params.result}`] : []),
@@ -1059,7 +1181,9 @@ export default async function plugin(bb: BbPluginApi) {
             ? "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
             : row.role === "worker" && params.state === "ready"
               ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
-              : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+              : row.role === "planner" && params.state === "ready"
+                ? "Read this plan yourself. Correct it with chief_continue, escalate a genuine decision to the user, or call chief_delegate with the agreed plan in its context. Nothing is implemented until you do."
+                : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
     const delivered = await alertChief(current, `report:${now}:${randomUUID()}`, summary);
     if (!delivered) {
@@ -1232,6 +1356,7 @@ export default async function plugin(bb: BbPluginApi) {
       writeJevFingerprint(null);
     }
     void jevStatus().catch((error) => bb.log.warn(`Could not re-check the Jev gate: ${String(error)}`));
+    plannerActive = next.plannerEnabled;
   });
 
   function rosterFor(projectId: string, includeComplete = false) {
@@ -1476,6 +1601,19 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   bb.agents.registerTool({
+    name: "chief_plan",
+    description: "Send one unit of work to a read-only planner. It proposes an implementation plan; you read it and decide whether to delegate it.",
+    parameters: planParams,
+    async execute(params, context) {
+      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      if (!caller || caller.role !== "chief" || ["complete", "archived", "deleted"].includes(caller.state)) {
+        throw new Error("chief_plan requires an active registered Chief thread.");
+      }
+      const result = await startPlan(params, context.threadId);
+      return `Started planner “${result.title}” in thread ${result.threadId}. Read its plan before delegating the work.`;
+    },
+  });
+  bb.agents.registerTool({
     name: "chief_roster",
     description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation.",
     parameters: z.object({ includeComplete: z.boolean().optional() }),
@@ -1585,9 +1723,17 @@ export default async function plugin(bb: BbPluginApi) {
     const rules = rulesCache.get(row.project_id) ?? BUILT_IN_RULES;
     if (row.role === "chief") {
       return {
-        tools: ["chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete"],
+        tools: [
+          ...(plannerActive ? ["chief_plan"] : []),
+          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete",
+        ],
         skills: ["chief"],
-        instructions: `You are the registered Chief supervisor for ${context.project.name}. Use ordinary visible BB threads and drive managed work through completion.\n\n${rules}`,
+        instructions: [
+          `You are the registered Chief supervisor for ${context.project.name}. Use ordinary visible BB threads and drive managed work through completion.`,
+          ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
+          "",
+          rules,
+        ].join("\n"),
       };
     }
     const scoring = row.role === "reviewer" && jevActive;
@@ -1612,6 +1758,7 @@ export default async function plugin(bb: BbPluginApi) {
         const connected = host.status === "connected";
         const selections = {
           chief: readRoleModel(host.id, "chief"),
+          planner: readRoleModel(host.id, "planner"),
           junior: readRoleModel(host.id, "junior"),
           senior: readRoleModel(host.id, "senior"),
           reviewer: readRoleModel(host.id, "reviewer"),
@@ -1654,6 +1801,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief start [--project proj_id] [--json]",
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
+    "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
     "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--tier junior|senior] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
@@ -1670,6 +1818,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "start", summary: "Start or return the latest Chief for a project", usage: "bb chief start [--project proj_id] [--json]" },
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
+      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
       { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--tier junior|senior] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
@@ -1726,6 +1875,14 @@ export default async function plugin(bb: BbPluginApi) {
           insertThread({ threadId, role: "chief", projectId: thread.projectId, title, state: thread.status === "active" ? "active" : "idle", status: thread.status });
           await readRules(thread.projectId);
           return ok({ threadId, projectId: thread.projectId, title }, `Adopted ${threadId} as “${title}”.`);
+        }
+        if (command === "plan") {
+          const parsed = planParams.safeParse({
+            title: args.one("title"), mission: args.one("mission"), context: args.one("context"),
+          });
+          if (!parsed.success) return fail(`Invalid plan brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
+          const result = await startPlan(parsed.data, context.threadId);
+          return ok(result, `Started planner “${result.title}” in ${result.threadId}.`);
         }
         if (command === "delegate") {
           const parsed = delegateParams.safeParse({
@@ -1793,6 +1950,7 @@ export default async function plugin(bb: BbPluginApi) {
     bb.log.warn(`Initial reconciliation deferred: ${String(error)}`);
   }
   await jevStatus().catch((error) => bb.log.warn(`Could not read the Jev gate: ${String(error)}`));
+  await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
   const initial = await settings.get();
   if (initial.chiefProject) {
     void ensureChief(initial.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));

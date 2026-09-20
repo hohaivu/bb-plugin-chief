@@ -7,7 +7,7 @@ import {
   experimental_scanPublicSdkOnly,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import plugin, { capDiff } from "./server";
+import plugin, { capDiff, MIGRATIONS } from "./server";
 import { metricKeys } from "./jev/types";
 
 const jev = vi.hoisted(() => ({ pingGateway: vi.fn(), runEvaluation: vi.fn() }));
@@ -681,6 +681,101 @@ describe("Chief backend", () => {
     expect((await state.harness.behavior.runCli(["jev-stats"])).stdout).toContain("abstained");
   });
 
+  test("keeps planning off until the setting turns it on", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(configured.tools.map((tool) => tool.name)).not.toContain("chief_plan");
+    await expect(state.harness.behavior.callAgentTool("chief_plan", {
+      title: "Rework checkout", mission: "Propose how to fix totals",
+    }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(/Planning is off/);
+    expect(state.spawned).toHaveLength(1);
+  });
+
+  test("plans read-only in the project's own checkout and spends no worktree", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const plan = await state.harness.behavior.callAgentTool("chief_plan", {
+      title: "Rework checkout", mission: "Propose how to fix totals",
+    }, { threadId: chief.threadId, projectId: "proj_1" });
+
+    const spawned = state.spawned.at(-1);
+    expect(spawned).toMatchObject({
+      title: "Plan · Rework checkout",
+      sectionId: "sec_chief",
+      visibility: "visible",
+      // A plan reads code; only a worker earns a worktree.
+      environment: { type: "project-default" },
+    });
+    expect(spawned.prompt).toContain("do not create, modify, or delete files");
+    expect(JSON.stringify(plan)).toContain("Read its plan before delegating");
+
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    expect(planner.chiefThreadId).toBe(chief.threadId);
+    const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(configured.tools.map((tool) => tool.name)).toContain("chief_plan");
+    expect(configured.instructions).toContain("chief_plan first");
+  });
+
+  test("hands a finished plan back to Chief to delegate, and never auto-reviews it", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Change totals.ts, then cover it with a test",
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+
+    const reported = state.sent.at(-1).input[0].text;
+    // Not "Worker report": Chief has to see which role spoke.
+    expect(reported).toContain("Planner report");
+    expect(reported).toContain("chief_delegate with the agreed plan");
+
+    // A plan is not work: going idle must not start a reviewer on it.
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(planner.threadId)!,
+      lastAssistantText: "plan ready",
+    });
+    expect(state.spawned.some((entry) => String(entry.title).startsWith("Review · "))).toBe(false);
+
+    // Chief stays read-only with the planner unless it says otherwise.
+    await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "Name the test file"]);
+    expect(state.sent.at(-1).input[0].text).toContain("Remain read-only");
+  });
+
+  test("upgrading an existing database keeps its rows and admits the planner role", async () => {
+    // The rebuild that widens the role CHECK drops live tables, so the upgrade
+    // path is driven here against a real database rather than only a fresh one.
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    const beforePlanner = MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("'planner'")));
+    bb.storage.migrate(db, beforePlanner);
+
+    db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, title, state, created_at, updated_at)
+      VALUES ('thr_old', 'worker', 'proj_1', 'thr_chief', 'Existing work', 'ready', 1, 2)`).run();
+    db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at)
+      VALUES ('host_1', 'senior', 'codex', 'gpt-6-astra', 'high', 3)`).run();
+
+    bb.storage.migrate(db, MIGRATIONS);
+
+    expect(db.prepare(`SELECT title, state, chief_thread_id FROM managed_threads WHERE thread_id='thr_old'`).get())
+      .toEqual({ title: "Existing work", state: "ready", chief_thread_id: "thr_chief" });
+    expect(db.prepare(`SELECT model, reasoning_level FROM chief_models WHERE host_id='host_1' AND role='senior'`).get())
+      .toEqual({ model: "gpt-6-astra", reasoning_level: "high" });
+    // Widening that CHECK is the whole point of the rebuild.
+    expect(() => db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, title, state, created_at, updated_at)
+      VALUES ('thr_plan', 'planner', 'proj_1', 'Plan · Rework checkout', 'idle', 4, 4)`).run()).not.toThrow();
+    // Dropping the table dropped its index; the roster scan needs it back.
+    expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='managed_threads_chief'`).get())
+      .toBeTruthy();
+  });
+
   test("stops the supervisor service cleanly on abort", async () => {
     const state = await setup();
     const service = state.harness.behavior.runService("supervisor");
@@ -757,6 +852,7 @@ describe("Chief backend", () => {
       fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" },
       selections: {
         chief: null,
+        planner: null,
         junior: null,
         senior: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
         reviewer: null,

@@ -12,12 +12,13 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 
 1. Open BB's project-aware **New Thread** screen and click **Start Chief**. Each click creates and opens a fresh independent Chief for that project; the CLI remains available for automation.
 2. Talk to `Chief · <project name>` in the normal thread UI.
-3. Chief owns the forge: `chief_forge_init` returns one ready-to-run script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. Chief runs the script and reads the `CHIEF_FORGE branch=… issue_url=… pr_url=…` line it prints. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
-4. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
-5. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
-6. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled. Alerts use a durable SQLite outbox and retry after transient delivery failures.
-7. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts one read-only reviewer in its worktree and tells Chief to wait for that verdict. The reviewer reads the same brief the worker was given, and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes back to the worker. Chief can start further reviews itself with `chief_review`.
-8. Chief inspects live status and bounded output, continues safe reversible work, marks verified non-running work complete, and escalates only genuine decisions.
+3. With planning enabled, Chief can send the work to a read-only planner first, read the plan it reports, and carry that plan into the delegation.
+4. Chief owns the forge: `chief_forge_init` returns one ready-to-run script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. Chief runs the script and reads the `CHIEF_FORGE branch=… issue_url=… pr_url=…` line it prints. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
+5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
+6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
+7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled. Alerts use a durable SQLite outbox and retry after transient delivery failures.
+8. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts one read-only reviewer in its worktree and tells Chief to wait for that verdict. The reviewer reads the same brief the worker was given, and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes back to the worker. Chief can start further reviews itself with `chief_review`.
+9. Chief inspects live status and bounded output, continues safe reversible work, marks verified non-running work complete, and escalates only genuine decisions.
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
 
@@ -40,7 +41,7 @@ one project.
 
 Settings → **Chief models by machine** scans every enrolled machine for its signed-in providers
 and their live model catalogs, and lets you pick a provider, model, and reasoning level per role:
-Chief, junior worker, senior worker, and reviewer. A role without a selection spawns on BB's own
+Chief, planner, junior worker, senior worker, and reviewer. A role without a selection spawns on BB's own
 default for the project, and a selection the machine can no longer serve (signed out, model
 retired) falls back to that default rather than failing the spawn.
 
@@ -57,6 +58,19 @@ recorded with the thread and shown in `chief_roster` and `chief_inspect`. The pl
 the script, with every value substituted and quoted, and Chief runs it from its own thread. Both GitHub (`gh`) and GitLab (`glab`) are covered;
 the surrounding policy, including what to skip when a forge step fails, is the **Git workflow** section
 of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
+
+### Planning
+
+Settings → **Plan before delegating**. With it on, Chief gains `chief_plan`: it sends one unit of
+work to a read-only planner that reads the project's own checkout and reports a plan — files to
+change, ordered steps, verifiable success criteria, constraints, and risks.
+
+The handoff is Chief's, not the plugin's. Chief reads the plan, corrects it with `chief_continue`,
+escalates a genuine decision to you, then calls `chief_delegate` with the agreed plan as its
+context. Nothing is implemented until it does, and no worktree is spent on a plan.
+
+The toggle reaches Chief threads that are already running, so turning it off mid-project simply
+withdraws `chief_plan`.
 
 ### Jev review scoring
 
@@ -86,6 +100,7 @@ bb chief status [--project proj_...] [--json]
 bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
+bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--json]
 bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--tier junior|senior] [--branch feature/...] [--issue-url ...] [--pr-url ...] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
@@ -94,7 +109,7 @@ bb chief complete thr_... [--result "..."] [--json]
 bb chief jev-stats [--json]
 ```
 
-Agent tools expose the lifecycle: `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer `chief_report`.
 
 ## Build and verify
 
