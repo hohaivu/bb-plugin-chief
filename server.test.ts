@@ -213,9 +213,25 @@ describe("Chief backend", () => {
     expect(state.spawned[1]).toMatchObject({
       title: "Fix checkout totals",
       sectionId: "sec_chief",
+      parentThreadId: chief.threadId,
       visibility: "visible",
       environment: { type: "host", hostId: "host_1", workspace: { type: "managed-worktree" } },
     });
+  });
+
+  test("files planner, worker and reviewer threads as children of their Chief", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: state.live.get(chief.threadId)!.projectId };
+    expect((await state.harness.behavior.runCli(
+      ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals"], opts,
+    )).exitCode).toBe(0);
+    const worker = await delegate(state, chief.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+    expect((await state.harness.behavior.runCli(["review", worker.threadId], opts)).exitCode).toBe(0);
+    expect(state.spawned.slice(1).map((entry: any) => entry.parentThreadId))
+      .toEqual([chief.threadId, chief.threadId, chief.threadId]);
   });
 
   test("starts or resolves a project Chief through RPC for frontend launchers", async () => {
