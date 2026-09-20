@@ -252,6 +252,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
 - A worker report is evidence, not proof. Every worker that reports ready gets an independent review automatically; read that reviewer's verdict before completing its work.
+- When the user or a worker corrects a factual claim, verify it against the code before accepting the correction.
 - Start extra reviews with chief_review whenever a change is risky enough to deserve a second pass.
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete; let the user archive it when desired.`;
@@ -928,9 +929,11 @@ export default async function plugin(bb: BbPluginApi) {
       ...(params.context ? ["", "## Context", params.context] : []),
       "", "## Project rules", rules,
       "", "## Working contract",
-      "- Read the code this change would touch and trace the real flow before proposing anything. A plan naming the wrong files is worse than no plan.",
+      "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
       `- ${PLAN_ONLY}`,
-      "- Report with chief_report state ready, the plan as its result: the files and functions to change, the steps in order, success criteria a worker can verify, real constraints, and the risks.",
+      "- Report with chief_report state ready, the plan as its result: the files and functions to change, the steps in order, real constraints, and the risks.",
+      "- Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
+      "- Add an explicit \"What we're NOT doing\" section naming what this plan leaves out of scope.",
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -982,8 +985,10 @@ export default async function plugin(bb: BbPluginApi) {
       ] : []),
       "", "## Project rules", rules,
       "", "## Working contract",
+      "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
+      "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
@@ -1017,15 +1022,20 @@ export default async function plugin(bb: BbPluginApi) {
     const row = roles.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker, planner, or reviewer ${threadId}.`);
     // Planners and reviewers both stay out of the files; only a worker edits.
-    const text = row.role === "reviewer"
-      ? `${REVIEW_ONLY}\n\n${instruction}`
-      : row.role === "planner"
-        ? `${PLAN_ONLY}\n\n${instruction}`
-        : instruction;
+    // The instruction leads so consecutive continuations differ from their first
+    // character in the BB queue preview, instead of both starting with the same
+    // read-only reminder. Clip the instruction alone, reserving room for the
+    // reminder and the blank line between them, then append the reminder to the
+    // already-clipped text — otherwise a long instruction could delete or
+    // truncate the read-only constraint instead of just itself.
+    const reminder = row.role === "reviewer" ? REVIEW_ONLY : row.role === "planner" ? PLAN_ONLY : null;
+    const text = reminder
+      ? `${clip(instruction, MAX_RESULT_LENGTH - reminder.length - 2)}\n\n${reminder}`
+      : clip(instruction, MAX_RESULT_LENGTH);
     await bb.sdk.threads.send({
       threadId,
       mode: "queue-if-active",
-      input: [{ type: "text", text: clip(text, MAX_RESULT_LENGTH), mentions: [] }],
+      input: [{ type: "text", text, mentions: [] }],
       senderThreadId: row.chief_thread_id ?? undefined,
     });
     db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
@@ -1056,6 +1066,7 @@ export default async function plugin(bb: BbPluginApi) {
         focus ? `Review focus: ${focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
         REVIEW_ONLY,
         "Inspect the actual worktree and evidence; do not rely only on the worker's claims.",
+        "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
         `Report your findings to Chief thread ${worker.chief_thread_id} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
         "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
         ...(worker.brief ? [
