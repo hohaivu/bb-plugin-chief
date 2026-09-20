@@ -49,6 +49,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   let patch = "diff --git a/totals.ts b/totals.ts\n+const total = subtotal - discount;";
   let updateFailures = new Map<string, number>();
   const live = new Map<string, ReturnType<typeof makeThreadResponse>>();
+  const pluginMetadataStore = new Map<string, any>();
   const sent: any[] = [];
   const spawned: any[] = [];
   const catalogReads: (string | undefined)[] = [];
@@ -100,10 +101,14 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
             sectionId: args.sectionId,
             visibility: args.visibility,
             status: "idle",
+            // Seeding pluginMetadata always attributes the new thread to this plugin.
+            originPluginId: args.pluginMetadata ? "chief" : null,
           });
           live.set(id, thread);
+          if (args.pluginMetadata) pluginMetadataStore.set(id, args.pluginMetadata);
           return thread;
         },
+        getPluginMetadata: async ({ threadId }: { threadId: string }) => pluginMetadataStore.get(threadId) ?? {},
         get: async ({ threadId }: { threadId: string }) => {
           const failures = getFailures.get(threadId) ?? 0;
           if (failures > 0) {
@@ -159,7 +164,8 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
     setPatch(next: string) { patch = next; },
-    addLive(threadId: string, projectId: string, title = "Existing thread") {
+    seedPluginMetadata(threadId: string, metadata: any) { pluginMetadataStore.set(threadId, metadata); },
+    addLive(threadId: string, projectId: string, title = "Existing thread", originPluginId: string | null = null) {
       live.set(threadId, makeThreadResponse({
         id: threadId,
         projectId,
@@ -168,6 +174,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         sectionId: null,
         visibility: "visible",
         status: "idle",
+        originPluginId,
       }));
     },
     supervisorCycle,
@@ -392,6 +399,50 @@ describe("Chief backend", () => {
     expect(state.sent).toHaveLength(1);
   });
 
+  test("supersedes an undelivered alert instead of re-delivering it after a newer report", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.failNextSend();
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "First report",
+    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("saved but could not be delivered");
+    expect(state.sent).toHaveLength(0);
+
+    // A newer report lands before the failed one is ever retried.
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Second report",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(state.sent).toHaveLength(1);
+    expect(state.sent[0].input[0].text).toContain("Second report");
+
+    // The first attempt's alert is still sitting undelivered; a retry sweep must not
+    // resurrect it now that Chief has already received what actually happened next.
+    await state.supervisorCycle();
+    expect(state.sent).toHaveLength(1);
+    expect(state.sent.some((entry: any) => entry.input[0].text.includes("First report"))).toBe(false);
+  });
+
+  test("does not let an ordinary lifecycle alert evict a report still waiting for delivery", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.failNextSend();
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Needs review",
+    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("saved but could not be delivered");
+    expect(state.sent).toHaveLength(0);
+
+    // Generic lifecycle noise (a different alert "kind") must never evict the
+    // still-undelivered report alert above.
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "idle result",
+    });
+    await state.supervisorCycle();
+    expect(state.sent.some((entry: any) => entry.input[0].text.includes("Needs review"))).toBe(true);
+  });
+
   test("requires canonical ready and complete report payloads", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -526,6 +577,40 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).input[0].text).toContain("escalate to the user");
   });
 
+  test("does not misfire the not-converging escalation on a phase's first rejection", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const ready = async () => {
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Phase implemented",
+      }, { threadId: worker.threadId, projectId: "proj_1" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: state.live.get(worker.threadId)!,
+        lastAssistantText: "done",
+      });
+    };
+    await ready();
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer.threadId)! });
+    const verdict = (value: "approve" | "request_changes") => state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Phase reviewed", verdict: value,
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+
+    // Phase 1 approved, then the same reviewer is resumed for phase 2 and approves
+    // again — active_cycle keeps climbing with every resume even though nothing has
+    // been rejected yet.
+    await verdict("approve");
+    await state.harness.behavior.runCli(["continue", reviewer.threadId, "--instruction", "Phase 2 is ready to review."]);
+    await verdict("approve");
+    await state.harness.behavior.runCli(["continue", reviewer.threadId, "--instruction", "Phase 3 is ready to review."]);
+
+    // Phase 3's very first rejection must not read as two rounds of disagreement.
+    await verdict("request_changes");
+    expect(state.sent.at(-1).input[0].text).toContain("Verdict: request_changes");
+    expect(state.sent.at(-1).input[0].text).not.toContain("not converging");
+  });
+
   test("tells Chief to complete work its reviewer approved", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -542,7 +627,67 @@ describe("Chief backend", () => {
       state: "ready", result: "Confirmed against the regression test", verdict: "approve",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
     expect(state.sent.at(-1).input[0].text).toContain("Verdict: approve");
-    expect(state.sent.at(-1).input[0].text).toContain("mark the pull request ready");
+    expect(state.sent.at(-1).input[0].text).toContain("The reviewer approves. Complete this work, then mark the pull request ready.");
+  });
+
+  test("does not tell Chief to complete a non-final phase's approval", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Phase 1 of 2 implemented",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Phase 1 confirmed", verdict: "approve",
+      recommendation: "Continue the worker with phase 2 of 2.",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    const text = state.sent.at(-1).input[0].text;
+    expect(text).toContain("The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above.");
+    expect(text).not.toContain("mark the pull request ready");
+    expect(text).not.toContain("Complete this work");
+  });
+
+  test("drives one reviewer thread across three phases, naming each phase on resume", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const reportReady = async (result: string) => {
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result,
+      }, { threadId: worker.threadId, projectId: "proj_1" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: state.live.get(worker.threadId)!,
+        lastAssistantText: "done",
+      });
+    };
+    const approve = async (reviewerThreadId: string, result: string, recommendation?: string) => {
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result, verdict: "approve",
+        ...(recommendation ? { recommendation } : {}),
+      }, { threadId: reviewerThreadId, projectId: "proj_1" });
+    };
+
+    await reportReady("Phase 1 of 3 finished: totals fixed");
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await approve(reviewer.threadId, "Phase 1 confirmed", "Continue the worker with phase 2 of 3.");
+
+    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 2"]);
+    await reportReady("Phase 2 of 3 finished: discounts fixed");
+    await approve(reviewer.threadId, "Phase 2 confirmed", "Continue the worker with phase 3 of 3.");
+
+    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 3"]);
+    await reportReady("Phase 3 of 3 finished: shipping fixed");
+
+    const reviewerSpawns = state.spawned.filter((entry: any) => entry.pluginMetadata?.role === "reviewer");
+    expect(reviewerSpawns).toHaveLength(1);
+    const resumes = state.sent.filter((entry: any) => entry.threadId === reviewer.threadId);
+    expect(resumes.some((entry: any) => entry.input[0].text.includes("Phase 2 of 3 finished"))).toBe(true);
+    expect(resumes.some((entry: any) => entry.input[0].text.includes("Phase 3 of 3 finished"))).toBe(true);
   });
 
   test("hands the reviewer the brief and report the work was judged against", async () => {
@@ -639,6 +784,69 @@ describe("Chief backend", () => {
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker"]);
     expect(ordinary.tools).toEqual([]);
+  });
+
+  test("ignores pluginMetadata seeded by a thread this plugin never spawned", async () => {
+    const state = await setup();
+    // pluginMetadata is writable by any API client, another plugin, or the thread's
+    // own agent, so a thread claiming role: "chief" there must not be trusted unless
+    // origin.pluginId proves this plugin actually spawned it.
+    const spoofed = await state.harness.behavior.resolveAgentConfiguration({
+      ...configurationContext("thr_spoofed"),
+      origin: { kind: null, pluginId: "some-other-plugin" },
+      pluginMetadata: { role: "chief" },
+    });
+    expect(spoofed.tools).toEqual([]);
+    expect(spoofed.skills).toEqual([]);
+  });
+
+  test("exposes chief_report to a reviewer even before its row is persisted", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.runCli(["review", worker.threadId, "--json"]);
+    // insertThread only runs after threads.spawn resolves, so the tool set for a
+    // brand-new thread's first turn cannot depend on that row already existing —
+    // it has to come from what was seeded into pluginMetadata at spawn time.
+    expect(state.spawned.at(-1).pluginMetadata).toEqual({ role: "reviewer", chiefThreadId: chief.threadId });
+
+    const resolved = await state.harness.behavior.resolveAgentConfiguration({
+      ...configurationContext("thr_not_yet_persisted"),
+      pluginMetadata: { role: "reviewer", chiefThreadId: chief.threadId },
+    });
+    expect(resolved.tools.map((tool: any) => tool.name)).toContain("chief_report");
+    expect(resolved.skills).toEqual(["chief-worker"]);
+  });
+
+  test("persists a reviewer's verdict even if chief_report races the row insert", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    // Simulate the same race the test above exercises for tool exposure, but this
+    // time actually call chief_report while managed_threads has no row for it yet.
+    state.addLive("thr_racing_insert", "proj_1", "Review · totals fix", "chief");
+    state.seedPluginMetadata("thr_racing_insert", { role: "reviewer", chiefThreadId: chief.threadId });
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Confirmed against the regression test", verdict: "approve",
+    }, { threadId: "thr_racing_insert", projectId: "proj_1" });
+    expect(state.sent.at(-1).input[0].text).toContain("Verdict: approve");
+
+    const roster = await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" });
+    expect(roster).toContain("thr_racing_insert");
+    expect(roster).toContain("verdict: approve");
+  });
+
+  test("refuses to self-heal chief_report for a thread this plugin never spawned", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    // Same race as above, but originPluginId does not attribute this thread to us,
+    // so the pluginMetadata it claims must not be trusted to insert a managed row.
+    state.addLive("thr_untrusted_insert", "proj_1", "Review · totals fix", "some-other-plugin");
+    state.seedPluginMetadata("thr_untrusted_insert", { role: "reviewer", chiefThreadId: chief.threadId });
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Should not land", verdict: "approve",
+    }, { threadId: "thr_untrusted_insert", projectId: "proj_1" })).rejects.toThrow();
   });
 
   test("hands Chief a forge script instead of the plumbing to reassemble", async () => {
@@ -857,6 +1065,25 @@ describe("Chief backend", () => {
     // Dropping the table dropped its index; the roster scan needs it back.
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='managed_threads_chief'`).get())
       .toBeTruthy();
+  });
+
+  test("adds reject_streak to an existing database and survives a restart", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-reject-streak" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    const beforeRejectStreak = MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("reject_streak")));
+    bb.storage.migrate(db, beforeRejectStreak);
+
+    db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, title, state, created_at, updated_at)
+      VALUES ('thr_old', 'reviewer', 'proj_1', 'thr_chief', 'Existing review', 'ready', 1, 2)`).run();
+
+    bb.storage.migrate(db, MIGRATIONS);
+
+    expect(db.prepare(`SELECT title, reject_streak FROM managed_threads WHERE thread_id='thr_old'`).get())
+      .toEqual({ title: "Existing review", reject_streak: 0 });
+    expect(() => db.prepare(`UPDATE managed_threads SET reject_streak=reject_streak+1 WHERE thread_id='thr_old'`).run()).not.toThrow();
+    // A restart re-runs the full, now-longer migration list against an already-upgraded database.
+    expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
   });
 
   test("stops the supervisor service cleanly on abort", async () => {
