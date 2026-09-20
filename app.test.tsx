@@ -141,6 +141,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
       fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
       selections: {
         chief: { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const },
+        planner: null,
         junior: null,
         senior: null,
         reviewer: null,
@@ -166,7 +167,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
   unmounts.push(() => rendered.lifecycle.unmount());
 
   await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(3);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(4);
 
   fireEvent.click(rendered.getByRole("button", { name: "Use BB default" }));
 
@@ -176,7 +177,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
       input: { hostId: "host_1", role: "chief", selection: null },
     }),
   );
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(4);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
 });
 
 const jevOff = { hasKey: false, model: "typesafe-ai/jev", verified: false, enabled: false };

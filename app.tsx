@@ -10,6 +10,7 @@ import type { JevStatus, ModelConfiguration, ModelSelection, rpcContract } from 
 
 const ROLES = [
   { role: "chief", label: "Chief", hint: "Supervises and decides." },
+  { role: "planner", label: "Planner", hint: "Plans work before it starts." },
   { role: "junior", label: "Junior worker", hint: "Trivial, mechanical, already-specified bounded work." },
   { role: "senior", label: "Senior worker", hint: "Everything else Chief delegates." },
   { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
@@ -149,8 +150,8 @@ function ChiefModelSettings() {
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          Chief, its workers, and its reviewers can each run on their own model. A role without a
-          selection uses BB&apos;s own default for the project.
+          Chief, its planners, workers, and reviewers can each run on their own model. A role
+          without a selection uses BB&apos;s own default for the project.
         </p>
         <button
           type="button"
