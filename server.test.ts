@@ -392,6 +392,30 @@ describe("Chief backend", () => {
     expect(state.sent).toHaveLength(1);
   });
 
+  test("supersedes an undelivered alert instead of re-delivering it after a newer report", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.failNextSend();
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "First report",
+    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("saved but could not be delivered");
+    expect(state.sent).toHaveLength(0);
+
+    // A newer report lands before the failed one is ever retried.
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Second report",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(state.sent).toHaveLength(1);
+    expect(state.sent[0].input[0].text).toContain("Second report");
+
+    // The first attempt's alert is still sitting undelivered; a retry sweep must not
+    // resurrect it now that Chief has already received what actually happened next.
+    await state.supervisorCycle();
+    expect(state.sent).toHaveLength(1);
+    expect(state.sent.some((entry: any) => entry.input[0].text.includes("First report"))).toBe(false);
+  });
+
   test("requires canonical ready and complete report payloads", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -526,6 +550,40 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).input[0].text).toContain("escalate to the user");
   });
 
+  test("does not misfire the not-converging escalation on a phase's first rejection", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const ready = async () => {
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Phase implemented",
+      }, { threadId: worker.threadId, projectId: "proj_1" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: state.live.get(worker.threadId)!,
+        lastAssistantText: "done",
+      });
+    };
+    await ready();
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer.threadId)! });
+    const verdict = (value: "approve" | "request_changes") => state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Phase reviewed", verdict: value,
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+
+    // Phase 1 approved, then the same reviewer is resumed for phase 2 and approves
+    // again — active_cycle keeps climbing with every resume even though nothing has
+    // been rejected yet.
+    await verdict("approve");
+    await state.harness.behavior.runCli(["continue", reviewer.threadId, "--instruction", "Phase 2 is ready to review."]);
+    await verdict("approve");
+    await state.harness.behavior.runCli(["continue", reviewer.threadId, "--instruction", "Phase 3 is ready to review."]);
+
+    // Phase 3's very first rejection must not read as two rounds of disagreement.
+    await verdict("request_changes");
+    expect(state.sent.at(-1).input[0].text).toContain("Verdict: request_changes");
+    expect(state.sent.at(-1).input[0].text).not.toContain("not converging");
+  });
+
   test("tells Chief to complete work its reviewer approved", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -639,6 +697,24 @@ describe("Chief backend", () => {
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker"]);
     expect(ordinary.tools).toEqual([]);
+  });
+
+  test("exposes chief_report to a reviewer even before its row is persisted", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.runCli(["review", worker.threadId, "--json"]);
+    // insertThread only runs after threads.spawn resolves, so the tool set for a
+    // brand-new thread's first turn cannot depend on that row already existing —
+    // it has to come from what was seeded into pluginMetadata at spawn time.
+    expect(state.spawned.at(-1).pluginMetadata).toEqual({ role: "reviewer", chiefThreadId: chief.threadId });
+
+    const resolved = await state.harness.behavior.resolveAgentConfiguration({
+      ...configurationContext("thr_not_yet_persisted"),
+      pluginMetadata: { role: "reviewer", chiefThreadId: chief.threadId },
+    });
+    expect(resolved.tools.map((tool: any) => tool.name)).toContain("chief_report");
+    expect(resolved.skills).toEqual(["chief-worker"]);
   });
 
   test("hands Chief a forge script instead of the plumbing to reassemble", async () => {
@@ -857,6 +933,25 @@ describe("Chief backend", () => {
     // Dropping the table dropped its index; the roster scan needs it back.
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='managed_threads_chief'`).get())
       .toBeTruthy();
+  });
+
+  test("adds reject_streak to an existing database and survives a restart", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-reject-streak" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    const beforeRejectStreak = MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("reject_streak")));
+    bb.storage.migrate(db, beforeRejectStreak);
+
+    db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, title, state, created_at, updated_at)
+      VALUES ('thr_old', 'reviewer', 'proj_1', 'thr_chief', 'Existing review', 'ready', 1, 2)`).run();
+
+    bb.storage.migrate(db, MIGRATIONS);
+
+    expect(db.prepare(`SELECT title, reject_streak FROM managed_threads WHERE thread_id='thr_old'`).get())
+      .toEqual({ title: "Existing review", reject_streak: 0 });
+    expect(() => db.prepare(`UPDATE managed_threads SET reject_streak=reject_streak+1 WHERE thread_id='thr_old'`).run()).not.toThrow();
+    // A restart re-runs the full, now-longer migration list against an already-upgraded database.
+    expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
   });
 
   test("stops the supervisor service cleanly on abort", async () => {
