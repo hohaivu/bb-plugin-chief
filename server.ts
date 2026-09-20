@@ -37,6 +37,15 @@ const PLAN_ONLY = "Remain read-only: do not create, modify, or delete files. A w
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const roleSchema = z.enum(["chief", "planner", "worker", "reviewer"]);
+/** What a spawn seeds into a thread's pluginMetadata, read back in bb.agents.configure.
+ * insertThread runs only after threads.spawn resolves, so the very first configure()
+ * call for a brand-new thread can land before that row exists; pluginMetadata is
+ * seeded atomically at spawn time and survives that gap. Untrusted input, so parsed
+ * defensively like everything else crossing this boundary. */
+const spawnMetadataSchema = z.object({
+  role: roleSchema,
+  chiefThreadId: z.string().nullable().optional(),
+});
 /** A worker's tier, chosen by Chief at delegation time. Separate from the
  * lifecycle role above: every tier is still a "worker" for role-gated tools,
  * lifecycle alerts, and the managed_threads role CHECK. */
@@ -225,6 +234,7 @@ interface ManagedRow {
   brief: string | null;
   active_since: number | null;
   active_cycle: number;
+  reject_streak: number;
   stall_alerted_cycle: number | null;
   lifecycle_alert_key: string | null;
   created_at: number;
@@ -468,6 +478,10 @@ export const MIGRATIONS = [
     `INSERT INTO chief_models_v3 SELECT * FROM chief_models`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_v3 RENAME TO chief_models`,
+    // A reviewer's active_cycle counts every resume, which under a phased plan is the
+    // phase count, not rejection rounds. Consecutive request_changes verdicts need
+    // their own counter so a phase's first rejection can't misread as a deadlock.
+    `ALTER TABLE managed_threads ADD COLUMN reject_streak INTEGER NOT NULL DEFAULT 0`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -845,6 +859,7 @@ export default async function plugin(bb: BbPluginApi) {
       title,
       ...(await execution("chief", await projectHostId(target))),
       prompt,
+      pluginMetadata: { role: "chief" },
     });
     if (previous && previous.thread_id !== thread.id) {
       const now = Date.now();
@@ -913,6 +928,7 @@ export default async function plugin(bb: BbPluginApi) {
       `- ${PLAN_ONLY}`,
       "- Report with chief_report state ready, the plan as its result: the files and functions to change, the steps in order, real constraints, and the risks.",
       "- Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
+      "- For multi-step work, order it into named phases one worker implements one at a time: each phase ends in its own ready report and review, and only that verdict opens the next phase.",
       "- Add an explicit \"What we're NOT doing\" section naming what this plan leaves out of scope.",
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
@@ -926,6 +942,7 @@ export default async function plugin(bb: BbPluginApi) {
       title,
       ...(await execution("planner", await projectHostId(projectId))),
       prompt,
+      pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
     });
     insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, title, state: "starting", status: thread.status });
     return { threadId: thread.id, title, projectId };
@@ -967,6 +984,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
+      "- If this brief lays out ordered phases, implement and report only the phase you are currently asked for, then stop; the next phase arrives as a new instruction once this one is reviewed, not something to start on your own.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -987,6 +1005,7 @@ export default async function plugin(bb: BbPluginApi) {
       title: params.title,
       ...(await execution(params.tier, hostId)),
       prompt,
+      pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id },
     });
     insertThread({
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, title: params.title,
@@ -1062,6 +1081,7 @@ export default async function plugin(bb: BbPluginApi) {
         title,
         ...(await execution("reviewer", await environmentHostId(live.environmentId))),
         prompt,
+        pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
       insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status });
       return { threadId: thread.id, title, workerThreadId, created: true };
@@ -1084,7 +1104,13 @@ export default async function plugin(bb: BbPluginApi) {
       if (!reviewer || BUSY_STATUSES.has(reviewer.state)) return { ...review, resumed: false };
       await continueThread(
         review.threadId,
-        "The worker reported ready again. Re-check the current worktree, including everything changed since your last report, and send Chief a fresh verdict with chief_report.",
+        [
+          "The worker reported ready again.",
+          // Names whatever phase the worker says it just finished, the same way the
+          // reviewer's first pass already sees the worker's brief and last report.
+          ...(row.result ? [`What it says it finished: ${clip(row.result, 2_000)}`] : []),
+          "Re-check the current worktree, including everything changed since your last report, and send Chief a fresh verdict with chief_report.",
+        ].join("\n"),
       );
       return { ...review, resumed: true };
     } catch (error) {
@@ -1109,13 +1135,21 @@ export default async function plugin(bb: BbPluginApi) {
 
   function enqueueAlert(row: ManagedRow, key: string, message: string) {
     if (!row.chief_thread_id) throw new Error(`Managed thread ${row.thread_id} has no Chief to notify.`);
-    db.prepare(`INSERT OR IGNORE INTO alert_outbox
-      (dedupe_key, target_thread_id, source_thread_id, message, created_at)
-      VALUES (?, ?, ?, ?, ?)`).run(
-      `${row.thread_id}:${key}`, row.chief_thread_id, row.thread_id,
-      clip(`[Chief lifecycle alert]\n${message}`), Date.now(),
-    );
-    return `${row.thread_id}:${key}`;
+    const dedupeKey = `${row.thread_id}:${key}`;
+    db.transaction(() => {
+      // A fresh alert about this thread makes any earlier one still waiting to be
+      // delivered stale: a retry sweep must never resurrect what a newer report or
+      // lifecycle event already superseded, so Chief gets what just happened rather
+      // than a duplicate or an overtaken prior state.
+      db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>?`).run(row.thread_id, dedupeKey);
+      db.prepare(`INSERT OR IGNORE INTO alert_outbox
+        (dedupe_key, target_thread_id, source_thread_id, message, created_at)
+        VALUES (?, ?, ?, ?, ?)`).run(
+        dedupeKey, row.chief_thread_id, row.thread_id,
+        clip(`[Chief lifecycle alert]\n${message}`), Date.now(),
+      );
+    })();
+    return dedupeKey;
   }
 
   async function deliverAlert(key: string) {
@@ -1167,16 +1201,22 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error('A reviewer\'s ready report must carry a verdict: "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
     }
     const now = Date.now();
-    db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
+    // A reviewer's active_cycle counts every resume, which under a phased plan is the
+    // phase count rather than rejection rounds — a phase's first-ever rejection can
+    // land on a high active_cycle and must not read as a deadlock. reject_streak counts
+    // only consecutive request_changes verdicts, and resets the moment either side
+    // breaks the streak with an approve.
+    db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
+      reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
+      active_since=NULL, updated_at=? WHERE thread_id=?`).run(
       params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
-      params.recommendation ?? null, verdict, now, threadId,
+      params.recommendation ?? null, verdict,
+      verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
+      now, threadId,
     );
     reloadRoles();
     const current = roles.get(threadId)!;
-    // ponytail: active_cycle counts the times a thread started working, which for a
-    // reviewer is its review rounds. It can drift by one, and it only nudges an
-    // escalation rather than gating anything — a dedicated counter if that changes.
-    const deadlocked = verdict === "request_changes" && row.active_cycle >= 2;
+    const deadlocked = verdict === "request_changes" && current.reject_streak >= 2;
     const summary = [
       `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
@@ -1185,9 +1225,9 @@ export default async function plugin(bb: BbPluginApi) {
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
       verdict === "approve"
-        ? "The reviewer approves. Complete this work, then mark the pull request ready."
+        ? "The reviewer approves this phase. If more phases remain in the plan, continue the worker with the next one; otherwise complete this work and mark the pull request ready."
         : deadlocked
-          ? `The reviewer still requires changes after ${row.active_cycle} review rounds. This pair is not converging: escalate to the user with both positions and your recommendation instead of funding another round.`
+          ? `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging: escalate to the user with both positions and your recommendation instead of funding another round.`
           : verdict === "request_changes"
             ? "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
             : row.role === "worker" && params.state === "ready"
@@ -1730,9 +1770,18 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.configure((context) => {
     const row = roles.get(context.thread.id);
-    if (!row || ["complete", "archived", "deleted"].includes(row.state)) return { tools: [], skills: [] };
-    const rules = rulesCache.get(row.project_id) ?? BUILT_IN_RULES;
-    if (row.role === "chief") {
+    if (row && ["complete", "archived", "deleted"].includes(row.state)) return { tools: [], skills: [] };
+    // insertThread only runs after threads.spawn resolves, so the very first
+    // configure() call for a brand-new thread can land before that row exists. The
+    // role and chief seeded into pluginMetadata at spawn time cover that gap —
+    // without it, a fast environment (a reused reviewer worktree wins this race far
+    // more often than a freshly provisioned one) could start a thread with no tools
+    // at all, including chief_report.
+    const seeded = spawnMetadataSchema.safeParse(context.pluginMetadata);
+    const role = row?.role ?? (seeded.success ? seeded.data.role : undefined);
+    if (!role) return { tools: [], skills: [] };
+    const rules = rulesCache.get(context.project.id) ?? BUILT_IN_RULES;
+    if (role === "chief") {
       return {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
@@ -1747,12 +1796,13 @@ export default async function plugin(bb: BbPluginApi) {
         ].join("\n"),
       };
     }
-    const scoring = row.role === "reviewer" && jevActive;
+    const scoring = role === "reviewer" && jevActive;
+    const chiefThreadId = row?.chief_thread_id ?? (seeded.success ? seeded.data.chiefThreadId ?? null : null);
     return {
       tools: scoring ? ["chief_report", "chief_score"] : ["chief_report"],
       skills: ["chief-worker"],
       instructions: [
-        `You are a managed ${row.role} reporting to Chief thread ${row.chief_thread_id}.`,
+        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}.`,
         ...(scoring ? [JEV_REVIEWER_INSTRUCTIONS] : []),
         "",
         rules,

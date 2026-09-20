@@ -12,6 +12,7 @@ Own the assigned outcome in your existing BB thread and worktree.
 - Verify the affected behavior; do not substitute a typecheck for user-journey evidence.
 - Use `chief_report` for meaningful progress, a blocker, a review verdict, or work ready for verification.
 - Report `state: "ready"` with a non-empty result when your work is ready. Only Chief can mark work `complete` after inspecting evidence.
+- When the brief lays out ordered phases, `ready` means the current phase is ready, not the whole plan: implement and report one phase at a time, and let the next instruction start the next phase.
 - Before reporting ready, run the project's tests or the closest executable check as Automated Verification, kept with its command and exit status. Name anything that still needs a human to confirm as Manual Verification, explicitly.
 - Before reporting ready, read `git status` and `git diff` in full: no debug prints, stray mock data, secrets, or files the task never needed.
 - Report `state: "blocked"` only with both a non-empty blocker and your recommended decision or next action.
