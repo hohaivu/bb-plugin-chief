@@ -724,7 +724,18 @@ describe("Chief backend", () => {
       // A plan reads code; only a worker earns a worktree.
       environment: { type: "project-default" },
     });
-    expect(spawned.prompt).toContain("do not create, modify, or delete files");
+    // The planner opens on the provider's own /plan action, not as plain text.
+    expect(spawned.prompt).toBeUndefined();
+    expect(spawned.input[0].text).toMatch(/^\/plan /);
+    expect(spawned.input[0].mentions).toEqual([{
+      start: 0,
+      end: 5,
+      resource: {
+        kind: "command", trigger: "/", name: "plan",
+        source: "command", origin: "builtin", label: "plan", argumentHint: null,
+      },
+    }]);
+    expect(spawned.input[0].text).toContain("do not create, modify, or delete files");
     expect(JSON.stringify(plan)).toContain("Read its plan before delegating");
 
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;

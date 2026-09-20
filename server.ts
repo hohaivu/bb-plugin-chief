@@ -34,6 +34,8 @@ const GENERATED_OR_LOCK_PATTERN =
 const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
 /** Same for a planner: said when the plan starts and again on every continuation. */
 const PLAN_ONLY = "Remain read-only: do not create, modify, or delete files. A worker implements the plan in its own worktree.";
+/** BB's builtin plan slash command, the trigger a provider maps to its own plan mode. */
+const PLAN_COMMAND = "/plan";
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const roleSchema = z.enum(["chief", "planner", "worker", "reviewer"]);
@@ -892,6 +894,24 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** Open a planner on the provider's own `/plan` action rather than as plain
+   * text: the builtin command mention is what makes BB enter plan mode, the way
+   * `bb thread spawn --plan` does. */
+  function planCommandInput(prompt: string) {
+    return [{
+      type: "text" as const,
+      text: `${PLAN_COMMAND} ${prompt}`,
+      mentions: [{
+        start: 0,
+        end: PLAN_COMMAND.length,
+        resource: {
+          kind: "command" as const, trigger: "/" as const, name: "plan",
+          source: "command" as const, origin: "builtin" as const, label: "plan", argumentHint: null,
+        },
+      }],
+    }];
+  }
+
   /** A plan is read-only work in the project's own checkout: no worktree is spent
    * until Chief has read the plan and chosen to delegate it. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
@@ -923,7 +943,7 @@ export default async function plugin(bb: BbPluginApi) {
       visibility: "visible",
       title,
       ...(await execution("planner", await projectHostId(projectId))),
-      prompt,
+      input: planCommandInput(prompt),
     });
     insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, title, state: "starting", status: thread.status });
     return { threadId: thread.id, title, projectId };
