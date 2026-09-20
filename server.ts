@@ -932,7 +932,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
       `- ${PLAN_ONLY}`,
       "- Report with chief_report state ready, the plan as its result: the files and functions to change, the steps in order, real constraints, and the risks.",
-      "- Split success criteria into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
+      "- Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- Add an explicit \"What we're NOT doing\" section naming what this plan leaves out of scope.",
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
@@ -1024,16 +1024,18 @@ export default async function plugin(bb: BbPluginApi) {
     // Planners and reviewers both stay out of the files; only a worker edits.
     // The instruction leads so consecutive continuations differ from their first
     // character in the BB queue preview, instead of both starting with the same
-    // read-only reminder.
-    const text = row.role === "reviewer"
-      ? `${instruction}\n\n${REVIEW_ONLY}`
-      : row.role === "planner"
-        ? `${instruction}\n\n${PLAN_ONLY}`
-        : instruction;
+    // read-only reminder. Clip the instruction alone, reserving room for the
+    // reminder and the blank line between them, then append the reminder to the
+    // already-clipped text — otherwise a long instruction could delete or
+    // truncate the read-only constraint instead of just itself.
+    const reminder = row.role === "reviewer" ? REVIEW_ONLY : row.role === "planner" ? PLAN_ONLY : null;
+    const text = reminder
+      ? `${clip(instruction, MAX_RESULT_LENGTH - reminder.length - 2)}\n\n${reminder}`
+      : clip(instruction, MAX_RESULT_LENGTH);
     await bb.sdk.threads.send({
       threadId,
       mode: "queue-if-active",
-      input: [{ type: "text", text: clip(text, MAX_RESULT_LENGTH), mentions: [] }],
+      input: [{ type: "text", text, mentions: [] }],
       senderThreadId: row.chief_thread_id ?? undefined,
     });
     db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
