@@ -428,6 +428,8 @@ describe("Chief backend", () => {
     expect(second.exitCode).toBe(0);
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
     expect(state.spawned.at(-1).prompt).toContain("Remain review-only");
+    // The reviewer confirms the automated criteria ran instead of taking the worker's word for it.
+    expect(state.spawned.at(-1).prompt).toContain("Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.");
   });
 
   test("reviews a ready worker without Chief asking for it", async () => {
@@ -735,7 +737,12 @@ describe("Chief backend", () => {
         source: "command", origin: "builtin", label: "plan", argumentHint: null,
       },
     }]);
-    expect(spawned.input[0].text).toContain("do not create, modify, or delete files");
+    const planPrompt = spawned.input[0].text as string;
+    expect(planPrompt).toContain("do not create, modify, or delete files");
+    // Split success criteria and the out-of-scope section are the planner's contract, not an afterthought.
+    expect(planPrompt).toContain("Read every file this brief names in full before proposing anything: no partial reads, no limit or offset.");
+    expect(planPrompt).toContain("Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm)");
+    expect(planPrompt).toContain("What we're NOT doing")
     expect(JSON.stringify(plan)).toContain("Read its plan before delegating");
 
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -773,6 +780,25 @@ describe("Chief backend", () => {
     // Chief stays read-only with the planner unless it says otherwise.
     await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "Name the test file"]);
     expect(state.sent.at(-1).input[0].text).toContain("Remain read-only");
+  });
+
+  test("puts the instruction first in a continuation, so the queue preview shows what it says", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "Name the test file"]);
+
+    const text = state.sent.at(-1).input[0].text as string;
+    // Two different instructions must not share a byte-identical prefix in the BB queue preview.
+    expect(text.startsWith("Name the test file")).toBe(true);
+    expect(text.startsWith("Remain read-only")).toBe(false);
+    // The read-only reminder still follows, unchanged in wording.
+    expect(text).toContain("Remain read-only: do not create, modify, or delete files. A worker implements the plan in its own worktree.");
   });
 
   test("upgrading an existing database keeps its rows and admits the planner role", async () => {
@@ -922,6 +948,9 @@ describe("Chief backend", () => {
     expect(state.spawned[1].prompt).toContain("Your worktree is based on feature/fix-checkout-totals");
     expect(state.spawned[1].prompt).toContain("https://github.com/acme/shop/issues/7");
     expect(state.spawned[1].prompt).toContain("Do not create, merge, or mark ready any pull request");
+    // The worker's ready report splits verification the same way the planner's does.
+    expect(state.spawned[1].prompt).toContain("Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset.");
+    expect(state.spawned[1].prompt).toContain("splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm)");
   });
 
   test("keeps the project default base when a delegation names no branch", async () => {
