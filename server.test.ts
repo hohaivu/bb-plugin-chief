@@ -713,7 +713,7 @@ describe("Chief backend", () => {
     expect(spawned.prompt).toContain("do not create, modify, or delete files");
     // Split success criteria and the out-of-scope section are the planner's contract, not an afterthought.
     expect(spawned.prompt).toContain("Read every file this brief names in full before proposing anything: no partial reads, no limit or offset.");
-    expect(spawned.prompt).toContain("Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm)");
+    expect(spawned.prompt).toContain("Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm)");
     expect(spawned.prompt).toContain("What we're NOT doing");
     expect(JSON.stringify(plan)).toContain("Read its plan before delegating");
 
@@ -771,6 +771,36 @@ describe("Chief backend", () => {
     expect(text.startsWith("Remain read-only")).toBe(false);
     // The read-only reminder still follows, unchanged in wording.
     expect(text).toContain("Remain read-only: do not create, modify, or delete files. A worker implements the plan in its own worktree.");
+  });
+
+  test("clips an over-long planner instruction but keeps the read-only reminder byte-identical", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    // Near the 8,000-character cap: long enough that a naive clip of the combined
+    // string would delete or truncate the reminder instead of the instruction.
+    await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "x".repeat(7_995)]);
+
+    const text = state.sent.at(-1).input[0].text as string;
+    expect(text.endsWith("Remain read-only: do not create, modify, or delete files. A worker implements the plan in its own worktree.")).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(8_000);
+  });
+
+  test("clips an over-long reviewer instruction but keeps the review-only reminder byte-identical", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
+    await state.harness.behavior.runCli(["continue", review.threadId, "--instruction", "y".repeat(7_995)]);
+
+    const text = state.sent.filter((entry: any) => entry.threadId === review.threadId).at(-1).input[0].text as string;
+    expect(text.endsWith("Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.")).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(8_000);
   });
 
   test("upgrading an existing database keeps its rows and admits the planner role", async () => {
