@@ -1005,7 +1005,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
-      "- If this brief lays out ordered phases, implement and report only the phase you are currently asked for, then stop; the next phase arrives as a new instruction once this one is reviewed, not something to start on your own.",
+      "- If this brief lays out ordered phases, implement and report only the phase you are currently asked for, then stop; name which phase you finished in your ready result (for example \"Phase 2 of 4\"), so the reviewer and Chief both see it. The next phase arrives as a new instruction once this one is reviewed, not something to start on your own.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -1087,6 +1087,7 @@ export default async function plugin(bb: BbPluginApi) {
         "Inspect the actual worktree and evidence; do not rely only on the worker's claims.",
         "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
         `Report your findings to Chief thread ${worker.chief_thread_id} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
+        "If the worker's brief lays out ordered phases and this is not the last one, name the next phase in your recommendation (for example \"Continue the worker with phase 3 of 4.\"); leave recommendation unset only when no phases remain, since that is what tells Chief whether to complete this work or continue it.",
         "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
         ...(worker.brief ? [
           "", "## The brief this work was given", clip(worker.brief, 6_000),
@@ -1159,12 +1160,14 @@ export default async function plugin(bb: BbPluginApi) {
   function enqueueAlert(row: ManagedRow, key: string, message: string) {
     if (!row.chief_thread_id) throw new Error(`Managed thread ${row.thread_id} has no Chief to notify.`);
     const dedupeKey = `${row.thread_id}:${key}`;
+    // Only an alert of the same kind (the segment before the first ":") is stale
+    // once this one lands — a newer report supersedes an older undelivered report,
+    // but generic lifecycle noise (idle, active, stall, ...) must never evict a
+    // pending report/verdict alert Chief has not received yet.
+    const kind = key.slice(0, key.indexOf(":"));
     db.transaction(() => {
-      // A fresh alert about this thread makes any earlier one still waiting to be
-      // delivered stale: a retry sweep must never resurrect what a newer report or
-      // lifecycle event already superseded, so Chief gets what just happened rather
-      // than a duplicate or an overtaken prior state.
-      db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>?`).run(row.thread_id, dedupeKey);
+      db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>? AND dedupe_key LIKE ?`)
+        .run(row.thread_id, dedupeKey, `${row.thread_id}:${kind}:%`);
       db.prepare(`INSERT OR IGNORE INTO alert_outbox
         (dedupe_key, target_thread_id, source_thread_id, message, created_at)
         VALUES (?, ?, ?, ?, ?)`).run(
@@ -1213,8 +1216,28 @@ export default async function plugin(bb: BbPluginApi) {
     for (const alert of pendingAlerts.all() as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
 
-  async function report(threadId: string, params: z.infer<typeof reportParams>) {
-    const row = roles.get(threadId);
+  async function report(threadId: string, params: z.infer<typeof reportParams>, callerProjectId: string) {
+    let row = roles.get(threadId);
+    if (!row) {
+      // configure() already falls back to pluginMetadata seeded at spawn time
+      // because insertThread only runs after threads.spawn resolves; a report can
+      // land in that same gap for a brand-new thread. Recover the same seed here
+      // instead of throwing, so exposing the tool and executing it close together.
+      const seeded = spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null));
+      if (seeded.success) {
+        const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
+        insertThread({
+          threadId,
+          role: seeded.data.role,
+          projectId: callerProjectId,
+          chiefThreadId: seeded.data.chiefThreadId ?? null,
+          title: live?.title ?? live?.titleFallback ?? threadId,
+          state: "active",
+          status: live?.status ?? "active",
+        });
+        row = roles.get(threadId);
+      }
+    }
     if (!row || row.role === "chief") throw new Error("chief_report is available only in managed worker, planner, and reviewer threads.");
     if (["complete", "archived", "deleted"].includes(row.state)) {
       throw new Error(`Managed thread ${threadId} is ${row.state} and can no longer report.`);
@@ -1247,8 +1270,14 @@ export default async function plugin(bb: BbPluginApi) {
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
+      // The server has no phase column and cannot know from the database whether
+      // more phases remain — a reviewer that reads the worker's brief does. Its
+      // recommendation naming the next phase is what makes this non-final; its
+      // absence is what makes the legacy final wording below reachable verbatim.
       verdict === "approve"
-        ? "The reviewer approves this phase. If more phases remain in the plan, continue the worker with the next one; otherwise complete this work and mark the pull request ready."
+        ? params.recommendation
+          ? "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
+          : "The reviewer approves. Complete this work, then mark the pull request ready."
         : deadlocked
           ? `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging: escalate to the user with both positions and your recommendation instead of funding another round.`
           : verdict === "request_changes"
@@ -1771,7 +1800,7 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
-      await report(context.threadId, params);
+      await report(context.threadId, params, context.projectId);
       return "Report delivered to Chief.";
     },
   });
