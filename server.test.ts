@@ -101,6 +101,8 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
             sectionId: args.sectionId,
             visibility: args.visibility,
             status: "idle",
+            // Seeding pluginMetadata always attributes the new thread to this plugin.
+            originPluginId: args.pluginMetadata ? "chief" : null,
           });
           live.set(id, thread);
           if (args.pluginMetadata) pluginMetadataStore.set(id, args.pluginMetadata);
@@ -163,7 +165,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextSend() { sendFailures += 1; },
     setPatch(next: string) { patch = next; },
     seedPluginMetadata(threadId: string, metadata: any) { pluginMetadataStore.set(threadId, metadata); },
-    addLive(threadId: string, projectId: string, title = "Existing thread") {
+    addLive(threadId: string, projectId: string, title = "Existing thread", originPluginId: string | null = null) {
       live.set(threadId, makeThreadResponse({
         id: threadId,
         projectId,
@@ -172,6 +174,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         sectionId: null,
         visibility: "visible",
         status: "idle",
+        originPluginId,
       }));
     },
     supervisorCycle,
@@ -783,6 +786,20 @@ describe("Chief backend", () => {
     expect(ordinary.tools).toEqual([]);
   });
 
+  test("ignores pluginMetadata seeded by a thread this plugin never spawned", async () => {
+    const state = await setup();
+    // pluginMetadata is writable by any API client, another plugin, or the thread's
+    // own agent, so a thread claiming role: "chief" there must not be trusted unless
+    // origin.pluginId proves this plugin actually spawned it.
+    const spoofed = await state.harness.behavior.resolveAgentConfiguration({
+      ...configurationContext("thr_spoofed"),
+      origin: { kind: null, pluginId: "some-other-plugin" },
+      pluginMetadata: { role: "chief" },
+    });
+    expect(spoofed.tools).toEqual([]);
+    expect(spoofed.skills).toEqual([]);
+  });
+
   test("exposes chief_report to a reviewer even before its row is persisted", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -807,7 +824,7 @@ describe("Chief backend", () => {
     await delegate(state, chief.threadId);
     // Simulate the same race the test above exercises for tool exposure, but this
     // time actually call chief_report while managed_threads has no row for it yet.
-    state.addLive("thr_racing_insert", "proj_1", "Review · totals fix");
+    state.addLive("thr_racing_insert", "proj_1", "Review · totals fix", "chief");
     state.seedPluginMetadata("thr_racing_insert", { role: "reviewer", chiefThreadId: chief.threadId });
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Confirmed against the regression test", verdict: "approve",
@@ -817,6 +834,19 @@ describe("Chief backend", () => {
     const roster = await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" });
     expect(roster).toContain("thr_racing_insert");
     expect(roster).toContain("verdict: approve");
+  });
+
+  test("refuses to self-heal chief_report for a thread this plugin never spawned", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    // Same race as above, but originPluginId does not attribute this thread to us,
+    // so the pluginMetadata it claims must not be trusted to insert a managed row.
+    state.addLive("thr_untrusted_insert", "proj_1", "Review · totals fix", "some-other-plugin");
+    state.seedPluginMetadata("thr_untrusted_insert", { role: "reviewer", chiefThreadId: chief.threadId });
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Should not land", verdict: "approve",
+    }, { threadId: "thr_untrusted_insert", projectId: "proj_1" })).rejects.toThrow();
   });
 
   test("hands Chief a forge script instead of the plumbing to reassemble", async () => {

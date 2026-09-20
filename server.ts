@@ -1223,9 +1223,14 @@ export default async function plugin(bb: BbPluginApi) {
       // because insertThread only runs after threads.spawn resolves; a report can
       // land in that same gap for a brand-new thread. Recover the same seed here
       // instead of throwing, so exposing the tool and executing it close together.
-      const seeded = spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null));
-      if (seeded.success) {
-        const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
+      // pluginMetadata is writable by any API client, another plugin, or the
+      // thread's own agent, so only trust it once originPluginId proves this
+      // thread was actually created by our own spawn call.
+      const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
+      const seeded = live?.originPluginId === bb.pluginId
+        ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
+        : undefined;
+      if (seeded?.success) {
         insertThread({
           threadId,
           role: seeded.data.role,
@@ -1828,9 +1833,14 @@ export default async function plugin(bb: BbPluginApi) {
     // role and chief seeded into pluginMetadata at spawn time cover that gap —
     // without it, a fast environment (a reused reviewer worktree wins this race far
     // more often than a freshly provisioned one) could start a thread with no tools
-    // at all, including chief_report.
-    const seeded = spawnMetadataSchema.safeParse(context.pluginMetadata);
-    const role = row?.role ?? (seeded.success ? seeded.data.role : undefined);
+    // at all, including chief_report. pluginMetadata itself is writable by any API
+    // client, another plugin, or the thread's own agent, so only trust it when
+    // origin.pluginId proves this thread was actually created by our own spawn call
+    // (seeding pluginMetadata always attributes the new thread to this plugin).
+    const seeded = context.origin.pluginId === bb.pluginId
+      ? spawnMetadataSchema.safeParse(context.pluginMetadata)
+      : undefined;
+    const role = row?.role ?? (seeded?.success ? seeded.data.role : undefined);
     if (!role) return { tools: [], skills: [] };
     const rules = rulesCache.get(context.project.id) ?? BUILT_IN_RULES;
     if (role === "chief") {
@@ -1849,7 +1859,7 @@ export default async function plugin(bb: BbPluginApi) {
       };
     }
     const scoring = role === "reviewer" && jevActive;
-    const chiefThreadId = row?.chief_thread_id ?? (seeded.success ? seeded.data.chiefThreadId ?? null : null);
+    const chiefThreadId = row?.chief_thread_id ?? (seeded?.success ? seeded.data.chiefThreadId ?? null : null);
     return {
       tools: scoring ? ["chief_report", "chief_score"] : ["chief_report"],
       skills: ["chief-worker"],
