@@ -479,6 +479,75 @@ describe("Chief backend", () => {
     expect(state.spawned.at(-1).prompt).toContain("Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.");
   });
 
+  test("starts a review for a plain branch with no managed worker, on a fresh worktree based on it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const result = await state.harness.behavior.runCli(["review", "--branch", "feature/legacy-fix", "--json"], opts);
+    expect(result.exitCode).toBe(0);
+    const parsed = JSON.parse(result.stdout!) as { threadId: string; title: string; created: boolean };
+    expect(parsed.created).toBe(true);
+    expect(parsed.title).toBe("Review · feature/legacy-fix");
+    const spawnedReview = state.spawned.find((entry) => entry.title === "Review · feature/legacy-fix");
+    expect(spawnedReview).toMatchObject({
+      parentThreadId: chief.threadId,
+      environment: {
+        type: "host", hostId: "host_1",
+        workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/legacy-fix" } },
+      },
+    });
+    expect(spawnedReview.prompt).toContain("Remain review-only");
+    expect(spawnedReview.prompt).toContain("feature/legacy-fix");
+  });
+
+  test("returns the existing reviewer instead of duplicating one for the same branch", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const [first, second] = await Promise.all([
+      state.harness.behavior.runCli(["review", "--branch", "feature/legacy-fix", "--json"], opts),
+      state.harness.behavior.runCli(["review", "--branch", "feature/legacy-fix", "--json"], opts),
+    ]);
+    expect(first.exitCode).toBe(0);
+    expect(second.exitCode).toBe(0);
+    expect(state.spawned.filter((entry) => entry.title === "Review · feature/legacy-fix")).toHaveLength(1);
+    // A later, no-longer-in-flight call must also return the same reviewer, not spawn another.
+    const third = await state.harness.behavior.runCli(["review", "--branch", "feature/legacy-fix", "--json"], opts);
+    expect(JSON.parse(third.stdout!).created).toBe(false);
+    expect(state.spawned.filter((entry) => entry.title === "Review · feature/legacy-fix")).toHaveLength(1);
+  });
+
+  test("rejects chief_review given both a worker and a branch", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await expect(state.harness.behavior.callAgentTool("chief_review", {
+      workerThreadId: worker.threadId, branch: "feature/legacy-fix",
+    }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow();
+  });
+
+  test("rejects chief_review given neither a worker nor a branch/pull request", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_review", {}, { threadId: chief.threadId, projectId: "proj_1" },
+    )).rejects.toThrow();
+  });
+
+  test("a branch reviewer's row records the branch, and reports through the same verdict contract as a worker's reviewer", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const result = await state.harness.behavior.runCli(["review", "--branch", "feature/legacy-fix", "--json"], opts);
+    const { threadId: reviewerThreadId } = JSON.parse(result.stdout!) as { threadId: string };
+    const roster = await state.harness.behavior.callAgentTool("chief_roster", {}, opts) as string;
+    expect(roster).toContain("branch: feature/legacy-fix");
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Reviewed the branch", verdict: "approve",
+    }, { threadId: reviewerThreadId, projectId: "proj_1" });
+    expect(state.sent.at(-1).input[0].text).toContain("Verdict: approve");
+  });
+
   test("reviews a ready worker without Chief asking for it", async () => {
     const state = await setup();
     const chief = await start(state);
