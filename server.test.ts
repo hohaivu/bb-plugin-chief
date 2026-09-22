@@ -1449,8 +1449,9 @@ describe("Chief backend", () => {
   });
 
   test("bounds a hung forge CLI with a timeout, falling back to the raw reference as a branch instead of hanging", async () => {
+    const seenOptions: any[] = [];
     execFileMock.mockImplementation((_file: string, _args: string[], options: any) => {
-      expect(options?.timeout).toBeGreaterThan(0);
+      seenOptions.push(options);
       return Promise.reject(Object.assign(new Error("terminated"), { signal: "SIGTERM", killed: true }));
     });
     const state = await setup({ projectPath: "/repo/proj1" });
@@ -1459,7 +1460,11 @@ describe("Chief backend", () => {
     const result = await state.harness.behavior.runCli(["review", "--pull-request", "42", "--json"], opts);
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout!).title).toBe("Review · 42");
-    expect(execFileMock).toHaveBeenCalled();
+    // Assert on recorded options after the await: an assertion inside the mock itself
+    // would throw into resolvePullRequestBranch's own catch, producing the same
+    // null-fallback the test expects either way, masking a missing timeout.
+    expect(seenOptions.length).toBeGreaterThan(0);
+    for (const options of seenOptions) expect(options?.timeout).toBeGreaterThan(0);
   });
 
   test("resolves an explicit GitHub PR URL through gh without inspecting the project's own remote", async () => {
