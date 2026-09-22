@@ -165,6 +165,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
 
   return {
     harness,
+    db: bb.storage.database(),
     spawned,
     sent,
     live,
@@ -204,9 +205,10 @@ async function delegate(
   tier?: "junior" | "senior",
   forge?: { branch?: string; issueUrl?: string; prUrl?: string },
 ) {
+  const resolvedTier = tier ?? "senior";
   const result = await state.harness.behavior.runCli([
     "delegate", "--title", title, "--mission", "Correct and verify totals", "--criteria", "Regression passes",
-    ...(tier ? ["--tier", tier] : []),
+    "--tier", resolvedTier,
     ...(forge?.branch ? ["--branch", forge.branch] : []),
     ...(forge?.issueUrl ? ["--issue-url", forge.issueUrl] : []),
     ...(forge?.prUrl ? ["--pr-url", forge.prUrl] : []),
@@ -797,6 +799,7 @@ describe("Chief backend", () => {
     const planPath = "/Users/example/.bb/thread-storage/thr_plan123/plan.md";
     const result = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", mission,
+      "--tier", "senior",
       "--context", `Plan file: ${planPath}`, "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(result.exitCode).toBe(0);
@@ -835,7 +838,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await expect(state.harness.behavior.callAgentTool("chief_delegate", {
-      title: "Unauthorized", mission: "Must not start",
+      title: "Unauthorized", mission: "Must not start", tier: "senior",
     }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("active registered Chief");
     expect((await state.harness.behavior.runCli(["complete", worker.threadId])).exitCode).toBe(0);
     await expect(state.harness.behavior.callAgentTool("chief_report", {
@@ -1306,6 +1309,7 @@ describe("Chief backend", () => {
     // A second worktree cannot check the branch out, so this has to fail here, not in git.
     const result = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals again", "--mission", "Correct and verify totals",
+      "--tier", "senior",
       "--branch", "feature/fix-checkout-totals", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(result.exitCode).toBe(1);
@@ -1368,12 +1372,35 @@ describe("Chief backend", () => {
     expect(roster).toContain("worker (senior)");
   });
 
-  test("defaults an unspecified delegation to the senior tier", async () => {
+  test("chief_delegate rejects a call with no tier, naming both valid values in the error", async () => {
     const state = await setup();
     const chief = await start(state);
-    await delegate(state, chief.threadId);
-    const roster = await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" });
-    expect(JSON.stringify(roster)).toContain("worker (senior)");
+    await expect(
+      state.harness.behavior.callAgentTool(
+        "chief_delegate",
+        { title: "Fix typo", mission: "Fix typo in README" } as any,
+        { threadId: chief.threadId, projectId: "proj_1" },
+      ),
+    ).rejects.toThrow(/junior.*senior|senior.*junior/);
+  });
+
+  test("bb chief delegate without --tier fails naming both valid values in the error", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix typo", "--mission", "Fix typo in README", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/junior.*senior|senior.*junior/);
+  });
+
+  test("surfaces the running junior/senior split in chief_roster", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId, "Trivial fix", "junior");
+    await delegate(state, chief.threadId, "Complex architectural change", "senior");
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(roster).toContain("Tier split: 1 junior, 1 senior");
   });
 
   test("spawns a junior delegation on the junior model selection", async () => {
@@ -1383,8 +1410,10 @@ describe("Chief backend", () => {
       selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const chief = await start(state);
-    await delegate(state, chief.threadId, "Fix typo", "junior");
+    const worker = await delegate(state, chief.threadId, "Fix typo", "junior");
     expect(state.spawned[1]).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
+    const row = state.db.prepare("SELECT * FROM managed_threads WHERE thread_id=?").get(worker.threadId) as any;
+    expect(row.tier).toBe("junior");
   });
 
   test("falls back to the BB default when a junior pick leaves the machine's catalog, never to the senior pick", async () => {
