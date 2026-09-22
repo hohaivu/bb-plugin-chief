@@ -9,9 +9,18 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import plugin, { MIGRATIONS } from "./server";
 
+// Stands in for git/gh/glab so pull-request resolution tests never shell out for real.
+const execFileMock = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", () => {
+  const execFile: any = () => { throw new Error("execFile must be invoked through promisify"); };
+  execFile[Symbol.for("nodejs.util.promisify.custom")] = (...args: any[]) => execFileMock(...args);
+  return { execFile };
+});
+
 const disposals: Array<() => Promise<void>> = [];
 afterEach(async () => {
   while (disposals.length) await disposals.pop()!();
+  execFileMock.mockReset();
 });
 
 function configurationContext(threadId: string, projectId = "proj_1"): PluginAgentConfigurationContext {
@@ -37,7 +46,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { hostStatus?: string; providerAvailable?: boolean } = {}) {
+async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string } = {}) {
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
   let sendFailures = 0;
@@ -58,7 +67,12 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         create: async ({ name }: { name: string }) => section = { id: "sec_chief", name, createdAt: 1, updatedAt: 1 },
       },
       projects: {
-        get: async ({ projectId }: { projectId: string }) => ({ id: projectId, name: projectId === "proj_1" ? "Asha" : "Second", kind: "standard" }),
+        get: async ({ projectId }: { projectId: string }) => ({
+          id: projectId,
+          name: projectId === "proj_1" ? "Asha" : "Second",
+          kind: "standard",
+          ...(options.projectPath ? { sources: [{ path: options.projectPath, hostId: "host_1", isDefault: true }] } : {}),
+        }),
         fileContent: async () => { throw new Error("missing"); },
       },
       hosts: { list: async () => [{ id: "host_1", name: "Local", status: options.hostStatus ?? "connected" }] },
@@ -1432,5 +1446,66 @@ describe("Chief backend", () => {
     const result = await experimental_scanPublicSdkOnly(dirname(fileURLToPath(import.meta.url)), { allow: [/^vitest$/, /^react$/, /^@testing-library\/react$/] });
     expect(result.violations).toEqual([]);
     expect(result.privateDependencies).toEqual([]);
+  });
+
+  test("bounds a hung forge CLI with a timeout, falling back to the raw reference as a branch instead of hanging", async () => {
+    execFileMock.mockImplementation((_file: string, _args: string[], options: any) => {
+      expect(options?.timeout).toBeGreaterThan(0);
+      return Promise.reject(Object.assign(new Error("terminated"), { signal: "SIGTERM", killed: true }));
+    });
+    const state = await setup({ projectPath: "/repo/proj1" });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const result = await state.harness.behavior.runCli(["review", "--pull-request", "42", "--json"], opts);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout!).title).toBe("Review · 42");
+    expect(execFileMock).toHaveBeenCalled();
+  });
+
+  test("resolves an explicit GitHub PR URL through gh without inspecting the project's own remote", async () => {
+    execFileMock.mockImplementation((file: string, args: string[]) => {
+      if (file === "git") return Promise.resolve({ stdout: "git@gitlab.example.com:acme/widgets.git\n", stderr: "" });
+      if (file === "gh") { expect(args).toContain("pr"); return Promise.resolve({ stdout: "feature/from-github\n", stderr: "" }); }
+      return Promise.reject(new Error(`unexpected CLI ${file}`));
+    });
+    const state = await setup({ projectPath: "/repo/proj1" });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const result = await state.harness.behavior.runCli(
+      ["review", "--pull-request", "https://github.com/acme/widgets/pull/7", "--json"], opts,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout!).title).toBe("Review · feature/from-github");
+    expect(execFileMock).not.toHaveBeenCalledWith("git", expect.anything(), expect.anything());
+  });
+
+  test("resolves a bare PR number's forge from the target project's own checkout, not the plugin process's cwd", async () => {
+    execFileMock.mockImplementation((file: string, _args: string[], options: any) => {
+      expect(options.cwd).toBe("/repo/proj1");
+      if (file === "git") return Promise.resolve({ stdout: "git@github.com:acme/widgets.git\n", stderr: "" });
+      if (file === "gh") return Promise.resolve({ stdout: "feature/bare-number\n", stderr: "" });
+      return Promise.reject(new Error(`unexpected CLI ${file}`));
+    });
+    const state = await setup({ projectPath: "/repo/proj1" });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const result = await state.harness.behavior.runCli(["review", "--pull-request", "42", "--json"], opts);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout!).title).toBe("Review · feature/bare-number");
+  });
+
+  test("resolves an owner/repo#number reference's forge as gitlab from the project's own remote", async () => {
+    execFileMock.mockImplementation((file: string, _args: string[], options: any) => {
+      expect(options.cwd).toBe("/repo/proj1");
+      if (file === "git") return Promise.resolve({ stdout: "git@gitlab.example.com:acme/widgets.git\n", stderr: "" });
+      if (file === "glab") return Promise.resolve({ stdout: JSON.stringify({ source_branch: "feature/from-gitlab" }), stderr: "" });
+      return Promise.reject(new Error(`unexpected CLI ${file}`));
+    });
+    const state = await setup({ projectPath: "/repo/proj1" });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const result = await state.harness.behavior.runCli(["review", "--pull-request", "acme/widgets#9", "--json"], opts);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout!).title).toBe("Review · feature/from-gitlab");
   });
 });

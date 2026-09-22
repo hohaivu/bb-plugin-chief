@@ -16,6 +16,7 @@ const RECONCILE_INTERVAL_MS = 30_000;
 const MAX_ALERT_LENGTH = 3_000;
 const MAX_RESULT_LENGTH = 8_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+const FORGE_CLI_TIMEOUT_MS = 10_000;
 /** One wording for the reviewer's read-only rule, said when the review starts and
  * again on every continuation — the two places an edit instruction could arrive. */
 const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
@@ -27,36 +28,49 @@ const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const execFileAsync = promisify(execFile);
 
+type Forge = "github" | "gitlab";
+
 /** Pulls the forge target (and, when the reference names its own repo, the repo
  * to pass alongside it) out of a PR number, an owner/repo#123 reference, or a
- * PR/MR URL. */
-function parsePullRequestRef(input: string): { target: string; repo: string | null } {
+ * PR/MR URL. An explicit URL also names its forge, so callers don't need to
+ * re-derive it from a repo checkout that may not even be the right one. */
+function parsePullRequestRef(input: string): { target: string; repo: string | null; forge: Forge | null } {
   const githubUrl = input.match(/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/);
-  if (githubUrl) return { target: githubUrl[3], repo: `${githubUrl[1]}/${githubUrl[2]}` };
+  if (githubUrl) return { target: githubUrl[3], repo: `${githubUrl[1]}/${githubUrl[2]}`, forge: "github" };
   const gitlabUrl = input.match(/\/([^/\s]+)\/([^/\s]+)\/-\/merge_requests\/(\d+)/);
-  if (gitlabUrl) return { target: gitlabUrl[3], repo: `${gitlabUrl[1]}/${gitlabUrl[2]}` };
+  if (gitlabUrl) return { target: gitlabUrl[3], repo: `${gitlabUrl[1]}/${gitlabUrl[2]}`, forge: "gitlab" };
   const shortRef = input.match(/^([\w.-]+\/[\w.-]+)#(\d+)$/);
-  if (shortRef) return { target: shortRef[2], repo: shortRef[1] };
-  return { target: input.replace(/^#/, ""), repo: null };
+  if (shortRef) return { target: shortRef[2], repo: shortRef[1], forge: null };
+  return { target: input.replace(/^#/, ""), repo: null, forge: null };
 }
 
 /** Best-effort: resolves a pull request reference to its head branch with
  * whichever forge CLI the repo uses, mirroring the detection in forgeInitScript.
- * Any failure — no remote, no CLI, no auth, an unrecognised reference — returns
- * null so the caller falls back to treating the input as a plain branch name. */
-async function resolvePullRequestBranch(pullRequest: string): Promise<string | null> {
+ * An explicit URL's own forge wins; a bare number or owner/repo#123 reference
+ * falls back to `git remote get-url origin` in the target project's own
+ * checkout (cwd), never this process's own. Every subprocess is time-bounded,
+ * and any failure — no remote, no CLI, no auth, an unrecognised reference, a
+ * hung subprocess — returns null so the caller falls back to treating the
+ * input as a plain branch name. */
+async function resolvePullRequestBranch(pullRequest: string, cwd: string | null): Promise<string | null> {
   try {
-    const { target, repo } = parsePullRequestRef(pullRequest);
-    const remote = await execFileAsync("git", ["remote", "get-url", "origin"])
-      .then((result) => result.stdout.trim())
-      .catch(() => "");
-    if (remote.includes("github.com")) {
+    const { target, repo, forge } = parsePullRequestRef(pullRequest);
+    let resolvedForge = forge;
+    if (!resolvedForge) {
+      const remote = cwd
+        ? await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: FORGE_CLI_TIMEOUT_MS })
+            .then((result) => result.stdout.trim())
+            .catch(() => "")
+        : "";
+      resolvedForge = remote.includes("github.com") ? "github" : "gitlab";
+    }
+    if (resolvedForge === "github") {
       const args = ["pr", "view", target, "--json", "headRefName", "--jq", ".headRefName", ...(repo ? ["--repo", repo] : [])];
-      const { stdout } = await execFileAsync("gh", args);
+      const { stdout } = await execFileAsync("gh", args, { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS });
       return stdout.trim() || null;
     }
     const args = ["mr", "view", target, "-F", "json", ...(repo ? ["--repo", repo] : [])];
-    const { stdout } = await execFileAsync("glab", args);
+    const { stdout } = await execFileAsync("glab", args, { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS });
     const parsed = JSON.parse(stdout) as { source_branch?: string };
     return parsed.source_branch?.trim() || null;
   } catch {
@@ -773,6 +787,18 @@ export default async function plugin(bb: BbPluginApi) {
       return source?.hostId ?? await defaultHostId();
     } catch (error) {
       bb.log.warn(`Could not resolve the machine for ${projectId}: ${String(error)}`);
+      return null;
+    }
+  }
+
+  /** The target project's own local checkout path, or null when unknown. */
+  async function projectPath(projectId: string) {
+    try {
+      const project = await bb.sdk.projects.get({ projectId });
+      const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+      return source?.path ?? null;
+    } catch (error) {
+      bb.log.warn(`Could not resolve the checkout path for ${projectId}: ${String(error)}`);
       return null;
     }
   }
@@ -1677,7 +1703,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (!caller || caller.role !== "chief") {
         throw new Error("chief_review requires a registered Chief thread.");
       }
-      const branch = params.branch ?? (await resolvePullRequestBranch(params.pullRequest!)) ?? params.pullRequest!;
+      const branch = params.branch
+        ?? (await resolvePullRequestBranch(params.pullRequest!, await projectPath(caller.project_id)))
+        ?? params.pullRequest!;
       const review = await startBranchReview(caller.thread_id, caller.project_id, branch, params.pullRequest ?? null, params.focus);
       return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}.`;
     },
@@ -1921,7 +1949,9 @@ export default async function plugin(bb: BbPluginApi) {
             return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}.`);
           }
           const { chief, projectId } = await owningChief(context.threadId);
-          const branch = parsed.data.branch ?? (await resolvePullRequestBranch(parsed.data.pullRequest!)) ?? parsed.data.pullRequest!;
+          const branch = parsed.data.branch
+            ?? (await resolvePullRequestBranch(parsed.data.pullRequest!, await projectPath(projectId)))
+            ?? parsed.data.pullRequest!;
           const result = await startBranchReview(chief.thread_id, projectId, branch, parsed.data.pullRequest ?? null, parsed.data.focus);
           return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}.`);
         }
