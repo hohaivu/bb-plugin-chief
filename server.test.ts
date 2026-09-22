@@ -708,6 +708,35 @@ describe("Chief backend", () => {
     expect(review.prompt).toContain("Totals fixed and covered by a test");
   });
 
+  test("keeps a plan file path in the reviewer's brief excerpt behind a long-but-valid mission", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    // A long mission alone can push "## Context" — where a plan file path now lives,
+    // since ## Context is assembled last in the stored brief — past a tail-only clip
+    // of the reviewer's brief excerpt.
+    const mission = "Correct and verify totals. ".repeat(300);
+    const planPath = "/Users/example/.bb/thread-storage/thr_plan123/plan.md";
+    const result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", mission,
+      "--context", `Plan file: ${planPath}`, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(result.exitCode).toBe(0);
+    const worker = JSON.parse(result.stdout!) as { threadId: string };
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals fixed and covered by a test",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+
+    const review = state.spawned.find((entry: any) => entry.title === "Review · Fix checkout totals");
+    expect(review.prompt).toContain(planPath);
+    // The head of the mission survives the same clip, alongside the tail.
+    expect(review.prompt).toContain("Correct and verify totals.");
+  });
+
   test("keeps reviewers read-only however the continuation is phrased", async () => {
     const state = await setup();
     const chief = await start(state);

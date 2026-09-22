@@ -340,6 +340,19 @@ function clip(value: string, limit = MAX_ALERT_LENGTH) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 }
 
+/** Like clip(), but elides the middle instead of the tail: a long brief's opening
+ * (the mission) and its trailing sections (Context, where a plan file path now
+ * lives) both survive the cut, instead of the tail-only clip() dropping whichever
+ * section comes last. */
+function clipMiddle(value: string, limit: number) {
+  const marker = "\n…\n";
+  if (value.length <= limit || limit <= marker.length) return clip(value, limit);
+  const room = limit - marker.length;
+  const head = Math.ceil(room / 2);
+  const tail = room - head;
+  return `${value.slice(0, head)}${marker}${value.slice(value.length - tail)}`;
+}
+
 function bullets(values?: string[]) {
   return values?.length ? values.map((value) => `- ${value}`).join("\n") : "- None stated.";
 }
@@ -1091,7 +1104,7 @@ export default async function plugin(bb: BbPluginApi) {
         "If the worker's brief lays out ordered phases and this is not the last one, name the next phase in your recommendation (for example \"Continue the worker with phase 3 of 4.\"); leave recommendation unset only when no phases remain, since that is what tells Chief whether to complete this work or continue it.",
         "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
         ...(worker.brief ? [
-          "", "## The brief this work was given", clip(worker.brief, 6_000),
+          "", "## The brief this work was given", clipMiddle(worker.brief, 6_000),
           "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
         ] : []),
         ...(worker.result ? ["", "## What the worker reported", clip(worker.result, 2_000)] : []),
