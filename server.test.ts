@@ -113,6 +113,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
             status: "idle",
             // Seeding pluginMetadata always attributes the new thread to this plugin.
             originPluginId: args.pluginMetadata ? "chief" : null,
+            parentThreadId: args.parentThreadId ?? null,
           });
           live.set(id, thread);
           if (args.pluginMetadata) pluginMetadataStore.set(id, args.pluginMetadata);
@@ -251,6 +252,60 @@ describe("Chief backend", () => {
     expect((await state.harness.behavior.runCli(["review", worker.threadId], opts)).exitCode).toBe(0);
     expect(state.spawned.slice(1).map((entry: any) => entry.parentThreadId))
       .toEqual([chief.threadId, chief.threadId, chief.threadId]);
+  });
+
+  test("allows Chief to inspect, roster, and continue child threads even if chief_thread_id was transferred", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Original child worker");
+
+    // Simulate replacement Chief stealing worker's chief_thread_id
+    state.db.prepare(`UPDATE managed_threads SET chief_thread_id='thr_replacement' WHERE thread_id=?`).run(worker.threadId);
+
+    // Original Chief can still see it in roster because it's a child thread
+    const roster = await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" });
+    expect(JSON.stringify(roster)).toContain(worker.threadId);
+
+    // Original Chief can inspect it
+    const inspected = await state.harness.behavior.callAgentTool("chief_inspect", { threadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" });
+    expect(String(inspected)).toContain(worker.threadId);
+
+    // Original Chief can continue it, which also re-associates chief_thread_id
+    const continued = await state.harness.behavior.callAgentTool(
+      "chief_continue",
+      { threadId: worker.threadId, instruction: "Keep working" },
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    expect(String(continued)).toContain(`Continued ${worker.threadId}`);
+    expect(state.db.prepare(`SELECT chief_thread_id FROM managed_threads WHERE thread_id=?`).get(worker.threadId))
+      .toEqual({ chief_thread_id: chief.threadId });
+  });
+
+  test("auto-resolves and inspects untracked child threads created under Chief", async () => {
+    const state = await setup();
+    const chief = await start(state);
+
+    // Simulate a child thread created in BB under Chief without calling delegate
+    const childId = "thr_manual_child";
+    state.live.set(childId, makeThreadResponse({
+      id: childId,
+      projectId: "proj_1",
+      environmentId: "env_manual",
+      title: "Manual child task",
+      sectionId: "sec_chief",
+      visibility: "visible",
+      status: "idle",
+      originPluginId: null,
+      parentThreadId: chief.threadId,
+    }));
+
+    // Chief inspects the child thread directly - it auto-resolves and inspects
+    const inspected = await state.harness.behavior.callAgentTool("chief_inspect", { threadId: childId }, { threadId: chief.threadId, projectId: "proj_1" });
+    expect(String(inspected)).toContain(childId);
+
+    // Chief can continue it
+    await state.harness.behavior.callAgentTool("chief_continue", { threadId: childId, instruction: "Proceed" }, { threadId: chief.threadId, projectId: "proj_1" });
+    expect(state.sent.at(-1)).toMatchObject({ threadId: childId, senderThreadId: chief.threadId });
   });
 
   test("starts or resolves a project Chief through RPC for frontend launchers", async () => {
