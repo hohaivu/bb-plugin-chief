@@ -62,12 +62,14 @@ of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 ### Planning
 
 Settings → **Plan before delegating**. With it on, Chief gains `chief_plan`: it sends one unit of
-work to a read-only planner that reads the project's own checkout and reports a plan — files to
-change, ordered steps, verifiable success criteria, constraints, and risks.
+work to a read-only planner that reads the project's own checkout and writes a plan — files to
+change, ordered steps, verifiable success criteria, constraints, and risks — to
+`$BB_THREAD_STORAGE/plan.md`, reporting back a short summary and that file's path.
 
-The handoff is Chief's, not the plugin's. Chief reads the plan, corrects it with `chief_continue`,
-escalates a genuine decision to you, then calls `chief_delegate` with the agreed plan as its
-context. Nothing is implemented until it does, and no worktree is spent on a plan.
+The handoff is Chief's, not the plugin's. Chief reads the plan file in full, corrects it with
+`chief_continue`, escalates a genuine decision to you, then calls `chief_delegate` with the plan
+file's path as its context, not the plan body. Nothing is implemented until it does, and no
+worktree is spent on a plan.
 
 The toggle reaches Chief threads that are already running, so turning it off mid-project simply
 withdraws `chief_plan`.
