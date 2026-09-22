@@ -1077,9 +1077,6 @@ export default async function plugin(bb: BbPluginApi) {
       active_since=?, active_cycle=active_cycle+1, stall_alerted_cycle=NULL, updated_at=? WHERE thread_id=?`).run(
       effectiveChiefId ?? null, now, now, threadId,
     );
-    if (callerChief && callerChief.role === "chief" && callerChief.state === "failed") {
-      db.prepare(`UPDATE managed_threads SET state='active', updated_at=? WHERE thread_id=?`).run(now, callerChief.thread_id);
-    }
     reloadRoles();
     return roles.get(threadId)!;
   }
@@ -1581,38 +1578,46 @@ export default async function plugin(bb: BbPluginApi) {
     return false;
   }
 
+  const INACTIVE_CHIEF_STATES = ["complete", "archived", "deleted"];
+  /** A superseded Chief (spawnChief already marked it complete/archived/deleted and
+   * handed its workers to the replacement) must not still be able to act as Chief. */
+  function isActiveChief(caller: ManagedRow | undefined): caller is ManagedRow {
+    return !!caller && caller.role === "chief" && !INACTIVE_CHIEF_STATES.includes(caller.state);
+  }
+
   async function resolveTarget(threadId: string, chiefThreadId: string): Promise<ManagedRow | undefined> {
     let target = roles.get(threadId);
     if (!target) {
       try {
         const live = await bb.sdk.threads.get({ threadId });
         const chief = roles.get(chiefThreadId);
-        if (live.parentThreadId === chiefThreadId && chief && live.projectId === chief.project_id) {
-          insertThread({
-            threadId: live.id,
-            role: "worker",
-            projectId: live.projectId,
-            chiefThreadId,
-            parentThreadId: chiefThreadId,
-            title: live.title || "Managed thread",
-            state: live.status === "active" ? "active" : "idle",
-            status: live.status,
-          });
-          target = roles.get(threadId);
+        if (
+          live.deletedAt === null && live.archivedAt === null &&
+          live.parentThreadId === chiefThreadId && chief && live.projectId === chief.project_id
+        ) {
+          // Only adopt threads this plugin itself spawned (pluginMetadata seeded at
+          // spawn time, trusted only once originPluginId proves it — see report()'s
+          // identical check) — otherwise a sub-thread the user created under Chief in
+          // the BB UI gets silently relocated into the Chief section as a "worker".
+          const seeded = live.originPluginId === bb.pluginId
+            ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
+            : undefined;
+          if (seeded?.success) {
+            insertThread({
+              threadId: live.id,
+              role: "worker",
+              projectId: live.projectId,
+              chiefThreadId,
+              parentThreadId: chiefThreadId,
+              title: live.title || "Managed thread",
+              state: live.status === "active" ? "active" : "idle",
+              status: live.status,
+            });
+            target = roles.get(threadId);
+          }
         }
       } catch {
         // not found
-      }
-    } else if (!target.parent_thread_id) {
-      try {
-        const live = await bb.sdk.threads.get({ threadId });
-        if (live.parentThreadId) {
-          db.prepare(`UPDATE managed_threads SET parent_thread_id=?, updated_at=? WHERE thread_id=?`).run(live.parentThreadId, Date.now(), threadId);
-          reloadRoles();
-          target = roles.get(threadId);
-        }
-      } catch {
-        // ignore
       }
     }
     return target;
@@ -1667,7 +1672,7 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
-      if (!caller || caller.role !== "chief" || ["complete", "archived", "deleted"].includes(caller.state)) {
+      if (!isActiveChief(caller)) {
         throw new Error("chief_forge_init requires an active registered Chief thread.");
       }
       const { branch, script } = forgeInitScript(params);
@@ -1684,7 +1689,7 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
-      if (!caller || caller.role !== "chief" || ["complete", "archived", "deleted"].includes(caller.state)) {
+      if (!isActiveChief(caller)) {
         throw new Error("chief_delegate requires an active registered Chief thread.");
       }
       const result = await delegate(params, context.threadId);
@@ -1697,7 +1702,7 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: planParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
-      if (!caller || caller.role !== "chief" || ["complete", "archived", "deleted"].includes(caller.state)) {
+      if (!isActiveChief(caller)) {
         throw new Error("chief_plan requires an active registered Chief thread.");
       }
       const result = await startPlan(params, context.threadId);
@@ -1719,19 +1724,6 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!caller || caller.role !== "chief") throw new Error("chief_roster requires a registered Chief thread.");
       touchCallerChief(caller);
-      for (const row of roles.values()) {
-        if (!row.parent_thread_id && row.project_id === caller.project_id) {
-          try {
-            const live = await bb.sdk.threads.get({ threadId: row.thread_id });
-            if (live.parentThreadId) {
-              db.prepare(`UPDATE managed_threads SET parent_thread_id=?, updated_at=? WHERE thread_id=?`).run(live.parentThreadId, Date.now(), row.thread_id);
-            }
-          } catch {
-            // ignore
-          }
-        }
-      }
-      reloadRoles();
       const rows = rosterForChief(caller.thread_id, includeComplete);
       if (!rows.length) return "No managed threads for this project.";
       const allWorkers = rosterForChief(caller.thread_id, true).filter((row) => row.role === "worker");
@@ -1758,8 +1750,9 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: z.object({ threadId: z.string() }),
     async execute({ threadId }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
-      const target = caller ? await resolveTarget(threadId, caller.thread_id) : roles.get(threadId);
-      if (!caller || caller.role !== "chief" || !target || !belongsToChief(target, caller.thread_id)) {
+      if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
+      const target = await resolveTarget(threadId, caller.thread_id);
+      if (!target || !belongsToChief(target, caller.thread_id)) {
         throw new Error(`No managed thread ${threadId} for this Chief.`);
       }
       touchCallerChief(caller);
@@ -1775,8 +1768,9 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute({ threadId, instruction }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
-      const target = caller ? await resolveTarget(threadId, caller.thread_id) : roles.get(threadId);
-      if (!caller || caller.role !== "chief" || !target || !belongsToChief(target, caller.thread_id)) {
+      if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
+      const target = await resolveTarget(threadId, caller.thread_id);
+      if (!target || !belongsToChief(target, caller.thread_id)) {
         throw new Error(`No managed thread ${threadId} for this Chief.`);
       }
       touchCallerChief(caller);
@@ -1791,15 +1785,16 @@ export default async function plugin(bb: BbPluginApi) {
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (params.workerThreadId) {
-        const worker = caller ? await resolveTarget(params.workerThreadId, caller.thread_id) : roles.get(params.workerThreadId);
-        if (!caller || caller.role !== "chief" || !worker || !belongsToChief(worker, caller.thread_id)) {
+        if (!isActiveChief(caller)) throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
+        const worker = await resolveTarget(params.workerThreadId, caller.thread_id);
+        if (!worker || !belongsToChief(worker, caller.thread_id)) {
           throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
         }
         touchCallerChief(caller);
         const review = await startReview(params.workerThreadId, params.focus);
         return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}.`;
       }
-      if (!caller || caller.role !== "chief") {
+      if (!isActiveChief(caller)) {
         throw new Error("chief_review requires a registered Chief thread.");
       }
       touchCallerChief(caller);
@@ -1816,8 +1811,9 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional() }),
     async execute({ threadId, result }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
-      const target = caller ? await resolveTarget(threadId, caller.thread_id) : roles.get(threadId);
-      if (!caller || caller.role !== "chief" || !target || !belongsToChief(target, caller.thread_id)) {
+      if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
+      const target = await resolveTarget(threadId, caller.thread_id);
+      if (!target || !belongsToChief(target, caller.thread_id)) {
         throw new Error(`No managed thread ${threadId} for this Chief.`);
       }
       touchCallerChief(caller);

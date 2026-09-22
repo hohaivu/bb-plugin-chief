@@ -281,11 +281,12 @@ describe("Chief backend", () => {
       .toEqual({ chief_thread_id: chief.threadId });
   });
 
-  test("auto-resolves and inspects untracked child threads created under Chief", async () => {
+  test("auto-resolves and inspects an untracked child thread this plugin spawned outside chief_delegate", async () => {
     const state = await setup();
     const chief = await start(state);
 
-    // Simulate a child thread created in BB under Chief without calling delegate
+    // Simulate a thread this plugin spawned (pluginMetadata + originPluginId prove it)
+    // whose managed_threads row was never inserted, e.g. a restart in the gap.
     const childId = "thr_manual_child";
     state.live.set(childId, makeThreadResponse({
       id: childId,
@@ -295,9 +296,10 @@ describe("Chief backend", () => {
       sectionId: "sec_chief",
       visibility: "visible",
       status: "idle",
-      originPluginId: null,
+      originPluginId: "chief",
       parentThreadId: chief.threadId,
     }));
+    state.seedPluginMetadata(childId, { role: "worker", chiefThreadId: chief.threadId });
 
     // Chief inspects the child thread directly - it auto-resolves and inspects
     const inspected = await state.harness.behavior.callAgentTool("chief_inspect", { threadId: childId }, { threadId: chief.threadId, projectId: "proj_1" });
@@ -306,6 +308,101 @@ describe("Chief backend", () => {
     // Chief can continue it
     await state.harness.behavior.callAgentTool("chief_continue", { threadId: childId, instruction: "Proceed" }, { threadId: chief.threadId, projectId: "proj_1" });
     expect(state.sent.at(-1)).toMatchObject({ threadId: childId, senderThreadId: chief.threadId });
+  });
+
+  test("does not adopt a user-created sub-thread under Chief that this plugin never spawned", async () => {
+    const state = await setup();
+    const chief = await start(state);
+
+    // A thread the user created directly in the BB UI under Chief: live, same
+    // project, correct parent — but no pluginMetadata this plugin ever seeded.
+    const childId = "thr_user_child";
+    state.live.set(childId, makeThreadResponse({
+      id: childId,
+      projectId: "proj_1",
+      environmentId: "env_manual",
+      title: "User's own sub-thread",
+      sectionId: null,
+      visibility: "visible",
+      status: "idle",
+      originPluginId: null,
+      parentThreadId: chief.threadId,
+    }));
+
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_inspect", { threadId: childId }, { threadId: chief.threadId, projectId: "proj_1" },
+    )).rejects.toThrow("for this Chief");
+    expect(state.db.prepare(`SELECT 1 FROM managed_threads WHERE thread_id=?`).get(childId)).toBeUndefined();
+  });
+
+  test("does not adopt a deleted or archived child thread even if this plugin spawned it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+
+    const childId = "thr_deleted_child";
+    state.live.set(childId, makeThreadResponse({
+      id: childId,
+      projectId: "proj_1",
+      environmentId: "env_manual",
+      title: "Deleted child",
+      sectionId: null,
+      visibility: "visible",
+      status: "idle",
+      originPluginId: "chief",
+      parentThreadId: chief.threadId,
+      deletedAt: Date.now(),
+    }));
+    state.seedPluginMetadata(childId, { role: "worker", chiefThreadId: chief.threadId });
+
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_inspect", { threadId: childId }, { threadId: chief.threadId, projectId: "proj_1" },
+    )).rejects.toThrow("for this Chief");
+    expect(state.db.prepare(`SELECT 1 FROM managed_threads WHERE thread_id=?`).get(childId)).toBeUndefined();
+  });
+
+  test("rejects chief_continue and chief_inspect from a Chief already superseded", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    // Trigger the real supersede path: an archived Chief with an orphaned active
+    // worker gets replaced, and spawnChief marks the old Chief row complete.
+    state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, archivedAt: Date.now() });
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(chief.threadId)! });
+    await state.supervisorCycle();
+    const rows = (await status(state)).threads;
+    expect(rows.find((row) => row.threadId === chief.threadId)?.state).toBe("complete");
+
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_continue", { threadId: worker.threadId, instruction: "Keep going" }, { threadId: chief.threadId, projectId: "proj_1" },
+    )).rejects.toThrow();
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_inspect", { threadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    )).rejects.toThrow();
+  });
+
+  test("does not let a non-Chief caller insert a row via chief_inspect", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+
+    const childId = "thr_worker_child";
+    state.live.set(childId, makeThreadResponse({
+      id: childId,
+      projectId: "proj_1",
+      environmentId: "env_manual",
+      title: "Child of a worker",
+      sectionId: null,
+      visibility: "visible",
+      status: "idle",
+      originPluginId: "chief",
+      parentThreadId: worker.threadId,
+    }));
+    state.seedPluginMetadata(childId, { role: "worker", chiefThreadId: worker.threadId });
+
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_inspect", { threadId: childId }, { threadId: worker.threadId, projectId: "proj_1" },
+    )).rejects.toThrow();
+    expect(state.db.prepare(`SELECT 1 FROM managed_threads WHERE thread_id=?`).get(childId)).toBeUndefined();
   });
 
   test("starts or resolves a project Chief through RPC for frontend launchers", async () => {
