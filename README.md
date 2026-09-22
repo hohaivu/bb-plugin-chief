@@ -82,7 +82,7 @@ bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
 bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--tier junior|senior] [--branch feature/...] [--issue-url ...] [--pr-url ...] [--json]
+bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." --tier junior|senior [--branch feature/...] [--issue-url ...] [--pr-url ...] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief review thr_worker [--focus "..."] [--json]
