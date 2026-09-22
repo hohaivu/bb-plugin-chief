@@ -34,8 +34,6 @@
     ]
   },
   "dependencies": {
-    "@ai-sdk/gateway": "^4.0.85",
-    "ai": "^7.0.105",
     "zod": "^4.3.6"
   },
   "devDependencies": {

@@ -6,7 +6,7 @@ import {
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
-import type { JevStatus, ModelConfiguration, ModelSelection, rpcContract } from "./server";
+import type { ModelConfiguration, ModelSelection, rpcContract } from "./server";
 
 const ROLES = [
   { role: "chief", label: "Chief", hint: "Supervises and decides." },
@@ -222,67 +222,6 @@ function ChiefModelSettings() {
   );
 }
 
-/** The key, model, and toggle are host-rendered settings fields. This only reports
- * whether the gate is open and runs the one check that opens it. */
-function JevSettings() {
-  const rpc = useRpc<typeof rpcContract>();
-  const [status, setStatus] = useState<JevStatus | null>(null);
-  const [isChecking, setIsChecking] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
-
-  useEffect(() => {
-    void rpc.call("jevStatus", null).then(setStatus).catch(() => undefined);
-  }, [rpc]);
-
-  const check = useCallback(() => {
-    setIsChecking(true);
-    setResult(null);
-    void rpc
-      .call("jevCheck", null)
-      .then((response) => {
-        setStatus(response.status);
-        setResult({ ok: response.ok, message: response.message });
-      })
-      .catch((cause) => setResult({ ok: false, message: cause instanceof Error ? cause.message : String(cause) }))
-      .finally(() => setIsChecking(false));
-  }, [rpc]);
-
-  return (
-    <div className="space-y-3">
-      <p className="text-sm text-muted-foreground">
-        Reviewers can score a change on 19 engineering-quality dimensions against a base branch they
-        pick. Enter an AI Gateway key above, check the connection, then turn scoring on.
-      </p>
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          disabled={isChecking || !status?.hasKey}
-          onClick={check}
-          className="h-7 shrink-0 cursor-pointer rounded-md border border-input px-3 text-xs font-medium disabled:pointer-events-none disabled:opacity-50"
-        >
-          {isChecking ? "Checking…" : "Check connection"}
-        </button>
-        <span className="text-xs text-muted-foreground">
-          {!status
-            ? "Reading settings…"
-            : !status.hasKey
-              ? "No API key set."
-              : status.enabled
-                ? `Scoring is on, using ${status.model}.`
-                : status.verified
-                  ? `${status.model} is reachable. Turn the toggle on to use it.`
-                  : "Not checked yet for this key and model."}
-        </span>
-      </div>
-      {result ? (
-        <p role="alert" className={`text-sm ${result.ok ? "text-muted-foreground" : "text-destructive"}`}>
-          {result.message}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 function ChiefHeaderBadge({
   threadId,
   isCompactViewport,
@@ -346,12 +285,6 @@ export default definePluginApp((app) => {
     title: "Chief models by machine",
     description: "Live provider and model choices scanned from each enrolled machine.",
     component: ChiefModelSettings,
-  });
-  app.slots.settingsSection({
-    id: "jev",
-    title: "Jev review scoring",
-    description: "Engineering-quality scoring reviewers can run on a change.",
-    component: JevSettings,
   });
   app.slots.experimental_threadHeaderAction({
     id: "chief-role",

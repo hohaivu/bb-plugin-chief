@@ -74,27 +74,6 @@ worktree is spent on a plan.
 The toggle reaches Chief threads that are already running, so turning it off mid-project simply
 withdraws `chief_plan`.
 
-### Jev review scoring
-
-Reviewers can score a change on 19 engineering-quality dimensions — correctness, coupling,
-changeability, security, and so on — through the `chief_score` tool. The reviewer picks the base
-branch to compare against (the open PR's base, else main/master) and Chief diffs the whole
-worktree against it, uncommitted work included. Scoring the same worker against the same base
-twice reports which dimensions improved and which regressed.
-
-Settings → **Jev review scoring**. Enter an AI Gateway API key, press **Check connection**, then
-turn the toggle on. The toggle stays off until a check succeeds for the exact key and model in
-force; changing either one, or a failed check, closes the gate again. This is enforced on the
-server, so setting `jevEnabled` through the CLI cannot skip the check.
-
-The score is evidence for the reviewer to confirm or reject against the code it read — never a
-completion gate.
-
-Every scored dimension is counted as it is produced. `bb chief jev-stats` reports how often each of
-the 19 dimensions answered its applicability question with no — the number to look at before
-deciding whether a dimension that cannot be judged from a diff needs fuller context or should be
-dropped.
-
 ## CLI
 
 ```sh
@@ -108,7 +87,6 @@ bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief review thr_worker [--focus "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
-bb chief jev-stats [--json]
 ```
 
 Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer `chief_report`.
