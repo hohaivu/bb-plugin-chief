@@ -946,7 +946,9 @@ describe("Chief backend", () => {
       },
     }]);
     const planPrompt = spawned.input[0].text as string;
-    expect(planPrompt).toContain("do not create, modify, or delete files");
+    expect(planPrompt).toContain("do not create, modify, or delete any file it tracks");
+    // The plan file's path is what Chief and the worker read instead of an inlined plan body.
+    expect(planPrompt).toContain("$BB_THREAD_STORAGE/plan.md");
     // Split success criteria and the out-of-scope section are the planner's contract, not an afterthought.
     expect(planPrompt).toContain("Read every file this brief names in full before proposing anything: no partial reads, no limit or offset.");
     expect(planPrompt).toContain("Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm)");
@@ -976,7 +978,7 @@ describe("Chief backend", () => {
     const reported = state.sent.at(-1).input[0].text;
     // Not "Worker report": Chief has to see which role spoke.
     expect(reported).toContain("Planner report");
-    expect(reported).toContain("chief_delegate with the agreed plan");
+    expect(reported).toContain("chief_delegate with the plan file's path");
 
     // A plan is not work: going idle must not start a reviewer on it.
     await state.harness.behavior.emitThreadEvent("thread.idle", {
@@ -1006,7 +1008,7 @@ describe("Chief backend", () => {
     expect(text.startsWith("Name the test file")).toBe(true);
     expect(text.startsWith("Remain read-only")).toBe(false);
     // The read-only reminder still follows, unchanged in wording.
-    expect(text).toContain("Remain read-only: do not create, modify, or delete files. A worker implements the plan in its own worktree.");
+    expect(text).toContain("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Writing the plan itself to $BB_THREAD_STORAGE/plan.md is not a repository edit and stays allowed. A worker implements the plan in its own worktree.");
   });
 
   test("clips an over-long planner instruction but keeps the read-only reminder byte-identical", async () => {
@@ -1023,7 +1025,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "x".repeat(7_995)]);
 
     const text = state.sent.at(-1).input[0].text as string;
-    expect(text.endsWith("Remain read-only: do not create, modify, or delete files. A worker implements the plan in its own worktree.")).toBe(true);
+    expect(text.endsWith("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Writing the plan itself to $BB_THREAD_STORAGE/plan.md is not a repository edit and stays allowed. A worker implements the plan in its own worktree.")).toBe(true);
     expect(text.length).toBeLessThanOrEqual(8_000);
   });
 

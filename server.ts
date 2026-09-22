@@ -33,7 +33,7 @@ const GENERATED_OR_LOCK_PATTERN =
  * again on every continuation — the two places an edit instruction could arrive. */
 const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
 /** Same for a planner: said when the plan starts and again on every continuation. */
-const PLAN_ONLY = "Remain read-only: do not create, modify, or delete files. A worker implements the plan in its own worktree.";
+const PLAN_ONLY = "Remain read-only in the repository: do not create, modify, or delete any file it tracks. Writing the plan itself to $BB_THREAD_STORAGE/plan.md is not a repository edit and stays allowed. A worker implements the plan in its own worktree.";
 /** BB's builtin plan slash command, the trigger a provider maps to its own plan mode. */
 const PLAN_COMMAND = "/plan";
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
@@ -282,7 +282,7 @@ In your report to Chief, state the base you used, which findings you confirmed a
 /** Planning is a decision point, not a relay: the plan is worth a thread only because
  * Chief reads it before any worktree is spent on it. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. For work that is not obviously small, use chief_plan first. Read the returned plan, correct it with chief_continue or escalate a genuine decision to the user, then call chief_delegate with the agreed plan in its context. A plan is never implementation: only a worker changes code.";
+  "Planning is on. For work that is not obviously small, use chief_plan first. Its ready report names the plan file it wrote — read that file in full before deciding, correct the plan with chief_continue or escalate a genuine decision to the user, then call chief_delegate with the plan file's path in its context, not the plan body. A plan is never implementation: only a worker changes code.";
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -946,7 +946,8 @@ export default async function plugin(bb: BbPluginApi) {
       "", "## Working contract",
       "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
       `- ${PLAN_ONLY}`,
-      "- Report with chief_report state ready, the plan as its result: the files and functions to change, the steps in order, real constraints, and the risks.",
+      "- Write the full plan as Markdown to $BB_THREAD_STORAGE/plan.md: the files and functions to change, the steps in order, real constraints, and the risks.",
+      "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline — followed by the plan file's absolute path. The detail lives in the file, not the report.",
       "- Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- For multi-step work, order it into named phases one worker implements one at a time: each phase ends in its own ready report and review, and only that verdict opens the next phase.",
       "- Add an explicit \"What we're NOT doing\" section naming what this plan leaves out of scope.",
@@ -1002,7 +1003,7 @@ export default async function plugin(bb: BbPluginApi) {
       ] : []),
       "", "## Project rules", rules,
       "", "## Working contract",
-      "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset.",
+      "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file, read that file in full too before starting.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
       "- If this brief lays out ordered phases, implement and report only the phase you are currently asked for, then stop; name which phase you finished in your ready result (for example \"Phase 2 of 4\"), so the reviewer and Chief both see it. The next phase arrives as a new instruction once this one is reviewed, not something to start on your own.",
@@ -1084,7 +1085,7 @@ export default async function plugin(bb: BbPluginApi) {
         `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
         focus ? `Review focus: ${focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
         REVIEW_ONLY,
-        "Inspect the actual worktree and evidence; do not rely only on the worker's claims.",
+        "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When the worker's brief context names a plan file, read that file in full before judging the change against it.",
         "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
         `Report your findings to Chief thread ${worker.chief_thread_id} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
         "If the worker's brief lays out ordered phases and this is not the last one, name the next phase in your recommendation (for example \"Continue the worker with phase 3 of 4.\"); leave recommendation unset only when no phases remain, since that is what tells Chief whether to complete this work or continue it.",
@@ -1290,7 +1291,7 @@ export default async function plugin(bb: BbPluginApi) {
             : row.role === "worker" && params.state === "ready"
               ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
               : row.role === "planner" && params.state === "ready"
-                ? "Read this plan yourself. Correct it with chief_continue, escalate a genuine decision to the user, or call chief_delegate with the agreed plan in its context. Nothing is implemented until you do."
+                ? "The plan detail is in the file named above; read it in full before deciding. Correct it with chief_continue, escalate a genuine decision to the user, or call chief_delegate with the plan file's path in its context, not the plan body. Nothing is implemented until you do."
                 : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
     const delivered = await alertChief(current, `report:${now}:${randomUUID()}`, summary);
