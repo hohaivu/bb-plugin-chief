@@ -174,8 +174,8 @@ const delegateParams = z.object({
   context: z.string().trim().max(12_000).optional(),
   // The policy behind this choice lives in the chief skill, which is loaded into
   // every Chief turn. Here it stays a one-line gloss of the two enum values.
-  tier: tierSchema.default("senior").describe(
-    "junior for trivial, mechanical, or already-specified bounded work; senior for everything else. When unsure, senior.",
+  tier: tierSchema.describe(
+    "junior for renames, typos, formatting, decided APIs, tests for existing behavior, or localized fixes; senior for multi-file changes, design decisions, unknown causes, or new features.",
   ),
   branch: z.string().trim().min(1).max(300).optional().describe(
     "The task branch Chief already created and pushed. The worktree is based on it and the worker commits there. Omit to base the worktree on the project default.",
@@ -1644,16 +1644,23 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!caller || caller.role !== "chief") throw new Error("chief_roster requires a registered Chief thread.");
       const rows = rosterForChief(caller.thread_id, includeComplete);
-      return rows.length ? rows.map((row) => [
-        `${row.role}${row.tier ? ` (${row.tier})` : ""} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
-        ...(row.branch ? [`branch: ${row.branch}`] : []),
-        ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
-        ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
-        ...(row.result ? [`result: ${clip(row.result, 1_000)}`] : []),
-        ...(row.blocker ? [`blocker: ${clip(row.blocker, 600)}`] : []),
-        ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 600)}`] : []),
-        ...(row.verdict ? [`verdict: ${row.verdict}`] : []),
-      ].join("\n  ")).join("\n") : "No managed threads for this project.";
+      if (!rows.length) return "No managed threads for this project.";
+      const allWorkers = rosterForChief(caller.thread_id, true).filter((row) => row.role === "worker");
+      const juniorCount = allWorkers.filter((row) => row.tier === "junior").length;
+      const seniorCount = allWorkers.filter((row) => row.tier === "senior").length;
+      return [
+        `Tier split: ${juniorCount} junior, ${seniorCount} senior`,
+        ...rows.map((row) => [
+          `${row.role}${row.tier ? ` (${row.tier})` : ""} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
+          ...(row.branch ? [`branch: ${row.branch}`] : []),
+          ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
+          ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
+          ...(row.result ? [`result: ${clip(row.result, 1_000)}`] : []),
+          ...(row.blocker ? [`blocker: ${clip(row.blocker, 600)}`] : []),
+          ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 600)}`] : []),
+          ...(row.verdict ? [`verdict: ${row.verdict}`] : []),
+        ].join("\n  ")),
+      ].join("\n");
     },
   });
   bb.agents.registerTool({
@@ -1831,7 +1838,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--tier junior|senior] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]",
@@ -1847,7 +1854,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--tier junior|senior] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--branch feature/…] [--issue-url …] [--pr-url …] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "review", summary: "Start or return a read-only review for a worker, pull request, or branch", usage: "bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]" },
