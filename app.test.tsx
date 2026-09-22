@@ -159,8 +159,6 @@ test("picks a scanned model per role and clears back to the BB default", async (
         create: () => ({ threadId: "thr_1", created: true }),
         modelConfiguration: () => configuration,
         setRoleModel: () => ({ ok: true as const }),
-        jevStatus: () => jevOff,
-        jevCheck: () => ({ ok: true, message: "Reached it.", status: { ...jevOff, verified: true } }),
       },
     },
   );
@@ -178,40 +176,4 @@ test("picks a scanned model per role and clears back to the BB default", async (
     }),
   );
   expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
-});
-
-const jevOff = { hasKey: false, model: "typesafe-ai/jev", verified: false, enabled: false };
-
-test("opens the Jev gate only after a connection check succeeds", async () => {
-  const section = app.settingsSections.find((candidate) => candidate.id === "jev")!;
-  let status = { hasKey: true, model: "typesafe-ai/jev", verified: false, enabled: false };
-  const rendered = renderSlot<Record<string, never>, typeof rpcContract>(
-    section,
-    {},
-    {
-      rpc: {
-        status: () => emptyStatus,
-        start: () => ({ threadId: "thr_1", created: false }),
-        create: () => ({ threadId: "thr_1", created: true }),
-        modelConfiguration: () => ({ hosts: [] }),
-        setRoleModel: () => ({ ok: true as const }),
-        jevStatus: () => status,
-        jevCheck: () => {
-          status = { ...status, verified: true };
-          return { ok: true, message: "Reached typesafe-ai/jev.", status };
-        },
-      },
-    },
-  );
-  unmounts.push(() => rendered.lifecycle.unmount());
-
-  await vi.waitFor(() =>
-    expect(rendered.getByText("Not checked yet for this key and model.")).toBeTruthy(),
-  );
-
-  fireEvent.click(rendered.getByRole("button", { name: "Check connection" }));
-
-  await vi.waitFor(() =>
-    expect(rendered.getByText("typesafe-ai/jev is reachable. Turn the toggle on to use it.")).toBeTruthy(),
-  );
 });

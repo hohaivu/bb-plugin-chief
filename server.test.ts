@@ -7,11 +7,7 @@ import {
   experimental_scanPublicSdkOnly,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import plugin, { capDiff, MIGRATIONS } from "./server";
-import { metricKeys } from "./jev/types";
-
-const jev = vi.hoisted(() => ({ pingGateway: vi.fn(), runEvaluation: vi.fn() }));
-vi.mock("./jev/gateway", () => jev);
+import plugin, { MIGRATIONS } from "./server";
 
 const disposals: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -751,33 +747,6 @@ describe("Chief backend", () => {
     expect(JSON.stringify(chiefTools.tools.find((tool: any) => tool.name === "chief_continue"))).not.toContain("allowEdits");
   });
 
-  test("tells Jev when the diff it scores was cut short", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
-    jev.pingGateway.mockResolvedValue(undefined);
-    // Stored and re-read on the next pass, so it has to satisfy the real schema.
-    jev.runEvaluation.mockResolvedValue({
-      metrics: Object.fromEntries(metricKeys.map((key) => [
-        key,
-        key === "correctness" ? { applicable: true, score: 8, confidence: 0.8 } : { applicable: false },
-      ])),
-      priorities: [],
-    });
-    await state.harness.behavior.setSettings({ jevApiKey: "gw_key" });
-    expect((await state.harness.behavior.callRpc("jevCheck", null)).ok).toBe(true);
-    await state.harness.behavior.setSettings({ jevEnabled: true });
-
-    await state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId });
-    expect(jev.runEvaluation.mock.calls.at(-1)![1]).not.toHaveProperty("diffTruncated");
-
-    // A diff cut to fit reads as missing implementation unless the scorer is told.
-    state.setPatch("x".repeat(200 * 1024));
-    await state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId });
-    expect(jev.runEvaluation.mock.calls.at(-1)![1].diffTruncated).toContain("cut to fit");
-  });
-
   test("enforces agent-tool authorization at execution time", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -908,32 +877,6 @@ describe("Chief backend", () => {
     expect(prompt).toContain("chief_forge_init");
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configured.instructions).toContain("Chief operating rules");
-  });
-
-  test("counts how often each Jev dimension abstained instead of scoring", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
-    jev.pingGateway.mockResolvedValue(undefined);
-    jev.runEvaluation.mockResolvedValue({
-      metrics: Object.fromEntries(metricKeys.map((key) => [
-        key,
-        key === "correctness" ? { applicable: true, score: 8, confidence: 0.8 } : { applicable: false },
-      ])),
-      priorities: [],
-    });
-    await state.harness.behavior.setSettings({ jevApiKey: "gw_key" });
-    expect((await state.harness.behavior.callRpc("jevCheck", null)).ok).toBe(true);
-    await state.harness.behavior.setSettings({ jevEnabled: true });
-    await state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId });
-
-    const stats = JSON.parse((await state.harness.behavior.runCli(["jev-stats", "--json"])).stdout!) as
-      { metric: string; samples: number; abstainedPercent: number; meanScore: number | null }[];
-    expect(stats).toHaveLength(metricKeys.length);
-    expect(stats.find((row) => row.metric === "correctness")).toMatchObject({ samples: 1, abstainedPercent: 0, meanScore: 8 });
-    expect(stats.find((row) => row.metric === "projectStructure")).toMatchObject({ abstainedPercent: 100, meanScore: null });
-    expect((await state.harness.behavior.runCli(["jev-stats"])).stdout).toContain("abstained");
   });
 
   test("keeps planning off until the setting turns it on", async () => {
@@ -1115,6 +1058,26 @@ describe("Chief backend", () => {
     expect(() => db.prepare(`UPDATE managed_threads SET reject_streak=reject_streak+1 WHERE thread_id='thr_old'`).run()).not.toThrow();
     // A restart re-runs the full, now-longer migration list against an already-upgraded database.
     expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
+  });
+
+  test("drops the retired Jev tables and forgets its verified key on an existing database", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-drop-jev" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    const beforeDrop = MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("reject_streak")) + 1);
+    bb.storage.migrate(db, beforeDrop);
+
+    db.prepare(`INSERT INTO jev_scores (worker_thread_id, base_branch, evaluation, updated_at)
+      VALUES ('thr_worker', 'main', '{}', 1)`).run();
+    db.prepare(`INSERT INTO jev_metric_stats (metric, samples, abstained, score_sum, updated_at)
+      VALUES ('correctness', 1, 0, 8, 1)`).run();
+    db.prepare(`INSERT INTO plugin_meta (key, value) VALUES ('jev_verified', 'fingerprint')`).run();
+
+    expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
+
+    expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='jev_scores'`).get()).toBeUndefined();
+    expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='jev_metric_stats'`).get()).toBeUndefined();
+    expect(db.prepare(`SELECT value FROM plugin_meta WHERE key='jev_verified'`).get()).toBeUndefined();
   });
 
   test("stops the supervisor service cleanly on abort", async () => {
@@ -1396,52 +1359,8 @@ describe("Chief backend", () => {
     expect(offline.hosts[0]!.error).toContain("disconnected");
   });
 
-  test("keeps Jev scoring off until a check succeeds for the current key and model", async () => {
-    const state = await setup();
-    const chiefId = (await start(state)).threadId;
-    const worker = await delegate(state, chiefId);
-    const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
-
-    // Turning the toggle on without a passing check is a claim, not a gate pass.
-    await state.harness.behavior.setSettings({ jevApiKey: "gw_key", jevEnabled: true });
-    expect(await state.harness.behavior.callRpc("jevStatus", null)).toMatchObject({ hasKey: true, verified: false, enabled: false });
-    const ungated = await state.harness.behavior.resolveAgentConfiguration(configurationContext(review.threadId));
-    expect(ungated.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
-    await expect(state.harness.behavior.callAgentTool("chief_score", { baseBranch: "main" }, { threadId: review.threadId }))
-      .rejects.toThrow(/Jev scoring is off/);
-  });
-
-  test("keeps a byte-safe prefix of a patch too large to fit whole", async () => {
-    // A single oversized patch used to be dropped outright, handing Jev an empty
-    // diff to score and persisting the meaningless result.
-    const huge = { patch: "a".repeat(5_000), truncated: false };
-    const alone = capDiff([huge], 1_000);
-    expect(alone.truncated).toBe(true);
-    expect(Buffer.byteLength(alone.diff, "utf8")).toBe(1_000);
-
-    // Whatever fits stays whole; the overflowing patch contributes its prefix, and the
-    // joining newline is charged against the budget rather than spilling past it.
-    const mixed = capDiff([{ patch: "abc", truncated: false }, huge], 1_000);
-    expect(mixed.diff.startsWith("abc\n")).toBe(true);
-    expect(Buffer.byteLength(mixed.diff, "utf8")).toBe(1_000);
-
-    // No combination of whole and cut patches may exceed the cap.
-    for (const cap of [1, 2, 4, 7, 64, 999]) {
-      for (const input of [[huge], [{ patch: "abc", truncated: false }, huge], [{ patch: "ab", truncated: false }, { patch: "cd", truncated: false }]]) {
-        expect(Buffer.byteLength(capDiff(input, cap).diff, "utf8")).toBeLessThanOrEqual(cap);
-      }
-    }
-
-    // Cutting inside a multi-byte character drops it rather than mangling it.
-    const multibyte = capDiff([{ patch: "\u00e9".repeat(10), truncated: false }], 5);
-    expect(multibyte.diff).toBe("\u00e9\u00e9");
-
-    // collectDiff rejects this rather than scoring nothing.
-    expect(capDiff([{ patch: "", truncated: false }], 1_000).diff).toBe("");
-  });
-
   test("imports only public SDK surfaces", async () => {
-    const result = await experimental_scanPublicSdkOnly(dirname(fileURLToPath(import.meta.url)), { allow: [/^vitest$/, /^react$/, /^@testing-library\/react$/, /^ai$/, /^@ai-sdk\//] });
+    const result = await experimental_scanPublicSdkOnly(dirname(fileURLToPath(import.meta.url)), { allow: [/^vitest$/, /^react$/, /^@testing-library\/react$/] });
     expect(result.violations).toEqual([]);
     expect(result.privateDependencies).toEqual([]);
   });

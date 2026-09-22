@@ -1,5 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
-import { StringDecoder } from "node:string_decoder";
+import { randomUUID } from "node:crypto";
 import {
   defineRpcContract,
   type BbPluginApi,
@@ -8,9 +7,6 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
-import { pingGateway, runEvaluation } from "./jev/gateway";
-import { getMetricDefinition } from "./jev/transform";
-import { evaluationSchema, type Evaluation, type MetricKey } from "./jev/types";
 
 const SECTION_NAME = "Chief";
 const RULES_FILE = "chief.md";
@@ -18,17 +14,6 @@ const RECONCILE_INTERVAL_MS = 30_000;
 const MAX_ALERT_LENGTH = 3_000;
 const MAX_RESULT_LENGTH = 8_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
-const JEV_DEFAULT_MODEL = "typesafe-ai/jev";
-const JEV_PING_TIMEOUT_MS = 30_000;
-const JEV_SCORE_TIMEOUT_MS = 180_000;
-const JEV_MAX_DIFF_BYTES = 96 * 1024;
-/** Scoring a cut diff without saying so reads as missing implementation, and the
- * change is penalised for bytes that were never sent. */
-const TRUNCATED_DIFF_NOTE =
-  "This diff was cut to fit a size budget: later files and hunks are missing from this state. Judge only what is present, and when a dimension depends on seeing the whole change, answer no to its applicability question instead of penalising the code that was omitted.";
-/** Lock files and generated output drown a real diff in noise nobody reviews. */
-const GENERATED_OR_LOCK_PATTERN =
-  /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum|.*\.generated\.[a-z]+|.*\.min\.js)$/;
 /** One wording for the reviewer's read-only rule, said when the review starts and
  * again on every continuation — the two places an edit instruction could arrive. */
 const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
@@ -171,16 +156,6 @@ const blockedReport = z.object({
 });
 const reportParams = z.discriminatedUnion("state", [optionalReport, readyReport, blockedReport]);
 
-const jevStatusSchema = z.object({
-  hasKey: z.boolean(),
-  model: z.string(),
-  /** The stored check matches the key and model in effect right now. */
-  verified: z.boolean(),
-  enabled: z.boolean(),
-}).strict();
-
-export type JevStatus = z.infer<typeof jevStatusSchema>;
-
 export const rpcContract = defineRpcContract({
   status: {
     input: z.null(),
@@ -205,14 +180,6 @@ export const rpcContract = defineRpcContract({
       selection: modelSelectionSchema.nullable(),
     }).strict(),
     output: z.object({ ok: z.literal(true) }).strict(),
-  },
-  jevStatus: {
-    input: z.null(),
-    output: jevStatusSchema,
-  },
-  jevCheck: {
-    input: z.null(),
-    output: z.object({ ok: z.boolean(), message: z.string(), status: jevStatusSchema }).strict(),
   },
 });
 
@@ -267,18 +234,6 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete; let the user archive it when desired.`;
 
-const JEV_REVIEWER_INSTRUCTIONS = `
-Jev scoring is available to you through chief_score. Use it once per review pass, and only after you have read the change yourself — the score is a second opinion, not your first impression.
-
-You choose the base branch to compare against. Pick the branch this change actually merges into:
-1. If the worktree has an open pull request, use its base (\`gh pr view --json baseRefName -q .baseRefName\`).
-2. Otherwise use the branch the environment was forked from, if it is a real branch and not the one the work is committed on — a task branch compared against itself yields an empty diff.
-3. Otherwise use the repository's default branch (main or master).
-
-Score against the same base on every pass for one worker; only then does the improved/regressed comparison mean anything. If you deliberately change the base, say so in your report and treat that score as a fresh baseline.
-
-In your report to Chief, state the base you used, which findings you confirmed against the code, and which scored points you reject and why.`;
-
 /** Planning is a decision point, not a relay: the plan is worth a thread only because
  * Chief reads it before any worktree is spent on it. */
 const PLANNER_CHIEF_INSTRUCTIONS =
@@ -304,36 +259,6 @@ function parseArgs(argv: string[]) {
     all: (name: string) => flags.get(name) ?? [],
     bool: (name: string) => flags.get(name)?.[0] === "true",
   };
-}
-
-/** Keeps as much of the diff as the budget allows, joining separator included, so the
- * result never exceeds maxBytes. A patch that does not fit whole is cut to its byte
- * prefix rather than dropped: one oversized file must still be reviewable, and dropping
- * it would hand Jev an empty diff to score. Exported for tests. */
-export function capDiff(patches: readonly { patch: string; truncated: boolean }[], maxBytes: number) {
-  const parts: string[] = [];
-  let size = 0;
-  let truncated = false;
-  for (const patch of patches) {
-    if (patch.truncated) truncated = true;
-    const separator = parts.length === 0 ? 0 : 1;
-    const bytes = Buffer.from(patch.patch, "utf8");
-    if (size + separator + bytes.byteLength > maxBytes) {
-      truncated = true;
-      // StringDecoder drops a trailing partial UTF-8 sequence instead of
-      // emitting a replacement character mid-identifier.
-      // Clamped: a full budget plus the separator makes this negative, and
-      // subarray reads a negative end as an offset from the buffer's end —
-      // handing back all but the last byte of the patch.
-      const room = Math.max(0, maxBytes - size - separator);
-      const prefix = new StringDecoder("utf8").write(bytes.subarray(0, room));
-      if (prefix) parts.push(prefix);
-      break;
-    }
-    parts.push(patch.patch);
-    size += separator + bytes.byteLength;
-  }
-  return { diff: parts.join("\n"), truncated };
 }
 
 function clip(value: string, limit = MAX_ALERT_LENGTH) {
@@ -497,6 +422,10 @@ export const MIGRATIONS = [
     // phase count, not rejection rounds. Consecutive request_changes verdicts need
     // their own counter so a phase's first rejection can't misread as a deadlock.
     `ALTER TABLE managed_threads ADD COLUMN reject_streak INTEGER NOT NULL DEFAULT 0`,
+    // Jev scoring is removed for cost reasons; its tables and settled state go with it.
+    `DROP TABLE IF EXISTS jev_scores`,
+    `DROP TABLE IF EXISTS jev_metric_stats`,
+    `DELETE FROM plugin_meta WHERE key='jev_verified'`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -507,19 +436,6 @@ export default async function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Plan before delegating",
       description: "Lets Chief send work to a read-only planner first, read the plan, and delegate it.",
-      default: false,
-    },
-    jevApiKey: {
-      type: "string",
-      label: "AI Gateway API key",
-      description: "Needed for Jev scoring. Check the connection below before enabling it.",
-      secret: true,
-    },
-    jevModel: { type: "string", label: "Jev model", default: JEV_DEFAULT_MODEL },
-    jevEnabled: {
-      type: "boolean",
-      label: "Let reviewers score changes with Jev",
-      description: "Stays off until a connection check succeeds for the current key and model.",
       default: false,
     },
   });
@@ -546,18 +462,7 @@ export default async function plugin(bb: BbPluginApi) {
   const roleModelRow = db.prepare<[string, string]>(
     `SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`,
   );
-  const previousScore = db.prepare<[string, string]>(
-    `SELECT evaluation FROM jev_scores WHERE worker_thread_id=? AND base_branch=?`,
-  );
-  const recordMetric = db.prepare<[string, number, number, number]>(
-    `INSERT INTO jev_metric_stats (metric, samples, abstained, score_sum, updated_at) VALUES (?, 1, ?, ?, ?)
-     ON CONFLICT(metric) DO UPDATE SET samples=samples+1, abstained=abstained+excluded.abstained,
-       score_sum=score_sum+excluded.score_sum, updated_at=excluded.updated_at`,
-  );
-  const metricStats = db.prepare(`SELECT * FROM jev_metric_stats ORDER BY metric ASC`);
   let roles = new Map<string, ManagedRow>();
-  // bb.agents.configure is synchronous, so the gate's answer has to be on hand.
-  let jevActive = false;
   let plannerActive = false;
   const rulesCache = new Map<string, string>();
   const alertDeliveries = new Map<string, Promise<boolean>>();
@@ -1473,11 +1378,6 @@ export default async function plugin(bb: BbPluginApi) {
     if (next.chiefProject && next.chiefProject !== previous.chiefProject) {
       void ensureChief(next.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
     }
-    // A new key or model has not been checked yet, whatever the toggle says.
-    if (next.jevApiKey !== previous.jevApiKey || next.jevModel !== previous.jevModel) {
-      writeJevFingerprint(null);
-    }
-    void jevStatus().catch((error) => bb.log.warn(`Could not re-check the Jev gate: ${String(error)}`));
     plannerActive = next.plannerEnabled;
   });
 
@@ -1526,166 +1426,6 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.verdict ? [`Verdict: ${row.verdict}`] : []),
       `Last assistant output:\n${output ? clip(output, 4_000) : "(none available)"}`,
     ].join("\n");
-  }
-
-  // --- Jev scoring -------------------------------------------------------
-  // The toggle is a claim; the stored fingerprint is the proof. Nothing scores
-  // unless a connection check succeeded for the exact key and model in force.
-
-  function jevFingerprint(values: { jevApiKey?: string; jevModel: string }) {
-    return createHash("sha256").update(`${values.jevApiKey ?? ""}\n${values.jevModel}`).digest("hex");
-  }
-
-  function storedJevFingerprint() {
-    return (db.prepare(`SELECT value FROM plugin_meta WHERE key='jev_verified'`).get() as { value: string } | undefined)?.value ?? null;
-  }
-
-  function writeJevFingerprint(fingerprint: string | null) {
-    if (fingerprint === null) {
-      db.prepare(`DELETE FROM plugin_meta WHERE key='jev_verified'`).run();
-      return;
-    }
-    db.prepare(`INSERT INTO plugin_meta (key, value) VALUES ('jev_verified', ?)
-      ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(fingerprint);
-  }
-
-  /** Reads the gate and repairs it: an enabled toggle without a matching check is
-   * forced back off, so editing settings through the CLI cannot slip past the UI. */
-  async function jevStatus(): Promise<JevStatus> {
-    const values = await settings.get();
-    const verified = Boolean(values.jevApiKey) && storedJevFingerprint() === jevFingerprint(values);
-    if (!verified && values.jevEnabled) {
-      jevActive = false;
-      await settings.experimental_set({ jevEnabled: false });
-      return { hasKey: Boolean(values.jevApiKey), model: values.jevModel, verified: false, enabled: false };
-    }
-    jevActive = values.jevEnabled;
-    return { hasKey: Boolean(values.jevApiKey), model: values.jevModel, verified, enabled: values.jevEnabled };
-  }
-
-  async function checkJevConnection() {
-    const values = await settings.get();
-    if (!values.jevApiKey) {
-      writeJevFingerprint(null);
-      return { ok: false, message: "Enter an AI Gateway API key first.", status: await jevStatus() };
-    }
-    try {
-      await pingGateway({ apiKey: values.jevApiKey, model: values.jevModel, timeoutMs: JEV_PING_TIMEOUT_MS });
-    } catch (error) {
-      writeJevFingerprint(null);
-      return { ok: false, message: clip(String(error), 500), status: await jevStatus() };
-    }
-    writeJevFingerprint(jevFingerprint(values));
-    return { ok: true, message: `Reached ${values.jevModel}. You can turn scoring on now.`, status: await jevStatus() };
-  }
-
-  async function collectDiff(environmentId: string, baseBranch: string) {
-    const files = await bb.sdk.environments.diffFiles({ environmentId, target: "all", mergeBaseBranch: baseBranch });
-    if (files.outcome !== "available") throw new Error(`Cannot diff against ${baseBranch}: ${diffFailure(files)}`);
-    const paths = files.files.map((file) => file.path).filter((path) => !GENERATED_OR_LOCK_PATTERN.test(path));
-    if (paths.length === 0) {
-      throw new Error(
-        files.files.length === 0
-          ? `Nothing has changed against ${baseBranch}.`
-          : `Only generated or lock files changed against ${baseBranch}.`,
-      );
-    }
-    const patches = await bb.sdk.environments.diffPatch({ environmentId, paths, target: { type: "all", mergeBaseBranch: baseBranch } });
-    if (patches.outcome !== "available") throw new Error(`Cannot diff against ${baseBranch}: ${diffFailure(patches)}`);
-
-    const { diff, truncated } = capDiff(patches.patches, JEV_MAX_DIFF_BYTES);
-    if (diff.trim() === "") throw new Error(`The diff against ${baseBranch} carries no reviewable text.`);
-    return { diff, fileCount: paths.length, truncated };
-  }
-
-  function diffFailure(result: { outcome: "not_applicable" | "unavailable"; message?: string; failure?: { message: string } }) {
-    return result.outcome === "not_applicable" ? (result.message ?? "not applicable") : (result.failure?.message ?? "unavailable");
-  }
-
-  async function scoreChange(reviewer: ManagedRow, baseBranch: string) {
-    const status = await jevStatus();
-    if (!status.enabled) throw new Error("Jev scoring is off. Turn it on in Chief's settings after a successful connection check.");
-    const values = await settings.get();
-    if (!values.jevApiKey) throw new Error("Jev scoring has no API key.");
-    const workerThreadId = reviewer.worker_thread_id;
-    if (!workerThreadId) throw new Error("This reviewer is not attached to a worker.");
-
-    const live = await bb.sdk.threads.get({ threadId: reviewer.thread_id });
-    if (!live.environmentId) throw new Error("This review thread has no environment to diff.");
-    const { diff, fileCount, truncated } = await collectDiff(live.environmentId, baseBranch);
-
-    const worker = roles.get(workerThreadId);
-    const stored = previousScore.get(workerThreadId, baseBranch) as { evaluation: string } | undefined;
-    const previous = stored ? evaluationSchema.parse(JSON.parse(stored.evaluation)) : undefined;
-
-    const evaluation = await runEvaluation(
-      { apiKey: values.jevApiKey, model: values.jevModel, timeoutMs: JEV_SCORE_TIMEOUT_MS },
-      {
-        task: worker?.title ?? reviewer.title,
-        diff,
-        repositoryContext: await readRules(reviewer.project_id),
-        ...(truncated ? { diffTruncated: TRUNCATED_DIFF_NOTE } : {}),
-      },
-      previous,
-    );
-
-    db.prepare(`INSERT INTO jev_scores (worker_thread_id, base_branch, evaluation, updated_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT(worker_thread_id, base_branch) DO UPDATE SET evaluation=excluded.evaluation, updated_at=excluded.updated_at`).run(
-      workerThreadId, baseBranch, JSON.stringify(evaluation), Date.now(),
-    );
-    recordMetrics(evaluation);
-    return formatEvaluation(evaluation, { baseBranch, fileCount, truncated, hadPrevious: previous !== undefined });
-  }
-
-  function recordMetrics(evaluation: Evaluation) {
-    const now = Date.now();
-    db.transaction(() => {
-      for (const [metric, value] of Object.entries(evaluation.metrics) as [MetricKey, Evaluation["metrics"][MetricKey]][]) {
-        recordMetric.run(metric, value.applicable ? 0 : 1, value.score ?? 0, now);
-      }
-    })();
-  }
-
-  function metricAbstention() {
-    return (metricStats.all() as { metric: string; samples: number; abstained: number; score_sum: number }[])
-      .map((row) => ({
-        metric: row.metric,
-        samples: row.samples,
-        abstained: row.abstained,
-        abstainedPercent: Math.round((row.abstained / row.samples) * 100),
-        meanScore: row.samples > row.abstained
-          ? Math.round((row.score_sum / (row.samples - row.abstained)) * 10) / 10
-          : null,
-      }))
-      .sort((left, right) => right.abstainedPercent - left.abstainedPercent || left.metric.localeCompare(right.metric));
-  }
-
-  function formatEvaluation(
-    evaluation: Evaluation,
-    context: { baseBranch: string; fileCount: number; truncated: boolean; hadPrevious: boolean },
-  ) {
-    const scored = (Object.entries(evaluation.metrics) as [MetricKey, Evaluation["metrics"][MetricKey]][])
-      .filter((entry): entry is [MetricKey, { applicable: true; score: number }] => entry[1].applicable && entry[1].score !== undefined)
-      .sort((left, right) => left[1].score - right[1].score);
-    const lines = [
-      `Jev score vs ${context.baseBranch} · ${context.fileCount} file(s)${context.truncated ? " · diff truncated, treat low scores as provisional" : ""}`,
-      "",
-      ...scored.map(([key, metric]) => `${getMetricDefinition(key).label}: ${metric.score}/10`),
-    ];
-    if (evaluation.priorities.length) {
-      lines.push("", "Weakest dimensions:");
-      for (const priority of evaluation.priorities) {
-        lines.push(`- ${getMetricDefinition(priority.metric).label} (${priority.severity}): ${priority.reason}`);
-      }
-    }
-    if (context.hadPrevious) {
-      lines.push("", `Since the last score against this same base — improved: ${evaluation.improvements?.join(", ") || "none"}; regressed: ${evaluation.regressions?.join(", ") || "none"}.`);
-    }
-    lines.push(
-      "",
-      "This is one model's opinion on the diff alone. Confirm or reject each point against the code you read, and say so in your report to Chief.",
-    );
-    return lines.join("\n");
   }
 
   bb.agents.registerTool({
@@ -1824,21 +1564,6 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.registerTool({
-    name: "chief_score",
-    description: "Score this review's change on 19 engineering-quality dimensions. You choose the base branch to compare against.",
-    parameters: z.object({
-      baseBranch: z.string().trim().min(1).describe("The branch this change will merge into — the PR's base, or main/master."),
-    }),
-    async execute({ baseBranch }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
-      if (!caller || caller.role !== "reviewer" || ["complete", "archived", "deleted"].includes(caller.state)) {
-        throw new Error("chief_score is available only in an active managed review thread.");
-      }
-      return scoreChange(caller, baseBranch);
-    },
-  });
-
   bb.agents.configure((context) => {
     const row = roles.get(context.thread.id);
     if (row && ["complete", "archived", "deleted"].includes(row.state)) return { tools: [], skills: [] };
@@ -1872,14 +1597,12 @@ export default async function plugin(bb: BbPluginApi) {
         ].join("\n"),
       };
     }
-    const scoring = role === "reviewer" && jevActive;
     const chiefThreadId = row?.chief_thread_id ?? (seeded?.success ? seeded.data.chiefThreadId ?? null : null);
     return {
-      tools: scoring ? ["chief_report", "chief_score"] : ["chief_report"],
+      tools: ["chief_report"],
       skills: ["chief-worker"],
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}.`,
-        ...(scoring ? [JEV_REVIEWER_INSTRUCTIONS] : []),
         "",
         rules,
       ].join("\n"),
@@ -1928,8 +1651,6 @@ export default async function plugin(bb: BbPluginApi) {
       writeRoleModel(hostId, role, selection);
       return { ok: true as const };
     },
-    jevStatus: () => jevStatus(),
-    jevCheck: () => checkJevConnection(),
   });
 
   const usage = [
@@ -1944,7 +1665,6 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief review <worker-thread-id> [--focus \"…\"] [--json]",
     "  bb chief complete <thread-id> [--result \"…\"] [--json]",
-    "  bb chief jev-stats [--json]",
   ].join("\n");
 
   bb.cli.register({
@@ -1961,7 +1681,6 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "review", summary: "Start or return a read-only review for an idle worker", usage: "bb chief review <worker-thread-id> [--focus \"…\"] [--json]" },
       { name: "complete", summary: "Mark verified, non-running managed work complete", usage: "bb chief complete <thread-id> [--result \"…\"] [--json]" },
-      { name: "jev-stats", summary: "Show how often each Jev dimension abstained instead of scoring", usage: "bb chief jev-stats [--json]" },
     ],
     async run(argv: string[], context: PluginCliContext): Promise<PluginCliResult> {
       const [command, ...rest] = argv;
@@ -2052,22 +1771,6 @@ export default async function plugin(bb: BbPluginApi) {
           const result = await startReview(workerThreadId, args.one("focus"));
           return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}.`);
         }
-        if (command === "jev-stats") {
-          const rows = metricAbstention();
-          if (!rows.length) return ok([], "No Jev scores recorded yet.");
-          const width = Math.max(...rows.map((row) => row.metric.length));
-          return ok(rows, [
-            "dimension".padEnd(width) + "  samples  abstained  mean score",
-            ...rows.map((row) => [
-              row.metric.padEnd(width),
-              String(row.samples).padStart(7),
-              `${row.abstainedPercent}%`.padStart(9),
-              (row.meanScore === null ? "—" : row.meanScore.toFixed(1)).padStart(10),
-            ].join("  ")),
-            "",
-            "A dimension that rarely abstains on thin diffs is scoring what it cannot see.",
-          ].join("\n"));
-        }
         if (command === "complete") {
           const threadId = args.positional[0];
           if (!threadId) return fail("complete requires <thread-id>");
@@ -2086,7 +1789,6 @@ export default async function plugin(bb: BbPluginApi) {
   } catch (error) {
     bb.log.warn(`Initial reconciliation deferred: ${String(error)}`);
   }
-  await jevStatus().catch((error) => bb.log.warn(`Could not read the Jev gate: ${String(error)}`));
   await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
   const initial = await settings.get();
   if (initial.chiefProject) {
