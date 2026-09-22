@@ -363,6 +363,40 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1)?.threadId).toBe(replacement!.threadId);
   });
 
+  test("does not resurrect a terminal Chief when there are no active workers or pending alerts", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    expect(state.spawned).toHaveLength(1);
+    state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, archivedAt: Date.now() });
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(chief.threadId)! });
+    await state.supervisorCycle();
+    const rows = (await status(state)).threads;
+    const activeChiefs = rows.filter((row) => row.role === "chief" && row.state !== "archived");
+    expect(activeChiefs).toHaveLength(0);
+    expect(state.spawned).toHaveLength(1);
+  });
+
+  test("does not auto-spawn Chief on startup or settings change by default", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
+    expect(state.spawned).toHaveLength(0);
+    await state.harness.behavior.setSettings({ chiefProject: "proj_2" });
+    expect(state.spawned).toHaveLength(0);
+    await state.supervisorCycle();
+    expect(state.spawned).toHaveLength(0);
+  });
+
+  test("auto-spawns Chief on settings change and reconciliation when autoSpawn is enabled", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ autoSpawn: true });
+    expect(state.spawned).toHaveLength(0);
+    await state.harness.behavior.setSettings({ autoSpawn: true, chiefProject: "proj_1" });
+    // allow async ensureChief triggered by onChange
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(state.spawned).toHaveLength(1);
+    expect(state.spawned[0].title).toContain("Chief · Asha");
+  });
+
   test("retries transient get and filing failures without classifying the thread deleted", async () => {
     const state = await setup();
     const chief = await start(state);

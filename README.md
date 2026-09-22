@@ -31,11 +31,12 @@ Put `chief.md` at the project root. Chief reads it through BB's project file API
 ```sh
 bb plugin config chief set chiefProject proj_...
 bb plugin config chief set stallMinutes 30
+bb plugin config chief set autoSpawn false
 ```
 
 `chiefProject` is the default used outside an existing project context — including the **Start Chief**
 button on the root New thread screen, which bb gives no project of its own. It does not limit Chief to
-one project.
+one project. `autoSpawn` (default `false`) controls whether Chief should automatically start upon BB launch or settings changes.
 
 ### Models
 

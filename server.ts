@@ -504,6 +504,12 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Lets Chief send work to a read-only planner first, read the plan, and delegate it.",
       default: false,
     },
+    autoSpawn: {
+      type: "boolean",
+      label: "Auto-spawn Chief",
+      description: "Automatically start a Chief supervisor when BB opens, the default project changes, or an active project Chief is missing.",
+      default: false,
+    },
   });
 
   const db = bb.storage.database();
@@ -1517,12 +1523,19 @@ export default async function plugin(bb: BbPluginApi) {
               reloadRoles();
             }
           }
-          const chiefProjects = new Set(
-            [...roles.values()]
-              .filter((row) => row.role === "chief" && ["failed", "archived", "deleted"].includes(row.state))
-              .map((row) => row.project_id),
-          );
-          if (values.chiefProject) chiefProjects.add(values.chiefProject);
+          // Replace terminal Chiefs only if they left active orphaned workers or undelivered alerts that need a supervisor.
+          const terminalChiefsWithOrphanWork = [...roles.values()].filter((row) => {
+            if (row.role !== "chief" || !["failed", "archived", "deleted"].includes(row.state)) return false;
+            const hasActiveChildren = [...roles.values()].some(
+              (child) => child.chief_thread_id === row.thread_id && !["failed", "deleted", "archived", "complete"].includes(child.state),
+            );
+            const hasPendingAlerts = (pendingAlerts.all() as AlertRow[]).some(
+              (alert) => alert.target_thread_id === row.thread_id,
+            );
+            return hasActiveChildren || hasPendingAlerts;
+          });
+          const chiefProjects = new Set(terminalChiefsWithOrphanWork.map((row) => row.project_id));
+          if (values.autoSpawn && values.chiefProject) chiefProjects.add(values.chiefProject);
           for (const projectId of chiefProjects) await ensureChief(projectId);
           // Replace terminal Chiefs and retarget their queued alerts before any
           // pending delivery is attempted.
@@ -1536,7 +1549,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   settings.onChange((next, previous) => {
-    if (next.chiefProject && next.chiefProject !== previous.chiefProject) {
+    if (next.autoSpawn && next.chiefProject && next.chiefProject !== previous.chiefProject) {
       void ensureChief(next.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
     }
     plannerActive = next.plannerEnabled;
@@ -1982,7 +1995,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
   const initial = await settings.get();
-  if (initial.chiefProject) {
+  if (initial.autoSpawn && initial.chiefProject) {
     void ensureChief(initial.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
   }
   bb.log.info("Chief supervisor loaded");
