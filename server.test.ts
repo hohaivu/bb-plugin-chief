@@ -1839,6 +1839,46 @@ describe("Chief backend", () => {
     expect(mismatchedBranch.stderr).toContain("carries branch feature/fix-checkout-totals");
   });
 
+  test("replaces: prefers an explicit issueUrl/prUrl over the prior worker's, and inherits when omitted", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+      issueUrl: "https://github.com/acme/shop/issues/7",
+      prUrl: "https://github.com/acme/shop/pull/8",
+    });
+
+    // Explicit issueUrl/prUrl on the replaces: call override the prior worker's.
+    const overrideResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
+      "--tier", "senior", "--replaces", worker.threadId,
+      "--issue-url", "https://github.com/acme/shop/issues/9",
+      "--pr-url", "https://github.com/acme/shop/pull/10",
+      "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(overrideResult.exitCode).toBe(0);
+    const overrideWorker = JSON.parse(overrideResult.stdout!) as { threadId: string };
+    expect(state.spawned.at(-1).prompt).toContain("https://github.com/acme/shop/issues/9");
+    expect(state.spawned.at(-1).prompt).toContain("https://github.com/acme/shop/pull/10");
+    expect(state.spawned.at(-1).prompt).not.toContain("https://github.com/acme/shop/issues/7");
+    expect(state.spawned.at(-1).prompt).not.toContain("https://github.com/acme/shop/pull/8");
+    const overrideRow = state.db.prepare(`SELECT issue_url, pr_url FROM managed_threads WHERE thread_id=?`).get(overrideWorker.threadId) as any;
+    expect(overrideRow.issue_url).toBe("https://github.com/acme/shop/issues/9");
+    expect(overrideRow.pr_url).toBe("https://github.com/acme/shop/pull/10");
+
+    // Omitting issueUrl/prUrl on a further replaces: call inherits the prior worker's.
+    const inheritResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug again",
+      "--tier", "senior", "--replaces", overrideWorker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(inheritResult.exitCode).toBe(0);
+    const inheritedWorker = JSON.parse(inheritResult.stdout!) as { threadId: string };
+    expect(state.spawned.at(-1).prompt).toContain("https://github.com/acme/shop/issues/9");
+    expect(state.spawned.at(-1).prompt).toContain("https://github.com/acme/shop/pull/10");
+    const inheritedRow = state.db.prepare(`SELECT issue_url, pr_url FROM managed_threads WHERE thread_id=?`).get(inheritedWorker.threadId) as any;
+    expect(inheritedRow.issue_url).toBe("https://github.com/acme/shop/issues/9");
+    expect(inheritedRow.pr_url).toBe("https://github.com/acme/shop/pull/10");
+  });
+
   test("tells the worker the forge is Chief's even when only a pull request was created", async () => {
     const state = await setup();
     const chief = await start(state);

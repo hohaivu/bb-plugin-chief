@@ -996,8 +996,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (params.branch && params.branch !== prior.branch) throw new Error(`replaces: ${prior.thread_id} carries branch ${prior.branch}; pass no --branch or the same one.`);
     }
     const branch = prior ? prior.branch ?? undefined : params.branch;
-    const issueUrl = prior ? prior.issue_url ?? params.issueUrl : params.issueUrl;
-    const prUrl = prior ? prior.pr_url ?? params.prUrl : params.prUrl;
+    const issueUrl = params.issueUrl ?? (prior ? prior.issue_url ?? undefined : undefined);
+    const prUrl = params.prUrl ?? (prior ? prior.pr_url ?? undefined : undefined);
     // One task branch carries one active worker: a second worktree cannot check out a
     // branch another one already holds, and the spawn would fail with a raw git error.
     const holder = branch
