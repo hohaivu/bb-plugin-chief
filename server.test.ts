@@ -204,7 +204,7 @@ async function delegate(
   chiefThreadId: string,
   title = "Fix checkout totals",
   tier?: "junior" | "senior",
-  forge?: { branch?: string; issueUrl?: string; prUrl?: string },
+  forge?: { branch?: string; issueUrl?: string; prUrl?: string; replaces?: string },
 ) {
   const resolvedTier = tier ?? "senior";
   const result = await state.harness.behavior.runCli([
@@ -213,6 +213,7 @@ async function delegate(
     ...(forge?.branch ? ["--branch", forge.branch] : []),
     ...(forge?.issueUrl ? ["--issue-url", forge.issueUrl] : []),
     ...(forge?.prUrl ? ["--pr-url", forge.prUrl] : []),
+    ...(forge?.replaces ? ["--replaces", forge.replaces] : []),
     "--json",
   ], { threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
   expect(result.exitCode).toBe(0);
@@ -932,7 +933,7 @@ describe("Chief backend", () => {
     }, { threadId: reviewerThreadId, projectId: "proj_1" });
     await reject(reviewer.threadId);
     expect(state.sent.at(-1).input[0].text).toContain("Verdict: request_changes");
-    expect(state.sent.at(-1).input[0].text).toContain("Continue the worker");
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_delegate (replaces: ${worker.threadId})`);
     expect(state.sent.at(-1).input[0].text).not.toContain("not converging");
     expect(JSON.stringify(await state.harness.behavior.callAgentTool(
       "chief_inspect", { threadId: reviewer.threadId }, { threadId: chief.threadId },
@@ -1024,7 +1025,7 @@ describe("Chief backend", () => {
       recommendation: "Continue the worker with phase 2 of 2.",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
     const text = state.sent.at(-1).input[0].text;
-    expect(text).toContain("The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above.");
+    expect(text).toContain(`The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${worker.threadId}).`);
     expect(text).not.toContain("mark the pull request ready");
     expect(text).not.toContain("Complete this work");
   });
@@ -1726,6 +1727,116 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, { threadId: chief.threadId, projectId: "proj_1" });
     await delegate(state, chief.threadId, "Fix checkout totals follow-up", undefined, { branch: "feature/fix-checkout-totals" });
     expect(state.spawned).toHaveLength(3);
+  });
+
+  test("hands a repair round to a fresh worker in the same worktree", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+      branch: "feature/fix-checkout-totals",
+      prUrl: "https://github.com/acme/shop/pull/8",
+    });
+    const ready = async (threadId: string, result: string) => {
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result,
+      }, { threadId, projectId: "proj_1" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: state.live.get(threadId)!,
+        lastAssistantText: "done",
+      });
+    };
+    await ready(worker.threadId, "Totals fixed");
+    const reviewer1 = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals are off by the discount", verdict: "request_changes",
+    }, { threadId: reviewer1.threadId, projectId: "proj_1" });
+
+    const replaceResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Fix the discount bug the reviewer found",
+      "--criteria", "Regression passes", "--tier", "senior",
+      "--replaces", worker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(replaceResult.exitCode).toBe(0);
+    const freshWorker = JSON.parse(replaceResult.stdout!) as { threadId: string };
+
+    const freshWorkerSpawn = state.spawned.at(-1);
+    expect(freshWorkerSpawn.environment).toEqual({ type: "reuse", environmentId: "env_worker" });
+    expect(freshWorkerSpawn.prompt).toContain("Review findings to fix");
+    expect(freshWorkerSpawn.prompt).toContain("Totals are off by the discount");
+    expect(freshWorkerSpawn.prompt).toContain("Your worktree is based on feature/fix-checkout-totals");
+
+    const rows = (await status(state)).threads;
+    expect(rows.find((row) => row.threadId === worker.threadId)?.state).toBe("complete");
+    expect(rows.find((row) => row.threadId === reviewer1.threadId)?.workerThreadId).toBe(freshWorker.threadId);
+    const freshWorkerRow = state.db.prepare(`SELECT branch, pr_url FROM managed_threads WHERE thread_id=?`).get(freshWorker.threadId) as any;
+    expect(freshWorkerRow.branch).toBe("feature/fix-checkout-totals");
+    expect(freshWorkerRow.pr_url).toBe("https://github.com/acme/shop/pull/8");
+
+    // A fresh reviewer for the fresh worker, carrying reviewer1's verdict forward.
+    await ready(freshWorker.threadId, "Discount fixed");
+    const reviewer2 = (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
+    expect(reviewer2.threadId).not.toBe(reviewer1.threadId);
+    expect(state.spawned.at(-1).prompt).toContain("The previous review");
+
+    // Second straight rejection across the fresh worker and fresh reviewers: not converging.
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Still off by a cent", verdict: "request_changes",
+    }, { threadId: reviewer2.threadId, projectId: "proj_1" });
+    expect(state.sent.at(-1).input[0].text).toContain("not converging");
+  });
+
+  test("refuses to replace a busy worker or another Chief's worker", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+    await expect(state.harness.behavior.callAgentTool("chief_delegate", {
+      title: "Fix checkout totals", mission: "Patch the fix", tier: "senior", replaces: worker.threadId,
+    }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow("wait until it is idle");
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+
+    const otherChief = await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string };
+    await expect(state.harness.behavior.callAgentTool("chief_delegate", {
+      title: "Fix checkout totals", mission: "Patch the fix", tier: "senior", replaces: worker.threadId,
+    }, { threadId: otherChief.threadId, projectId: "proj_1" })).rejects.toThrow("for this Chief");
+
+    // Neither refusal spawned a replacement worker.
+    expect(state.spawned.filter((entry) => entry.title === "Fix checkout totals")).toHaveLength(1);
+  });
+
+  test("keeps one active worker per branch around a replacement", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { branch: "feature/fix-checkout-totals" });
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+
+    const replaceResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
+      "--criteria", "Regression passes", "--tier", "senior",
+      "--replaces", worker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(replaceResult.exitCode).toBe(0);
+    const freshWorker = JSON.parse(replaceResult.stdout!) as { threadId: string };
+
+    // Plain delegation onto the same branch is still refused: the fresh worker holds it now.
+    const collision = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals again", "--mission", "Correct and verify totals",
+      "--tier", "senior", "--branch", "feature/fix-checkout-totals", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(collision.exitCode).toBe(1);
+    expect(collision.stderr).toContain("already carries the active worker");
+
+    // Replacing again with a different branch is refused too: replaces carries the prior branch.
+    const mismatchedBranch = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
+      "--tier", "senior", "--branch", "feature/other", "--replaces", freshWorker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(mismatchedBranch.exitCode).toBe(1);
+    expect(mismatchedBranch.stderr).toContain("carries branch feature/fix-checkout-totals");
   });
 
   test("tells the worker the forge is Chief's even when only a pull request was created", async () => {
