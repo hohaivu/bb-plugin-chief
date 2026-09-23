@@ -305,7 +305,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 /** Planning is a decision point, not a relay: the plan is worth a thread only because
  * Chief reads it before any worktree is spent on it. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. For work that is not obviously small, use chief_plan first. Its ready report names the plan file it wrote — read that file in full before deciding, correct the plan with chief_continue or escalate a genuine decision to the user, then call chief_delegate with the plan file's path in its context, not the plan body. A plan is never implementation: only a worker changes code.";
+  "Planning is on. For work that is not obviously small, use chief_plan first. Its ready report names the plan file it wrote — read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path in its context, not the plan body. A plan is never implementation: only a worker changes code.";
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -1438,7 +1438,7 @@ export default async function plugin(bb: BbPluginApi) {
             : row.role === "worker" && params.state === "ready"
               ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
               : row.role === "planner" && params.state === "ready"
-                ? "Read the plan file named above in full before deciding: correct it with chief_continue, escalate a genuine decision, or call chief_delegate with the plan file's path as context. Nothing is implemented until you do."
+                ? "Read the plan file named above in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do."
                 : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
     const delivered = await alertChief(current, `report:${current.active_cycle}:${now}:${randomUUID()}`, summary);
