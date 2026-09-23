@@ -1107,14 +1107,20 @@ export default async function plugin(bb: BbPluginApi) {
     ].join("\n");
   }
 
+  /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
+   * by a fresh one rather than resumed; its verdict and reject_streak carry over onto
+   * the new row, so deadlock detection still sees consecutive rejections across the
+   * fresh reviewers. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
   async function startReview(workerThreadId: string, focus?: string) {
     const inFlight = reviewStarts.get(workerThreadId);
     if (inFlight) return inFlight;
     const start = (async () => {
       const worker = roles.get(workerThreadId);
       if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
-      const duplicate = existingReview.get(workerThreadId) as ManagedRow | undefined;
-      if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId, created: false };
+      const previous = existingReview.get(workerThreadId) as ManagedRow | undefined;
+      if (previous && BUSY_STATUSES.has(previous.state)) {
+        return { threadId: previous.thread_id, title: previous.title, workerThreadId, created: false };
+      }
       const live = await bb.sdk.threads.get({ threadId: workerThreadId });
       if (BUSY_STATUSES.has(live.status)) throw new Error(`Worker ${workerThreadId} is ${live.status}; wait until it is idle before starting a review.`);
       if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
@@ -1137,6 +1143,13 @@ export default async function plugin(bb: BbPluginApi) {
             "", "## What the worker reported", clip(worker.result, 300),
             `Full report and last output: bb chief inspect ${workerThreadId}`,
           ] : []),
+          ...(previous?.result ? [
+            "", `## The previous review (${previous.thread_id})`,
+            `Verdict: ${previous.verdict ?? "none"}`, clip(previous.result, 300),
+            `Full report and last output: bb chief inspect ${previous.thread_id}`,
+            ...(previous.recommendation ? [`Recommendation: ${clip(previous.recommendation, 600)}`] : []),
+            "", "Check each finding above against the current worktree: say which were fixed and which remain. Do not re-open points it approved.",
+          ] : []),
         ],
       });
       const thread = await bb.sdk.threads.spawn({
@@ -1151,6 +1164,14 @@ export default async function plugin(bb: BbPluginApi) {
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
       insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status });
+      if (previous) {
+        const now = Date.now();
+        db.transaction(() => {
+          db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(previous.reject_streak, now, thread.id);
+          db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, previous.thread_id);
+        })();
+        reloadRoles();
+      }
       return { threadId: thread.id, title, workerThreadId, created: true };
     })();
     reviewStarts.set(workerThreadId, start);
@@ -1223,25 +1244,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** A failed auto-review must never swallow the alert Chief is waiting for. */
   async function autoReview(row: ManagedRow) {
     try {
-      const review = await startReview(row.thread_id);
-      const reviewer = review.created ? null : roles.get(review.threadId);
-      // The worker fixed what the review found and reported ready again. Its
-      // finished reviewer has to look again, or the fix cycle ships unreviewed.
-      if (!reviewer || BUSY_STATUSES.has(reviewer.state)) return { ...review, resumed: false };
-      await continueThread(
-        review.threadId,
-        [
-          "The worker reported ready again.",
-          // Names whatever phase the worker says it just finished, the same way the
-          // reviewer's first pass already sees the worker's brief and last report.
-          ...(row.result ? [
-            `What it says it finished: ${clip(row.result, 300)}`,
-            `Full report and last output: bb chief inspect ${row.thread_id}`,
-          ] : []),
-          "Re-check the current worktree, including everything changed since your last report, and send Chief a fresh verdict with chief_report.",
-        ].join("\n"),
-      );
-      return { ...review, resumed: true };
+      return await startReview(row.thread_id);
     } catch (error) {
       bb.log.warn(`Could not auto-start a review for ${row.thread_id}: ${String(error)}`);
       return null;
@@ -1512,7 +1515,7 @@ export default async function plugin(bb: BbPluginApi) {
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
       ...(detail && !reported ? [`Detail: ${detail}`] : []),
       review
-        ? `Independent review “${review.title}” (${review.threadId}) ${review.resumed ? "has been asked to re-check the latest changes" : "is running in this worktree"}. Read its report before completing this work.`
+        ? `Independent review “${review.title}” (${review.threadId}) is running in this worktree. Read its report before completing this work.`
         : pending
           ? "Its review could not be started automatically. Start one with chief_review before completing this work."
           : "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
