@@ -1366,6 +1366,7 @@ describe("Chief backend", () => {
     expect(state.spawned[0].prompt).not.toContain("chief_plan first");
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configured.instructions).toContain("chief_plan first");
+    expect(configured.instructions).toContain("approve the plan yourself, and delegate it right away without waiting for user sign-off");
   });
 
   test("keeps planning off when the setting is turned off", async () => {
@@ -1444,6 +1445,7 @@ describe("Chief backend", () => {
     // Not "Worker report": Chief has to see which role spoke.
     expect(reported).toContain("Planner report");
     expect(reported).toContain("chief_delegate with the plan file's path");
+    expect(reported).toContain("approve the plan yourself, and delegate it right away without waiting for user sign-off");
 
     // A plan is not work: going idle must not start a reviewer on it.
     await state.harness.behavior.emitThreadEvent("thread.idle", {
