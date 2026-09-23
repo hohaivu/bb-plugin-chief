@@ -505,7 +505,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Plan before delegating",
       description: "Lets Chief send work to a read-only planner first, read the plan, and delegate it.",
-      default: false,
+      default: true,
     },
     autoSpawn: {
       type: "boolean",
@@ -857,7 +857,6 @@ export default async function plugin(bb: BbPluginApi) {
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
       "Use chief_delegate for implementation work. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
-      ...((await plannerEnabled()) ? [PLANNER_CHIEF_INSTRUCTIONS] : []),
       "You own the forge for every delegation: run chief_forge_init, run the script it returns from the project checkout, and pass the branch, issueUrl and prUrl it prints to chief_delegate. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
       "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want — including a pull request or branch with no managed worker.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
@@ -946,13 +945,14 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const { chief, projectId } = await owningChief(callerThreadId);
     const sectionId = await ensureSection();
-    const rules = await readRules(projectId);
+    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
+    // the rules into every planner turn, so the spawn prompt does not repeat them.
+    await readRules(projectId);
     const title = `Plan · ${params.title}`;
     const prompt = [
       `You are the managed planner for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
       "", "## Problem", params.mission,
       ...(params.context ? ["", "## Context", params.context] : []),
-      "", "## Project rules", rules,
       "", "## Working contract",
       "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
       `- ${PLAN_ONLY}`,
@@ -992,15 +992,19 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`Branch ${params.branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
     const sectionId = await ensureSection();
-    const rules = await readRules(projectId);
-    // One rendering of the brief: the worker reads it now, and its reviewer reads
-    // the same text later instead of guessing what the change was asked to do.
-    const brief = [
-      "## Mission", params.mission,
+    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
+    // the rules into every worker turn, so the spawn prompt does not repeat them.
+    await readRules(projectId);
+    const render = (mission: string, context?: string) => [
+      "## Mission", mission,
       "", "## Success criteria", bullets(params.successCriteria),
       "", "## Constraints", bullets(params.constraints),
-      ...(params.context ? ["", "## Context", params.context] : []),
+      ...(context ? ["", "## Context", context] : []),
     ].join("\n");
+    const brief = render(params.mission, params.context);
+    // The reviewer gets the same sections, with a long mission or context clipped —
+    // it judges against the criteria and constraints, which stay in full.
+    const reviewerBrief = render(clip(params.mission, 1_500), params.context && clipMiddle(params.context, 1_500));
     const prompt = [
       `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
       "", brief,
@@ -1011,7 +1015,6 @@ export default async function plugin(bb: BbPluginApi) {
         ...(params.prUrl ? [`Draft pull request: ${params.prUrl}`] : []),
         "Do not create, merge, or mark ready any pull request — Chief owns the forge. Commit and push your work, then report ready.",
       ] : []),
-      "", "## Project rules", rules,
       "", "## Working contract",
       "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file, read that file in full too before starting.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
@@ -1042,7 +1045,7 @@ export default async function plugin(bb: BbPluginApi) {
     });
     insertThread({
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
-      state: "starting", status: thread.status, tier: params.tier, brief,
+      state: "starting", status: thread.status, tier: params.tier, brief: reviewerBrief,
       branch: params.branch, issueUrl: params.issueUrl, prUrl: params.prUrl,
     });
     return { threadId: thread.id, title: params.title, projectId };
@@ -1081,15 +1084,14 @@ export default async function plugin(bb: BbPluginApi) {
     return roles.get(threadId)!;
   }
 
-  /** Shared reviewer prompt: REVIEW_ONLY, the chief_report/verdict contract, and
-   * the project rules are identical for a worker's reviewer and a branch/PR
-   * reviewer. Only the subject line and provenance section (worker brief/result,
-   * or nothing for a branch/PR with no worker) differ. */
+  /** Shared reviewer prompt: REVIEW_ONLY and the chief_report/verdict contract are
+   * identical for a worker's reviewer and a branch/PR reviewer. Only the subject
+   * line and provenance section (worker brief/result, or nothing for a branch/PR
+   * with no worker) differ. */
   function reviewerPrompt(opts: {
     subject: string;
     chiefThreadId: string | null;
     focus?: string;
-    rules: string;
     provenance: string[];
   }) {
     return [
@@ -1102,7 +1104,6 @@ export default async function plugin(bb: BbPluginApi) {
       "If the worker's brief lays out ordered phases and this is not the last one, name the next phase in your recommendation (for example \"Continue the worker with phase 3 of 4.\"); leave recommendation unset only when no phases remain, since that is what tells Chief whether to complete this work or continue it.",
       "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
       ...opts.provenance,
-      "", "## Project rules", opts.rules,
     ].join("\n");
   }
 
@@ -1119,19 +1120,23 @@ export default async function plugin(bb: BbPluginApi) {
       if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
       if (!live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
       const sectionId = await ensureSection();
-      const rules = await readRules(worker.project_id);
+      // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
+      // the rules into every reviewer turn, so the spawn prompt does not repeat them.
+      await readRules(worker.project_id);
       const title = `Review · ${worker.title}`;
       const prompt = reviewerPrompt({
         subject: `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
         chiefThreadId: worker.chief_thread_id,
         focus,
-        rules,
         provenance: [
           ...(worker.brief ? [
-            "", "## The brief this work was given", clipMiddle(worker.brief, 6_000),
+            "", "## The brief this work was given", clipMiddle(worker.brief, 4_000),
             "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
           ] : []),
-          ...(worker.result ? ["", "## What the worker reported", clip(worker.result, 2_000)] : []),
+          ...(worker.result ? [
+            "", "## What the worker reported", clip(worker.result, 300),
+            `Full report and last output: bb chief inspect ${workerThreadId}`,
+          ] : []),
         ],
       });
       const thread = await bb.sdk.threads.spawn({
@@ -1173,7 +1178,9 @@ export default async function plugin(bb: BbPluginApi) {
       const duplicate = existingBranchReview.get(projectId, branch) as ManagedRow | undefined;
       if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId: null, created: false };
       const sectionId = await ensureSection();
-      const rules = await readRules(projectId);
+      // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
+      // the rules into every reviewer turn, so the spawn prompt does not repeat them.
+      await readRules(projectId);
       const title = `Review · ${branch}`;
       const prompt = reviewerPrompt({
         subject: pullRequestRef
@@ -1181,7 +1188,6 @@ export default async function plugin(bb: BbPluginApi) {
           : `Independently review branch ${branch}. No managed worker owns this change: read it in this worktree against its base branch.`,
         chiefThreadId,
         focus,
-        rules,
         provenance: [],
       });
       const hostId = await defaultHostId();
@@ -1228,7 +1234,10 @@ export default async function plugin(bb: BbPluginApi) {
           "The worker reported ready again.",
           // Names whatever phase the worker says it just finished, the same way the
           // reviewer's first pass already sees the worker's brief and last report.
-          ...(row.result ? [`What it says it finished: ${clip(row.result, 2_000)}`] : []),
+          ...(row.result ? [
+            `What it says it finished: ${clip(row.result, 300)}`,
+            `Full report and last output: bb chief inspect ${row.thread_id}`,
+          ] : []),
           "Re-check the current worktree, including everything changed since your last report, and send Chief a fresh verdict with chief_report.",
         ].join("\n"),
       );
@@ -1386,10 +1395,10 @@ export default async function plugin(bb: BbPluginApi) {
             : row.role === "worker" && params.state === "ready"
               ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
               : row.role === "planner" && params.state === "ready"
-                ? "The plan detail is in the file named above; read it in full before deciding. Correct it with chief_continue, escalate a genuine decision to the user, or call chief_delegate with the plan file's path in its context, not the plan body. Nothing is implemented until you do."
+                ? "Read the plan file named above in full before deciding: correct it with chief_continue, escalate a genuine decision, or call chief_delegate with the plan file's path as context. Nothing is implemented until you do."
                 : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
-    const delivered = await alertChief(current, `report:${now}:${randomUUID()}`, summary);
+    const delivered = await alertChief(current, `report:${current.active_cycle}:${now}:${randomUUID()}`, summary);
     if (!delivered) {
       throw new Error("Report was saved but could not be delivered to Chief. It will retry automatically; inspect Chief connectivity before reporting again.");
     }
@@ -1493,9 +1502,15 @@ export default async function plugin(bb: BbPluginApi) {
     // still owns the verdict. Only now is the worker idle enough to review.
     const pending = current.role === "worker" && current.state === "ready";
     const review = pending ? await autoReview(current) : null;
+    // A report already alerted Chief this cycle: an idle event right behind it (the
+    // worker/planner/reviewer going idle after chief_report) is the same news twice,
+    // except for a ready worker, whose auto-started review is new information.
+    const reported = kind === "idle" && (current.state === "ready" || current.state === "blocked")
+      && !!db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ? AND delivered_at IS NOT NULL`).get(`${current.thread_id}:report:${current.active_cycle}:%`);
+    if (reported && !pending) return;
     await alertChief(current, `${kind}:${row.active_cycle}`, [
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
-      ...(detail ? [`Detail: ${detail}`] : []),
+      ...(detail && !reported ? [`Detail: ${detail}`] : []),
       review
         ? `Independent review “${review.title}” (${review.threadId}) ${review.resumed ? "has been asked to re-check the latest changes" : "is running in this worktree"}. Read its report before completing this work.`
         : pending
@@ -1654,11 +1669,11 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
       `Persisted state: ${row.state}`,
       `Live status: ${liveStatus ?? "unknown"}`,
-      ...(row.result ? [`Result: ${clip(row.result, 2_000)}`] : []),
-      ...(row.blocker ? [`Blocker: ${clip(row.blocker, 1_000)}`] : []),
-      ...(row.recommendation ? [`Recommendation: ${clip(row.recommendation, 1_000)}`] : []),
+      ...(row.result ? [`Result: ${clip(row.result, 1_500)}`] : []),
+      ...(row.blocker ? [`Blocker: ${clip(row.blocker, 600)}`] : []),
+      ...(row.recommendation ? [`Recommendation: ${clip(row.recommendation, 600)}`] : []),
       ...(row.verdict ? [`Verdict: ${row.verdict}`] : []),
-      `Last assistant output:\n${output ? clip(output, 4_000) : "(none available)"}`,
+      `Last assistant output:\n${output ? clip(output, 2_000) : "(none available)"}`,
     ].join("\n");
   }
 
@@ -1729,19 +1744,19 @@ export default async function plugin(bb: BbPluginApi) {
       const allWorkers = rosterForChief(caller.thread_id, true).filter((row) => row.role === "worker");
       const juniorCount = allWorkers.filter((row) => row.tier === "junior").length;
       const seniorCount = allWorkers.filter((row) => row.tier === "senior").length;
-      return [
+      return clip([
         `Tier split: ${juniorCount} junior, ${seniorCount} senior`,
-        ...rows.map((row) => [
+        ...[...rows].reverse().map((row) => [
           `${row.role}${row.tier ? ` (${row.tier})` : ""} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
           ...(row.branch ? [`branch: ${row.branch}`] : []),
           ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
           ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
-          ...(row.result ? [`result: ${clip(row.result, 1_000)}`] : []),
-          ...(row.blocker ? [`blocker: ${clip(row.blocker, 600)}`] : []),
-          ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 600)}`] : []),
+          ...(row.result ? [`result: ${clip(row.result, 300)}`] : []),
+          ...(row.blocker ? [`blocker: ${clip(row.blocker, 200)}`] : []),
+          ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 200)}`] : []),
           ...(row.verdict ? [`verdict: ${row.verdict}`] : []),
         ].join("\n  ")),
-      ].join("\n");
+      ].join("\n"), 6_000);
     },
   });
   bb.agents.registerTool({
