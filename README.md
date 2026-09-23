@@ -12,12 +12,12 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 
 1. Open BB's project-aware **New Thread** screen and click **Start Chief**. Each click creates and opens a fresh independent Chief for that project; the CLI remains available for automation.
 2. Talk to `Chief · <project name>` in the normal thread UI.
-3. With planning enabled, Chief can send the work to a read-only planner first, read the plan it reports, and carry that plan into the delegation.
+3. Planning is on by default: Chief can send the work to a read-only planner first, read the plan it reports, and carry that plan into the delegation.
 4. Chief owns the forge: `chief_forge_init` returns one ready-to-run script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. Chief runs the script and reads the `CHIEF_FORGE branch=… issue_url=… pr_url=…` line it prints. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
 5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
 6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled. Alerts use a durable SQLite outbox and retry after transient delivery failures.
-8. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts one read-only reviewer in its worktree and tells Chief to wait for that verdict. The reviewer reads the same brief the worker was given, and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes back to the worker. Chief can start further reviews itself with `chief_review`.
+8. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts one read-only reviewer in its worktree and tells Chief to wait for that verdict. The reviewer reads the worker's brief (a long mission or context is clipped), and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes back to the worker. Chief can start further reviews itself with `chief_review`.
 9. Chief inspects live status and bounded output, continues safe reversible work, marks verified non-running work complete, and escalates only genuine decisions.
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
@@ -62,9 +62,9 @@ of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 
 ### Planning
 
-Settings → **Plan before delegating**. With it on, Chief gains `chief_plan`: it sends one unit of
-work to a read-only planner that reads the project's own checkout and writes a plan — files to
-change, ordered steps, verifiable success criteria, constraints, and risks — to
+Settings → **Plan before delegating** (on by default). With it on, Chief gains `chief_plan`: it sends
+one unit of work to a read-only planner that reads the project's own checkout and writes a plan —
+files to change, ordered steps, verifiable success criteria, constraints, and risks — to
 `$BB_THREAD_STORAGE/plan.md`, reporting back a short summary and that file's path.
 
 The handoff is Chief's, not the plugin's. Chief reads the plan file in full, corrects it with
@@ -72,8 +72,7 @@ The handoff is Chief's, not the plugin's. Chief reads the plan file in full, cor
 file's path as its context, not the plan body. Nothing is implemented until it does, and no
 worktree is spent on a plan.
 
-The toggle reaches Chief threads that are already running, so turning it off mid-project simply
-withdraws `chief_plan`.
+The toggle reaches Chief threads that are already running. Turn it off to delegate directly.
 
 ## CLI
 
