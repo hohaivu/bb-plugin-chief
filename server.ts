@@ -182,6 +182,7 @@ const delegateParams = z.object({
   ),
   issueUrl: z.string().trim().min(1).max(500).optional().describe("URL of the tracking issue Chief opened for this task, when the forge has issues."),
   prUrl: z.string().trim().min(1).max(500).optional().describe("URL of the draft pull request Chief opened from the task branch. The worker never marks it ready."),
+  replaces: z.string().trim().min(1).optional().describe("A finished worker's thread id to hand off from: the new worker starts in that worker's worktree and branch, gets its latest review findings, and the old worker is marked complete."),
 });
 
 /** A planner is briefed on the same problem as a worker, minus the criteria and
@@ -982,14 +983,29 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function delegate(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
+    const prior = params.replaces ? roles.get(params.replaces) : undefined;
+    if (params.replaces && (!prior || prior.role !== "worker" || !belongsToChief(prior, chief.thread_id) || prior.project_id !== projectId)) {
+      throw new Error(`No managed worker ${params.replaces} for this Chief.`);
+    }
+    let priorLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
+    if (prior) {
+      priorLive = await bb.sdk.threads.get({ threadId: prior.thread_id });
+      if (BUSY_STATUSES.has(priorLive.status)) throw new Error(`Worker ${prior.thread_id} is ${priorLive.status}; wait until it is idle before replacing it.`);
+      if (priorLive.deletedAt !== null || priorLive.archivedAt !== null) throw new Error(`Worker ${prior.thread_id} is not replaceable.`);
+      if (!priorLive.environmentId) throw new Error(`Worker ${prior.thread_id} has no reusable environment.`);
+      if (params.branch && params.branch !== prior.branch) throw new Error(`replaces: ${prior.thread_id} carries branch ${prior.branch}; pass no --branch or the same one.`);
+    }
+    const branch = prior ? prior.branch ?? undefined : params.branch;
+    const issueUrl = params.issueUrl ?? (prior ? prior.issue_url ?? undefined : undefined);
+    const prUrl = params.prUrl ?? (prior ? prior.pr_url ?? undefined : undefined);
     // One task branch carries one active worker: a second worktree cannot check out a
     // branch another one already holds, and the spawn would fail with a raw git error.
-    const holder = params.branch
+    const holder = branch
       ? [...roles.values()].find((row) => row.role === "worker" && row.state !== "complete"
-        && row.project_id === projectId && row.branch === params.branch)
+        && row.project_id === projectId && row.branch === branch && row.thread_id !== params.replaces)
       : undefined;
     if (holder) {
-      throw new Error(`Branch ${params.branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
+      throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
@@ -1005,36 +1021,48 @@ export default async function plugin(bb: BbPluginApi) {
     // The reviewer gets the same sections, with a long mission or context clipped —
     // it judges against the criteria and constraints, which stay in full.
     const reviewerBrief = render(clip(params.mission, 1_500), params.context && clipMiddle(params.context, 1_500));
+    // Read before the reviewer row is re-pointed below, so a `replaces` chain always
+    // hands the fresh worker the review that prompted the handoff.
+    const findings = prior ? existingReview.get(prior.thread_id) as ManagedRow | undefined : undefined;
     const prompt = [
       `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
       "", brief,
-      ...(params.branch || params.issueUrl || params.prUrl ? [
+      ...(findings?.result ? [
+        "", `## Review findings to fix (${findings.thread_id})`,
+        `Verdict: ${findings.verdict ?? "none"}`, clip(findings.result, 300),
+        `Full report and last output: bb chief inspect ${findings.thread_id}`,
+        ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
+      ] : []),
+      ...(branch || issueUrl || prUrl ? [
         "", "## Git workflow",
-        ...(params.branch ? [`Your worktree is based on ${params.branch}. Check that branch out and commit your work there.`] : []),
-        ...(params.issueUrl ? [`Tracking issue: ${params.issueUrl}`] : []),
-        ...(params.prUrl ? [`Draft pull request: ${params.prUrl}`] : []),
+        ...(branch ? [`Your worktree is based on ${branch}. Check that branch out and commit your work there.`] : []),
+        ...(prior ? [`This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them. Its last report: bb chief inspect ${prior.thread_id}`] : []),
+        ...(issueUrl ? [`Tracking issue: ${issueUrl}`] : []),
+        ...(prUrl ? [`Draft pull request: ${prUrl}`] : []),
         "Do not create, merge, or mark ready any pull request — Chief owns the forge. Commit and push your work, then report ready.",
       ] : []),
       "", "## Working contract",
       "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file, read that file in full too before starting.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
-      "- If this brief lays out ordered phases, implement and report only the phase you are currently asked for, then stop; name which phase you finished in your ready result (for example \"Phase 2 of 4\"), so the reviewer and Chief both see it. The next phase arrives as a new instruction once this one is reviewed, not something to start on your own.",
+      "- If this brief lays out ordered phases, implement and report only the phase you are currently asked for, then stop; name which phase you finished in your ready result (for example \"Phase 2 of 4\"), so the reviewer and Chief both see it. The next phase arrives as a new brief once this one is reviewed, not something to start on your own.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
-    const hostId = await defaultHostId();
+    const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : await defaultHostId();
     const thread = await bb.sdk.threads.spawn({
       projectId,
-      environment: {
-        type: "host",
-        hostId,
-        workspace: {
-          type: "managed-worktree",
-          baseBranch: params.branch ? { kind: "named" as const, name: params.branch } : { kind: "default" as const },
+      environment: prior
+        ? { type: "reuse", environmentId: priorLive!.environmentId! }
+        : {
+          type: "host",
+          hostId: hostId as string,
+          workspace: {
+            type: "managed-worktree",
+            baseBranch: branch ? { kind: "named" as const, name: branch } : { kind: "default" as const },
+          },
         },
-      },
       sectionId,
       parentThreadId: chief.thread_id,
       visibility: "visible",
@@ -1046,8 +1074,16 @@ export default async function plugin(bb: BbPluginApi) {
     insertThread({
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
       state: "starting", status: thread.status, tier: params.tier, brief: reviewerBrief,
-      branch: params.branch, issueUrl: params.issueUrl, prUrl: params.prUrl,
+      branch, issueUrl, prUrl,
     });
+    if (prior) {
+      const now = Date.now();
+      db.transaction(() => {
+        db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, prior.thread_id);
+        db.prepare(`UPDATE managed_threads SET worker_thread_id=?, updated_at=? WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(thread.id, now, prior.thread_id);
+      })();
+      reloadRoles();
+    }
     return { threadId: thread.id, title: params.title, projectId };
   }
 
@@ -1107,14 +1143,20 @@ export default async function plugin(bb: BbPluginApi) {
     ].join("\n");
   }
 
+  /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
+   * by a fresh one rather than resumed; its verdict and reject_streak carry over onto
+   * the new row, so deadlock detection still sees consecutive rejections across the
+   * fresh reviewers. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
   async function startReview(workerThreadId: string, focus?: string) {
     const inFlight = reviewStarts.get(workerThreadId);
     if (inFlight) return inFlight;
     const start = (async () => {
       const worker = roles.get(workerThreadId);
       if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
-      const duplicate = existingReview.get(workerThreadId) as ManagedRow | undefined;
-      if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId, created: false };
+      const previous = existingReview.get(workerThreadId) as ManagedRow | undefined;
+      if (previous && BUSY_STATUSES.has(previous.state)) {
+        return { threadId: previous.thread_id, title: previous.title, workerThreadId, created: false };
+      }
       const live = await bb.sdk.threads.get({ threadId: workerThreadId });
       if (BUSY_STATUSES.has(live.status)) throw new Error(`Worker ${workerThreadId} is ${live.status}; wait until it is idle before starting a review.`);
       if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
@@ -1137,6 +1179,13 @@ export default async function plugin(bb: BbPluginApi) {
             "", "## What the worker reported", clip(worker.result, 300),
             `Full report and last output: bb chief inspect ${workerThreadId}`,
           ] : []),
+          ...(previous?.result ? [
+            "", `## The previous review (${previous.thread_id})`,
+            `Verdict: ${previous.verdict ?? "none"}`, clip(previous.result, 300),
+            `Full report and last output: bb chief inspect ${previous.thread_id}`,
+            ...(previous.recommendation ? [`Recommendation: ${clip(previous.recommendation, 600)}`] : []),
+            "", "Check each finding above against the current worktree: say which were fixed and which remain. Do not re-open points it approved.",
+          ] : []),
         ],
       });
       const thread = await bb.sdk.threads.spawn({
@@ -1151,6 +1200,14 @@ export default async function plugin(bb: BbPluginApi) {
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
       insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status });
+      if (previous) {
+        const now = Date.now();
+        db.transaction(() => {
+          db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(previous.reject_streak, now, thread.id);
+          db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, previous.thread_id);
+        })();
+        reloadRoles();
+      }
       return { threadId: thread.id, title, workerThreadId, created: true };
     })();
     reviewStarts.set(workerThreadId, start);
@@ -1223,25 +1280,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** A failed auto-review must never swallow the alert Chief is waiting for. */
   async function autoReview(row: ManagedRow) {
     try {
-      const review = await startReview(row.thread_id);
-      const reviewer = review.created ? null : roles.get(review.threadId);
-      // The worker fixed what the review found and reported ready again. Its
-      // finished reviewer has to look again, or the fix cycle ships unreviewed.
-      if (!reviewer || BUSY_STATUSES.has(reviewer.state)) return { ...review, resumed: false };
-      await continueThread(
-        review.threadId,
-        [
-          "The worker reported ready again.",
-          // Names whatever phase the worker says it just finished, the same way the
-          // reviewer's first pass already sees the worker's brief and last report.
-          ...(row.result ? [
-            `What it says it finished: ${clip(row.result, 300)}`,
-            `Full report and last output: bb chief inspect ${row.thread_id}`,
-          ] : []),
-          "Re-check the current worktree, including everything changed since your last report, and send Chief a fresh verdict with chief_report.",
-        ].join("\n"),
-      );
-      return { ...review, resumed: true };
+      return await startReview(row.thread_id);
     } catch (error) {
       bb.log.warn(`Could not auto-start a review for ${row.thread_id}: ${String(error)}`);
       return null;
@@ -1386,12 +1425,16 @@ export default async function plugin(bb: BbPluginApi) {
       // absence is what makes the legacy final wording below reachable verbatim.
       verdict === "approve"
         ? params.recommendation
-          ? "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
+          ? current.worker_thread_id
+            ? `The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${current.worker_thread_id}).`
+            : "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
           : "The reviewer approves. Complete this work, then mark the pull request ready."
         : deadlocked
           ? `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging: escalate to the user with both positions and your recommendation instead of funding another round.`
           : verdict === "request_changes"
-            ? "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
+            ? current.worker_thread_id
+              ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${current.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
+              : "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
             : row.role === "worker" && params.state === "ready"
               ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
               : row.role === "planner" && params.state === "ready"
@@ -1512,7 +1555,7 @@ export default async function plugin(bb: BbPluginApi) {
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
       ...(detail && !reported ? [`Detail: ${detail}`] : []),
       review
-        ? `Independent review “${review.title}” (${review.threadId}) ${review.resumed ? "has been asked to re-check the latest changes" : "is running in this worktree"}. Read its report before completing this work.`
+        ? `Independent review “${review.title}” (${review.threadId}) is running in this worktree. Read its report before completing this work.`
         : pending
           ? "Its review could not be started automatically. Start one with chief_review before completing this work."
           : "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
@@ -1943,7 +1986,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]",
@@ -1959,7 +2002,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--branch feature/…] [--issue-url …] [--pr-url …] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "review", summary: "Start or return a read-only review for a worker, pull request, or branch", usage: "bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]" },
@@ -2029,6 +2072,7 @@ export default async function plugin(bb: BbPluginApi) {
             successCriteria: args.all("criteria"), constraints: args.all("constraint"), context: args.one("context"),
             tier: args.one("tier"),
             branch: args.one("branch"), issueUrl: args.one("issue-url"), prUrl: args.one("pr-url"),
+            replaces: args.one("replaces"),
           });
           if (!parsed.success) return fail(`Invalid delegate brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await delegate(parsed.data, context.threadId);

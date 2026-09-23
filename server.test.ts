@@ -204,7 +204,7 @@ async function delegate(
   chiefThreadId: string,
   title = "Fix checkout totals",
   tier?: "junior" | "senior",
-  forge?: { branch?: string; issueUrl?: string; prUrl?: string },
+  forge?: { branch?: string; issueUrl?: string; prUrl?: string; replaces?: string },
 ) {
   const resolvedTier = tier ?? "senior";
   const result = await state.harness.behavior.runCli([
@@ -213,6 +213,7 @@ async function delegate(
     ...(forge?.branch ? ["--branch", forge.branch] : []),
     ...(forge?.issueUrl ? ["--issue-url", forge.issueUrl] : []),
     ...(forge?.prUrl ? ["--pr-url", forge.prUrl] : []),
+    ...(forge?.replaces ? ["--replaces", forge.replaces] : []),
     "--json",
   ], { threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
   expect(result.exitCode).toBe(0);
@@ -826,6 +827,31 @@ describe("Chief backend", () => {
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
   });
 
+  test("keeps a busy reviewer instead of spawning a second one", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer.threadId)! });
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready again",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
+  });
+
   test("still announces the auto-review on a worker's idle, without repeating its output", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -842,7 +868,7 @@ describe("Chief backend", () => {
     expect(text).not.toContain("Detail:");
   });
 
-  test("sends the finished reviewer back after the worker fixes what it found", async () => {
+  test("starts a fresh reviewer after the worker fixes what it found", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
@@ -856,19 +882,28 @@ describe("Chief backend", () => {
       });
     };
     await ready();
-    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    const firstReviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals are off by the discount", verdict: "request_changes",
-    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    }, { threadId: firstReviewer.threadId, projectId: "proj_1" });
     await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Fix the discount"]);
 
     await ready();
 
-    // One reviewer, but it must be asked again — a fix cycle cannot ship unreviewed.
-    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
-    expect(state.sent.filter((entry) => entry.threadId === reviewer.threadId).at(-1).input[0].text)
-      .toContain("Re-check the current worktree");
-    expect(state.sent.at(-1).input[0].text).toContain("re-check the latest changes");
+    // A fresh reviewer, not the finished one asked to re-check — but its verdict
+    // and pointer travel forward so the fresh reviewer can pick up where it left off.
+    const reviewSpawns = state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals");
+    expect(reviewSpawns).toHaveLength(2);
+    for (const entry of reviewSpawns) {
+      expect(entry.environment).toEqual({ type: "reuse", environmentId: "env_worker" });
+    }
+    expect((await status(state)).threads.find((row) => row.threadId === firstReviewer.threadId)?.state).toBe("complete");
+    expect(reviewSpawns[1].prompt).toContain("Totals are off by the discount");
+    expect(reviewSpawns[1].prompt).toContain("Verdict: request_changes");
+    expect(reviewSpawns[1].prompt).toContain("The previous review");
+    expect(state.sent.filter((entry) => entry.threadId === firstReviewer.threadId)
+      .some((entry) => entry.input[0].text.includes("Re-check"))).toBe(false);
+    expect(state.sent.at(-1).input[0].text).toContain("is running in this worktree");
   });
 
   test("routes on a reviewer's structured verdict and names a pair that stops converging", async () => {
@@ -893,21 +928,25 @@ describe("Chief backend", () => {
       state: "ready", result: "The discount is still applied twice",
     }, { threadId: reviewer.threadId, projectId: "proj_1" })).rejects.toThrow(/verdict/);
 
-    const reject = async () => state.harness.behavior.callAgentTool("chief_report", {
+    const reject = async (reviewerThreadId: string) => state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "The discount is still applied twice", verdict: "request_changes",
-    }, { threadId: reviewer.threadId, projectId: "proj_1" });
-    await reject();
+    }, { threadId: reviewerThreadId, projectId: "proj_1" });
+    await reject(reviewer.threadId);
     expect(state.sent.at(-1).input[0].text).toContain("Verdict: request_changes");
-    expect(state.sent.at(-1).input[0].text).toContain("Continue the worker");
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_delegate (replaces: ${worker.threadId})`);
     expect(state.sent.at(-1).input[0].text).not.toContain("not converging");
     expect(JSON.stringify(await state.harness.behavior.callAgentTool(
       "chief_inspect", { threadId: reviewer.threadId }, { threadId: chief.threadId },
     ))).toContain("Verdict: request_changes");
 
-    // Second round on the same objection: Chief is told to escalate, not to fund a third.
+    // Second round on the same objection: the fix cycle spawns a fresh reviewer,
+    // which carries the reject_streak forward — Chief is told to escalate, not to
+    // fund a third round.
     await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Fix the discount"]);
     await ready();
-    await reject();
+    const secondReviewer = (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
+    expect(secondReviewer.threadId).not.toBe(reviewer.threadId);
+    await reject(secondReviewer.threadId);
     expect(state.sent.at(-1).input[0].text).toContain("not converging");
     expect(state.sent.at(-1).input[0].text).toContain("escalate to the user");
   });
@@ -916,34 +955,38 @@ describe("Chief backend", () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    const ready = async () => {
+    const ready = async (result: string) => {
       await state.harness.behavior.callAgentTool("chief_report", {
-        state: "ready", result: "Phase implemented",
+        state: "ready", result,
       }, { threadId: worker.threadId, projectId: "proj_1" });
       await state.harness.behavior.emitThreadEvent("thread.idle", {
         thread: state.live.get(worker.threadId)!,
         lastAssistantText: "done",
       });
     };
-    await ready();
-    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer.threadId)! });
-    const verdict = (value: "approve" | "request_changes") => state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Phase reviewed", verdict: value,
-    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    const verdict = (reviewerThreadId: string, value: "approve" | "request_changes") =>
+      state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Phase reviewed", verdict: value,
+      }, { threadId: reviewerThreadId, projectId: "proj_1" });
+    const latestReviewer = async () => (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
 
-    // Phase 1 approved, then the same reviewer is resumed for phase 2 and approves
-    // again — active_cycle keeps climbing with every resume even though nothing has
-    // been rejected yet.
-    await verdict("approve");
-    await state.harness.behavior.runCli(["continue", reviewer.threadId, "--instruction", "Phase 2 is ready to review."]);
-    await verdict("approve");
-    await state.harness.behavior.runCli(["continue", reviewer.threadId, "--instruction", "Phase 3 is ready to review."]);
+    // Phase 1 approved, then phase 2's fresh reviewer approves again — active_cycle
+    // must not read as prior disagreement just because it is climbing.
+    await ready("Phase 1 implemented");
+    await verdict((await latestReviewer()).threadId, "approve");
+
+    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 2"]);
+    await ready("Phase 2 implemented");
+    await verdict((await latestReviewer()).threadId, "approve");
+
+    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 3"]);
+    await ready("Phase 3 implemented");
 
     // Phase 3's very first rejection must not read as two rounds of disagreement.
-    await verdict("request_changes");
+    await verdict((await latestReviewer()).threadId, "request_changes");
     expect(state.sent.at(-1).input[0].text).toContain("Verdict: request_changes");
     expect(state.sent.at(-1).input[0].text).not.toContain("not converging");
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(3);
   });
 
   test("tells Chief to complete work its reviewer approved", async () => {
@@ -982,12 +1025,12 @@ describe("Chief backend", () => {
       recommendation: "Continue the worker with phase 2 of 2.",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
     const text = state.sent.at(-1).input[0].text;
-    expect(text).toContain("The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above.");
+    expect(text).toContain(`The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${worker.threadId}).`);
     expect(text).not.toContain("mark the pull request ready");
     expect(text).not.toContain("Complete this work");
   });
 
-  test("drives one reviewer thread across three phases, naming each phase on resume", async () => {
+  test("starts a fresh reviewer for each phase, carrying the previous verdict", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
@@ -1000,6 +1043,7 @@ describe("Chief backend", () => {
         lastAssistantText: "done",
       });
     };
+    const latestReviewer = async () => (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
     const approve = async (reviewerThreadId: string, result: string, recommendation?: string) => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result, verdict: "approve",
@@ -1008,21 +1052,21 @@ describe("Chief backend", () => {
     };
 
     await reportReady("Phase 1 of 3 finished: totals fixed");
-    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-    await approve(reviewer.threadId, "Phase 1 confirmed", "Continue the worker with phase 2 of 3.");
+    await approve((await latestReviewer()).threadId, "Phase 1 confirmed", "Continue the worker with phase 2 of 3.");
 
     await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 2"]);
     await reportReady("Phase 2 of 3 finished: discounts fixed");
-    await approve(reviewer.threadId, "Phase 2 confirmed", "Continue the worker with phase 3 of 3.");
+    await approve((await latestReviewer()).threadId, "Phase 2 confirmed", "Continue the worker with phase 3 of 3.");
 
     await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 3"]);
     await reportReady("Phase 3 of 3 finished: shipping fixed");
 
     const reviewerSpawns = state.spawned.filter((entry: any) => entry.pluginMetadata?.role === "reviewer");
-    expect(reviewerSpawns).toHaveLength(1);
-    const resumes = state.sent.filter((entry: any) => entry.threadId === reviewer.threadId);
-    expect(resumes.some((entry: any) => entry.input[0].text.includes("Phase 2 of 3 finished"))).toBe(true);
-    expect(resumes.some((entry: any) => entry.input[0].text.includes("Phase 3 of 3 finished"))).toBe(true);
+    expect(reviewerSpawns).toHaveLength(3);
+    expect(reviewerSpawns[1].prompt).toContain("Phase 2 of 3 finished");
+    expect(reviewerSpawns[1].prompt).toContain("Phase 1 confirmed");
+    expect(reviewerSpawns[1].prompt).toContain("Continue the worker with phase 2 of 3.");
+    expect(reviewerSpawns[2].prompt).toContain("Phase 3 of 3 finished");
   });
 
   test("hands the reviewer the brief and report the work was judged against", async () => {
@@ -1092,7 +1136,7 @@ describe("Chief backend", () => {
     expect(resultLine.length).toBeLessThanOrEqual(300);
     expect(review.prompt).toContain(`bb chief inspect ${worker.threadId}`);
 
-    // Resuming a finished reviewer clips the worker's fresh result the same way.
+    // The fresh reviewer spawned after a fix clips the worker's new result the same way.
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Found an issue", verdict: "request_changes",
@@ -1105,9 +1149,10 @@ describe("Chief backend", () => {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "done",
     });
-    const resume = state.sent.filter((entry: any) => entry.threadId === reviewer.threadId).at(-1).input[0].text as string;
-    expect(resume.length).toBeLessThan(longResult.length);
-    expect(resume).toContain(`bb chief inspect ${worker.threadId}`);
+    const freshReviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!;
+    const freshResultLine = freshReviewSpawn.prompt.split("## What the worker reported")[1].split("\n")[1];
+    expect(freshResultLine.length).toBeLessThanOrEqual(300);
+    expect(freshReviewSpawn.prompt).toContain(`bb chief inspect ${worker.threadId}`);
   });
 
   test("keeps reviewers read-only however the continuation is phrased", async () => {
@@ -1682,6 +1727,156 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, { threadId: chief.threadId, projectId: "proj_1" });
     await delegate(state, chief.threadId, "Fix checkout totals follow-up", undefined, { branch: "feature/fix-checkout-totals" });
     expect(state.spawned).toHaveLength(3);
+  });
+
+  test("hands a repair round to a fresh worker in the same worktree", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+      branch: "feature/fix-checkout-totals",
+      prUrl: "https://github.com/acme/shop/pull/8",
+    });
+    const ready = async (threadId: string, result: string) => {
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result,
+      }, { threadId, projectId: "proj_1" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: state.live.get(threadId)!,
+        lastAssistantText: "done",
+      });
+    };
+    await ready(worker.threadId, "Totals fixed");
+    const reviewer1 = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals are off by the discount", verdict: "request_changes",
+    }, { threadId: reviewer1.threadId, projectId: "proj_1" });
+
+    const replaceResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Fix the discount bug the reviewer found",
+      "--criteria", "Regression passes", "--tier", "senior",
+      "--replaces", worker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(replaceResult.exitCode).toBe(0);
+    const freshWorker = JSON.parse(replaceResult.stdout!) as { threadId: string };
+
+    const freshWorkerSpawn = state.spawned.at(-1);
+    expect(freshWorkerSpawn.environment).toEqual({ type: "reuse", environmentId: "env_worker" });
+    expect(freshWorkerSpawn.prompt).toContain("Review findings to fix");
+    expect(freshWorkerSpawn.prompt).toContain("Totals are off by the discount");
+    expect(freshWorkerSpawn.prompt).toContain("Your worktree is based on feature/fix-checkout-totals");
+
+    const rows = (await status(state)).threads;
+    expect(rows.find((row) => row.threadId === worker.threadId)?.state).toBe("complete");
+    expect(rows.find((row) => row.threadId === reviewer1.threadId)?.workerThreadId).toBe(freshWorker.threadId);
+    const freshWorkerRow = state.db.prepare(`SELECT branch, pr_url FROM managed_threads WHERE thread_id=?`).get(freshWorker.threadId) as any;
+    expect(freshWorkerRow.branch).toBe("feature/fix-checkout-totals");
+    expect(freshWorkerRow.pr_url).toBe("https://github.com/acme/shop/pull/8");
+
+    // A fresh reviewer for the fresh worker, carrying reviewer1's verdict forward.
+    await ready(freshWorker.threadId, "Discount fixed");
+    const reviewer2 = (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
+    expect(reviewer2.threadId).not.toBe(reviewer1.threadId);
+    expect(state.spawned.at(-1).prompt).toContain("The previous review");
+
+    // Second straight rejection across the fresh worker and fresh reviewers: not converging.
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Still off by a cent", verdict: "request_changes",
+    }, { threadId: reviewer2.threadId, projectId: "proj_1" });
+    expect(state.sent.at(-1).input[0].text).toContain("not converging");
+  });
+
+  test("refuses to replace a busy worker or another Chief's worker", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+    await expect(state.harness.behavior.callAgentTool("chief_delegate", {
+      title: "Fix checkout totals", mission: "Patch the fix", tier: "senior", replaces: worker.threadId,
+    }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow("wait until it is idle");
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+
+    const otherChief = await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string };
+    await expect(state.harness.behavior.callAgentTool("chief_delegate", {
+      title: "Fix checkout totals", mission: "Patch the fix", tier: "senior", replaces: worker.threadId,
+    }, { threadId: otherChief.threadId, projectId: "proj_1" })).rejects.toThrow("for this Chief");
+
+    // Neither refusal spawned a replacement worker.
+    expect(state.spawned.filter((entry) => entry.title === "Fix checkout totals")).toHaveLength(1);
+  });
+
+  test("keeps one active worker per branch around a replacement", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { branch: "feature/fix-checkout-totals" });
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+
+    const replaceResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
+      "--criteria", "Regression passes", "--tier", "senior",
+      "--replaces", worker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(replaceResult.exitCode).toBe(0);
+    const freshWorker = JSON.parse(replaceResult.stdout!) as { threadId: string };
+
+    // Plain delegation onto the same branch is still refused: the fresh worker holds it now.
+    const collision = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals again", "--mission", "Correct and verify totals",
+      "--tier", "senior", "--branch", "feature/fix-checkout-totals", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(collision.exitCode).toBe(1);
+    expect(collision.stderr).toContain("already carries the active worker");
+
+    // Replacing again with a different branch is refused too: replaces carries the prior branch.
+    const mismatchedBranch = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
+      "--tier", "senior", "--branch", "feature/other", "--replaces", freshWorker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(mismatchedBranch.exitCode).toBe(1);
+    expect(mismatchedBranch.stderr).toContain("carries branch feature/fix-checkout-totals");
+  });
+
+  test("replaces: prefers an explicit issueUrl/prUrl over the prior worker's, and inherits when omitted", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+      issueUrl: "https://github.com/acme/shop/issues/7",
+      prUrl: "https://github.com/acme/shop/pull/8",
+    });
+
+    // Explicit issueUrl/prUrl on the replaces: call override the prior worker's.
+    const overrideResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
+      "--tier", "senior", "--replaces", worker.threadId,
+      "--issue-url", "https://github.com/acme/shop/issues/9",
+      "--pr-url", "https://github.com/acme/shop/pull/10",
+      "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(overrideResult.exitCode).toBe(0);
+    const overrideWorker = JSON.parse(overrideResult.stdout!) as { threadId: string };
+    expect(state.spawned.at(-1).prompt).toContain("https://github.com/acme/shop/issues/9");
+    expect(state.spawned.at(-1).prompt).toContain("https://github.com/acme/shop/pull/10");
+    expect(state.spawned.at(-1).prompt).not.toContain("https://github.com/acme/shop/issues/7");
+    expect(state.spawned.at(-1).prompt).not.toContain("https://github.com/acme/shop/pull/8");
+    const overrideRow = state.db.prepare(`SELECT issue_url, pr_url FROM managed_threads WHERE thread_id=?`).get(overrideWorker.threadId) as any;
+    expect(overrideRow.issue_url).toBe("https://github.com/acme/shop/issues/9");
+    expect(overrideRow.pr_url).toBe("https://github.com/acme/shop/pull/10");
+
+    // Omitting issueUrl/prUrl on a further replaces: call inherits the prior worker's.
+    const inheritResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug again",
+      "--tier", "senior", "--replaces", overrideWorker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(inheritResult.exitCode).toBe(0);
+    const inheritedWorker = JSON.parse(inheritResult.stdout!) as { threadId: string };
+    expect(state.spawned.at(-1).prompt).toContain("https://github.com/acme/shop/issues/9");
+    expect(state.spawned.at(-1).prompt).toContain("https://github.com/acme/shop/pull/10");
+    const inheritedRow = state.db.prepare(`SELECT issue_url, pr_url FROM managed_threads WHERE thread_id=?`).get(inheritedWorker.threadId) as any;
+    expect(inheritedRow.issue_url).toBe("https://github.com/acme/shop/issues/9");
+    expect(inheritedRow.pr_url).toBe("https://github.com/acme/shop/pull/10");
   });
 
   test("tells the worker the forge is Chief's even when only a pull request was created", async () => {
