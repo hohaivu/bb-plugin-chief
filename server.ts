@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import {
   defineRpcContract,
@@ -15,6 +17,7 @@ const RULES_FILE = "chief.md";
 const RECONCILE_INTERVAL_MS = 30_000;
 const MAX_ALERT_LENGTH = 3_000;
 const MAX_RESULT_LENGTH = 8_000;
+const MAX_PLAN_LENGTH = 64_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 const FORGE_CLI_TIMEOUT_MS = 10_000;
 /** One wording for the reviewer's read-only rule, said when the review starts and
@@ -228,6 +231,9 @@ const readyReport = z.object({
   ),
   regression: z.boolean().optional().describe(
     "Reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
+  ),
+  plan: z.string().trim().min(1).max(MAX_PLAN_LENGTH).optional().describe(
+    "A planner's ready report requires this: the full plan body as Markdown. Chief receives it as a file, not inline. No other role sets this.",
   ),
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
@@ -1537,6 +1543,16 @@ export default async function plugin(bb: BbPluginApi) {
     for (const alert of pendingAlerts.all() as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
 
+  /** The server, not the planner, owns writing the plan: the planner submits it
+   * through chief_report and this lands it at the thread's own storage location. */
+  async function writePlan(threadId: string, body: string) {
+    const { storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
+    await mkdir(storageRootPath, { recursive: true });
+    const path = join(storageRootPath, "plan.md");
+    await writeFile(path, `${body}\n`);
+    return path;
+  }
+
   async function report(threadId: string, params: z.infer<typeof reportParams>, callerProjectId: string) {
     let row = roles.get(threadId);
     if (!row) {
@@ -1572,6 +1588,13 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "reviewer" && params.state === "ready" && !verdict) {
       throw new Error('A reviewer\'s ready report must carry a verdict: "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
     }
+    if (row.role === "planner" && params.state === "ready" && !params.plan) {
+      throw new Error("A planner's ready report requires plan: the full plan body.");
+    }
+    if (params.state === "ready" && params.plan && row.role !== "planner") {
+      throw new Error("Only a planner's ready report carries plan.");
+    }
+    const planPath = params.state === "ready" && params.plan ? await writePlan(threadId, params.plan) : null;
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, which under a phased plan is the
     // phase count rather than rejection rounds — a phase's first-ever rejection can
@@ -1621,7 +1644,7 @@ export default async function plugin(bb: BbPluginApi) {
               : row.role === "advisor" && params.state === "ready"
                 ? `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${current.worker_thread_id ? ` (replaces: ${current.worker_thread_id})` : ""} with the advice in its context, or escalate to the user if it names a genuine decision.`
                 : row.role === "planner" && params.state === "ready"
-                  ? "Read the plan file named above in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do."
+                  ? `Plan file: ${planPath}. Read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Optionally, chief_consult the Advisor with the plan file's path for a second opinion before delegating. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do.`
                   : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
     const contentKey = createHash("sha1").update(summary).digest("hex").slice(0, 16);
@@ -2136,7 +2159,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_report",
-    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict.",
+    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file.",
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
