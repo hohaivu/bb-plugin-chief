@@ -22,8 +22,12 @@ const FORGE_CLI_TIMEOUT_MS = 10_000;
 const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
 /** Same for a planner: said when the plan starts and again on every continuation. */
 const PLAN_ONLY = "Remain read-only in the repository: do not create, modify, or delete any file it tracks. Writing the plan itself to $BB_THREAD_STORAGE/plan.md is not a repository edit and stays allowed. A worker implements the plan in its own worktree.";
+/** Same for an advisor: said when the consult starts and again on every continuation. */
+const ADVISE_ONLY = "Remain advisory: read code and run commands to reproduce the problem, but do not create, modify, or delete any file, commit, or push. Report your advice to Chief; a worker makes the change.";
 /** BB's builtin plan slash command, the trigger a provider maps to its own plan mode. */
 const PLAN_COMMAND = "/plan";
+/** Consecutive request_changes verdicts on one task before Chief must consult the advisor. */
+const CONSULT_AFTER_REJECTIONS = 2;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const execFileAsync = promisify(execFile);
@@ -78,7 +82,7 @@ async function resolvePullRequestBranch(pullRequest: string, cwd: string | null)
   }
 }
 
-const roleSchema = z.enum(["chief", "planner", "worker", "reviewer"]);
+const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor"]);
 /** What a spawn seeds into a thread's pluginMetadata, read back in bb.agents.configure.
  * insertThread runs only after threads.spawn resolves, so the very first configure()
  * call for a brand-new thread can land before that row exists; pluginMetadata is
@@ -97,7 +101,7 @@ const tierSchema = z.enum(["junior", "senior"]);
 const verdictSchema = z.enum(["approve", "request_changes"]);
 /** The role key chief_models stores a per-machine model pick under: the
  * lifecycle roles, but with "worker" split into its two tiers. */
-const modelRoleSchema = z.enum(["chief", "planner", "junior", "senior", "reviewer"]);
+const modelRoleSchema = z.enum(["chief", "planner", "junior", "senior", "reviewer", "advisor"]);
 const stateSchema = z.enum([
   "starting",
   "pending",
@@ -142,6 +146,7 @@ const modelConfigurationSchema = z.object({
       junior: modelSelectionSchema.nullable(),
       senior: modelSelectionSchema.nullable(),
       reviewer: modelSelectionSchema.nullable(),
+      advisor: modelSelectionSchema.nullable(),
     }),
     /** Roles whose stored pick this machine can no longer serve, so spawns use BB's default. */
     unusable: z.array(modelRoleSchema),
@@ -189,6 +194,10 @@ const delegateParams = z.object({
  * constraints it is being asked to propose. */
 const planParams = delegateParams.pick({ title: true, mission: true, context: true });
 
+const consultParams = planParams.extend({
+  workerThreadId: z.string().trim().min(1).optional().describe("The managed worker whose change keeps failing review: the advisor runs in its worktree and gets its brief, reviewer verdicts, and branch."),
+});
+
 const reviewParams = z.object({
   workerThreadId: z.string().trim().min(1).optional().describe("An existing managed worker's thread id."),
   pullRequest: z.string().trim().min(1).max(500).optional().describe(
@@ -211,6 +220,9 @@ const readyReport = z.object({
   result: z.string().trim().min(1).max(MAX_RESULT_LENGTH),
   verdict: verdictSchema.optional().describe(
     "Required in a review thread: approve when the change can ship as it stands, request_changes when the worker must fix something. Workers leave this unset.",
+  ),
+  regression: z.boolean().optional().describe(
+    "Reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
   ),
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
@@ -496,6 +508,54 @@ export const MIGRATIONS = [
     `DELETE FROM plugin_meta WHERE key='jev_verified'`,
     // Child threads spawned by Chief or filed under Chief track their parent thread.
     `ALTER TABLE managed_threads ADD COLUMN parent_thread_id TEXT`,
+    // Admitting the advisor role means widening two CHECK constraints again, and
+    // SQLite still cannot drop one. Same rebuild pattern as managed_threads_v2 /
+    // chief_models_v3 above: column order matches the live table, ALTER-added
+    // columns last, which is what SELECT * relies on.
+    `CREATE TABLE managed_threads_v3 (
+      thread_id TEXT PRIMARY KEY,
+      role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor')),
+      project_id TEXT NOT NULL,
+      chief_thread_id TEXT,
+      worker_thread_id TEXT,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      status TEXT,
+      result TEXT,
+      blocker TEXT,
+      recommendation TEXT,
+      active_since INTEGER,
+      active_cycle INTEGER NOT NULL DEFAULT 0,
+      stall_alerted_cycle INTEGER,
+      lifecycle_alert_key TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      tier TEXT,
+      branch TEXT,
+      issue_url TEXT,
+      pr_url TEXT,
+      verdict TEXT,
+      brief TEXT,
+      reject_streak INTEGER NOT NULL DEFAULT 0,
+      parent_thread_id TEXT
+    )`,
+    `INSERT INTO managed_threads_v3 SELECT * FROM managed_threads`,
+    `DROP TABLE managed_threads`,
+    `ALTER TABLE managed_threads_v3 RENAME TO managed_threads`,
+    // Dropping the table dropped its index with it.
+    `CREATE INDEX IF NOT EXISTS managed_threads_chief ON managed_threads (chief_thread_id, created_at)`,
+    `CREATE TABLE chief_models_v4 (
+      host_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('chief','planner','junior','senior','reviewer','advisor')),
+      provider_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      reasoning_level TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (host_id, role)
+    )`,
+    `INSERT INTO chief_models_v4 SELECT * FROM chief_models`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_v4 RENAME TO chief_models`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -981,6 +1041,80 @@ export default async function plugin(bb: BbPluginApi) {
     return { threadId: thread.id, title, projectId };
   }
 
+  /** A consult is read-only, like a review: with a worker it reuses that
+   * worker's worktree so the advisor can reproduce the failing change; without
+   * one it runs in the project's own checkout, like a plan. */
+  async function startConsult(params: z.infer<typeof consultParams>, callerThreadId?: string | null) {
+    const { chief, projectId } = await owningChief(callerThreadId);
+    const worker = params.workerThreadId ? roles.get(params.workerThreadId) : undefined;
+    if (params.workerThreadId && (!worker || worker.role !== "worker" || !belongsToChief(worker, chief.thread_id))) {
+      throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
+    }
+    let workerLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
+    if (worker) {
+      workerLive = await bb.sdk.threads.get({ threadId: worker.thread_id });
+      if (BUSY_STATUSES.has(workerLive.status)) throw new Error(`Worker ${worker.thread_id} is ${workerLive.status}; wait until it is idle before starting a consult.`);
+      if (workerLive.deletedAt !== null || workerLive.archivedAt !== null) throw new Error(`Worker ${worker.thread_id} is not consultable.`);
+      if (!workerLive.environmentId) throw new Error(`Worker ${worker.thread_id} has no reusable environment.`);
+    }
+    const sectionId = await ensureSection();
+    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
+    // the rules into every advisor turn, so the spawn prompt does not repeat them.
+    await readRules(projectId);
+    const title = `Consult · ${params.title}`;
+    const reviews = worker ? taskReviews(worker) : [];
+    const prompt = [
+      `You are the managed advisor for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
+      "You are a strategic advisor and debugger of last resort: find the root cause and the smallest credible way forward.",
+      "", "## Question", params.mission,
+      ...(params.context ? ["", "## Context", params.context] : []),
+      ...(worker ? [
+        ...(worker.brief ? [
+          "", "## The brief this work was given", clipMiddle(worker.brief, 4_000),
+        ] : []),
+        ...(reviews.length ? [
+          "", "## Reviewer verdicts",
+          ...reviews.flatMap((review) => [
+            `Verdict: ${review.verdict} (${review.thread_id})`, clip(review.result ?? "", 300),
+            `Full report and last output: bb chief inspect ${review.thread_id}`,
+          ]),
+        ] : []),
+        "", "## Branch and diff",
+        `Branch: ${worker.branch ?? "the project default base"}`,
+        ...(worker.pr_url ? [`Pull request: ${worker.pr_url}`] : []),
+        "This worktree holds the change: read it with git diff against its base.",
+        ...(worker.result ? [clip(worker.result, 300), `Full report and last output: bb chief inspect ${worker.thread_id}`] : []),
+      ] : []),
+      "", "## Working contract",
+      `- ${ADVISE_ONLY}`,
+      "- Read every file this brief names in full before concluding anything: no partial reads, no limit or offset.",
+      "- Reproduce before concluding: run the failing test or command, and quote the command and its exit status.",
+      "- A ready report gives the root cause, the evidence, what earlier rounds missed, and the recommended next step for a fresh worker.",
+      "- A blocked report must include the blocker and your recommended decision or next action.",
+      "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
+    ].join("\n");
+    const hostId = worker ? await environmentHostId(workerLive!.environmentId!) : await projectHostId(projectId);
+    const thread = await bb.sdk.threads.spawn({
+      projectId,
+      environment: worker
+        ? { type: "reuse", environmentId: workerLive!.environmentId! }
+        : { type: "project-default" },
+      sectionId,
+      parentThreadId: chief.thread_id,
+      visibility: "visible",
+      title,
+      ...(await execution("advisor", hostId)),
+      prompt,
+      pluginMetadata: { role: "advisor", chiefThreadId: chief.thread_id },
+    });
+    insertThread({
+      threadId: thread.id, role: "advisor", projectId, chiefThreadId: chief.thread_id,
+      workerThreadId: worker?.thread_id ?? null, parentThreadId: chief.thread_id, title,
+      state: "starting", status: thread.status,
+    });
+    return { threadId: thread.id, title, projectId };
+  }
+
   async function delegate(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
     const prior = params.replaces ? roles.get(params.replaces) : undefined;
@@ -1089,19 +1223,19 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function continueThread(threadId: string, instruction: string, callerChiefThreadId?: string | null) {
     const row = roles.get(threadId);
-    if (!row || row.role === "chief") throw new Error(`No managed worker, planner, or reviewer ${threadId}.`);
+    if (!row || row.role === "chief") throw new Error(`No managed worker, planner, reviewer, or advisor ${threadId}.`);
     const callerChief = callerChiefThreadId ? roles.get(callerChiefThreadId) : undefined;
     const effectiveChiefId = (callerChief && callerChief.role === "chief")
       ? callerChief.thread_id
       : (row.chief_thread_id ?? undefined);
-    // Planners and reviewers both stay out of the files; only a worker edits.
-    // The instruction leads so consecutive continuations differ from their first
-    // character in the BB queue preview, instead of both starting with the same
-    // read-only reminder. Clip the instruction alone, reserving room for the
+    // Planners, reviewers, and advisors all stay out of the files; only a worker
+    // edits. The instruction leads so consecutive continuations differ from their
+    // first character in the BB queue preview, instead of both starting with the
+    // same read-only reminder. Clip the instruction alone, reserving room for the
     // reminder and the blank line between them, then append the reminder to the
     // already-clipped text — otherwise a long instruction could delete or
     // truncate the read-only constraint instead of just itself.
-    const reminder = row.role === "reviewer" ? REVIEW_ONLY : row.role === "planner" ? PLAN_ONLY : null;
+    const reminder = ({ reviewer: REVIEW_ONLY, planner: PLAN_ONLY, advisor: ADVISE_ONLY } as Partial<Record<ManagedRow["role"], string>>)[row.role] ?? null;
     const text = reminder
       ? `${clip(instruction, MAX_RESULT_LENGTH - reminder.length - 2)}\n\n${reminder}`
       : clip(instruction, MAX_RESULT_LENGTH);
@@ -1137,6 +1271,7 @@ export default async function plugin(bb: BbPluginApi) {
       "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When the worker's brief context names a plan file, read that file in full before judging the change against it.",
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
       `Report your findings to Chief thread ${opts.chiefThreadId} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
+      "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
       "If the worker's brief lays out ordered phases and this is not the last one, name the next phase in your recommendation (for example \"Continue the worker with phase 3 of 4.\"); leave recommendation unset only when no phases remain, since that is what tells Chief whether to complete this work or continue it.",
       "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
       ...opts.provenance,
@@ -1387,7 +1522,7 @@ export default async function plugin(bb: BbPluginApi) {
         row = roles.get(threadId);
       }
     }
-    if (!row || row.role === "chief") throw new Error("chief_report is available only in managed worker, planner, and reviewer threads.");
+    if (!row || row.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
     if (["complete", "archived", "deleted"].includes(row.state)) {
       throw new Error(`Managed thread ${threadId} is ${row.state} and can no longer report.`);
     }
@@ -1411,7 +1546,8 @@ export default async function plugin(bb: BbPluginApi) {
     );
     reloadRoles();
     const current = roles.get(threadId)!;
-    const deadlocked = verdict === "request_changes" && current.reject_streak >= 2;
+    const deadlocked = verdict === "request_changes" && current.reject_streak >= CONSULT_AFTER_REJECTIONS;
+    const regression = params.state === "ready" && params.regression === true && verdict === "request_changes";
     const summary = [
       `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
@@ -1429,17 +1565,22 @@ export default async function plugin(bb: BbPluginApi) {
             ? `The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${current.worker_thread_id}).`
             : "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
           : "The reviewer approves. Complete this work, then mark the pull request ready."
-        : deadlocked
-          ? `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging: escalate to the user with both positions and your recommendation instead of funding another round.`
+        : deadlocked || regression
+          ? `${regression && !deadlocked
+              ? "The reviewer reports this change introduced a new problem."
+              : `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging.`
+            } Before starting another worker round, call chief_consult${current.worker_thread_id ? ` (workerThreadId: ${current.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`
           : verdict === "request_changes"
             ? current.worker_thread_id
               ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${current.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
               : "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
             : row.role === "worker" && params.state === "ready"
               ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
-              : row.role === "planner" && params.state === "ready"
-                ? "Read the plan file named above in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do."
-                : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+              : row.role === "advisor" && params.state === "ready"
+                ? `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${current.worker_thread_id ? ` (replaces: ${current.worker_thread_id})` : ""} with the advice in its context, or escalate to the user if it names a genuine decision.`
+                : row.role === "planner" && params.state === "ready"
+                  ? "Read the plan file named above in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do."
+                  : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
     const delivered = await alertChief(current, `report:${current.active_cycle}:${now}:${randomUUID()}`, summary);
     if (!delivered) {
@@ -1636,6 +1777,23 @@ export default async function plugin(bb: BbPluginApi) {
     return false;
   }
 
+  /** The last 3 reviewer rows with a verdict for this worker's task, so the
+   * advisor sees the review history that led to the consult, across a `replaces`
+   * handoff. ponytail: chains by matching branch across the whole project, so a
+   * branch reused by a later task can surface an earlier task's reviews, and
+   * with no branch only the current worker's own reviews are found. Upgrade to
+   * a `replaces` link column if that ever needs to be precise. */
+  function taskReviews(worker: ManagedRow): ManagedRow[] {
+    const chain = worker.branch
+      ? [...roles.values()].filter((row) => row.role === "worker" && row.project_id === worker.project_id && row.branch === worker.branch)
+      : [worker];
+    const workerIds = new Set(chain.map((row) => row.thread_id));
+    return [...roles.values()]
+      .filter((row) => row.role === "reviewer" && row.verdict && row.worker_thread_id && workerIds.has(row.worker_thread_id))
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, 3);
+  }
+
   const INACTIVE_CHIEF_STATES = ["complete", "archived", "deleted"];
   /** A superseded Chief (spawnChief already marked it complete/archived/deleted and
    * handed its workers to the replacement) must not still be able to act as Chief. */
@@ -1765,6 +1923,26 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const result = await startPlan(params, context.threadId);
       return `Started planner “${result.title}” in thread ${result.threadId}. Read its plan before delegating the work.`;
+    },
+  });
+  bb.agents.registerTool({
+    name: "chief_consult",
+    description: "Start a read-only advisor on a hard problem or a change that keeps failing review. It may read code and run commands to reproduce it, never edits, and reports its advice back to you.",
+    parameters: consultParams,
+    async execute(params, context) {
+      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      if (!isActiveChief(caller)) {
+        throw new Error("chief_consult requires an active registered Chief thread.");
+      }
+      if (params.workerThreadId) {
+        const worker = await resolveTarget(params.workerThreadId, caller.thread_id);
+        if (!worker || !belongsToChief(worker, caller.thread_id)) {
+          throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
+        }
+      }
+      touchCallerChief(caller);
+      const result = await startConsult(params, context.threadId);
+      return `Started advisor “${result.title}” in thread ${result.threadId}. Wait for its advice before starting another worker round.`;
     },
   });
   function touchCallerChief(caller?: ManagedRow) {
@@ -1912,6 +2090,7 @@ export default async function plugin(bb: BbPluginApi) {
       return {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
+          "chief_consult",
           "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete",
         ],
         skills: ["chief"],
@@ -1948,6 +2127,7 @@ export default async function plugin(bb: BbPluginApi) {
           junior: readRoleModel(host.id, "junior"),
           senior: readRoleModel(host.id, "senior"),
           reviewer: readRoleModel(host.id, "reviewer"),
+          advisor: readRoleModel(host.id, "advisor"),
         };
         // A connected machine can answer for its own picks, so say which ones it
         // would refuse instead of showing a model the next spawn will ignore.
@@ -1986,6 +2166,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
+    "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id] [--json]",
     "  bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
@@ -2002,6 +2183,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
+      { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id] [--json]" },
       { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
@@ -2065,6 +2247,15 @@ export default async function plugin(bb: BbPluginApi) {
           if (!parsed.success) return fail(`Invalid plan brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await startPlan(parsed.data, context.threadId);
           return ok(result, `Started planner “${result.title}” in ${result.threadId}.`);
+        }
+        if (command === "consult") {
+          const parsed = consultParams.safeParse({
+            title: args.one("title"), mission: args.one("mission"), context: args.one("context"),
+            workerThreadId: args.one("worker"),
+          });
+          if (!parsed.success) return fail(`Invalid consult brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
+          const result = await startConsult(parsed.data, context.threadId);
+          return ok(result, `Started advisor “${result.title}” in ${result.threadId}.`);
         }
         if (command === "delegate") {
           const parsed = delegateParams.safeParse({

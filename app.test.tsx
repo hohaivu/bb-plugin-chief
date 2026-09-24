@@ -145,6 +145,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
         junior: null,
         senior: null,
         reviewer: null,
+        advisor: null,
       },
       unusable: [],
     }],
@@ -165,7 +166,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
   unmounts.push(() => rendered.lifecycle.unmount());
 
   await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(4);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
 
   fireEvent.click(rendered.getByRole("button", { name: "Use BB default" }));
 
@@ -175,5 +176,5 @@ test("picks a scanned model per role and clears back to the BB default", async (
       input: { hostId: "host_1", role: "chief", selection: null },
     }),
   );
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(6);
 });

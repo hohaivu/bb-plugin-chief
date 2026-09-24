@@ -14,6 +14,7 @@ const ROLES = [
   { role: "junior", label: "Junior worker", hint: "Trivial, mechanical, already-specified bounded work." },
   { role: "senior", label: "Senior worker", hint: "Everything else Chief delegates." },
   { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
+  { role: "advisor", label: "Advisor", hint: "Diagnoses work that keeps failing review." },
 ] as const;
 
 function Crown() {
@@ -150,7 +151,7 @@ function ChiefModelSettings() {
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          Chief, its planners, workers, and reviewers can each run on their own model. A role
+          Chief, its planners, workers, reviewers, and advisors can each run on their own model. A role
           without a selection uses BB&apos;s own default for the project.
         </p>
         <button
