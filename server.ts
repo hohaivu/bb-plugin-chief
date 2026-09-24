@@ -18,6 +18,8 @@ const RECONCILE_INTERVAL_MS = 30_000;
 const MAX_ALERT_LENGTH = 3_000;
 const MAX_RESULT_LENGTH = 8_000;
 const MAX_PLAN_LENGTH = 64_000;
+// ponytail: a nudge is 1–3 sentences; anything longer is new work for a fresh thread.
+const MAX_NUDGE_LENGTH = 500;
 // ponytail: arbitrary cap so a runaway plan can't schedule an unbounded worker chain.
 const MAX_WAVES = 8;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
@@ -356,6 +358,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Own work through completion; do not merely dispatch it.
 - Inspect the worker's evidence before choosing the next action.
 - Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark verified work complete.
+- Never reuse a worker for more work. Finishing skipped acceptance criteria, rebasing or restacking, or any new task goes to a fresh worker with chief_delegate replaces: — same worktree, branch, and pull request. chief_continue is only a short nudge to a thread that is still working.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
 - A worker report is evidence, not proof. Start one independent review per run with chief_review when a worker's ready alert says to — after the final wave, or for a worker with no plan link — and read that reviewer's verdict before completing the work.
@@ -1345,17 +1348,19 @@ export default async function plugin(bb: BbPluginApi) {
     const effectiveChiefId = (callerChief && callerChief.role === "chief")
       ? callerChief.thread_id
       : (row.chief_thread_id ?? undefined);
+    const handoff = `Hand it to a fresh worker instead: chief_delegate (replaces: ${threadId}) keeps the same worktree, branch, and pull request.`;
+    if (row.role === "worker" && (row.state === "ready" || row.state === "complete")) {
+      throw new Error(`Worker ${threadId} already reported ${row.state}. chief_continue never reuses a finished worker for more work — deferred acceptance criteria, a rebase or restack, or a new task. ${handoff}`);
+    }
+    if (instruction.trim().length > MAX_NUDGE_LENGTH) {
+      throw new Error(`chief_continue is a short nudge of at most ${MAX_NUDGE_LENGTH} characters to a thread that is still working. ${row.role === "worker" ? handoff : rerouteSteps(row)}`);
+    }
     // Planners, reviewers, and advisors all stay out of the files; only a worker
     // edits. The instruction leads so consecutive continuations differ from their
     // first character in the BB queue preview, instead of both starting with the
-    // same read-only reminder. Clip the instruction alone, reserving room for the
-    // reminder and the blank line between them, then append the reminder to the
-    // already-clipped text — otherwise a long instruction could delete or
-    // truncate the read-only constraint instead of just itself.
+    // same read-only reminder.
     const reminder = ({ reviewer: REVIEW_ONLY, planner: PLAN_ONLY, advisor: ADVISE_ONLY } as Partial<Record<ManagedRow["role"], string>>)[row.role] ?? null;
-    const text = reminder
-      ? `${clip(instruction, MAX_RESULT_LENGTH - reminder.length - 2)}\n\n${reminder}`
-      : clip(instruction, MAX_RESULT_LENGTH);
+    const text = reminder ? `${instruction}\n\n${reminder}` : instruction;
     await bb.sdk.threads.send({
       threadId,
       mode: "queue-if-active",
@@ -1428,7 +1433,7 @@ export default async function plugin(bb: BbPluginApi) {
       return `The reviewer reports this change introduced a new problem. Before starting another worker round, call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`;
     }
     return row.worker_thread_id
-      ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
+      ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`
       : "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision.";
   }
 
@@ -2328,10 +2333,10 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_continue",
-    description: "Send or queue a concrete next instruction to a managed worker or reviewer. Reviewers stay read-only; send a repair to the worker instead.",
+    description: "Send a short nudge (at most 500 characters) to a managed thread that is still working. Never reuse a worker for more work: once it has reported ready, finishing skipped acceptance criteria, a rebase or restack, or any new task goes to a fresh worker with chief_delegate replaces: (same worktree, branch, and PR). Reviewers stay read-only; a repair goes to a fresh worker.",
     parameters: z.object({
       threadId: z.string(),
-      instruction: z.string().trim().min(1).max(MAX_RESULT_LENGTH),
+      instruction: z.string().trim().min(1).max(MAX_RESULT_LENGTH).describe(`A short nudge, at most ${MAX_NUDGE_LENGTH} characters.`),
     }),
     async execute({ threadId, instruction }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
