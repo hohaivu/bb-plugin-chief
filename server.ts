@@ -209,6 +209,11 @@ const reviewParams = z.object({
   message: "Give exactly one of workerThreadId, pullRequest, or branch.",
 });
 
+const stopParams = z.object({
+  threadId: z.string().trim().min(1),
+  reason: z.string().trim().max(1_000).optional().describe("Why it is being stopped: what the evidence shows it stuck on."),
+});
+
 const optionalReport = z.object({
   state: z.enum(["active", "idle", "failed"]),
   result: z.string().trim().max(MAX_RESULT_LENGTH).optional(),
@@ -1436,6 +1441,25 @@ export default async function plugin(bb: BbPluginApi) {
     return roles.get(threadId)!;
   }
 
+  /** Interrupts a running managed thread but keeps its worktree, branch, and history:
+   * the row is marked blocked (with a reroute recommendation) rather than complete, so
+   * chief_delegate replaces: can hand it to a fresh worker once it is idle. */
+  async function stopThread(threadId: string, reason?: string) {
+    const row = roles.get(threadId);
+    if (!row || row.role === "chief") throw new Error(`No managed thread ${threadId} to stop.`);
+    const live = await bb.sdk.threads.get({ threadId });
+    if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Cannot stop ${threadId} because it is not a live thread.`);
+    if (!BUSY_STATUSES.has(live.status)) {
+      throw new Error(`${threadId} is ${live.status}; nothing to stop.${row.role === "worker" ? ` Replace it with chief_delegate (replaces: ${threadId}).` : ""}`);
+    }
+    await bb.sdk.threads.stop({ threadId });
+    db.prepare(`UPDATE managed_threads SET state='blocked', blocker=?, recommendation=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
+      clip(`Stopped by Chief${reason ? `: ${reason}` : "."}`, 4_000), rerouteSteps(row), Date.now(), threadId,
+    );
+    reloadRoles();
+    return roles.get(threadId)!;
+  }
+
   function enqueueAlert(row: ManagedRow, key: string, message: string) {
     if (!row.chief_thread_id) throw new Error(`Managed thread ${row.thread_id} has no Chief to notify.`);
     const dedupeKey = `${row.thread_id}:${key}`;
@@ -1771,6 +1795,20 @@ export default async function plugin(bb: BbPluginApi) {
     return [...roles.values()].filter((row) => row.project_id === projectId && (includeComplete || row.state !== "complete"));
   }
 
+  /** Said the same way in chief_stop's reply and both stall alerts. */
+  function rerouteSteps(row: ManagedRow): string {
+    if (row.role === "worker") {
+      return `Once it is idle, call chief_consult (workerThreadId: ${row.thread_id}) if the cause is unclear, then hand the work to a fresh worker with chief_delegate (replaces: ${row.thread_id}) and the advice in its context. Use chief_plan instead if the brief itself is wrong or too big.`;
+    }
+    if (row.role === "reviewer") {
+      return row.worker_thread_id
+        ? `Once it is idle, start a fresh review with chief_review (workerThreadId: ${row.worker_thread_id}).`
+        : `Once it is idle, chief_complete it, then start a fresh chief_review for branch ${row.branch}.`;
+    }
+    if (row.role === "planner") return "Once it is idle, start a fresh chief_plan with a narrower brief.";
+    return "Once it is idle, decide without it or start a fresh chief_consult with a narrower question.";
+  }
+
   function belongsToChief(row: ManagedRow, chiefThreadId: string) {
     if (row.thread_id === chiefThreadId || row.chief_thread_id === chiefThreadId) return true;
     if (row.parent_thread_id && row.parent_thread_id === chiefThreadId) return true;
@@ -1845,6 +1883,15 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
+  async function lastOutput(threadId: string) {
+    try {
+      return (await bb.sdk.threads.output({ threadId })).output;
+    } catch (error) {
+      bb.log.warn(`Could not inspect output for ${threadId}: ${String(error)}`);
+      return null;
+    }
+  }
+
   async function inspect(threadId: string, projectId: string) {
     const row = roles.get(threadId);
     if (!row || row.project_id !== projectId) throw new Error(`No managed thread ${threadId} for this Chief project.`);
@@ -1855,12 +1902,7 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) {
       bb.log.warn(`Could not inspect live status for ${threadId}: ${String(error)}`);
     }
-    let output: string | null = null;
-    try {
-      output = (await bb.sdk.threads.output({ threadId })).output;
-    } catch (error) {
-      bb.log.warn(`Could not inspect output for ${threadId}: ${String(error)}`);
-    }
+    const output = await lastOutput(threadId);
     return [
       `Thread: ${row.title} (${threadId})`,
       `Role: ${row.role}`,
@@ -2015,6 +2057,22 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   bb.agents.registerTool({
+    name: "chief_stop",
+    description: "Interrupt a running managed thread that is stuck or looping. Keeps its worktree and branch so a fresh worker can replace it with chief_delegate replaces.",
+    parameters: stopParams,
+    async execute({ threadId, reason }, context) {
+      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      if (!isActiveChief(caller)) throw new Error("chief_stop requires an active registered Chief thread.");
+      const target = await resolveTarget(threadId, caller.thread_id);
+      if (!target || !belongsToChief(target, caller.thread_id)) {
+        throw new Error(`No managed thread ${threadId} for this Chief.`);
+      }
+      touchCallerChief(caller);
+      const row = await stopThread(threadId, reason);
+      return `Stopped “${row.title}” (${threadId}). Its worktree, branch, and history are kept. ${rerouteSteps(row)}`;
+    },
+  });
+  bb.agents.registerTool({
     name: "chief_review",
     description: "Start or return an independent read-only review: in an idle worker's existing worktree, or in a fresh worktree for a pull request or branch no managed worker owns.",
     parameters: reviewParams,
@@ -2091,7 +2149,7 @@ export default async function plugin(bb: BbPluginApi) {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
           "chief_consult",
-          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete",
+          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete",
         ],
         skills: ["chief"],
         instructions: [
@@ -2170,6 +2228,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
+    "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
     "  bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]",
     "  bb chief complete <thread-id> [--result \"…\"] [--json]",
   ].join("\n");
@@ -2187,6 +2246,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
+      { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
       { name: "review", summary: "Start or return a read-only review for a worker, pull request, or branch", usage: "bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]" },
       { name: "complete", summary: "Mark verified, non-running managed work complete", usage: "bb chief complete <thread-id> [--result \"…\"] [--json]" },
     ],
@@ -2282,6 +2342,12 @@ export default async function plugin(bb: BbPluginApi) {
           if (!threadId || !instruction) return fail("continue requires <thread-id> and --instruction");
           await continueThread(threadId, instruction);
           return ok({ threadId }, `Continued ${threadId}.`);
+        }
+        if (command === "stop") {
+          const parsed = stopParams.safeParse({ threadId: args.positional[0], reason: args.one("reason") });
+          if (!parsed.success) return fail(`Invalid stop target: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
+          const row = await stopThread(parsed.data.threadId, parsed.data.reason);
+          return ok(toManaged(row), `Stopped “${row.title}”. ${row.recommendation}`);
         }
         if (command === "review") {
           const parsed = reviewParams.safeParse({

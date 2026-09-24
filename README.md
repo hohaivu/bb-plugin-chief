@@ -96,11 +96,12 @@ bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_...
 bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." --tier junior|senior [--branch feature/...] [--issue-url ...] [--pr-url ...] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
+bb chief stop thr_... [--reason "..."] [--json]
 bb chief review thr_worker [--focus "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
 ```
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
 
 ## Build and verify
 

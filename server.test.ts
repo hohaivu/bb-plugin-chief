@@ -57,6 +57,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   const pluginMetadataStore = new Map<string, any>();
   const sent: any[] = [];
   const spawned: any[] = [];
+  const stopped: string[] = [];
   const catalogReads: (string | undefined)[] = [];
   const { bb, harness } = createFakePluginHost({
     pluginId: "chief",
@@ -151,6 +152,11 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           return { ok: true, delivery: "sent" as const };
         },
         output: async ({ threadId }: { threadId: string }) => ({ output: `last output from ${threadId}` }),
+        stop: async ({ threadId }: { threadId: string }) => {
+          stopped.push(threadId);
+          live.set(threadId, { ...live.get(threadId)!, status: "idle" });
+          return { ok: true as const };
+        },
       },
     },
   });
@@ -169,6 +175,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     db: bb.storage.database(),
     spawned,
     sent,
+    stopped,
     live,
     catalogReads,
     section: () => section,
@@ -1279,7 +1286,7 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_review", "chief_complete"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete"]);
     expect(chief.skills).toEqual(["chief"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker"]);
@@ -2119,6 +2126,71 @@ describe("Chief backend", () => {
     expect(roster).toContain("branch: feature/fix-checkout-totals");
     expect(roster).toContain("pr: https://github.com/acme/shop/pull/8");
     expect(roster).toContain("worker (senior)");
+  });
+
+  test("stops a stuck worker and hands its worktree to a fresh worker", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { branch: "feature/fix-checkout-totals" });
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+
+    const text = await state.harness.behavior.callAgentTool("chief_stop", {
+      threadId: worker.threadId, reason: "looping on the same failing test",
+    }, { threadId: chief.threadId, projectId: "proj_1" }) as string;
+    expect(state.stopped).toEqual([worker.threadId]);
+    expect(text).toContain(`chief_delegate (replaces: ${worker.threadId})`);
+    expect(text).toContain(`chief_consult (workerThreadId: ${worker.threadId})`);
+    const blockedRow = state.db.prepare(`SELECT state, blocker FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
+    expect(blockedRow.state).toBe("blocked");
+    expect(blockedRow.blocker).toContain("Stopped by Chief: looping");
+
+    const replaceResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
+      "--criteria", "Regression passes", "--tier", "senior",
+      "--replaces", worker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(replaceResult.exitCode).toBe(0);
+    expect(state.spawned.at(-1).environment).toEqual({ type: "reuse", environmentId: "env_worker" });
+    const oldRow = state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
+    expect(oldRow.state).toBe("complete");
+  });
+
+  test("refuses to stop from a worker, another Chief, or a thread that is not running", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+
+    await expect(state.harness.behavior.callAgentTool("chief_stop", {
+      threadId: worker.threadId,
+    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("active registered Chief");
+
+    const otherChief = await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string };
+    await expect(state.harness.behavior.callAgentTool("chief_stop", {
+      threadId: worker.threadId,
+    }, { threadId: otherChief.threadId, projectId: "proj_1" })).rejects.toThrow("for this Chief");
+
+    await expect(state.harness.behavior.callAgentTool("chief_stop", {
+      threadId: worker.threadId,
+    }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow("nothing to stop");
+
+    expect(state.stopped).toEqual([]);
+  });
+
+  test("bb chief stop interrupts a running thread and prints its reroute steps", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+
+    const result = await state.harness.behavior.runCli(
+      ["stop", worker.threadId, "--reason", "stuck"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(`replaces: ${worker.threadId}`);
+
+    const missing = await state.harness.behavior.runCli(["stop"], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(missing.exitCode).toBe(1);
   });
 
   test("chief_delegate rejects a call with no tier, naming both valid values in the error", async () => {
