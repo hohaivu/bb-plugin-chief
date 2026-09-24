@@ -654,23 +654,23 @@ describe("Chief backend", () => {
     expect(state.sent[0].threadId).toBe(chief.threadId);
   });
 
-  test("retries a failed lifecycle alert without duplicate delivery", async () => {
+  test("sends no plugin alert on a plain idle or failed event", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    state.failNextSend();
+    // BB's own native parent notice already covers a plain idle or failed
+    // thread; the plugin must stay silent here with nothing pending.
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "idle result",
     });
     expect(state.sent).toHaveLength(0);
-    await state.supervisorCycle();
-    expect(state.sent).toHaveLength(1);
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
+    await state.harness.behavior.emitThreadEvent("thread.failed", {
       thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "idle result",
+      error: "boom",
     });
-    expect(state.sent).toHaveLength(1);
+    expect(state.sent).toHaveLength(0);
   });
 
   test("supersedes an undelivered alert instead of re-delivering it after a newer report", async () => {
@@ -803,50 +803,6 @@ describe("Chief backend", () => {
     });
     expect(state.sent).toHaveLength(sentAfterBlocked);
     expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
-  });
-
-  test("still alerts idle when no report was delivered in that cycle", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Totals fixed",
-    }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Keep going"]);
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done again",
-    });
-    expect(state.sent.at(-1).input[0].text).toContain("is idle");
-  });
-
-  test("repeated idles after one chief_continue alert once", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Totals fixed",
-    }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Keep going"]);
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done again",
-    });
-    expect(state.sent.at(-1).input[0].text).toContain("is idle");
-    const sentAfterFirstIdle = state.sent.length;
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done again",
-    });
-    expect(state.sent).toHaveLength(sentAfterFirstIdle);
   });
 
   test("requires canonical ready and complete report payloads", async () => {

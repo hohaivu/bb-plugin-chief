@@ -1255,7 +1255,7 @@ export default async function plugin(bb: BbPluginApi) {
     });
     const now = Date.now();
     db.prepare(`UPDATE managed_threads SET state='active', chief_thread_id=?, blocker=NULL, recommendation=NULL, verdict=NULL,
-      active_since=?, active_cycle=active_cycle+1, stall_alerted_cycle=NULL, lifecycle_alert_key=NULL, updated_at=? WHERE thread_id=?`).run(
+      active_since=?, active_cycle=active_cycle+1, stall_alerted_cycle=NULL, updated_at=? WHERE thread_id=?`).run(
       effectiveChiefId ?? null, now, now, threadId,
     );
     reloadRoles();
@@ -1456,7 +1456,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`${threadId} is ${live.status}; nothing to stop.${row.role === "worker" ? ` Replace it with chief_delegate (replaces: ${threadId}).` : ""}`);
     }
     await bb.sdk.threads.stop({ threadId });
-    db.prepare(`UPDATE managed_threads SET state='blocked', blocker=?, recommendation=?, active_since=NULL, lifecycle_alert_key='stop', updated_at=? WHERE thread_id=?`).run(
+    db.prepare(`UPDATE managed_threads SET state='blocked', blocker=?, recommendation=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
       clip(`Stopped by Chief${reason ? `: ${reason}` : "."}`, 4_000), rerouteSteps(row), Date.now(), threadId,
     );
     reloadRoles();
@@ -1580,7 +1580,7 @@ export default async function plugin(bb: BbPluginApi) {
     // breaks the streak with an approve.
     db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
       reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
-      active_since=NULL, lifecycle_alert_key='report', updated_at=? WHERE thread_id=?`).run(
+      active_since=NULL, updated_at=? WHERE thread_id=?`).run(
       params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
       params.recommendation ?? null, verdict,
       verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
@@ -1688,7 +1688,7 @@ export default async function plugin(bb: BbPluginApi) {
     for (const projectId of projects) await readRules(projectId);
   }
 
-  async function lifecycle(kind: string, thread: { id: string; status?: string }, detail?: string | null) {
+  async function lifecycle(kind: string, thread: { id: string; status?: string }) {
     const row = roles.get(thread.id);
     if (!row) return;
     const now = Date.now();
@@ -1720,44 +1720,25 @@ export default async function plugin(bb: BbPluginApi) {
       state, thread.status ?? observed, now, thread.id,
     );
     reloadRoles();
+    // A plain idle or failed/archived/deleted thread is already reflected in
+    // BB's own native parent notice ("completed"/"needs help"/interrupted) since
+    // this plugin still spawns children under Chief. Only alert here for what
+    // the plugin alone knows: an auto-review that failed to start.
+    if (kind !== "idle") return;
     const current = roles.get(thread.id)!;
-    if (kind !== "idle") {
-      // failed/archived/deleted are never routine; Chief always hears about them.
-      await alertChief(current, `${kind}:${row.active_cycle}`, [
-        `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
-        ...(detail ? [`Detail: ${detail}`] : []),
-        "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
-      ].join("\n"));
-      return;
-    }
-    // Ready work earns its reviewer without Chief having to ask for one; Chief
-    // still owns the verdict. Only now is the worker idle enough to review.
     const pending = current.role === "worker" && current.state === "ready";
-    const review = pending ? await autoReview(current) : null;
-    if (pending) {
-      // The report already told Chief a review is coming, and the reviewer
-      // reports its own verdict; only a failure to start one is news.
-      if (review) return;
-      await alertChief(current, `${kind}:${row.active_cycle}`, [
-        `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
-        "Its review could not be started automatically. Start one with chief_review before completing this work.",
-      ].join("\n"));
-      return;
-    }
-    // lifecycle_alert_key non-NULL means Chief has already been told about this
-    // thread since it last resumed it, whether by a report or an earlier idle.
-    if (current.lifecycle_alert_key) return;
+    if (!pending) return;
+    const review = await autoReview(current);
+    if (review) return;
     await alertChief(current, `${kind}:${row.active_cycle}`, [
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
-      ...(detail ? [`Detail: ${detail}`] : []),
-      "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
+      "Its review could not be started automatically. Start one with chief_review before completing this work.",
     ].join("\n"));
-    db.prepare(`UPDATE managed_threads SET lifecycle_alert_key='idle' WHERE thread_id=?`).run(current.thread_id);
   }
 
   bb.events.on("thread.active", ({ thread }) => lifecycle("active", thread));
-  bb.events.on("thread.idle", ({ thread, lastAssistantText }) => lifecycle("idle", thread, lastAssistantText));
-  bb.events.on("thread.failed", ({ thread, error }) => lifecycle("failed", thread, error));
+  bb.events.on("thread.idle", ({ thread }) => lifecycle("idle", thread));
+  bb.events.on("thread.failed", ({ thread }) => lifecycle("failed", thread));
   bb.events.on("thread.archived", ({ thread }) => lifecycle("archived", thread));
   bb.events.on("thread.deleted", ({ thread }) => lifecycle("deleted", thread));
 
