@@ -290,6 +290,7 @@ interface ManagedRow {
   active_cycle: number;
   reject_streak: number;
   stall_alerted_cycle: number | null;
+  stop_alerted_cycle: number | null;
   lifecycle_alert_key: string | null;
   created_at: number;
   updated_at: number;
@@ -561,6 +562,8 @@ export const MIGRATIONS = [
     `INSERT INTO chief_models_v4 SELECT * FROM chief_models`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_v4 RENAME TO chief_models`,
+    // The hard stall alert (2x stallMinutes) fires once per active cycle, like the soft one.
+    `ALTER TABLE managed_threads ADD COLUMN stop_alerted_cycle INTEGER`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1749,13 +1752,23 @@ export default async function plugin(bb: BbPluginApi) {
           const now = Date.now();
           for (const row of [...roles.values()]) {
             if (row.role === "chief" || row.state !== "active" || row.active_since === null) continue;
-            if (now - row.active_since < threshold || row.stall_alerted_cycle === row.active_cycle) continue;
-            const sent = await alertChief(row, `stall:${row.active_cycle}`, [
-              `${row.role} “${row.title}” (${row.thread_id}) has remained active for more than ${Math.round(threshold / 60_000)} minutes.`,
-              "Inspect current evidence before intervening. Continue or steer only when a safe next instruction is clear; otherwise escalate the concrete blocker.",
+            const elapsed = now - row.active_since;
+            if (elapsed < threshold) continue;
+            const hard = elapsed >= 2 * threshold;
+            if ((hard ? row.stop_alerted_cycle : row.stall_alerted_cycle) === row.active_cycle) continue;
+            const output = await lastOutput(row.thread_id);
+            const minutes = Math.round(threshold / 60_000);
+            const sent = await alertChief(row, `stall:${row.active_cycle}${hard ? ":hard" : ""}`, [
+              `${row.role} “${row.title}” (${row.thread_id}) has been active for ${Math.round(elapsed / 60_000)} minutes${hard ? `, twice the ${minutes}-minute stall threshold` : ` (stall threshold ${minutes})`}.`,
+              `Last output: ${output ? clip(output, 400) : "(none available)"}`,
+              hard
+                ? "Stop it now with chief_stop unless that output shows it finishing. Its worktree and branch are kept."
+                : `Inspect it with chief_inspect. If it is progressing, leave it. If it is stuck or looping, chief_stop it: its worktree and branch are kept. At ${2 * minutes} minutes you will be told to stop it.`,
+              rerouteSteps(row),
             ].join("\n"));
             if (sent) {
-              db.prepare(`UPDATE managed_threads SET stall_alerted_cycle=?, updated_at=? WHERE thread_id=?`).run(row.active_cycle, Date.now(), row.thread_id);
+              db.prepare(`UPDATE managed_threads SET stall_alerted_cycle=?, stop_alerted_cycle=?, updated_at=? WHERE thread_id=?`)
+                .run(row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle, Date.now(), row.thread_id);
               reloadRoles();
             }
           }

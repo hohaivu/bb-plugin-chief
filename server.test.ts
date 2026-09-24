@@ -1729,6 +1729,9 @@ describe("Chief backend", () => {
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='managed_threads_chief'`).get())
       .toBeTruthy();
     expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
+    // The hard stall alert's dedupe column must survive the whole migration chain too.
+    expect((db.prepare(`PRAGMA table_info(managed_threads)`).all() as { name: string }[]).map((column) => column.name))
+      .toContain("stop_alerted_cycle");
   });
 
   test("adds reject_streak to an existing database and survives a restart", async () => {
@@ -1775,6 +1778,128 @@ describe("Chief backend", () => {
     const service = state.harness.behavior.runService("supervisor");
     service.controller.abort();
     await expect(service.done).resolves.toBeUndefined();
+  });
+
+  test("alerts a stalled thread once with evidence and a ladder, then once to stop it at twice the threshold", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ stallMinutes: "1" });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const t0 = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(t0);
+    try {
+      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
+
+      nowSpy.mockReturnValue(t0 + 61_000);
+      await state.supervisorCycle();
+      const afterSoft = state.sent.length;
+      const softAlert = state.sent.at(-1).input[0].text;
+      expect(softAlert).toContain("has been active for 1 minutes");
+      expect(softAlert).toContain(`last output from ${worker.threadId}`);
+      expect(softAlert).toContain("chief_stop");
+      expect(softAlert).toContain(`chief_delegate (replaces: ${worker.threadId})`);
+      expect(softAlert).toContain(`chief_consult (workerThreadId: ${worker.threadId})`);
+
+      await state.supervisorCycle();
+      expect(state.sent).toHaveLength(afterSoft);
+
+      nowSpy.mockReturnValue(t0 + 121_000);
+      await state.supervisorCycle();
+      expect(state.sent).toHaveLength(afterSoft + 1);
+      const hardAlert = state.sent.at(-1).input[0].text;
+      expect(hardAlert).toContain("twice the 1-minute stall threshold");
+      expect(hardAlert).toContain("Stop it now with chief_stop");
+
+      const afterHard = state.sent.length;
+      await state.supervisorCycle();
+      expect(state.sent).toHaveLength(afterHard);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("a supervisor that first sees a thread past twice the threshold sends only the stop alert", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ stallMinutes: "1" });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const t0 = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(t0);
+    try {
+      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
+
+      nowSpy.mockReturnValue(t0 + 121_000);
+      await state.supervisorCycle();
+      expect(state.sent).toHaveLength(1);
+      expect(state.sent.at(-1).input[0].text).toContain("Stop it now with chief_stop");
+
+      await state.supervisorCycle();
+      expect(state.sent).toHaveLength(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("a continued thread earns fresh stall alerts in its new active cycle", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ stallMinutes: "1" });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const t0 = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(t0);
+    try {
+      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
+
+      nowSpy.mockReturnValue(t0 + 121_000);
+      await state.supervisorCycle();
+      expect(state.sent.at(-1).input[0].text).toContain("Stop it now with chief_stop");
+
+      const continueTime = t0 + 121_000;
+      nowSpy.mockReturnValue(continueTime);
+      const continued = await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Try again"]);
+      expect(continued.exitCode).toBe(0);
+      const afterContinue = state.sent.length;
+
+      nowSpy.mockReturnValue(continueTime + 61_000);
+      await state.supervisorCycle();
+      expect(state.sent).toHaveLength(afterContinue + 1);
+      expect(state.sent.at(-1).input[0].text).toContain("has been active for 1 minutes");
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("a reviewer's stall ladder points at a fresh review, not a replacement worker", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ stallMinutes: "1" });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+
+    const t0 = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(t0);
+    try {
+      state.live.set(reviewer.threadId, { ...state.live.get(reviewer.threadId)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer.threadId)! });
+
+      nowSpy.mockReturnValue(t0 + 61_000);
+      await state.supervisorCycle();
+      const alert = state.sent.at(-1).input[0].text;
+      expect(alert).toContain(`chief_review (workerThreadId: ${worker.threadId})`);
+      expect(alert).not.toContain("chief_delegate");
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   test("spawns on BB defaults until a machine and role are given a model", async () => {
