@@ -1721,6 +1721,7 @@ describe("Chief backend", () => {
     // Dropping the table dropped its index; the roster scan needs it back.
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='managed_threads_chief'`).get())
       .toBeTruthy();
+    expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
   });
 
   test("adds reject_streak to an existing database and survives a restart", async () => {
