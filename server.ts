@@ -237,6 +237,10 @@ const optionalReport = z.object({
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
 });
+const planWavesSchema = z.array(z.object({
+  tier: tierSchema,
+  body: z.string().trim().min(1).max(MAX_PLAN_LENGTH),
+})).min(1).max(MAX_WAVES);
 const readyReport = z.object({
   state: z.literal("ready"),
   result: z.string().trim().min(1).max(MAX_RESULT_LENGTH),
@@ -248,10 +252,7 @@ const readyReport = z.object({
   ),
   plan: z.union([
     z.string().trim().min(1).max(MAX_PLAN_LENGTH),
-    z.array(z.object({
-      tier: tierSchema,
-      body: z.string().trim().min(1).max(MAX_PLAN_LENGTH),
-    })).min(1).max(MAX_WAVES),
+    planWavesSchema,
   ]).optional().describe(
     "A planner's ready report requires this: either the full plan body as Markdown (one wave, tier senior), or an array of up to 8 {tier, body} waves. Chief receives each wave as its own file, not inline. No other role sets this.",
   ),
@@ -357,7 +358,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark verified work complete.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
-- A worker report is evidence, not proof. Every worker that reports ready gets an independent review automatically; read that reviewer's verdict before completing its work.
+- A worker report is evidence, not proof. Start one independent review per run with chief_review when a worker's ready alert says to — after the final wave, or for a worker with no plan link — and read that reviewer's verdict before completing the work.
 - When the user or a worker corrects a factual claim, verify it against the code before accepting the correction.
 - Start extra reviews with chief_review — a worker's worktree, or a fresh one for a pull request or branch with no worker — whenever a change deserves a second pass.
 - Keep thread titles literal and recognizable. Never invent codenames.
@@ -1005,7 +1006,7 @@ export default async function plugin(bb: BbPluginApi) {
       "",
       "When chief_plan is available, implementation work goes plan → forge → delegate: chief_plan, then chief_forge_init, then chief_delegate with the planThreadId and wave its ready alert names; chief_delegate refuses anything else unless it is junior-sized, bounded work you pass unplannedReason for. Without chief_plan, use chief_delegate directly. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
       "You own the forge for every delegation: run chief_forge_init, run the script it returns from the project checkout, and pass the branch, issueUrl and prUrl it prints to chief_delegate. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
-      "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want — including a pull request or branch with no managed worker.",
+      "A worker's ready alert names the next call: an intermediate wave hands off to the next wave with no review in between; the final wave, or a worker with no plan link, tells you to start the one review of the whole run with chief_review, whose reviewer reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want — including a pull request or branch with no managed worker.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "", "Acknowledge the operating rules you were given briefly, call chief_roster for the current work list, and wait for work.",
     ].join("\n");
@@ -1755,21 +1756,37 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "reviewer" && params.state === "ready" && !verdict) {
       throw new Error('A reviewer\'s ready report must carry a verdict: "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
     }
-    if (row.role === "planner" && params.state === "ready" && !params.plan) {
+    // Some planners send the wave array JSON-encoded; the string branch would take it as one flat wave.
+    let plan: z.infer<typeof readyReport>["plan"] = params.state === "ready" ? params.plan : undefined;
+    if (typeof plan === "string" && plan.startsWith("[")) {
+      let decoded: unknown;
+      try { decoded = JSON.parse(plan); } catch { decoded = undefined; }
+      if (Array.isArray(decoded)) {
+        const waves = planWavesSchema.safeParse(decoded);
+        if (!waves.success) {
+          throw new Error(`plan is a JSON-encoded wave array that is not valid (${waves.error.issues[0]?.message ?? "check the waves"}). Pass plan as an array of {tier, body}, not a string.`);
+        }
+        plan = waves.data;
+      }
+    }
+    if (row.role === "planner" && params.state === "ready" && !plan) {
       throw new Error("A planner's ready report requires plan: the full plan body.");
     }
-    if (params.state === "ready" && params.plan && row.role !== "planner") {
+    if (params.state === "ready" && plan && row.role !== "planner") {
       throw new Error("Only a planner's ready report carries plan.");
     }
-    if (row.role === "planner" && params.state === "ready" && params.plan) {
-      const bodies = typeof params.plan === "string" ? [params.plan] : params.plan.map((wave) => wave.body);
+    if (row.role === "planner" && params.state === "ready" && plan) {
+      const bodies = typeof plan === "string" ? [plan] : plan.map((wave) => wave.body);
       // ponytail: headings inside code blocks are deliberately out of scope (user decision).
       if (!bodies.some((body) => /^[ \t]*#{1,6}[ \t]+what we(?:'re|’re| are) not doing/im.test(body))) {
-        throw new Error('A planner\'s ready report requires a "What we\'re NOT doing" section in some wave.');
+        const hint = typeof plan === "string" && plan.startsWith("[")
+          ? " If you meant to send several waves, pass plan as an actual array of {tier, body}, not a JSON string."
+          : "";
+        throw new Error(`A planner's ready report requires a "What we're NOT doing" section in some wave.${hint}`);
       }
     }
     const plannerReady = row.role === "planner" && params.state === "ready";
-    const planWaves = plannerReady && params.plan ? await writePlan(threadId, params.plan) : null;
+    const planWaves = plannerReady && plan ? await writePlan(threadId, plan) : null;
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, not rejection rounds — a
     // reviewer resumed for an unrelated reason must not read as a deadlock.

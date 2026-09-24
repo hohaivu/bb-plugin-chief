@@ -2023,6 +2023,58 @@ describe("Chief backend", () => {
     ]);
   });
 
+  test("accepts a JSON-encoded wave array as a multi-wave plan", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready",
+      result: "Two waves, JSON-encoded.",
+      plan: JSON.stringify([
+        { tier: "junior", body: PLAN_FIXTURE },
+        { tier: "senior", body: "# Wave 2\nMigrate the data." },
+      ]),
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+
+    const path1 = join(state.storageRoot, planner.threadId, "plan-1.md");
+    const path2 = join(state.storageRoot, planner.threadId, "plan-2.md");
+    expect(await readFile(path1, "utf8")).toBe(`${PLAN_FIXTURE}\n`);
+    expect(await readFile(path2, "utf8")).toBe("# Wave 2\nMigrate the data.\n");
+    await expect(readFile(join(state.storageRoot, planner.threadId, "plan.md"), "utf8")).rejects.toThrow();
+
+    const reported = state.sent.at(-1).input[0].text;
+    expect(reported).toContain("Plan: 2 wave(s)");
+
+    const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
+    expect(JSON.parse(persisted.plan_waves)).toEqual([
+      { path: path1, tier: "junior" },
+      { path: path2, tier: "senior" },
+    ]);
+  });
+
+  test("rejects a JSON-encoded wave array with an invalid wave", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready",
+      result: "One bad wave, JSON-encoded.",
+      plan: JSON.stringify([{ tier: "mid", body: PLAN_FIXTURE }]),
+    }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/JSON-encoded wave array/);
+  });
+
   test("every wave line survives the 3,000-char alert clip behind an 8-wave schedule and a near-limit result", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
