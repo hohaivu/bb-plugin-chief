@@ -505,6 +505,63 @@ describe("Chief backend", () => {
     expect((await status(state)).threads.find((row) => row.threadId === worker.threadId)).toMatchObject({ state: "idle", status: "idle" });
   });
 
+  test("keeps a ready report while the reporting turn is still live, then reviews", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    // chief_report runs inside the worker's own turn, so the live status is
+    // still "active" for a while after the row is marked ready.
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals fixed",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    const before = state.db.prepare(`SELECT active_cycle FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
+    await state.supervisorCycle();
+    const after = state.db.prepare(`SELECT state, active_cycle FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
+    expect(after.state).toBe("ready");
+    expect(after.active_cycle).toBe(before.active_cycle);
+
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
+  });
+
+  test("keeps blocked while the live status is still stopping", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+    await state.harness.behavior.callAgentTool("chief_stop", {
+      threadId: worker.threadId, reason: "looping on the same failing test",
+    }, { threadId: chief.threadId, projectId: "proj_1" });
+    // The live thread has not caught up to the stop yet.
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "stopping" });
+    await state.supervisorCycle();
+    const row = (await status(state)).threads.find((entry) => entry.threadId === worker.threadId)!;
+    expect(row.state).toBe("blocked");
+  });
+
+  test("suppresses idle behind a queued (undelivered) report", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.failNextSend();
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "blocked", blocker: "Missing scope", recommendation: "Ask the user",
+    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("saved but could not be delivered");
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
+    const pending = state.db.prepare(`SELECT delivered_at FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${worker.threadId}:report:%`) as any;
+    expect(pending).toBeDefined();
+    expect(pending.delivered_at).toBeNull();
+  });
+
   test("replaces a terminal Chief and transfers its workers and pending alerts", async () => {
     const state = await setup();
     const chief = await start(state);

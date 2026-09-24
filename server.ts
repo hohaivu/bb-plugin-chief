@@ -1617,9 +1617,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function stateFromLive(row: ManagedRow, status: string) {
-    if (["active", "starting", "pending", "stopping"].includes(status)) return status;
     if (status === "error") return "failed";
     if (["ready", "blocked", "complete"].includes(row.state)) return row.state;
+    if (["active", "starting", "pending", "stopping"].includes(status)) return status;
     return "idle";
   }
 
@@ -1717,7 +1717,7 @@ export default async function plugin(bb: BbPluginApi) {
     // worker/planner/reviewer going idle after chief_report) is the same news twice,
     // except for a ready worker, whose auto-started review is new information.
     const reported = kind === "idle" && (current.state === "ready" || current.state === "blocked")
-      && !!db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ? AND delivered_at IS NOT NULL`).get(`${current.thread_id}:report:${current.active_cycle}:%`);
+      && !!db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${current.thread_id}:report:${current.active_cycle}:%`);
     if (reported && !pending) return;
     await alertChief(current, `${kind}:${row.active_cycle}`, [
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
