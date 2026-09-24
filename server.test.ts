@@ -1667,6 +1667,32 @@ describe("Chief backend", () => {
     }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow(/Only a planner/);
   });
 
+  test("keeps plan file path and approval instructions in alert despite near-limit result and recommendation", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    const planBody = "# Plan\n\n## What we're NOT doing\n- x";
+    const longResult = "A".repeat(7_900);
+    const longRecommendation = "B".repeat(3_900);
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready",
+      result: longResult,
+      recommendation: longRecommendation,
+      plan: planBody,
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+
+    const reported = state.sent.at(-1).input[0].text;
+    const planPath = join(state.storageRoot, planner.threadId, "plan.md");
+    expect(reported).toContain(`Plan file: ${planPath}`);
+    expect(reported).toContain("approve the plan yourself");
+  });
+
   test("puts the instruction first in a continuation, so the queue preview shows what it says", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });

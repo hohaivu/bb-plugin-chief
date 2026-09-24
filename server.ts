@@ -1593,9 +1593,13 @@ export default async function plugin(bb: BbPluginApi) {
     const current = roles.get(threadId)!;
     const deadlocked = verdict === "request_changes" && current.reject_streak >= CONSULT_AFTER_REJECTIONS;
     const regression = params.state === "ready" && params.regression === true && verdict === "request_changes";
+    const plannerReady = row.role === "planner" && params.state === "ready";
     const summary = [
       `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
+      ...(plannerReady
+        ? [`Plan file: ${planPath}. Read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Optionally, chief_consult the Advisor with the plan file's path for a second opinion before delegating. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do.`]
+        : []),
       ...(verdict ? [`Verdict: ${verdict}`] : []),
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
@@ -1604,17 +1608,18 @@ export default async function plugin(bb: BbPluginApi) {
       // more phases remain — a reviewer that reads the worker's brief does. Its
       // recommendation naming the next phase is what makes this non-final; its
       // absence is what makes the legacy final wording below reachable verbatim.
-      verdict === "approve"
-        ? params.recommendation
-          ? current.worker_thread_id
-            ? `The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${current.worker_thread_id}).`
-            : "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
-          : "The reviewer approves. Complete this work, then mark the pull request ready."
-        : deadlocked || regression
-          ? `${regression && !deadlocked
-              ? "The reviewer reports this change introduced a new problem."
-              : `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging.`
-            } Before starting another worker round, call chief_consult${current.worker_thread_id ? ` (workerThreadId: ${current.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`
+      ...(plannerReady ? [] : [
+        verdict === "approve"
+          ? params.recommendation
+            ? current.worker_thread_id
+              ? `The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${current.worker_thread_id}).`
+              : "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
+            : "The reviewer approves. Complete this work, then mark the pull request ready."
+          : deadlocked || regression
+            ? `${regression && !deadlocked
+                ? "The reviewer reports this change introduced a new problem."
+                : `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging.`
+              } Before starting another worker round, call chief_consult${current.worker_thread_id ? ` (workerThreadId: ${current.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`
           : verdict === "request_changes"
             ? current.worker_thread_id
               ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${current.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
@@ -1623,9 +1628,8 @@ export default async function plugin(bb: BbPluginApi) {
               ? "An independent review starts by itself once this worker goes idle; you will be alerted only if it cannot start. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
               : row.role === "advisor" && params.state === "ready"
                 ? `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${current.worker_thread_id ? ` (replaces: ${current.worker_thread_id})` : ""} with the advice in its context, or escalate to the user if it names a genuine decision.`
-                : row.role === "planner" && params.state === "ready"
-                  ? `Plan file: ${planPath}. Read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Optionally, chief_consult the Advisor with the plan file's path for a second opinion before delegating. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do.`
-                  : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+                : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+      ]),
     ].join("\n");
     const contentKey = createHash("sha1").update(summary).digest("hex").slice(0, 16);
     return alertChief(current, `report:${current.active_cycle}:${contentKey}`, summary);
