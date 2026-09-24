@@ -1025,7 +1025,7 @@ describe("Chief backend", () => {
   test("starts a fresh reviewer after the worker fixes what it found", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
+    let worker = await delegate(state, chief.threadId);
     const ready = async () => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Ready for review",
@@ -1039,7 +1039,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals are off by the discount", verdict: "request_changes",
     }, { threadId: firstReviewer.threadId, projectId: "proj_1" });
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Fix the discount"]);
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
 
     await ready();
 
@@ -1135,7 +1135,7 @@ describe("Chief backend", () => {
   test("routes on a reviewer's structured verdict and names a pair that stops converging", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
+    let worker = await delegate(state, chief.threadId);
     const ready = async () => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Ready for review",
@@ -1168,7 +1168,7 @@ describe("Chief backend", () => {
     // Second round on the same objection: the fix cycle spawns a fresh reviewer,
     // which carries the reject_streak forward — Chief is told to escalate, not to
     // fund a third round.
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Fix the discount"]);
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
     await ready();
     const secondReviewer = (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
     expect(secondReviewer.threadId).not.toBe(reviewer.threadId);
@@ -1181,7 +1181,7 @@ describe("Chief backend", () => {
   test("does not misfire the not-converging escalation on a phase's first rejection", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
+    let worker = await delegate(state, chief.threadId);
     const ready = async (result: string) => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result,
@@ -1201,11 +1201,11 @@ describe("Chief backend", () => {
     await ready("Phase 1 implemented");
     await verdict((await latestReviewer()).threadId, "approve");
 
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 2"]);
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
     await ready("Phase 2 implemented");
     await verdict((await latestReviewer()).threadId, "approve");
 
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 3"]);
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
     await ready("Phase 3 implemented");
 
     // Phase 3's very first rejection must not read as two rounds of disagreement.
@@ -1331,7 +1331,7 @@ describe("Chief backend", () => {
   test("clips the reviewer's brief and result", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
+    let worker = await delegate(state, chief.threadId);
     const longResult = "r".repeat(5_000);
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: longResult,
@@ -1350,7 +1350,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Found an issue", verdict: "request_changes",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Fix it"]);
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: longResult,
     }, { threadId: worker.threadId, projectId: "proj_1" });
@@ -1534,7 +1534,7 @@ describe("Chief backend", () => {
       state: "ready", result: "Off by one in the discount calc", verdict: "request_changes",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
     const reviewAlert = state.sent.at(-1).input[0].text as string;
-    const fixAction = `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${worker.threadId}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`;
+    const fixAction = `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${worker.threadId}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`;
     expect(reviewAlert).toContain(fixAction);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain(`- reviewer “Review · Fix checkout totals” (${reviewer.threadId}): ${fixAction}`);
@@ -2225,7 +2225,7 @@ describe("Chief backend", () => {
     expect(text).toContain("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.");
   });
 
-  test("clips an over-long planner instruction but keeps the read-only reminder byte-identical", async () => {
+  test("rejects an over-long planner instruction with a fresh chief_plan reroute", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
@@ -2234,25 +2234,80 @@ describe("Chief backend", () => {
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
-    // Near the 8,000-character cap: long enough that a naive clip of the combined
-    // string would delete or truncate the reminder instead of the instruction.
-    await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "x".repeat(7_995)]);
+    const sentBefore = state.sent.filter((entry: any) => entry.threadId === planner.threadId).length;
+    const result = await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "x".repeat(7_995)]);
 
-    const text = state.sent.at(-1).input[0].text as string;
-    expect(text.endsWith("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.")).toBe(true);
-    expect(text.length).toBeLessThanOrEqual(8_000);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("fresh chief_plan");
+    expect(state.sent.filter((entry: any) => entry.threadId === planner.threadId)).toHaveLength(sentBefore);
   });
 
-  test("clips an over-long reviewer instruction but keeps the review-only reminder byte-identical", async () => {
+  test("rejects an over-long reviewer instruction with a fresh chief_review reroute", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     const review = JSON.parse((await state.harness.behavior.runCli(["review", worker.threadId, "--json"])).stdout!);
-    await state.harness.behavior.runCli(["continue", review.threadId, "--instruction", "y".repeat(7_995)]);
+    const sentBefore = state.sent.filter((entry: any) => entry.threadId === review.threadId).length;
+    const result = await state.harness.behavior.runCli(["continue", review.threadId, "--instruction", "y".repeat(7_995)]);
 
-    const text = state.sent.filter((entry: any) => entry.threadId === review.threadId).at(-1).input[0].text as string;
-    expect(text.endsWith("Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.")).toBe(true);
-    expect(text.length).toBeLessThanOrEqual(8_000);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("fresh review with chief_review");
+    expect(state.sent.filter((entry: any) => entry.threadId === review.threadId)).toHaveLength(sentBefore);
+  });
+
+  test("refuses chief_continue on a worker that already reported ready", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    const sentBefore = state.sent.filter((entry: any) => entry.threadId === worker.threadId).length;
+
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_continue", { threadId: worker.threadId, instruction: "Keep going" }, { threadId: chief.threadId, projectId: "proj_1" },
+    )).rejects.toThrow(`chief_delegate (replaces: ${worker.threadId})`);
+    expect(state.sent.filter((entry: any) => entry.threadId === worker.threadId)).toHaveLength(sentBefore);
+    expect((await status(state)).threads.find((row) => row.threadId === worker.threadId)?.state).toBe("ready");
+
+    const cliResult = await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Keep going"]);
+    expect(cliResult.exitCode).toBe(1);
+    expect(cliResult.stderr).toContain(`chief_delegate (replaces: ${worker.threadId})`);
+    expect(state.sent.filter((entry: any) => entry.threadId === worker.threadId)).toHaveLength(sentBefore);
+  });
+
+  test("refuses chief_continue on a worker that already reported complete", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, opts);
+
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_continue", { threadId: worker.threadId, instruction: "Keep going" }, opts,
+    )).rejects.toThrow(`chief_delegate (replaces: ${worker.threadId})`);
+    expect((await status(state)).threads.find((row) => row.threadId === worker.threadId)?.state).toBe("complete");
+  });
+
+  test("rejects a nudge over 500 characters but accepts one at the limit", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const worker = await delegate(state, chief.threadId);
+    const sentBefore = state.sent.filter((entry: any) => entry.threadId === worker.threadId).length;
+
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_continue", { threadId: worker.threadId, instruction: "x".repeat(501) }, opts,
+    )).rejects.toThrow(`chief_delegate (replaces: ${worker.threadId})`);
+    expect(state.sent.filter((entry: any) => entry.threadId === worker.threadId)).toHaveLength(sentBefore);
+
+    await state.harness.behavior.callAgentTool(
+      "chief_continue", { threadId: worker.threadId, instruction: "x".repeat(500) }, opts,
+    );
+    expect(state.sent.filter((entry: any) => entry.threadId === worker.threadId)).toHaveLength(sentBefore + 1);
   });
 
   test("consults a read-only advisor in the failing worker's worktree with its brief, verdicts, and branch", async () => {
@@ -2324,7 +2379,7 @@ describe("Chief backend", () => {
     )).rejects.toThrow("for this Chief");
   });
 
-  test("clips an over-long advisor instruction but keeps the advisory reminder byte-identical", async () => {
+  test("rejects an over-long advisor instruction with a fresh chief_consult reroute", async () => {
     const state = await setup();
     const chief = await start(state);
     await state.harness.behavior.runCli(
@@ -2332,12 +2387,12 @@ describe("Chief backend", () => {
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
-    await state.harness.behavior.runCli(["continue", advisor.threadId, "--instruction", "x".repeat(7_995)]);
+    const sentBefore = state.sent.filter((entry: any) => entry.threadId === advisor.threadId).length;
+    const result = await state.harness.behavior.runCli(["continue", advisor.threadId, "--instruction", "x".repeat(7_995)]);
 
-    const text = state.sent.at(-1).input[0].text as string;
-    expect(text.endsWith("Remain advisory: read code and run commands to reproduce the problem, but do not create, modify, or delete any file, commit, or push. Report your advice to Chief; a worker makes the change.")).toBe(true);
-    expect(text.startsWith("x".repeat(50))).toBe(true);
-    expect(text.length).toBeLessThanOrEqual(8_000);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("fresh chief_consult");
+    expect(state.sent.filter((entry: any) => entry.threadId === advisor.threadId)).toHaveLength(sentBefore);
   });
 
   test("hands an advisor's advice back to Chief and never auto-reviews it", async () => {
