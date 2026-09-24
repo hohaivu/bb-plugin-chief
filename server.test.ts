@@ -1086,6 +1086,31 @@ describe("Chief backend", () => {
     }
   });
 
+  test("picks the newest reviewer round even when both rounds share a millisecond", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    const workerOpts = { threadId: worker.threadId, projectId: "proj_1" };
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, workerOpts);
+      await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+      const first = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Fix it", verdict: "request_changes" }, { threadId: first.threadId, projectId: "proj_1" });
+      await state.harness.behavior.callAgentTool("chief_complete", { threadId: first.threadId, result: "Round 1" }, opts);
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Fixed" }, workerOpts);
+      await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+      const second = (await status(state)).threads.find((row) => row.role === "reviewer" && row.threadId !== first.threadId)!;
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Good", verdict: "approve" }, { threadId: second.threadId, projectId: "proj_1" });
+
+      const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+      expect(roster).not.toContain(`- worker “Fix checkout totals” (${worker.threadId}):`);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   test("does not bring back a spurious review once its reviewer is completed directly", async () => {
     const state = await setup();
     const chief = await start(state);

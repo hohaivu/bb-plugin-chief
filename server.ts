@@ -641,7 +641,7 @@ export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
 
-  const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC`);
+  const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC, rowid ASC`);
   const activeChiefForProject = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='chief' AND project_id=? AND state NOT IN ('failed','deleted','archived','complete') ORDER BY created_at DESC LIMIT 1`,
   );
@@ -652,17 +652,17 @@ export default async function plugin(bb: BbPluginApi) {
     `SELECT COUNT(*) AS count FROM managed_threads WHERE role='chief' AND project_id=?`,
   );
   const existingReview = db.prepare<[string]>(
-    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC LIMIT 1`,
+    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
   // Unlike existingReview, this is not filtered by state: nextAction's dedup must
   // still find a reviewer that has since completed, so a completed reviewer that
   // already covered the worker's latest report does not bring back a spurious
   // chief_review recommendation.
   const latestReviewForWorker = db.prepare<[string]>(
-    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? ORDER BY created_at DESC LIMIT 1`,
+    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
   const existingBranchReview = db.prepare<[string, string]>(
-    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC LIMIT 1`,
+    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
   const pendingAlerts = db.prepare(
     `SELECT * FROM alert_outbox WHERE delivered_at IS NULL ORDER BY created_at ASC LIMIT 100`,
@@ -2060,7 +2060,7 @@ export default async function plugin(bb: BbPluginApi) {
         .filter((other) => other.role === "worker" && other.plan_thread_id === row.thread_id)
         .reduce<ManagedRow | undefined>((best, other) => (
           !best || (other.plan_wave ?? 0) > (best.plan_wave ?? 0)
-            || ((other.plan_wave ?? 0) === (best.plan_wave ?? 0) && other.created_at > best.created_at)
+            || ((other.plan_wave ?? 0) === (best.plan_wave ?? 0) && other.created_at >= best.created_at)
         ) ? other : best, undefined);
       const currentWave = current?.plan_wave ?? 1;
       const isFinalWave = currentWave === waves.length;
