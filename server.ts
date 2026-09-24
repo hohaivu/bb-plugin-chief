@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import {
   defineRpcContract,
@@ -15,17 +17,16 @@ const RULES_FILE = "chief.md";
 const RECONCILE_INTERVAL_MS = 30_000;
 const MAX_ALERT_LENGTH = 3_000;
 const MAX_RESULT_LENGTH = 8_000;
+const MAX_PLAN_LENGTH = 64_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 const FORGE_CLI_TIMEOUT_MS = 10_000;
 /** One wording for the reviewer's read-only rule, said when the review starts and
  * again on every continuation — the two places an edit instruction could arrive. */
 const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
 /** Same for a planner: said when the plan starts and again on every continuation. */
-const PLAN_ONLY = "Remain read-only in the repository: do not create, modify, or delete any file it tracks. Writing the plan itself to $BB_THREAD_STORAGE/plan.md is not a repository edit and stays allowed. A worker implements the plan in its own worktree.";
+const PLAN_ONLY = "Remain read-only in the repository: do not create, modify, or delete any file it tracks. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.";
 /** Same for an advisor: said when the consult starts and again on every continuation. */
 const ADVISE_ONLY = "Remain advisory: read code and run commands to reproduce the problem, but do not create, modify, or delete any file, commit, or push. Report your advice to Chief; a worker makes the change.";
-/** BB's builtin plan slash command, the trigger a provider maps to its own plan mode. */
-const PLAN_COMMAND = "/plan";
 /** Consecutive request_changes verdicts on one task before Chief must consult the advisor. */
 const CONSULT_AFTER_REJECTIONS = 2;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
@@ -229,6 +230,9 @@ const readyReport = z.object({
   regression: z.boolean().optional().describe(
     "Reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
   ),
+  plan: z.string().trim().min(1).max(MAX_PLAN_LENGTH).optional().describe(
+    "A planner's ready report requires this: the full plan body as Markdown. Chief receives it as a file, not inline. No other role sets this.",
+  ),
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
 });
@@ -323,7 +327,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 /** Planning is a decision point, not a relay: the plan is worth a thread only because
  * Chief reads it before any worktree is spent on it. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. For work that is not obviously small, use chief_plan first. Its ready report names the plan file it wrote — read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path in its context, not the plan body. A plan is never implementation: only a worker changes code.";
+  "Planning is on. For work that is not obviously small, use chief_plan first. Its ready alert names the plan file Chief saved — read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Optionally, chief_consult the Advisor with the plan file's path for a second opinion before delegating. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path in its context, not the plan body. A plan is never implementation: only a worker changes code.";
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -988,24 +992,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Open a planner on the provider's own `/plan` action rather than as plain
-   * text: the builtin command mention is what makes BB enter plan mode, the way
-   * `bb thread spawn --plan` does. */
-  function planCommandInput(prompt: string) {
-    return [{
-      type: "text" as const,
-      text: `${PLAN_COMMAND} ${prompt}`,
-      mentions: [{
-        start: 0,
-        end: PLAN_COMMAND.length,
-        resource: {
-          kind: "command" as const, trigger: "/" as const, name: "plan",
-          source: "command" as const, origin: "builtin" as const, label: "plan", argumentHint: null,
-        },
-      }],
-    }];
-  }
-
   /** A plan is read-only work in the project's own checkout: no worktree is spent
    * until Chief has read the plan and chosen to delegate it. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
@@ -1025,8 +1011,8 @@ export default async function plugin(bb: BbPluginApi) {
       "", "## Working contract",
       "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
       `- ${PLAN_ONLY}`,
-      "- Write the full plan as Markdown to $BB_THREAD_STORAGE/plan.md: the files and functions to change, the steps in order, real constraints, and the risks.",
-      "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline — followed by the plan file's absolute path. The detail lives in the file, not the report.",
+      "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
+      "- Report with chief_report state ready, passing the full plan body in chief_report's `plan` field. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives the plan itself as a file.",
       "- Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- For multi-step work, order it into named phases one worker implements one at a time: each phase ends in its own ready report and review, and only that verdict opens the next phase.",
       "- Add an explicit \"What we're NOT doing\" section naming what this plan leaves out of scope.",
@@ -1042,7 +1028,7 @@ export default async function plugin(bb: BbPluginApi) {
       visibility: "visible",
       title,
       ...(await execution("planner", await projectHostId(projectId))),
-      input: planCommandInput(prompt),
+      prompt,
       pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
     });
     insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, state: "starting", status: thread.status });
@@ -1537,6 +1523,16 @@ export default async function plugin(bb: BbPluginApi) {
     for (const alert of pendingAlerts.all() as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
 
+  /** The server, not the planner, owns writing the plan: the planner submits it
+   * through chief_report and this lands it at the thread's own storage location. */
+  async function writePlan(threadId: string, body: string) {
+    const { storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
+    await mkdir(storageRootPath, { recursive: true });
+    const path = join(storageRootPath, "plan.md");
+    await writeFile(path, `${body}\n`);
+    return path;
+  }
+
   async function report(threadId: string, params: z.infer<typeof reportParams>, callerProjectId: string) {
     let row = roles.get(threadId);
     if (!row) {
@@ -1572,6 +1568,13 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "reviewer" && params.state === "ready" && !verdict) {
       throw new Error('A reviewer\'s ready report must carry a verdict: "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
     }
+    if (row.role === "planner" && params.state === "ready" && !params.plan) {
+      throw new Error("A planner's ready report requires plan: the full plan body.");
+    }
+    if (params.state === "ready" && params.plan && row.role !== "planner") {
+      throw new Error("Only a planner's ready report carries plan.");
+    }
+    const planPath = params.state === "ready" && params.plan ? await writePlan(threadId, params.plan) : null;
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, which under a phased plan is the
     // phase count rather than rejection rounds — a phase's first-ever rejection can
@@ -1590,9 +1593,13 @@ export default async function plugin(bb: BbPluginApi) {
     const current = roles.get(threadId)!;
     const deadlocked = verdict === "request_changes" && current.reject_streak >= CONSULT_AFTER_REJECTIONS;
     const regression = params.state === "ready" && params.regression === true && verdict === "request_changes";
+    const plannerReady = row.role === "planner" && params.state === "ready";
     const summary = [
       `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
+      ...(plannerReady
+        ? [`Plan file: ${planPath}. Read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Optionally, chief_consult the Advisor with the plan file's path for a second opinion before delegating. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do.`]
+        : []),
       ...(verdict ? [`Verdict: ${verdict}`] : []),
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
@@ -1601,17 +1608,18 @@ export default async function plugin(bb: BbPluginApi) {
       // more phases remain — a reviewer that reads the worker's brief does. Its
       // recommendation naming the next phase is what makes this non-final; its
       // absence is what makes the legacy final wording below reachable verbatim.
-      verdict === "approve"
-        ? params.recommendation
-          ? current.worker_thread_id
-            ? `The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${current.worker_thread_id}).`
-            : "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
-          : "The reviewer approves. Complete this work, then mark the pull request ready."
-        : deadlocked || regression
-          ? `${regression && !deadlocked
-              ? "The reviewer reports this change introduced a new problem."
-              : `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging.`
-            } Before starting another worker round, call chief_consult${current.worker_thread_id ? ` (workerThreadId: ${current.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`
+      ...(plannerReady ? [] : [
+        verdict === "approve"
+          ? params.recommendation
+            ? current.worker_thread_id
+              ? `The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${current.worker_thread_id}).`
+              : "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
+            : "The reviewer approves. Complete this work, then mark the pull request ready."
+          : deadlocked || regression
+            ? `${regression && !deadlocked
+                ? "The reviewer reports this change introduced a new problem."
+                : `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging.`
+              } Before starting another worker round, call chief_consult${current.worker_thread_id ? ` (workerThreadId: ${current.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`
           : verdict === "request_changes"
             ? current.worker_thread_id
               ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${current.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
@@ -1620,9 +1628,8 @@ export default async function plugin(bb: BbPluginApi) {
               ? "An independent review starts by itself once this worker goes idle; you will be alerted only if it cannot start. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
               : row.role === "advisor" && params.state === "ready"
                 ? `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${current.worker_thread_id ? ` (replaces: ${current.worker_thread_id})` : ""} with the advice in its context, or escalate to the user if it names a genuine decision.`
-                : row.role === "planner" && params.state === "ready"
-                  ? "Read the plan file named above in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do."
-                  : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+                : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+      ]),
     ].join("\n");
     const contentKey = createHash("sha1").update(summary).digest("hex").slice(0, 16);
     return alertChief(current, `report:${current.active_cycle}:${contentKey}`, summary);
@@ -2136,7 +2143,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_report",
-    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict.",
+    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file.",
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");

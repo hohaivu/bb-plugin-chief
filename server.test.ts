@@ -1,4 +1,6 @@
-import { dirname } from "node:path";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
@@ -47,6 +49,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
 }
 
 async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string } = {}) {
+  const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
   let sendFailures = 0;
@@ -122,6 +125,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           return thread;
         },
         getPluginMetadata: async ({ threadId }: { threadId: string }) => pluginMetadataStore.get(threadId) ?? {},
+        storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_1", storageRootPath: join(storageRoot, threadId) }),
         get: async ({ threadId }: { threadId: string }) => {
           const failures = getFailures.get(threadId) ?? 0;
           if (failures > 0) {
@@ -177,6 +181,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   return {
     harness,
     db: bb.storage.database(),
+    storageRoot,
     spawned,
     sent,
     stopped,
@@ -782,7 +787,7 @@ describe("Chief backend", () => {
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Plan written",
+      state: "ready", result: "Plan written", plan: "# Plan",
     }, { threadId: planner.threadId, projectId: "proj_1" });
     const sentAfterPlan = state.sent.length;
     await state.harness.behavior.emitThreadEvent("thread.idle", {
@@ -1578,21 +1583,13 @@ describe("Chief backend", () => {
       // A plan reads code; only a worker earns a worktree.
       environment: { type: "project-default" },
     });
-    // The planner opens on the provider's own /plan action, not as plain text.
-    expect(spawned.prompt).toBeUndefined();
-    expect(spawned.input[0].text).toMatch(/^\/plan /);
-    expect(spawned.input[0].mentions).toEqual([{
-      start: 0,
-      end: 5,
-      resource: {
-        kind: "command", trigger: "/", name: "plan",
-        source: "command", origin: "builtin", label: "plan", argumentHint: null,
-      },
-    }]);
-    const planPrompt = spawned.input[0].text as string;
+    // The planner opens on a plain prompt, not the provider's own /plan action.
+    expect(spawned.input).toBeUndefined();
+    const planPrompt = spawned.prompt as string;
     expect(planPrompt).toContain("do not create, modify, or delete any file it tracks");
-    // The plan file's path is what Chief and the worker read instead of an inlined plan body.
-    expect(planPrompt).toContain("$BB_THREAD_STORAGE/plan.md");
+    // The plan body goes through chief_report's plan field, never a direct file write.
+    expect(planPrompt).toContain("chief_report's `plan` field");
+    expect(planPrompt).not.toContain("$BB_THREAD_STORAGE");
     // Split success criteria and the out-of-scope section are the planner's contract, not an afterthought.
     expect(planPrompt).toContain("Read every file this brief names in full before proposing anything: no partial reads, no limit or offset.");
     expect(planPrompt).toContain("Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm)");
@@ -1615,8 +1612,9 @@ describe("Chief backend", () => {
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    const planBody = "# Plan\n\n## What we're NOT doing\n- x";
     await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Change totals.ts, then cover it with a test",
+      state: "ready", result: "Change totals.ts, then cover it with a test", plan: planBody,
     }, { threadId: planner.threadId, projectId: "proj_1" });
 
     const reported = state.sent.at(-1).input[0].text;
@@ -1624,6 +1622,9 @@ describe("Chief backend", () => {
     expect(reported).toContain("Planner report");
     expect(reported).toContain("chief_delegate with the plan file's path");
     expect(reported).toContain("approve the plan yourself, and delegate it right away without waiting for user sign-off");
+    const planPath = join(state.storageRoot, planner.threadId, "plan.md");
+    expect(reported).toContain(`Plan file: ${planPath}`);
+    expect(await readFile(planPath, "utf8")).toBe(`${planBody}\n`);
 
     // A plan is not work: going idle must not start a reviewer on it.
     await state.harness.behavior.emitThreadEvent("thread.idle", {
@@ -1635,6 +1636,61 @@ describe("Chief backend", () => {
     // Chief stays read-only with the planner unless it says otherwise.
     await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "Name the test file"]);
     expect(state.sent.at(-1).input[0].text).toContain("Remain read-only");
+  });
+
+  test("rejects a planner's ready report without plan", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    const sentBefore = state.sent.length;
+
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Change totals.ts, then cover it with a test",
+    }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/requires plan/);
+
+    expect(state.sent.length).toBe(sentBefore);
+  });
+
+  test("rejects plan from a worker", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    const worker = (await status(state)).threads.find((row) => row.role === "worker")!;
+
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Done", plan: "# Plan",
+    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow(/Only a planner/);
+  });
+
+  test("keeps plan file path and approval instructions in alert despite near-limit result and recommendation", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    const planBody = "# Plan\n\n## What we're NOT doing\n- x";
+    const longResult = "A".repeat(7_900);
+    const longRecommendation = "B".repeat(3_900);
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready",
+      result: longResult,
+      recommendation: longRecommendation,
+      plan: planBody,
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+
+    const reported = state.sent.at(-1).input[0].text;
+    const planPath = join(state.storageRoot, planner.threadId, "plan.md");
+    expect(reported).toContain(`Plan file: ${planPath}`);
+    expect(reported).toContain("approve the plan yourself");
   });
 
   test("puts the instruction first in a continuation, so the queue preview shows what it says", async () => {
@@ -1653,7 +1709,7 @@ describe("Chief backend", () => {
     expect(text.startsWith("Name the test file")).toBe(true);
     expect(text.startsWith("Remain read-only")).toBe(false);
     // The read-only reminder still follows, unchanged in wording.
-    expect(text).toContain("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Writing the plan itself to $BB_THREAD_STORAGE/plan.md is not a repository edit and stays allowed. A worker implements the plan in its own worktree.");
+    expect(text).toContain("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.");
   });
 
   test("clips an over-long planner instruction but keeps the read-only reminder byte-identical", async () => {
@@ -1670,7 +1726,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "x".repeat(7_995)]);
 
     const text = state.sent.at(-1).input[0].text as string;
-    expect(text.endsWith("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Writing the plan itself to $BB_THREAD_STORAGE/plan.md is not a repository edit and stays allowed. A worker implements the plan in its own worktree.")).toBe(true);
+    expect(text.endsWith("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.")).toBe(true);
     expect(text.length).toBeLessThanOrEqual(8_000);
   });
 
