@@ -12,12 +12,12 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 
 1. Open BB's project-aware **New Thread** screen and click **Start Chief**. Each click creates and opens a fresh independent Chief for that project; the CLI remains available for automation.
 2. Talk to `Chief · <project name>` in the normal thread UI.
-3. Planning is on by default: Chief can send the work to a read-only planner first, read the plan it reports, and carry that plan into the delegation.
+3. Planning is on by default: Chief can send the work to a read-only planner first, which splits it into waves; the plugin persists the schedule and its ready alert names the exact next delegation, so Chief relays it without reading any plan file.
 4. Chief owns the forge: `chief_forge_init` returns one ready-to-run script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. Chief runs the script and reads the `CHIEF_FORGE branch=… issue_url=… pr_url=…` line it prints. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
 5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
 6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled — with its last output and the next steps; at twice `stallMinutes` the alert tells Chief to stop it with `chief_stop`. Alerts use a durable SQLite outbox and retry after transient delivery failures.
-8. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts a fresh read-only reviewer for every ready report (the previous verdict is carried over) in its worktree and tells Chief to wait for that verdict. The reviewer reads the worker's brief (a long mission or context is clipped), and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes to a fresh worker in the same worktree. Chief can start further reviews itself with `chief_review`.
+8. A worker that reports `ready` names its own next call: an intermediate wave tells Chief to delegate the next wave (`chief_delegate` with `replaces:`), with no review in between; the final wave, or any worker with no plan link, tells Chief to start the one review of the whole run with `chief_review`. The reviewer reads the worker's brief (a long mission or context is clipped), plus every wave's plan file on a multi-wave run, and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes to a fresh worker in the same worktree.
 9. Chief inspects live status and bounded output, continues safe reversible work, marks verified non-running work complete, and escalates only genuine decisions.
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
@@ -65,17 +65,16 @@ of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 
 Settings → **Plan before delegating** (on by default). With it on, Chief gains `chief_plan`: it sends
 one unit of work to a read-only planner that reads the project's own checkout on a plain prompt, with
-no provider plan mode and no approval prompt, and writes a plan — files to change, ordered steps,
-verifiable success criteria, constraints, and risks. It submits that plan through `chief_report`'s
-`plan` field, and the plugin saves it to the thread's own storage as `plan.md`, reporting back a
-short summary and that file's path.
+no provider plan mode and no approval prompt, and splits the work into up to 8 sequential waves, each
+a self-contained plan for one worker with its own tier. It submits those waves through `chief_report`'s
+`plan` field, and the plugin saves each one to the thread's own storage as `plan-1.md … plan-N.md` (or
+`plan.md` for the legacy string form) and persists the schedule.
 
-The handoff is Chief's, not the plugin's. Chief reads the plan file in full, corrects it with
-`chief_continue`, approves the plan itself, and calls `chief_delegate` right away without waiting
-for user sign-off, passing the plan file's path as its context, not the plan body — optionally
-`chief_consult`ing the Advisor with that path for a second opinion first. It escalates to you only
-for a genuine product or scope open question that cannot be resolved from the code. Nothing is
-implemented until it does, and no worktree is spent on a plan.
+The handoff is the plugin's, not Chief's: the planner's ready alert lists the wave schedule and the
+exact next call, `chief_delegate (planThreadId: …, wave: 1)`, which takes the plan file and tier from
+the schedule. Chief never opens or reads a plan file, and delegates wave 1 right away without waiting
+for user sign-off. It escalates to you only for a genuine product or scope open question the planner
+named. Nothing is implemented until it delegates, and no worktree is spent on a plan.
 
 The toggle reaches Chief threads that are already running. Turn it off to delegate directly.
 
@@ -87,6 +86,13 @@ commands to reproduce the problem, but never edits, commits, or pushes. With a w
 that worker's own worktree, briefed on the mission, the reviewer verdicts, and the branch; without
 one it runs in the project's own checkout, like a plan. Its advice goes back to Chief, which decides
 the next worker round or escalates.
+
+### Work list
+
+`chief_roster` opens with a **Pending** block: one line per managed thread that has a next
+action, in the same wording its lifecycle alert already used, so the two never disagree. Chief
+is instructed to call `chief_roster` at the start of every turn and again after any compaction,
+so the Pending block — not memory — is what it works from.
 
 ## CLI
 
