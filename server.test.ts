@@ -1356,6 +1356,90 @@ describe("Chief backend", () => {
     expect(bigRoster.indexOf(lastTitle)).toBeLessThan(bigRoster.indexOf("First worker"));
   });
 
+  test("the roster's Pending block uses the same wording as the lifecycle alert", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+    const workerAlert = state.sent.at(-1).input[0].text as string;
+    const workerAction = `Start its review now: chief_review (workerThreadId: ${worker.threadId}). Complete the work only on the reviewer's approve.`;
+    expect(workerAlert).toContain(workerAction);
+    let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("Pending:");
+    expect(roster).toContain(`- worker “Fix checkout totals” (${worker.threadId}): ${workerAction}`);
+
+    // Once the review is actually in flight, the worker drops out of Pending.
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).not.toContain(`- worker “Fix checkout totals” (${worker.threadId}):`);
+
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Looks correct", verdict: "approve",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    const reviewAlert = state.sent.at(-1).input[0].text as string;
+    const approveAction = "The reviewer approves. Complete this work, then mark the pull request ready.";
+    expect(reviewAlert).toContain(approveAction);
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain(`- reviewer “Review · Fix checkout totals” (${reviewer.threadId}): ${approveAction}`);
+  });
+
+  test("the Pending block shows a blocked worker and a rejected review the same way its alert does", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+
+    const blockedWorker = await delegate(state, chief.threadId, "Blocked work");
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "blocked", blocker: "Missing staging credentials", recommendation: "Ask the user",
+    }, { threadId: blockedWorker.threadId, projectId: "proj_1" });
+    let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain(`- worker “Blocked work” (${blockedWorker.threadId}): Blocked: Missing staging credentials — decide or escalate to the user.`);
+
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Off by one in the discount calc", verdict: "request_changes",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    const reviewAlert = state.sent.at(-1).input[0].text as string;
+    const fixAction = `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${worker.threadId}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`;
+    expect(reviewAlert).toContain(fixAction);
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain(`- reviewer “Review · Fix checkout totals” (${reviewer.threadId}): ${fixAction}`);
+  });
+
+  test("the Pending block tells Chief to delegate a planner's wave 1 until it is delegated", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const { planner } = await planTwoWaves(state, chief.threadId);
+
+    let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Delegate wave 1: chief_delegate (planThreadId: ${planner.threadId}, wave: 1).`);
+
+    await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "1", "--json",
+    ], opts);
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).not.toContain(`- planner “Plan · Rework checkout”`);
+  });
+
+  test("adds the roster instruction to every Chief turn but not a worker's", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const configuredChief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(configuredChief.instructions).toContain("Call chief_roster at the start of every turn, and again after any compaction");
+    const configuredWorker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(worker.threadId));
+    expect(configuredWorker.instructions).not.toContain("Call chief_roster at the start of every turn");
+  });
+
   test("selects supervisor and reporting tools only for the matching roles", async () => {
     const state = await setup();
     const chiefId = (await start(state)).threadId;
@@ -2684,6 +2768,14 @@ describe("Chief backend", () => {
       state: "ready", result: "Refund double-count fixed",
     }, { threadId: fixWorker.threadId, projectId: "proj_1" });
     expect(state.sent.at(-1).input[0].text).toContain(`chief_review (workerThreadId: ${fixWorker.threadId})`);
+
+    // The old reviewer row was re-pointed to fixWorker by `replaces:` without resetting
+    // its state, but it already reported (not busy), so the roster still recommends
+    // review for fixWorker — matching the alert above.
+    const roster = String(await state.harness.behavior.callAgentTool(
+      "chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" },
+    ));
+    expect(roster).toContain(`(${fixWorker.threadId}): Start its review now: chief_review (workerThreadId: ${fixWorker.threadId})`);
   });
 
   test("tells the worker the forge is Chief's even when only a pull request was created", async () => {

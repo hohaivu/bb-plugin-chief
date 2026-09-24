@@ -87,6 +87,13 @@ that worker's own worktree, briefed on the mission, the reviewer verdicts, and t
 one it runs in the project's own checkout, like a plan. Its advice goes back to Chief, which decides
 the next worker round or escalates.
 
+### Work list
+
+`chief_roster` opens with a **Pending** block: one line per managed thread that has a next
+action, in the same wording its lifecycle alert already used, so the two never disagree. Chief
+is instructed to call `chief_roster` at the start of every turn and again after any compaction,
+so the Pending block — not memory — is what it works from.
+
 ## CLI
 
 ```sh

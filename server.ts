@@ -352,6 +352,11 @@ const BUILT_IN_RULES = `# Chief operating rules
 const PLANNER_CHIEF_INSTRUCTIONS =
   "Planning is on. For work that is not obviously small, use chief_plan first. Its ready alert lists the wave schedule and the exact next call — delegate wave 1 right away without waiting for user sign-off, and without reading the plan file yourself. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. A plan is never implementation: only a worker changes code.";
 
+/** chief_roster's Pending block is the canonical work list; keep Chief calling it
+ * at each turn start and after compaction instead of relying on memory. */
+const ROSTER_CHIEF_INSTRUCTIONS =
+  "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list.";
+
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
   const flags = new Map<string, string[]>();
@@ -964,7 +969,7 @@ export default async function plugin(bb: BbPluginApi) {
       "You own the forge for every delegation: run chief_forge_init, run the script it returns from the project checkout, and pass the branch, issueUrl and prUrl it prints to chief_delegate. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
       "A worker that reports ready is reviewed automatically: a reviewer thread starts in its worktree and reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want — including a pull request or branch with no managed worker.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
-      "", "Acknowledge the operating rules you were given briefly, inspect the roster, and wait for work.",
+      "", "Acknowledge the operating rules you were given briefly, call chief_roster for the current work list, and wait for work.",
     ].join("\n");
     const thread = await bb.sdk.threads.spawn({
       projectId: target,
@@ -1331,6 +1336,38 @@ export default async function plugin(bb: BbPluginApi) {
       return `Wave ${row.plan_wave} of ${waves.length} is ready. Once it is idle, delegate wave ${row.plan_wave + 1} (${next.tier}): ${next.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave + 1}, replaces: ${row.thread_id}). Do not review between waves.`;
     }
     return `Start its review now: chief_review (workerThreadId: ${row.thread_id}). Complete the work only on the reviewer's approve.`;
+  }
+
+  /** A row's single pending call, reused identically in report()'s alert and
+   * chief_roster's Pending block so the two surfaces never disagree. Purely a
+   * function of already-persisted row state — no new columns, no new tracking. */
+  function nextAction(row: ManagedRow): string | null {
+    if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.`;
+    if (row.state !== "ready") return null;
+    if (row.role === "planner") {
+      if (!row.plan_waves) return null;
+      const delegated = [...roles.values()].some((other) => other.role === "worker" && other.plan_thread_id === row.thread_id);
+      return delegated ? null : `Delegate wave 1: chief_delegate (planThreadId: ${row.thread_id}, wave: 1).`;
+    }
+    if (row.role === "worker") {
+      // Same dedup rule as startReview(): a reviewer row survives past its own
+      // report (state moves to ready/blocked) but only a still-busy one means a
+      // review is actually in flight — a re-pointed stale reviewer (delegate's
+      // `replaces:`) is not busy, so this still recommends chief_review for it.
+      const reviewer = existingReview.get(row.thread_id) as ManagedRow | undefined;
+      return reviewer && BUSY_STATUSES.has(reviewer.state) ? null : workerReadyNextStep(row);
+    }
+    if (row.role === "advisor") {
+      return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${row.worker_thread_id ? ` (replaces: ${row.worker_thread_id})` : ""} with the advice in its context, or escalate to the user if it names a genuine decision.`;
+    }
+    if (row.role !== "reviewer" || !row.verdict) return null;
+    if (row.verdict === "approve") return "The reviewer approves. Complete this work, then mark the pull request ready.";
+    if (row.reject_streak >= CONSULT_AFTER_REJECTIONS) {
+      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. This pair is not converging. Before starting another worker round, call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`;
+    }
+    return row.worker_thread_id
+      ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
+      : "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision.";
   }
 
   /** Shared reviewer prompt: REVIEW_ONLY and the chief_report/verdict contract are
@@ -1706,22 +1743,9 @@ export default async function plugin(bb: BbPluginApi) {
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
       ...(plannerReady ? [] : [
-        verdict === "approve"
-          ? "The reviewer approves. Complete this work, then mark the pull request ready."
-          : deadlocked || regression
-            ? `${regression && !deadlocked
-                ? "The reviewer reports this change introduced a new problem."
-                : `The reviewer still requires changes after ${current.reject_streak} consecutive rounds. This pair is not converging.`
-              } Before starting another worker round, call chief_consult${current.worker_thread_id ? ` (workerThreadId: ${current.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`
-          : verdict === "request_changes"
-            ? current.worker_thread_id
-              ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${current.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
-              : "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
-            : row.role === "worker" && params.state === "ready"
-              ? workerReadyNextStep(current)
-              : row.role === "advisor" && params.state === "ready"
-                ? `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${current.worker_thread_id ? ` (replaces: ${current.worker_thread_id})` : ""} with the advice in its context, or escalate to the user if it names a genuine decision.`
-                : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
+        regression && !deadlocked
+          ? `The reviewer reports this change introduced a new problem. Before starting another worker round, call chief_consult${current.worker_thread_id ? ` (workerThreadId: ${current.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`
+          : nextAction(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
       ]),
     ].join("\n");
     const contentKey = createHash("sha1").update(summary).digest("hex").slice(0, 16);
@@ -2101,7 +2125,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "chief_roster",
-    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation.",
+    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert.",
     parameters: z.object({ includeComplete: z.boolean().optional() }),
     async execute({ includeComplete }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -2112,9 +2136,14 @@ export default async function plugin(bb: BbPluginApi) {
       const allWorkers = rosterForChief(caller.thread_id, true).filter((row) => row.role === "worker");
       const juniorCount = allWorkers.filter((row) => row.tier === "junior").length;
       const seniorCount = allWorkers.filter((row) => row.tier === "senior").length;
+      const reversed = [...rows].reverse();
+      const pending = reversed
+        .map((row) => [row, nextAction(row)] as const)
+        .filter((entry): entry is [ManagedRow, string] => entry[1] !== null);
       return clip([
+        ...(pending.length ? ["Pending:", ...pending.map(([row, action]) => `- ${row.role} “${row.title}” (${row.thread_id}): ${action}`)] : []),
         `Tier split: ${juniorCount} junior, ${seniorCount} senior`,
-        ...[...rows].reverse().map((row) => [
+        ...reversed.map((row) => [
           `${row.role}${row.tier ? ` (${row.tier})` : ""} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
           ...(row.branch ? [`branch: ${row.branch}`] : []),
           ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
@@ -2259,6 +2288,8 @@ export default async function plugin(bb: BbPluginApi) {
         skills: ["chief"],
         instructions: [
           `You are the registered Chief supervisor for ${context.project.name}. Use ordinary visible BB threads and drive managed work through completion.`,
+          "",
+          ROSTER_CHIEF_INSTRUCTIONS,
           ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
           "",
           rules,
