@@ -16,7 +16,7 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 4. Chief owns the forge: `chief_forge_init` returns one ready-to-run script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. Chief runs the script and reads the `CHIEF_FORGE branch=… issue_url=… pr_url=…` line it prints. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
 5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
 6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
-7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled. Alerts use a durable SQLite outbox and retry after transient delivery failures.
+7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled — with its last output and the next steps; at twice `stallMinutes` the alert tells Chief to stop it with `chief_stop`. Alerts use a durable SQLite outbox and retry after transient delivery failures.
 8. A worker that reported `ready` is reviewed automatically: as soon as it goes idle the plugin starts a fresh read-only reviewer for every ready report (the previous verdict is carried over) in its worktree and tells Chief to wait for that verdict. The reviewer reads the worker's brief (a long mission or context is clipped), and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes to a fresh worker in the same worktree. Chief can start further reviews itself with `chief_review`.
 9. Chief inspects live status and bounded output, continues safe reversible work, marks verified non-running work complete, and escalates only genuine decisions.
 
@@ -37,6 +37,7 @@ bb plugin config chief set autoSpawn false
 `chiefProject` is the default used outside an existing project context — including the **Start Chief**
 button on the root New thread screen, which bb gives no project of its own. It does not limit Chief to
 one project. `autoSpawn` (default `false`) controls whether Chief should automatically start upon BB launch or settings changes.
+`stallMinutes` (default 30) sets the soft stall alert; twice that sends the stop alert.
 
 ### Models
 
@@ -96,11 +97,12 @@ bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_...
 bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." --tier junior|senior [--branch feature/...] [--issue-url ...] [--pr-url ...] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
+bb chief stop thr_... [--reason "..."] [--json]
 bb chief review thr_worker [--focus "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
 ```
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
 
 ## Build and verify
 
