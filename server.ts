@@ -1655,7 +1655,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (row.role === "planner" && params.state === "ready" && params.plan) {
       const bodies = typeof params.plan === "string" ? [params.plan] : params.plan.map((wave) => wave.body);
-      if (!bodies.some((body) => /^\s*#{1,6}\s+what we(?:'re|’re| are) not doing/im.test(body))) {
+      // ponytail: headings inside code blocks are deliberately out of scope (user decision).
+      if (!bodies.some((body) => /^[ \t]*#{1,6}[ \t]+what we(?:'re|’re| are) not doing/im.test(body))) {
         throw new Error('A planner\'s ready report requires a "What we\'re NOT doing" section in some wave.');
       }
     }

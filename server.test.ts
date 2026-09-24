@@ -1850,6 +1850,31 @@ describe("Chief backend", () => {
     }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/NOT doing/);
   });
 
+  test("rejects a planner's ready report when What we are not doing follows a hash across a newline", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready",
+      result: "Wave with newline separating hash from NOT-doing prose",
+      plan: [
+        { tier: "senior", body: "# Plan\n#\nWhat we are not doing is documented elsewhere." },
+      ],
+    }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/NOT doing/);
+
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready",
+      result: "String plan with newline separating hash from NOT-doing prose",
+      plan: "# Plan\n#\nWhat we are not doing is documented elsewhere.",
+    }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/NOT doing/);
+  });
+
   test("accepts a planner's ready report with a What we are not doing markdown heading", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
