@@ -68,7 +68,7 @@ one unit of work to a read-only planner that reads the project's own checkout on
 no provider plan mode and no approval prompt, and splits the work into up to 8 sequential waves, each
 a self-contained plan for one worker with its own tier. It submits those waves through `chief_report`'s
 `plan` field, and the plugin saves each one to the thread's own storage as `plan-1.md … plan-N.md` (or
-`plan.md` for a single-wave plan) and persists the schedule.
+`plan.md` for the legacy string form) and persists the schedule.
 
 The handoff is the plugin's, not Chief's: the planner's ready alert lists the wave schedule and the
 exact next call, `chief_delegate (planThreadId: …, wave: 1)`, which takes the plan file and tier from
