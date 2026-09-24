@@ -250,13 +250,13 @@ describe("Chief backend", () => {
     expect(state.spawned[1]).toMatchObject({
       title: "Fix checkout totals",
       sectionId: "sec_chief",
+      parentThreadId: chief.threadId,
       visibility: "visible",
       environment: { type: "host", hostId: "host_1", workspace: { type: "managed-worktree" } },
     });
-    expect(state.spawned[1].parentThreadId).toBeUndefined();
   });
 
-  test("files planner, worker and reviewer threads for their Chief", async () => {
+  test("files planner, worker and reviewer threads as children of their Chief", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
@@ -268,23 +268,7 @@ describe("Chief backend", () => {
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
     expect((await state.harness.behavior.runCli(["review", worker.threadId], opts)).exitCode).toBe(0);
     expect(state.spawned.slice(1).map((entry: any) => entry.parentThreadId))
-      .toEqual([undefined, undefined, undefined]);
-  });
-
-  test("spawns carry no parentThreadId", async () => {
-    const state = await setup();
-    await state.harness.behavior.setSettings({ plannerEnabled: true });
-    const chief = await start(state);
-    const opts = { threadId: chief.threadId, projectId: "proj_1" };
-    await state.harness.behavior.runCli(
-      ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals"], opts,
-    );
-    await state.harness.behavior.runCli(["consult", "--title", "Sanity check", "--mission", "Confirm the plan holds"], opts);
-    const worker = await delegate(state, chief.threadId);
-    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
-    await state.harness.behavior.runCli(["review", worker.threadId], opts);
-    await state.harness.behavior.runCli(["review", "--branch", "feature/legacy-fix", "--json"], opts);
-    expect(state.spawned.every((entry: any) => entry.parentThreadId === undefined)).toBe(true);
+      .toEqual([chief.threadId, chief.threadId, chief.threadId]);
   });
 
   test("allows Chief to inspect, roster, and continue child threads even if chief_thread_id was transferred", async () => {
@@ -330,6 +314,7 @@ describe("Chief backend", () => {
       visibility: "visible",
       status: "idle",
       originPluginId: "chief",
+      parentThreadId: chief.threadId,
     }));
     state.seedPluginMetadata(childId, { role: "worker", chiefThreadId: chief.threadId });
 
@@ -342,12 +327,12 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1)).toMatchObject({ threadId: childId, senderThreadId: chief.threadId });
   });
 
-  test("does not adopt a user-created thread that this plugin never spawned", async () => {
+  test("does not adopt a user-created sub-thread under Chief that this plugin never spawned", async () => {
     const state = await setup();
     const chief = await start(state);
 
-    // A thread the user created directly in the BB UI: live, same project —
-    // but no pluginMetadata this plugin ever seeded.
+    // A thread the user created directly in the BB UI under Chief: live, same
+    // project, correct parent — but no pluginMetadata this plugin ever seeded.
     const childId = "thr_user_child";
     state.live.set(childId, makeThreadResponse({
       id: childId,
@@ -358,6 +343,7 @@ describe("Chief backend", () => {
       visibility: "visible",
       status: "idle",
       originPluginId: null,
+      parentThreadId: chief.threadId,
     }));
 
     await expect(state.harness.behavior.callAgentTool(
@@ -380,6 +366,7 @@ describe("Chief backend", () => {
       visibility: "visible",
       status: "idle",
       originPluginId: "chief",
+      parentThreadId: chief.threadId,
       deletedAt: Date.now(),
     }));
     state.seedPluginMetadata(childId, { role: "worker", chiefThreadId: chief.threadId });
@@ -913,12 +900,12 @@ describe("Chief backend", () => {
     expect(parsed.title).toBe("Review · feature/legacy-fix");
     const spawnedReview = state.spawned.find((entry) => entry.title === "Review · feature/legacy-fix");
     expect(spawnedReview).toMatchObject({
+      parentThreadId: chief.threadId,
       environment: {
         type: "host", hostId: "host_1",
         workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/legacy-fix" } },
       },
     });
-    expect(spawnedReview.parentThreadId).toBeUndefined();
     expect(spawnedReview.prompt).toContain("Remain review-only");
     expect(spawnedReview.prompt).toContain("feature/legacy-fix");
   });

@@ -1038,13 +1038,14 @@ export default async function plugin(bb: BbPluginApi) {
       projectId,
       environment: { type: "project-default" },
       sectionId,
+      parentThreadId: chief.thread_id,
       visibility: "visible",
       title,
       ...(await execution("planner", await projectHostId(projectId))),
       input: planCommandInput(prompt),
       pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
     });
-    insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, title, state: "starting", status: thread.status });
+    insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, state: "starting", status: thread.status });
     return { threadId: thread.id, title, projectId };
   }
 
@@ -1107,6 +1108,7 @@ export default async function plugin(bb: BbPluginApi) {
         ? { type: "reuse", environmentId: workerLive!.environmentId! }
         : { type: "project-default" },
       sectionId,
+      parentThreadId: chief.thread_id,
       visibility: "visible",
       title,
       ...(await execution("advisor", hostId)),
@@ -1115,7 +1117,7 @@ export default async function plugin(bb: BbPluginApi) {
     });
     insertThread({
       threadId: thread.id, role: "advisor", projectId, chiefThreadId: chief.thread_id,
-      workerThreadId: worker?.thread_id ?? null, title,
+      workerThreadId: worker?.thread_id ?? null, parentThreadId: chief.thread_id, title,
       state: "starting", status: thread.status,
     });
     return { threadId: thread.id, title, projectId };
@@ -1204,6 +1206,7 @@ export default async function plugin(bb: BbPluginApi) {
           },
         },
       sectionId,
+      parentThreadId: chief.thread_id,
       visibility: "visible",
       title: params.title,
       ...(await execution(params.tier, hostId)),
@@ -1211,7 +1214,7 @@ export default async function plugin(bb: BbPluginApi) {
       pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id },
     });
     insertThread({
-      threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, title: params.title,
+      threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
       state: "starting", status: thread.status, tier: params.tier, brief: reviewerBrief,
       branch, issueUrl, prUrl,
     });
@@ -1332,13 +1335,14 @@ export default async function plugin(bb: BbPluginApi) {
         projectId: worker.project_id,
         environment: { type: "reuse", environmentId: live.environmentId },
         sectionId,
+        parentThreadId: worker.chief_thread_id ?? undefined,
         visibility: "visible",
         title,
         ...(await execution("reviewer", await environmentHostId(live.environmentId))),
         prompt,
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
-      insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status });
+      insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status });
       if (previous) {
         const now = Date.now();
         db.transaction(() => {
@@ -1395,6 +1399,7 @@ export default async function plugin(bb: BbPluginApi) {
           workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: branch } },
         },
         sectionId,
+        parentThreadId: chiefThreadId,
         visibility: "visible",
         title,
         ...(await execution("reviewer", hostId)),
@@ -1402,7 +1407,7 @@ export default async function plugin(bb: BbPluginApi) {
         pluginMetadata: { role: "reviewer", chiefThreadId },
       });
       insertThread({
-        threadId: thread.id, role: "reviewer", projectId, chiefThreadId, title,
+        threadId: thread.id, role: "reviewer", projectId, chiefThreadId, parentThreadId: chiefThreadId, title,
         state: "starting", status: thread.status, branch, prUrl: pullRequestRef,
       });
       return { threadId: thread.id, title, workerThreadId: null, created: true };
@@ -1878,7 +1883,10 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         const live = await bb.sdk.threads.get({ threadId });
         const chief = roles.get(chiefThreadId);
-        if (live.deletedAt === null && live.archivedAt === null && chief && live.projectId === chief.project_id) {
+        if (
+          live.deletedAt === null && live.archivedAt === null &&
+          live.parentThreadId === chiefThreadId && chief && live.projectId === chief.project_id
+        ) {
           // Only adopt threads this plugin itself spawned (pluginMetadata seeded at
           // spawn time, trusted only once originPluginId proves it — see report()'s
           // identical check) — otherwise a sub-thread the user created under Chief in
@@ -1886,7 +1894,7 @@ export default async function plugin(bb: BbPluginApi) {
           const seeded = live.originPluginId === bb.pluginId
             ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
             : undefined;
-          if (seeded?.success && seeded.data.chiefThreadId === chiefThreadId) {
+          if (seeded?.success) {
             insertThread({
               threadId: live.id,
               role: "worker",
