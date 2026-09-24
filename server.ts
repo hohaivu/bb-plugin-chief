@@ -24,11 +24,9 @@ const FORGE_CLI_TIMEOUT_MS = 10_000;
  * again on every continuation — the two places an edit instruction could arrive. */
 const REVIEW_ONLY = "Remain review-only: do not modify files. A repair goes back to the worker, which then earns its own review.";
 /** Same for a planner: said when the plan starts and again on every continuation. */
-const PLAN_ONLY = "Remain read-only in the repository: do not create, modify, or delete any file it tracks. Writing the plan itself to $BB_THREAD_STORAGE/plan.md is not a repository edit and stays allowed. A worker implements the plan in its own worktree.";
+const PLAN_ONLY = "Remain read-only in the repository: do not create, modify, or delete any file it tracks. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.";
 /** Same for an advisor: said when the consult starts and again on every continuation. */
 const ADVISE_ONLY = "Remain advisory: read code and run commands to reproduce the problem, but do not create, modify, or delete any file, commit, or push. Report your advice to Chief; a worker makes the change.";
-/** BB's builtin plan slash command, the trigger a provider maps to its own plan mode. */
-const PLAN_COMMAND = "/plan";
 /** Consecutive request_changes verdicts on one task before Chief must consult the advisor. */
 const CONSULT_AFTER_REJECTIONS = 2;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
@@ -329,7 +327,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 /** Planning is a decision point, not a relay: the plan is worth a thread only because
  * Chief reads it before any worktree is spent on it. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. For work that is not obviously small, use chief_plan first. Its ready report names the plan file it wrote — read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path in its context, not the plan body. A plan is never implementation: only a worker changes code.";
+  "Planning is on. For work that is not obviously small, use chief_plan first. Its ready alert names the plan file Chief saved — read that file in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Optionally, chief_consult the Advisor with the plan file's path for a second opinion before delegating. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path in its context, not the plan body. A plan is never implementation: only a worker changes code.";
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -994,24 +992,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Open a planner on the provider's own `/plan` action rather than as plain
-   * text: the builtin command mention is what makes BB enter plan mode, the way
-   * `bb thread spawn --plan` does. */
-  function planCommandInput(prompt: string) {
-    return [{
-      type: "text" as const,
-      text: `${PLAN_COMMAND} ${prompt}`,
-      mentions: [{
-        start: 0,
-        end: PLAN_COMMAND.length,
-        resource: {
-          kind: "command" as const, trigger: "/" as const, name: "plan",
-          source: "command" as const, origin: "builtin" as const, label: "plan", argumentHint: null,
-        },
-      }],
-    }];
-  }
-
   /** A plan is read-only work in the project's own checkout: no worktree is spent
    * until Chief has read the plan and chosen to delegate it. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
@@ -1031,8 +1011,8 @@ export default async function plugin(bb: BbPluginApi) {
       "", "## Working contract",
       "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
       `- ${PLAN_ONLY}`,
-      "- Write the full plan as Markdown to $BB_THREAD_STORAGE/plan.md: the files and functions to change, the steps in order, real constraints, and the risks.",
-      "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline — followed by the plan file's absolute path. The detail lives in the file, not the report.",
+      "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
+      "- Report with chief_report state ready, passing the full plan body in chief_report's `plan` field. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives the plan itself as a file.",
       "- Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- For multi-step work, order it into named phases one worker implements one at a time: each phase ends in its own ready report and review, and only that verdict opens the next phase.",
       "- Add an explicit \"What we're NOT doing\" section naming what this plan leaves out of scope.",
@@ -1048,7 +1028,7 @@ export default async function plugin(bb: BbPluginApi) {
       visibility: "visible",
       title,
       ...(await execution("planner", await projectHostId(projectId))),
-      input: planCommandInput(prompt),
+      prompt,
       pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
     });
     insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, state: "starting", status: thread.status });

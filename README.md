@@ -64,15 +64,18 @@ of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 ### Planning
 
 Settings → **Plan before delegating** (on by default). With it on, Chief gains `chief_plan`: it sends
-one unit of work to a read-only planner that reads the project's own checkout and writes a plan —
-files to change, ordered steps, verifiable success criteria, constraints, and risks — to
-`$BB_THREAD_STORAGE/plan.md`, reporting back a short summary and that file's path.
+one unit of work to a read-only planner that reads the project's own checkout on a plain prompt, with
+no provider plan mode and no approval prompt, and writes a plan — files to change, ordered steps,
+verifiable success criteria, constraints, and risks. It submits that plan through `chief_report`'s
+`plan` field, and the plugin saves it to the thread's own storage as `plan.md`, reporting back a
+short summary and that file's path.
 
 The handoff is Chief's, not the plugin's. Chief reads the plan file in full, corrects it with
 `chief_continue`, approves the plan itself, and calls `chief_delegate` right away without waiting
-for user sign-off, passing the plan file's path as its context, not the plan body. It escalates to
-you only for a genuine product or scope open question that cannot be resolved from the code.
-Nothing is implemented until it does, and no worktree is spent on a plan.
+for user sign-off, passing the plan file's path as its context, not the plan body — optionally
+`chief_consult`ing the Advisor with that path for a second opinion first. It escalates to you only
+for a genuine product or scope open question that cannot be resolved from the code. Nothing is
+implemented until it does, and no worktree is spent on a plan.
 
 The toggle reaches Chief threads that are already running. Turn it off to delegate directly.
 
