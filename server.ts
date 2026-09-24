@@ -531,9 +531,9 @@ export const MIGRATIONS = [
     `INSERT INTO chief_models_v3 SELECT * FROM chief_models`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_v3 RENAME TO chief_models`,
-    // A reviewer's active_cycle counts every resume, which under a phased plan is the
-    // phase count, not rejection rounds. Consecutive request_changes verdicts need
-    // their own counter so a phase's first rejection can't misread as a deadlock.
+    // A reviewer's active_cycle counts every resume, not rejection rounds.
+    // Consecutive request_changes verdicts need their own counter so an
+    // unrelated resume can't misread as a deadlock.
     `ALTER TABLE managed_threads ADD COLUMN reject_streak INTEGER NOT NULL DEFAULT 0`,
     // Jev scoring is removed for cost reasons; its tables and settled state go with it.
     `DROP TABLE IF EXISTS jev_scores`,
@@ -1044,7 +1044,7 @@ export default async function plugin(bb: BbPluginApi) {
       `- ${PLAN_ONLY}`,
       "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
       "- Report with chief_report state ready, passing the plan through chief_report's `plan` field: an array of `{tier, body}` per wave, or a single string for one wave. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file.",
-      "- Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
+      "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- Split the work into at most 8 sequential waves, each a self-contained plan one worker finishes on the same branch; one wave by default, more only when one worker cannot finish it. Give each wave a tier: junior for bounded, known work, senior otherwise. Submit `plan` as an array of `{tier, body}`. Waves contain no phases.",
       "- Add an explicit \"What we're NOT doing\" section naming what this plan leaves out of scope.",
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
@@ -1173,9 +1173,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!planner || planner.role !== "planner" || !belongsToChief(planner, chief.thread_id)) {
         throw new Error(`No managed planner ${planThreadId} for this Chief.`);
       }
-      const waves = planner.plan_waves
-        ? (JSON.parse(planner.plan_waves) as { path: string; tier: z.infer<typeof tierSchema> }[])
-        : [];
+      const waves = planWavesFor(planThreadId);
       if (wave === undefined || wave < 1 || wave > waves.length) {
         throw new Error(`Wave ${wave ?? "?"} is out of range: planner ${planThreadId} scheduled ${waves.length} wave(s).`);
       }
@@ -1242,7 +1240,6 @@ export default async function plugin(bb: BbPluginApi) {
       "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file, read that file in full too before starting.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
-      "- If this brief lays out ordered phases, implement and report only the phase you are currently asked for, then stop; name which phase you finished in your ready result (for example \"Phase 2 of 4\"), so the reviewer and Chief both see it. The next phase arrives as a new brief once this one is reviewed, not something to start on your own.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -1317,6 +1314,25 @@ export default async function plugin(bb: BbPluginApi) {
     return roles.get(threadId)!;
   }
 
+  /** A worker's linked planner's persisted wave schedule, or [] when unlinked. */
+  function planWavesFor(planThreadId: string | null): { path: string; tier: z.infer<typeof tierSchema> }[] {
+    if (!planThreadId) return [];
+    const planner = roles.get(planThreadId);
+    return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as { path: string; tier: z.infer<typeof tierSchema> }[]) : [];
+  }
+
+  /** A ready worker's exact next call: the next wave (no review runs between waves), or
+   * the one review of the whole run once the schedule's last wave is ready — or, with no
+   * plan link at all, the same review call. */
+  function workerReadyNextStep(row: ManagedRow): string {
+    const waves = planWavesFor(row.plan_thread_id);
+    if (row.plan_thread_id && row.plan_wave != null && row.plan_wave < waves.length) {
+      const next = waves[row.plan_wave]!;
+      return `Wave ${row.plan_wave} of ${waves.length} is ready. Once it is idle, delegate wave ${row.plan_wave + 1} (${next.tier}): ${next.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave + 1}, replaces: ${row.thread_id}). Do not review between waves.`;
+    }
+    return `Start its review now: chief_review (workerThreadId: ${row.thread_id}). Complete the work only on the reviewer's approve.`;
+  }
+
   /** Shared reviewer prompt: REVIEW_ONLY and the chief_report/verdict contract are
    * identical for a worker's reviewer and a branch/PR reviewer. Only the subject
    * line and provenance section (worker brief/result, or nothing for a branch/PR
@@ -1335,7 +1351,6 @@ export default async function plugin(bb: BbPluginApi) {
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
       `Report your findings to Chief thread ${opts.chiefThreadId} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
       "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
-      "If the worker's brief lays out ordered phases and this is not the last one, name the next phase in your recommendation (for example \"Continue the worker with phase 3 of 4.\"); leave recommendation unset only when no phases remain, since that is what tells Chief whether to complete this work or continue it.",
       "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
       ...opts.provenance,
     ].join("\n");
@@ -1364,6 +1379,7 @@ export default async function plugin(bb: BbPluginApi) {
       // the rules into every reviewer turn, so the spawn prompt does not repeat them.
       await readRules(worker.project_id);
       const title = `Review · ${worker.title}`;
+      const waves = planWavesFor(worker.plan_thread_id);
       const prompt = reviewerPrompt({
         subject: `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
         chiefThreadId: worker.chief_thread_id,
@@ -1383,6 +1399,10 @@ export default async function plugin(bb: BbPluginApi) {
             `Full report and last output: bb chief inspect ${previous.thread_id}`,
             ...(previous.recommendation ? [`Recommendation: ${clip(previous.recommendation, 600)}`] : []),
             "", "Check each finding above against the current worktree: say which were fixed and which remain. Do not re-open points it approved.",
+          ] : []),
+          ...(waves.length > 1 ? [
+            "", `This is the final wave (${waves.length} of ${waves.length}). Review the whole branch against its base — every wave's changes — against every wave's plan:`,
+            ...waves.map((wave, index) => `Wave ${index + 1} of ${waves.length} (${wave.tier}): ${wave.path}`),
           ] : []),
         ],
       });
@@ -1472,16 +1492,6 @@ export default async function plugin(bb: BbPluginApi) {
       return await start;
     } finally {
       reviewStarts.delete(key);
-    }
-  }
-
-  /** A failed auto-review must never swallow the alert Chief is waiting for. */
-  async function autoReview(row: ManagedRow) {
-    try {
-      return await startReview(row.thread_id);
-    } catch (error) {
-      bb.log.warn(`Could not auto-start a review for ${row.thread_id}: ${String(error)}`);
-      return null;
     }
   }
 
@@ -1663,11 +1673,10 @@ export default async function plugin(bb: BbPluginApi) {
     const plannerReady = row.role === "planner" && params.state === "ready";
     const planWaves = plannerReady && params.plan ? await writePlan(threadId, params.plan) : null;
     const now = Date.now();
-    // A reviewer's active_cycle counts every resume, which under a phased plan is the
-    // phase count rather than rejection rounds — a phase's first-ever rejection can
-    // land on a high active_cycle and must not read as a deadlock. reject_streak counts
-    // only consecutive request_changes verdicts, and resets the moment either side
-    // breaks the streak with an approve.
+    // A reviewer's active_cycle counts every resume, not rejection rounds — a
+    // reviewer resumed for an unrelated reason must not read as a deadlock.
+    // reject_streak counts only consecutive request_changes verdicts, and
+    // resets the moment either side breaks the streak with an approve.
     db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
       reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
       plan_waves = COALESCE(?, plan_waves),
@@ -1696,17 +1705,9 @@ export default async function plugin(bb: BbPluginApi) {
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
-      // The server has no phase column and cannot know from the database whether
-      // more phases remain — a reviewer that reads the worker's brief does. Its
-      // recommendation naming the next phase is what makes this non-final; its
-      // absence is what makes the legacy final wording below reachable verbatim.
       ...(plannerReady ? [] : [
         verdict === "approve"
-          ? params.recommendation
-            ? current.worker_thread_id
-              ? `The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${current.worker_thread_id}).`
-              : "The reviewer approves this phase. Continue the worker with the next phase named in the recommendation above."
-            : "The reviewer approves. Complete this work, then mark the pull request ready."
+          ? "The reviewer approves. Complete this work, then mark the pull request ready."
           : deadlocked || regression
             ? `${regression && !deadlocked
                 ? "The reviewer reports this change introduced a new problem."
@@ -1717,7 +1718,7 @@ export default async function plugin(bb: BbPluginApi) {
               ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${current.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
               : "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
             : row.role === "worker" && params.state === "ready"
-              ? "An independent review starts by itself once this worker goes idle; you will be alerted only if it cannot start. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
+              ? workerReadyNextStep(current)
               : row.role === "advisor" && params.state === "ready"
                 ? `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${current.worker_thread_id ? ` (replaces: ${current.worker_thread_id})` : ""} with the advice in its context, or escalate to the user if it names a genuine decision.`
                 : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
@@ -1819,20 +1820,6 @@ export default async function plugin(bb: BbPluginApi) {
       state, thread.status ?? observed, now, thread.id,
     );
     reloadRoles();
-    // A plain idle or failed/archived/deleted thread is already reflected in
-    // BB's own native parent notice ("completed"/"needs help"/interrupted) since
-    // this plugin still spawns children under Chief. Only alert here for what
-    // the plugin alone knows: an auto-review that failed to start.
-    if (kind !== "idle") return;
-    const current = roles.get(thread.id)!;
-    const pending = current.role === "worker" && current.state === "ready";
-    if (!pending) return;
-    const review = await autoReview(current);
-    if (review) return;
-    await alertChief(current, `${kind}:${row.active_cycle}`, [
-      `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
-      "Its review could not be started automatically. Start one with chief_review before completing this work.",
-    ].join("\n"));
   }
 
   bb.events.on("thread.active", ({ thread }) => lifecycle("active", thread));

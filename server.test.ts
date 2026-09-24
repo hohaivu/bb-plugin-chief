@@ -566,6 +566,11 @@ describe("Chief backend", () => {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "done",
     });
+    // Idle alone spawns no reviewer; Chief has to call chief_review itself.
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(0);
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
   });
 
@@ -945,30 +950,34 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).input[0].text).toContain("Verdict: approve");
   });
 
-  test("reviews a ready worker without Chief asking for it", async () => {
+  test("does not review a ready worker until Chief calls chief_review", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals fixed and covered by a test",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    // The report itself already tells Chief a review starts automatically.
-    expect(state.sent.at(-1).input[0].text).toContain("An independent review starts by itself");
+    // The report itself already names the exact next call.
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_review (workerThreadId: ${worker.threadId})`);
     const sentBeforeIdle = state.sent.length;
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "done",
     });
+    // Idle alone spawns no reviewer and sends no extra alert.
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(0);
+    expect(state.sent).toHaveLength(sentBeforeIdle);
+
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const review = state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals");
     expect(review).toHaveLength(1);
     expect(review[0].environment).toEqual({ type: "reuse", environmentId: "env_worker" });
-    // No extra alert: the auto-review starting successfully speaks for itself.
-    expect(state.sent).toHaveLength(sentBeforeIdle);
-    // A second idle event must not spawn a second reviewer.
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    // A second chief_review call must not spawn a second reviewer.
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
   });
 
@@ -979,25 +988,23 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer.threadId)! });
 
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready again",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
 
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
   });
 
-  test("sends no idle alert or worker output once the auto-review starts", async () => {
+  test("sends no extra alert or worker output on an ordinary idle event", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
@@ -1010,24 +1017,9 @@ describe("Chief backend", () => {
       lastAssistantText: "a very detailed final message from the worker",
     });
     expect(state.sent).toHaveLength(sentBeforeIdle);
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(0);
     const text = state.sent.at(-1).input[0].text as string;
     expect(text).not.toContain("Detail:");
-  });
-
-  test("ready worker whose review cannot start gets the failure alert", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Totals fixed and covered by a test",
-    }, { threadId: worker.threadId, projectId: "proj_1" });
-    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, environmentId: null });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
-    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(0);
-    expect(state.sent.at(-1).input[0].text).toContain("could not be started automatically");
   });
 
   test("starts a fresh reviewer after the worker fixes what it found", async () => {
@@ -1038,10 +1030,9 @@ describe("Chief backend", () => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Ready for review",
       }, { threadId: worker.threadId, projectId: "proj_1" });
-      await state.harness.behavior.emitThreadEvent("thread.idle", {
-        thread: state.live.get(worker.threadId)!,
-        lastAssistantText: "done",
-      });
+      await state.harness.behavior.callAgentTool(
+        "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+      );
     };
     await ready();
     const firstReviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
@@ -1065,8 +1056,8 @@ describe("Chief backend", () => {
     expect(reviewSpawns[1].prompt).toContain("The previous review");
     expect(state.sent.filter((entry) => entry.threadId === firstReviewer.threadId)
       .some((entry) => entry.input[0].text.includes("Re-check"))).toBe(false);
-    // The fresh reviewer started silently; Chief only heard the worker's own report.
-    expect(state.sent.at(-1).input[0].text).toContain("An independent review starts by itself");
+    // The worker's own ready report names the exact next call; chief_review itself sends no alert.
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_review (workerThreadId: ${worker.threadId})`);
   });
 
   test("routes on a reviewer's structured verdict and names a pair that stops converging", async () => {
@@ -1077,10 +1068,9 @@ describe("Chief backend", () => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Ready for review",
       }, { threadId: worker.threadId, projectId: "proj_1" });
-      await state.harness.behavior.emitThreadEvent("thread.idle", {
-        thread: state.live.get(worker.threadId)!,
-        lastAssistantText: "done",
-      });
+      await state.harness.behavior.callAgentTool(
+        "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+      );
     };
     await ready();
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
@@ -1124,10 +1114,9 @@ describe("Chief backend", () => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result,
       }, { threadId: worker.threadId, projectId: "proj_1" });
-      await state.harness.behavior.emitThreadEvent("thread.idle", {
-        thread: state.live.get(worker.threadId)!,
-        lastAssistantText: "done",
-      });
+      await state.harness.behavior.callAgentTool(
+        "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+      );
     };
     const verdict = (reviewerThreadId: string, value: "approve" | "request_changes") =>
       state.harness.behavior.callAgentTool("chief_report", {
@@ -1161,10 +1150,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "This broke the tax calculation", verdict: "request_changes", regression: true,
@@ -1183,10 +1171,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Looks good", verdict: "approve", regression: true,
@@ -1205,77 +1192,15 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Confirmed against the regression test", verdict: "approve",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
     expect(state.sent.at(-1).input[0].text).toContain("Verdict: approve");
     expect(state.sent.at(-1).input[0].text).toContain("The reviewer approves. Complete this work, then mark the pull request ready.");
-  });
-
-  test("does not tell Chief to complete a non-final phase's approval", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Phase 1 of 2 implemented",
-    }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
-    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Phase 1 confirmed", verdict: "approve",
-      recommendation: "Continue the worker with phase 2 of 2.",
-    }, { threadId: reviewer.threadId, projectId: "proj_1" });
-    const text = state.sent.at(-1).input[0].text;
-    expect(text).toContain(`The reviewer approves this phase. Start the next phase named in the recommendation above with chief_delegate (replaces: ${worker.threadId}).`);
-    expect(text).not.toContain("mark the pull request ready");
-    expect(text).not.toContain("Complete this work");
-  });
-
-  test("starts a fresh reviewer for each phase, carrying the previous verdict", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    const reportReady = async (result: string) => {
-      await state.harness.behavior.callAgentTool("chief_report", {
-        state: "ready", result,
-      }, { threadId: worker.threadId, projectId: "proj_1" });
-      await state.harness.behavior.emitThreadEvent("thread.idle", {
-        thread: state.live.get(worker.threadId)!,
-        lastAssistantText: "done",
-      });
-    };
-    const latestReviewer = async () => (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
-    const approve = async (reviewerThreadId: string, result: string, recommendation?: string) => {
-      await state.harness.behavior.callAgentTool("chief_report", {
-        state: "ready", result, verdict: "approve",
-        ...(recommendation ? { recommendation } : {}),
-      }, { threadId: reviewerThreadId, projectId: "proj_1" });
-    };
-
-    await reportReady("Phase 1 of 3 finished: totals fixed");
-    await approve((await latestReviewer()).threadId, "Phase 1 confirmed", "Continue the worker with phase 2 of 3.");
-
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 2"]);
-    await reportReady("Phase 2 of 3 finished: discounts fixed");
-    await approve((await latestReviewer()).threadId, "Phase 2 confirmed", "Continue the worker with phase 3 of 3.");
-
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Start phase 3"]);
-    await reportReady("Phase 3 of 3 finished: shipping fixed");
-
-    const reviewerSpawns = state.spawned.filter((entry: any) => entry.pluginMetadata?.role === "reviewer");
-    expect(reviewerSpawns).toHaveLength(3);
-    expect(reviewerSpawns[1].prompt).toContain("Phase 2 of 3 finished");
-    expect(reviewerSpawns[1].prompt).toContain("Phase 1 confirmed");
-    expect(reviewerSpawns[1].prompt).toContain("Continue the worker with phase 2 of 3.");
-    expect(reviewerSpawns[2].prompt).toContain("Phase 3 of 3 finished");
   });
 
   test("hands the reviewer the brief and report the work was judged against", async () => {
@@ -1285,10 +1210,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals fixed and covered by a test",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const review = state.spawned.find((entry: any) => entry.title === "Review · Fix checkout totals");
     // Without the brief the reviewer scores the change against a standard nobody set.
     expect(review.prompt).toContain("Correct and verify totals");
@@ -1316,10 +1240,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals fixed and covered by a test",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
 
     const review = state.spawned.find((entry: any) => entry.title === "Review · Fix checkout totals");
     expect(review.prompt).toContain(planPath);
@@ -1335,10 +1258,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: longResult,
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
 
     const review = state.spawned.find((entry: any) => entry.title === "Review · Fix checkout totals");
     const resultLine = review.prompt.split("## What the worker reported")[1].split("\n")[1];
@@ -1354,10 +1276,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: longResult,
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const freshReviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!;
     const freshResultLine = freshReviewSpawn.prompt.split("## What the worker reported")[1].split("\n")[1];
     expect(freshResultLine.length).toBeLessThanOrEqual(300);
@@ -1618,7 +1539,7 @@ describe("Chief backend", () => {
     expect(planPrompt).not.toContain("$BB_THREAD_STORAGE");
     // Split success criteria and the out-of-scope section are the planner's contract, not an afterthought.
     expect(planPrompt).toContain("Read every file this brief names in full before proposing anything: no partial reads, no limit or offset.");
-    expect(planPrompt).toContain("Split success criteria per-phase into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm)");
+    expect(planPrompt).toContain("Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm)");
     expect(planPrompt).toContain("What we're NOT doing");
     expect(JSON.stringify(plan)).toContain("Its ready alert lists the wave schedule and the exact next call");
 
@@ -1954,10 +1875,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals are off by the discount", verdict: "request_changes",
@@ -2264,10 +2184,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
 
     const t0 = 1_000_000;
@@ -2447,10 +2366,9 @@ describe("Chief backend", () => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result,
       }, { threadId, projectId: "proj_1" });
-      await state.harness.behavior.emitThreadEvent("thread.idle", {
-        thread: state.live.get(threadId)!,
-        lastAssistantText: "done",
-      });
+      await state.harness.behavior.callAgentTool(
+        "chief_review", { workerThreadId: threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+      );
     };
     await ready(worker.threadId, "Totals fixed");
     const reviewer1 = (await status(state)).threads.find((row) => row.role === "reviewer")!;
@@ -2669,6 +2587,103 @@ describe("Chief backend", () => {
     expect(state.spawned.at(-1).prompt).toContain(`Plan file (wave 1 of 2): ${path1}`);
     const freshRow = state.db.prepare(`SELECT plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(freshWorker.threadId) as any;
     expect(freshRow).toEqual({ plan_thread_id: planner.threadId, plan_wave: 1 });
+  });
+
+  test("a 3-wave run delegates wave to wave with no review, then reviews the whole branch and carries wave 3 through a fix", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready",
+      result: "Three waves: schema, migration, then delegation.",
+      plan: [
+        { tier: "junior", body: PLAN_FIXTURE },
+        { tier: "senior", body: "# Wave 2\nMigrate the data." },
+        { tier: "senior", body: "# Wave 3\nWire up delegation." },
+      ],
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+    const path1 = join(state.storageRoot, planner.threadId, "plan-1.md");
+    const path2 = join(state.storageRoot, planner.threadId, "plan-2.md");
+    const path3 = join(state.storageRoot, planner.threadId, "plan-3.md");
+
+    const w1Result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "1",
+      "--branch", "feature/fix-checkout-totals", "--pr-url", "https://github.com/acme/shop/pull/8", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    const worker1 = JSON.parse(w1Result.stdout!) as { threadId: string };
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Wave 1 of 3 done",
+    }, { threadId: worker1.threadId, projectId: "proj_1" });
+    let alert = state.sent.at(-1).input[0].text as string;
+    expect(alert).toContain(`chief_delegate (planThreadId: ${planner.threadId}, wave: 2, replaces: ${worker1.threadId})`);
+    expect(alert).toContain(path2);
+    expect(alert).not.toContain("chief_review");
+    expect(state.spawned.some((entry) => String(entry.title).startsWith("Review · "))).toBe(false);
+
+    const w2Result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "2", "--replaces", worker1.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    const worker2 = JSON.parse(w2Result.stdout!) as { threadId: string };
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Wave 2 of 3 done",
+    }, { threadId: worker2.threadId, projectId: "proj_1" });
+    alert = state.sent.at(-1).input[0].text as string;
+    expect(alert).toContain(`chief_delegate (planThreadId: ${planner.threadId}, wave: 3, replaces: ${worker2.threadId})`);
+    expect(alert).toContain(path3);
+    expect(state.spawned.some((entry) => String(entry.title).startsWith("Review · "))).toBe(false);
+
+    const w3Result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "3", "--replaces", worker2.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    const worker3 = JSON.parse(w3Result.stdout!) as { threadId: string };
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Wave 3 of 3 done",
+    }, { threadId: worker3.threadId, projectId: "proj_1" });
+    alert = state.sent.at(-1).input[0].text as string;
+    expect(alert).toContain(`chief_review (workerThreadId: ${worker3.threadId})`);
+
+    await state.harness.behavior.callAgentTool(
+      "chief_review", { workerThreadId: worker3.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const reviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!;
+    expect(reviewSpawn.prompt).toContain(`This is the final wave (3 of 3). Review the whole branch against its base`);
+    expect(reviewSpawn.prompt).toContain(`Wave 1 of 3 (junior): ${path1}`);
+    expect(reviewSpawn.prompt).toContain(`Wave 2 of 3 (senior): ${path2}`);
+    expect(reviewSpawn.prompt).toContain(`Wave 3 of 3 (senior): ${path3}`);
+
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "The migration double-counts a refund", verdict: "request_changes",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_delegate (replaces: ${worker3.threadId})`);
+
+    const fixResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Fix the refund double-count the reviewer found",
+      "--replaces", worker3.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    const fixWorker = JSON.parse(fixResult.stdout!) as { threadId: string };
+    // The fix worker inherits wave 3/3 and the same branch/PR without being told again.
+    const fixRow = state.db.prepare(`SELECT plan_thread_id, plan_wave, branch, pr_url FROM managed_threads WHERE thread_id=?`).get(fixWorker.threadId) as any;
+    expect(fixRow).toEqual({
+      plan_thread_id: planner.threadId, plan_wave: 3,
+      branch: "feature/fix-checkout-totals", pr_url: "https://github.com/acme/shop/pull/8",
+    });
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Refund double-count fixed",
+    }, { threadId: fixWorker.threadId, projectId: "proj_1" });
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_review (workerThreadId: ${fixWorker.threadId})`);
   });
 
   test("tells the worker the forge is Chief's even when only a pull request was created", async () => {
