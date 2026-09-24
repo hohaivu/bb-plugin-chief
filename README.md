@@ -42,7 +42,7 @@ one project. `autoSpawn` (default `false`) controls whether Chief should automat
 
 Settings → **Chief models by machine** scans every enrolled machine for its signed-in providers
 and their live model catalogs, and lets you pick a provider, model, and reasoning level per role:
-Chief, planner, junior worker, senior worker, and reviewer. A role without a selection spawns on BB's own
+Chief, planner, junior worker, senior worker, reviewer, and advisor. A role without a selection spawns on BB's own
 default for the project, and a selection the machine can no longer serve (signed out, model
 retired) falls back to that default rather than failing the spawn.
 
@@ -75,6 +75,15 @@ Nothing is implemented until it does, and no worktree is spent on a plan.
 
 The toggle reaches Chief threads that are already running. Turn it off to delegate directly.
 
+### Advisor
+
+When a reviewer and worker stop converging (two straight `request_changes` verdicts, or one that
+reports a regression), Chief gains `chief_consult`: a read-only advisor that reads code and runs
+commands to reproduce the problem, but never edits, commits, or pushes. With a worker it runs in
+that worker's own worktree, briefed on the mission, the reviewer verdicts, and the branch; without
+one it runs in the project's own checkout, like a plan. Its advice goes back to Chief, which decides
+the next worker round or escalates.
+
 ## CLI
 
 ```sh
@@ -83,6 +92,7 @@ bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
 bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--json]
+bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_...] [--context "..."] [--json]
 bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." --tier junior|senior [--branch feature/...] [--issue-url ...] [--pr-url ...] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
@@ -90,7 +100,7 @@ bb chief review thr_worker [--focus "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
 ```
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
 
 ## Build and verify
 
