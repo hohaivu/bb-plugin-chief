@@ -55,6 +55,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   let updateFailures = new Map<string, number>();
   const live = new Map<string, ReturnType<typeof makeThreadResponse>>();
   const pluginMetadataStore = new Map<string, any>();
+  const queuedMessagesStore = new Map<string, any[]>();
   const sent: any[] = [];
   const spawned: any[] = [];
   const stopped: string[] = [];
@@ -152,6 +153,9 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           return { ok: true, delivery: "sent" as const };
         },
         output: async ({ threadId }: { threadId: string }) => ({ output: `last output from ${threadId}` }),
+        queuedMessages: {
+          list: async ({ threadId }: { threadId: string }) => queuedMessagesStore.get(threadId) ?? [],
+        },
         stop: async ({ threadId }: { threadId: string }) => {
           stopped.push(threadId);
           live.set(threadId, { ...live.get(threadId)!, status: "idle" });
@@ -183,6 +187,11 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
     setPatch(next: string) { patch = next; },
+    seedQueuedMessage(threadId: string, text: string) {
+      const existing = queuedMessagesStore.get(threadId) ?? [];
+      existing.push({ content: [{ type: "text", text, mentions: [] }] });
+      queuedMessagesStore.set(threadId, existing);
+    },
     seedPluginMetadata(threadId: string, metadata: any) { pluginMetadataStore.set(threadId, metadata); },
     addLive(threadId: string, projectId: string, title = "Existing thread", originPluginId: string | null = null) {
       live.set(threadId, makeThreadResponse({
@@ -505,14 +514,72 @@ describe("Chief backend", () => {
     expect((await status(state)).threads.find((row) => row.threadId === worker.threadId)).toMatchObject({ state: "idle", status: "idle" });
   });
 
+  test("keeps a ready report while the reporting turn is still live, then reviews", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    // chief_report runs inside the worker's own turn, so the live status is
+    // still "active" for a while after the row is marked ready.
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals fixed",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    const before = state.db.prepare(`SELECT active_cycle FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
+    await state.supervisorCycle();
+    const after = state.db.prepare(`SELECT state, active_cycle FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
+    expect(after.state).toBe("ready");
+    expect(after.active_cycle).toBe(before.active_cycle);
+
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
+  });
+
+  test("keeps blocked while the live status is still stopping", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+    await state.harness.behavior.callAgentTool("chief_stop", {
+      threadId: worker.threadId, reason: "looping on the same failing test",
+    }, { threadId: chief.threadId, projectId: "proj_1" });
+    // The live thread has not caught up to the stop yet.
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "stopping" });
+    await state.supervisorCycle();
+    const row = (await status(state)).threads.find((entry) => entry.threadId === worker.threadId)!;
+    expect(row.state).toBe("blocked");
+  });
+
+  test("suppresses idle behind a queued (undelivered) report", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.failNextSend();
+    const result = await state.harness.behavior.callAgentTool("chief_report", {
+      state: "blocked", blocker: "Missing scope", recommendation: "Ask the user",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(result).toContain("Report queued for Chief");
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
+    const pending = state.db.prepare(`SELECT delivered_at FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${worker.threadId}:report:%`) as any;
+    expect(pending).toBeDefined();
+    expect(pending.delivered_at).toBeNull();
+  });
+
   test("replaces a terminal Chief and transfers its workers and pending alerts", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     state.failNextSend();
-    await expect(state.harness.behavior.callAgentTool("chief_report", {
+    await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for the successor",
-    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow();
+    }, { threadId: worker.threadId, projectId: "proj_1" });
     state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, archivedAt: Date.now() });
     await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(chief.threadId)! });
     await state.supervisorCycle();
@@ -577,32 +644,33 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     state.failNextSend();
-    await expect(state.harness.behavior.callAgentTool("chief_report", {
+    const result = await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Tests pass and diff is ready",
-    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("saved but could not be delivered");
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(result).toContain("Report queued for Chief");
     expect(state.sent).toHaveLength(0);
     await state.supervisorCycle();
     expect(state.sent).toHaveLength(1);
     expect(state.sent[0].threadId).toBe(chief.threadId);
   });
 
-  test("retries a failed lifecycle alert without duplicate delivery", async () => {
+  test("sends no plugin alert on a plain idle or failed event", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    state.failNextSend();
+    // BB's own native parent notice already covers a plain idle or failed
+    // thread; the plugin must stay silent here with nothing pending.
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "idle result",
     });
     expect(state.sent).toHaveLength(0);
-    await state.supervisorCycle();
-    expect(state.sent).toHaveLength(1);
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
+    await state.harness.behavior.emitThreadEvent("thread.failed", {
       thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "idle result",
+      error: "boom",
     });
-    expect(state.sent).toHaveLength(1);
+    expect(state.sent).toHaveLength(0);
   });
 
   test("supersedes an undelivered alert instead of re-delivering it after a newer report", async () => {
@@ -610,9 +678,10 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     state.failNextSend();
-    await expect(state.harness.behavior.callAgentTool("chief_report", {
+    const firstResult = await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "First report",
-    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("saved but could not be delivered");
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(firstResult).toContain("Report queued for Chief");
     expect(state.sent).toHaveLength(0);
 
     // A newer report lands before the failed one is ever retried.
@@ -634,9 +703,10 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     state.failNextSend();
-    await expect(state.harness.behavior.callAgentTool("chief_report", {
+    const result = await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Needs review",
-    }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("saved but could not be delivered");
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(result).toContain("Report queued for Chief");
     expect(state.sent).toHaveLength(0);
 
     // Generic lifecycle noise (a different alert "kind") must never evict the
@@ -647,6 +717,59 @@ describe("Chief backend", () => {
     });
     await state.supervisorCycle();
     expect(state.sent.some((entry: any) => entry.input[0].text.includes("Needs review"))).toBe(true);
+  });
+
+  test("identical re-report in the same cycle sends once", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "blocked", blocker: "Missing scope", recommendation: "Ask the user",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(state.sent).toHaveLength(1);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "blocked", blocker: "Missing scope", recommendation: "Ask the user",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(state.sent).toHaveLength(1);
+  });
+
+  test("retry does not re-send an alert BB already queued", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.failNextSend();
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(state.sent).toHaveLength(0);
+    const outboxRow = state.db.prepare(`SELECT message FROM alert_outbox WHERE dedupe_key LIKE ?`)
+      .get(`${worker.threadId}:report:%`) as any;
+    state.seedQueuedMessage(chief.threadId, outboxRow.message);
+    await state.supervisorCycle();
+    expect(state.sent).toHaveLength(0);
+    const delivered = state.db.prepare(`SELECT delivered_at FROM alert_outbox WHERE dedupe_key LIKE ?`)
+      .get(`${worker.threadId}:report:%`) as any;
+    expect(delivered.delivered_at).not.toBeNull();
+  });
+
+  test("self-woken turn after a report sends no idle alert", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "blocked", blocker: "Missing scope", recommendation: "Ask the user",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(state.sent).toHaveLength(1);
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done again",
+    });
+    expect(state.sent).toHaveLength(1);
   });
 
   test("sends no idle alert after a delivered planner or blocked-worker report", async () => {
@@ -680,25 +803,6 @@ describe("Chief backend", () => {
     });
     expect(state.sent).toHaveLength(sentAfterBlocked);
     expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
-  });
-
-  test("still alerts idle when no report was delivered in that cycle", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Totals fixed",
-    }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done",
-    });
-    await state.harness.behavior.runCli(["continue", worker.threadId, "--instruction", "Keep going"]);
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(worker.threadId)!,
-      lastAssistantText: "done again",
-    });
-    expect(state.sent.at(-1).input[0].text).toContain("is idle");
   });
 
   test("requires canonical ready and complete report payloads", async () => {
@@ -817,6 +921,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals fixed and covered by a test",
     }, { threadId: worker.threadId, projectId: "proj_1" });
+    // The report itself already tells Chief a review starts automatically.
+    expect(state.sent.at(-1).input[0].text).toContain("An independent review starts by itself");
+    const sentBeforeIdle = state.sent.length;
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "done",
@@ -824,8 +931,8 @@ describe("Chief backend", () => {
     const review = state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals");
     expect(review).toHaveLength(1);
     expect(review[0].environment).toEqual({ type: "reuse", environmentId: "env_worker" });
-    // Chief must learn the review exists, or it completes the work before the verdict.
-    expect(state.sent.at(-1).input[0].text).toContain("Read its report before completing");
+    // No extra alert: the auto-review starting successfully speaks for itself.
+    expect(state.sent).toHaveLength(sentBeforeIdle);
     // A second idle event must not spawn a second reviewer.
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
@@ -859,20 +966,37 @@ describe("Chief backend", () => {
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
   });
 
-  test("still announces the auto-review on a worker's idle, without repeating its output", async () => {
+  test("sends no idle alert or worker output once the auto-review starts", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals fixed and covered by a test",
     }, { threadId: worker.threadId, projectId: "proj_1" });
+    const sentBeforeIdle = state.sent.length;
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "a very detailed final message from the worker",
     });
+    expect(state.sent).toHaveLength(sentBeforeIdle);
     const text = state.sent.at(-1).input[0].text as string;
-    expect(text).toContain("Read its report before completing");
     expect(text).not.toContain("Detail:");
+  });
+
+  test("ready worker whose review cannot start gets the failure alert", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Totals fixed and covered by a test",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, environmentId: null });
+    await state.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: state.live.get(worker.threadId)!,
+      lastAssistantText: "done",
+    });
+    expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(0);
+    expect(state.sent.at(-1).input[0].text).toContain("could not be started automatically");
   });
 
   test("starts a fresh reviewer after the worker fixes what it found", async () => {
@@ -910,7 +1034,8 @@ describe("Chief backend", () => {
     expect(reviewSpawns[1].prompt).toContain("The previous review");
     expect(state.sent.filter((entry) => entry.threadId === firstReviewer.threadId)
       .some((entry) => entry.input[0].text.includes("Re-check"))).toBe(false);
-    expect(state.sent.at(-1).input[0].text).toContain("is running in this worktree");
+    // The fresh reviewer started silently; Chief only heard the worker's own report.
+    expect(state.sent.at(-1).input[0].text).toContain("An independent review starts by itself");
   });
 
   test("routes on a reviewer's structured verdict and names a pair that stops converging", async () => {

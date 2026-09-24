@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import {
   defineRpcContract,
@@ -1490,6 +1490,21 @@ export default async function plugin(bb: BbPluginApi) {
     const delivery = (async () => {
       const alert = db.prepare<[string]>(`SELECT * FROM alert_outbox WHERE dedupe_key=?`).get(key) as AlertRow | undefined;
       if (!alert || alert.delivered_at !== null) return true;
+      // ponytail: only catches sends BB left queued; a send that reached an
+      // idle Chief and then threw has no idempotency key to detect it by.
+      if (alert.attempts > 0) {
+        try {
+          const queued = await bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id });
+          const alreadyQueued = queued.some((message) =>
+            message.content.some((part) => part.type === "text" && part.text === clip(alert.message)));
+          if (alreadyQueued) {
+            db.prepare(`UPDATE alert_outbox SET delivered_at=?, attempts=attempts+1, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
+            return true;
+          }
+        } catch {
+          // Fall through to the send below.
+        }
+      }
       try {
         await bb.sdk.threads.send({
           threadId: alert.target_thread_id,
@@ -1602,24 +1617,21 @@ export default async function plugin(bb: BbPluginApi) {
               ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${current.worker_thread_id}); its findings are attached automatically. Use chief_continue only for a one-line nudge, and escalate if the disagreement is a genuine decision.`
               : "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision."
             : row.role === "worker" && params.state === "ready"
-              ? "An independent review starts by itself once this worker goes idle. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
+              ? "An independent review starts by itself once this worker goes idle; you will be alerted only if it cannot start. Inspect the evidence now, but wait for the reviewer's verdict before completing the work."
               : row.role === "advisor" && params.state === "ready"
                 ? `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${current.worker_thread_id ? ` (replaces: ${current.worker_thread_id})` : ""} with the advice in its context, or escalate to the user if it names a genuine decision.`
                 : row.role === "planner" && params.state === "ready"
                   ? "Read the plan file named above in full before deciding: correct it with chief_continue, approve the plan yourself, and delegate it right away without waiting for user sign-off. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. Call chief_delegate with the plan file's path as context. Nothing is implemented until you do."
                   : "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     ].join("\n");
-    const delivered = await alertChief(current, `report:${current.active_cycle}:${now}:${randomUUID()}`, summary);
-    if (!delivered) {
-      throw new Error("Report was saved but could not be delivered to Chief. It will retry automatically; inspect Chief connectivity before reporting again.");
-    }
-    return current;
+    const contentKey = createHash("sha1").update(summary).digest("hex").slice(0, 16);
+    return alertChief(current, `report:${current.active_cycle}:${contentKey}`, summary);
   }
 
   function stateFromLive(row: ManagedRow, status: string) {
-    if (["active", "starting", "pending", "stopping"].includes(status)) return status;
     if (status === "error") return "failed";
     if (["ready", "blocked", "complete"].includes(row.state)) return row.state;
+    if (["active", "starting", "pending", "stopping"].includes(status)) return status;
     return "idle";
   }
 
@@ -1676,7 +1688,7 @@ export default async function plugin(bb: BbPluginApi) {
     for (const projectId of projects) await readRules(projectId);
   }
 
-  async function lifecycle(kind: string, thread: { id: string; status?: string }, detail?: string | null) {
+  async function lifecycle(kind: string, thread: { id: string; status?: string }) {
     const row = roles.get(thread.id);
     if (!row) return;
     const now = Date.now();
@@ -1708,31 +1720,25 @@ export default async function plugin(bb: BbPluginApi) {
       state, thread.status ?? observed, now, thread.id,
     );
     reloadRoles();
+    // A plain idle or failed/archived/deleted thread is already reflected in
+    // BB's own native parent notice ("completed"/"needs help"/interrupted) since
+    // this plugin still spawns children under Chief. Only alert here for what
+    // the plugin alone knows: an auto-review that failed to start.
+    if (kind !== "idle") return;
     const current = roles.get(thread.id)!;
-    // Ready work earns its reviewer without Chief having to ask for one; Chief
-    // still owns the verdict. Only now is the worker idle enough to review.
     const pending = current.role === "worker" && current.state === "ready";
-    const review = pending ? await autoReview(current) : null;
-    // A report already alerted Chief this cycle: an idle event right behind it (the
-    // worker/planner/reviewer going idle after chief_report) is the same news twice,
-    // except for a ready worker, whose auto-started review is new information.
-    const reported = kind === "idle" && (current.state === "ready" || current.state === "blocked")
-      && !!db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ? AND delivered_at IS NOT NULL`).get(`${current.thread_id}:report:${current.active_cycle}:%`);
-    if (reported && !pending) return;
+    if (!pending) return;
+    const review = await autoReview(current);
+    if (review) return;
     await alertChief(current, `${kind}:${row.active_cycle}`, [
       `${current.role} “${current.title}” (${current.thread_id}) is ${observed}.`,
-      ...(detail && !reported ? [`Detail: ${detail}`] : []),
-      review
-        ? `Independent review “${review.title}” (${review.threadId}) is running in this worktree. Read its report before completing this work.`
-        : pending
-          ? "Its review could not be started automatically. Start one with chief_review before completing this work."
-          : "Inspect live output and evidence. Choose a safe next step: continue it, start/assess a review, mark it complete, or escalate a genuine decision to the user.",
+      "Its review could not be started automatically. Start one with chief_review before completing this work.",
     ].join("\n"));
   }
 
   bb.events.on("thread.active", ({ thread }) => lifecycle("active", thread));
-  bb.events.on("thread.idle", ({ thread, lastAssistantText }) => lifecycle("idle", thread, lastAssistantText));
-  bb.events.on("thread.failed", ({ thread, error }) => lifecycle("failed", thread, error));
+  bb.events.on("thread.idle", ({ thread }) => lifecycle("idle", thread));
+  bb.events.on("thread.failed", ({ thread }) => lifecycle("failed", thread));
   bb.events.on("thread.archived", ({ thread }) => lifecycle("archived", thread));
   bb.events.on("thread.deleted", ({ thread }) => lifecycle("deleted", thread));
 
@@ -2134,8 +2140,8 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
-      await report(context.threadId, params, context.projectId);
-      return "Report delivered to Chief.";
+      const delivered = await report(context.threadId, params, context.projectId);
+      return delivered ? "Report delivered to Chief." : "Report queued for Chief; it will be delivered automatically. Do not report again.";
     },
   });
 
