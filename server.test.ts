@@ -237,7 +237,7 @@ async function delegate(
     ...(forge?.branch ? ["--branch", forge.branch] : []),
     ...(forge?.issueUrl ? ["--issue-url", forge.issueUrl] : []),
     ...(forge?.prUrl ? ["--pr-url", forge.prUrl] : []),
-    ...(forge?.replaces ? ["--replaces", forge.replaces] : []),
+    ...(forge?.replaces ? ["--replaces", forge.replaces] : ["--unplanned-reason", "Bounded test fixture"]),
     "--json",
   ], { threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
   expect(result.exitCode).toBe(0);
@@ -1310,7 +1310,7 @@ describe("Chief backend", () => {
     const result = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", mission,
       "--tier", "senior",
-      "--context", `Plan file: ${planPath}`, "--json",
+      "--context", `Plan file: ${planPath}`, "--unplanned-reason", "Bounded test fixture", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(result.exitCode).toBe(0);
     const worker = JSON.parse(result.stdout!) as { threadId: string };
@@ -1740,10 +1740,102 @@ describe("Chief backend", () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
-    expect(state.spawned[0].prompt).not.toContain("chief_plan first");
+    const prompt = state.spawned[0].prompt as string;
+    expect(prompt).not.toContain("chief_plan first");
+    expect(prompt.indexOf("chief_plan")).toBeLessThan(prompt.indexOf("chief_forge_init"));
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configured.instructions).toContain("chief_plan first");
     expect(configured.instructions).toContain("delegate wave 1 right away without waiting for user sign-off");
+  });
+
+  test("refuses chief_delegate with no plan or unplannedReason when planning is on", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await expect(state.harness.behavior.callAgentTool("chief_delegate", {
+      title: "Fix checkout totals", mission: "Correct and verify totals", tier: "senior",
+    }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(/chief_plan first/);
+    await expect(state.harness.behavior.callAgentTool("chief_delegate", {
+      title: "Fix checkout totals", mission: "Correct and verify totals", tier: "senior",
+    }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(/unplannedReason/);
+    expect(state.spawned).toHaveLength(1);
+
+    const result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals", "--tier", "senior", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/chief_plan first/);
+    expect(result.stderr).toMatch(/unplannedReason/);
+  });
+
+  test("unplannedReason spawns and shows the reason in roster and inspect", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const delegateResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix a typo", "--mission", "Fix the typo in the README",
+      "--tier", "junior", "--unplanned-reason", "Typo fix", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(delegateResult.exitCode).toBe(0);
+    const worker = JSON.parse(delegateResult.stdout!) as { threadId: string };
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(roster).toContain("unplanned: Typo fix");
+
+    const inspected = String(await state.harness.behavior.callAgentTool("chief_inspect", { threadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(inspected).toContain("Unplanned: Typo fix");
+  });
+
+  test("keeps planning off: tier-only delegate succeeds with no unplanned line", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: false });
+    const chief = await start(state);
+    const result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals", "--tier", "senior", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(result.exitCode).toBe(0);
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(roster).not.toContain("unplanned:");
+  });
+
+  test("replaces: an unplanned worker with no reason, and the fresh worker inherits it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const delegateResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix a typo", "--mission", "Fix the typo in the README",
+      "--tier", "junior", "--unplanned-reason", "Typo fix", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    const worker = JSON.parse(delegateResult.stdout!) as { threadId: string };
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Fixed",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+
+    const replaceResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix a typo", "--mission", "One more typo",
+      "--tier", "junior", "--replaces", worker.threadId, "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(replaceResult.exitCode).toBe(0);
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(roster).toContain("unplanned: Typo fix");
+  });
+
+  test("unplannedReason combined with planThreadId is rejected", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await expect(state.harness.behavior.callAgentTool("chief_delegate", {
+      title: "Fix checkout totals", mission: "Correct and verify totals", tier: "senior",
+      planThreadId: "thr_planner", wave: 1, unplannedReason: "Typo fix",
+    } as any, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(/cannot be combined/);
+  });
+
+  test("configure instructions mention the plan-forge-delegate order when planning is on", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(configured.instructions).toContain("well-specified");
+    expect(configured.instructions).toContain("chief_plan → chief_forge_init → chief_delegate");
   });
 
   test("keeps planning off when the setting is turned off", async () => {
@@ -2592,7 +2684,7 @@ describe("Chief backend", () => {
     const result = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals again", "--mission", "Correct and verify totals",
       "--tier", "senior",
-      "--branch", "feature/fix-checkout-totals", "--json",
+      "--branch", "feature/fix-checkout-totals", "--unplanned-reason", "Bounded test fixture", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("already carries the active worker");
@@ -2700,7 +2792,7 @@ describe("Chief backend", () => {
     // Plain delegation onto the same branch is still refused: the fresh worker holds it now.
     const collision = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals again", "--mission", "Correct and verify totals",
-      "--tier", "senior", "--branch", "feature/fix-checkout-totals", "--json",
+      "--tier", "senior", "--branch", "feature/fix-checkout-totals", "--unplanned-reason", "Bounded test fixture", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(collision.exitCode).toBe(1);
     expect(collision.stderr).toContain("already carries the active worker");
