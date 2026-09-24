@@ -2930,6 +2930,30 @@ describe("Chief backend", () => {
     expect(freshRow).toEqual({ plan_thread_id: planner.threadId, plan_wave: 1 });
   });
 
+  test("rejects replaces: with unplannedReason when the inherited plan link is not overridden", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
+
+    const first = await state.harness.behavior.runCli([
+      "delegate", "--title", "Wave 1 work", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "1", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    const worker = JSON.parse(first.stdout!) as { threadId: string };
+    const spawnedBefore = state.spawned.length;
+    const rowBefore = state.db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(worker.threadId);
+
+    const replaceResult = await state.harness.behavior.runCli([
+      "delegate", "--title", "Wave 1 work", "--mission", "Fix what the reviewer found",
+      "--replaces", worker.threadId, "--unplanned-reason", "Bounded test fixture", "--json",
+    ], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(replaceResult.exitCode).toBe(1);
+    expect(replaceResult.stderr).toMatch(/cannot be combined/);
+    expect(state.spawned).toHaveLength(spawnedBefore);
+    expect(state.db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(worker.threadId)).toEqual(rowBefore);
+  });
+
   test("a 3-wave run delegates wave to wave with no review, then reviews the whole branch and carries wave 3 through a fix", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });

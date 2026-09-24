@@ -1208,6 +1208,10 @@ export default async function plugin(bb: BbPluginApi) {
       planThreadId = prior.plan_thread_id;
       wave = prior.plan_wave;
     }
+    // The schema only sees params.planThreadId; a replaces: inherited one must be checked here too.
+    if (planThreadId !== undefined && params.unplannedReason) {
+      throw new Error("unplannedReason cannot be combined with planThreadId.");
+    }
     // Planning on means every new delegation starts from a plan wave. replaces: hands off
     // an already-gated delegation, so it passes; the escape hatch must say why.
     if (planThreadId === undefined && !prior && !params.unplannedReason && await plannerEnabled()) {
