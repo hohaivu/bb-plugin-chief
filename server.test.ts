@@ -1162,6 +1162,12 @@ describe("Chief backend", () => {
     expect(text).toContain("introduced a new problem");
     expect(text).toContain(`chief_consult (workerThreadId: ${worker.threadId})`);
     expect(text).not.toContain("not converging");
+    const consultAction = `The reviewer reports this change introduced a new problem. Before starting another worker round, call chief_consult (workerThreadId: ${worker.threadId}) — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`;
+    expect(text).toContain(consultAction);
+
+    // The roster must recommend the exact same next step, not a second inline wording.
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
+    expect(roster).toContain(`: ${consultAction}`);
   });
 
   test("ignores a regression flag on an approval", async () => {
@@ -1354,6 +1360,18 @@ describe("Chief backend", () => {
     const bigRoster = await state.harness.behavior.callAgentTool("chief_roster", {}, opts) as string;
     expect(bigRoster.length).toBeLessThanOrEqual(6_000);
     expect(bigRoster.indexOf(lastTitle)).toBeLessThan(bigRoster.indexOf("First worker"));
+    // The Pending block is built first and survives the cap even behind 19 rows of detail.
+    expect(bigRoster.startsWith("Pending:")).toBe(true);
+    expect(bigRoster).toContain(`“${lastTitle}”`);
+  });
+
+  test("chief_roster prints Pending: none. when nothing is pending", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const roster = String(await state.harness.behavior.callAgentTool(
+      "chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" },
+    ));
+    expect(roster.startsWith("Pending: none.")).toBe(true);
   });
 
   test("the roster's Pending block uses the same wording as the lifecycle alert", async () => {
@@ -1384,6 +1402,11 @@ describe("Chief backend", () => {
     expect(reviewAlert).toContain(approveAction);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain(`- reviewer “Review · Fix checkout totals” (${reviewer.threadId}): ${approveAction}`);
+
+    // Once Chief completes the worker, the approved reviewer must not keep advertising it.
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, opts);
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster.startsWith("Pending: none.")).toBe(true);
   });
 
   test("the Pending block shows a blocked worker and a rejected review the same way its alert does", async () => {
@@ -1420,7 +1443,7 @@ describe("Chief backend", () => {
     const { planner } = await planTwoWaves(state, chief.threadId);
 
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Delegate wave 1: chief_delegate (planThreadId: ${planner.threadId}, wave: 1).`);
+    expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Delegate wave 1 now: chief_delegate (planThreadId: ${planner.threadId}, wave: 1). The plugin supplies its plan file and tier; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`);
 
     await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
@@ -1428,6 +1451,41 @@ describe("Chief backend", () => {
     ], opts);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).not.toContain(`- planner “Plan · Rework checkout”`);
+  });
+
+  test("shows the wave schedule and progress on both the planner and its delegated worker", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const { planner, path1, path2 } = await planTwoWaves(state, chief.threadId);
+
+    const result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Wave 1 work", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "1", "--json",
+    ], opts);
+    const worker = JSON.parse(result.stdout!) as { threadId: string };
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("waves: 1/2 delegated");
+    expect(roster).toContain(`wave 1 of 2 (junior): ${path1}`);
+    expect(roster).toContain(`wave 2 of 2 (senior): ${path2}`);
+    expect(roster).toContain(`wave: 1 of 2 (plan ${planner.threadId})`);
+    expect(roster).toContain(worker.threadId);
+  });
+
+  test("shows the same Pending block on the CLI status command as on chief_roster", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    const pendingLine = roster.split("\n").find((line) => line.startsWith("- worker"))!;
+    const cli = await state.harness.behavior.runCli(["status", "--project", "proj_1"], opts);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.stdout).toContain(pendingLine);
   });
 
   test("adds the roster instruction to every Chief turn but not a worker's", async () => {
