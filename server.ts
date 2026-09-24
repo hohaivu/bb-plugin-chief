@@ -323,6 +323,12 @@ interface ManagedRow {
   /** Worker row only: the planner it was delegated from, with plan_wave, when planThreadId/wave was given. */
   plan_thread_id: string | null;
   plan_wave: number | null;
+  /** Incremented on every chief_report call from this row, regardless of role. */
+  report_seq: number;
+  /** Reviewer row only: the worker's report_seq this reviewer was started for —
+   * the tie nextAction uses to know whether it already covers the worker's latest
+   * report, instead of comparing updated_at timestamps. */
+  reviewed_report_seq: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -606,6 +612,12 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN plan_wave INTEGER`,
     // A reviewer's regression flag, so nextAction can see it on a later call too.
     `ALTER TABLE managed_threads ADD COLUMN regression INTEGER`,
+    // A monotonic per-row report counter and a reviewer's snapshot of the worker's
+    // count at spawn time — a robust (not timestamp-based) tie between a reviewer
+    // and the exact report it covers, immune to same-millisecond collisions and to
+    // the reviewer later completing.
+    `ALTER TABLE managed_threads ADD COLUMN report_seq INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE managed_threads ADD COLUMN reviewed_report_seq INTEGER`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -641,6 +653,13 @@ export default async function plugin(bb: BbPluginApi) {
   );
   const existingReview = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC LIMIT 1`,
+  );
+  // Unlike existingReview, this is not filtered by state: nextAction's dedup must
+  // still find a reviewer that has since completed, so a completed reviewer that
+  // already covered the worker's latest report does not bring back a spurious
+  // chief_review recommendation.
+  const latestReviewForWorker = db.prepare<[string]>(
+    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? ORDER BY created_at DESC LIMIT 1`,
   );
   const existingBranchReview = db.prepare<[string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC LIMIT 1`,
@@ -697,22 +716,25 @@ export default async function plugin(bb: BbPluginApi) {
     prUrl?: string | null;
     planThreadId?: string | null;
     planWave?: number | null;
+    reviewedReportSeq?: number | null;
   }) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, tier, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, tier, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       chief_thread_id=excluded.chief_thread_id, worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
       title=excluded.title, state=excluded.state, status=excluded.status, tier=excluded.tier,
       brief=excluded.brief, branch=excluded.branch, issue_url=excluded.issue_url, pr_url=excluded.pr_url,
-      plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave, updated_at=excluded.updated_at`).run(
+      plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
+      reviewed_report_seq=excluded.reviewed_report_seq, updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.parentThreadId ?? null, input.title, input.state ?? "starting",
       input.status ?? "starting", input.tier ?? null, input.brief ?? null, input.branch ?? null,
       input.issueUrl ?? null, input.prUrl ?? null, input.planThreadId ?? null, input.planWave ?? null,
+      input.reviewedReportSeq ?? null,
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
@@ -1285,7 +1307,10 @@ export default async function plugin(bb: BbPluginApi) {
       const now = Date.now();
       db.transaction(() => {
         db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, prior.thread_id);
-        db.prepare(`UPDATE managed_threads SET worker_thread_id=?, updated_at=? WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(thread.id, now, prior.thread_id);
+        // Reset the snapshot too: it was tied to the prior worker's report_seq, and the
+        // fresh worker restarts its own count from 0, so a stale value here could
+        // coincidentally match a future report and wrongly suppress its review.
+        db.prepare(`UPDATE managed_threads SET worker_thread_id=?, reviewed_report_seq=NULL, updated_at=? WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(thread.id, now, prior.thread_id);
       })();
       reloadRoles();
     }
@@ -1356,19 +1381,16 @@ export default async function plugin(bb: BbPluginApi) {
       return delegated ? null : `Delegate wave 1 now: chief_delegate (planThreadId: ${row.thread_id}, wave: 1). The plugin supplies its plan file and tier; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`;
     }
     if (row.role === "worker") {
-      // Same dedup rule as startReview(): a reviewer row survives past its own
-      // report (state moves to ready/blocked) but only a still-busy one means a
-      // review is actually in flight — a re-pointed stale reviewer (delegate's
-      // `replaces:`) is not busy, so this still recommends chief_review for it.
-      const reviewer = existingReview.get(row.thread_id) as ManagedRow | undefined;
-      if (reviewer && BUSY_STATUSES.has(reviewer.state)) return null;
-      // A reviewer last touched (verdict given, or re-pointed by `replaces:`) after this
-      // worker's latest report has, either way, already weighed in on that exact report —
-      // its own recommendation (below) covers this work now, so the worker itself must
-      // not also ask for a review. One last touched before this worker's latest report
-      // has not reviewed it yet (a stale row, or the worker was since continued and
-      // reported again), so this still recommends starting that review.
-      if (reviewer && reviewer.updated_at > row.updated_at) return null;
+      // A reviewer that still covers this worker's latest report — either busy
+      // (a review is actually in flight) or already reported on it — means its own
+      // recommendation (below) covers this work now, so the worker itself must not
+      // also ask for a review. The tie is report_seq equality, not updated_at: two
+      // reports in the same millisecond are indistinguishable by timestamp, and a
+      // reviewer that later completes (state moves to complete) must still count.
+      // A re-pointed stale reviewer (delegate's `replaces:`) has its snapshot reset
+      // to null, so it no longer matches and this still recommends chief_review.
+      const reviewer = latestReviewForWorker.get(row.thread_id) as ManagedRow | undefined;
+      if (reviewer && reviewer.reviewed_report_seq === row.report_seq) return null;
       return workerReadyNextStep(row);
     }
     if (row.role === "advisor") {
@@ -1473,7 +1495,7 @@ export default async function plugin(bb: BbPluginApi) {
         prompt,
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
-      insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status });
+      insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status, reviewedReportSeq: worker.report_seq });
       if (previous) {
         const now = Date.now();
         db.transaction(() => {
@@ -1736,7 +1758,7 @@ export default async function plugin(bb: BbPluginApi) {
     const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
     db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
       reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
-      plan_waves = COALESCE(?, plan_waves), regression=?,
+      plan_waves = COALESCE(?, plan_waves), regression=?, report_seq = report_seq + 1,
       active_since=NULL, updated_at=? WHERE thread_id=?`).run(
       params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
       params.recommendation ?? null, verdict,
@@ -2032,11 +2054,31 @@ export default async function plugin(bb: BbPluginApi) {
   function waveLines(row: ManagedRow): string[] {
     if (row.role === "planner" && row.plan_waves) {
       const waves = planWavesFor(row.thread_id);
-      const highestDelegated = [...roles.values()]
+      // The current wave's worker: the highest plan_wave linked to this planner,
+      // breaking ties (a same-wave fix worker) by the newest.
+      const current = [...roles.values()]
         .filter((other) => other.role === "worker" && other.plan_thread_id === row.thread_id)
-        .reduce((max, other) => Math.max(max, other.plan_wave ?? 0), 0);
+        .reduce<ManagedRow | undefined>((best, other) => (
+          !best || (other.plan_wave ?? 0) > (best.plan_wave ?? 0)
+            || ((other.plan_wave ?? 0) === (best.plan_wave ?? 0) && other.created_at > best.created_at)
+        ) ? other : best, undefined);
+      const currentWave = current?.plan_wave ?? 1;
+      const isFinalWave = currentWave === waves.length;
+      const reviewer = current ? latestReviewForWorker.get(current.thread_id) as ManagedRow | undefined : undefined;
+      // Only trust the reviewer's verdict/busy-ness for the wave's state when it
+      // still covers the current worker's latest report — the same report_seq tie
+      // nextAction uses, so a stale (re-pointed but not-yet-reported) reviewer
+      // does not show an approval or rejection that predates the current attempt.
+      const reviewerCovers = reviewer != null && reviewer.reviewed_report_seq === current?.report_seq;
+      const approved = isFinalWave && reviewerCovers && reviewer!.verdict === "approve";
+      const state = !current ? "not delegated"
+        : approved ? "approved"
+        : reviewerCovers && reviewer!.verdict === "request_changes" ? "changes requested"
+        : reviewerCovers && BUSY_STATUSES.has(reviewer!.state) ? "in review"
+        : current.state;
+      const done = Math.max(0, currentWave - 1) + (approved ? 1 : 0);
       return [
-        `waves: ${highestDelegated}/${waves.length} delegated`,
+        `waves: ${done}/${waves.length} done, wave ${currentWave} ${state}`,
         ...waves.map((wave, index) => `  wave ${index + 1} of ${waves.length} (${wave.tier}): ${wave.path}`),
       ];
     }
@@ -2070,6 +2112,29 @@ export default async function plugin(bb: BbPluginApi) {
     return pending.length
       ? ["Pending:", ...pending.map(([row, action]) => `- ${row.role} “${row.title}” (${row.thread_id}): ${action}`)]
       : ["Pending: none."];
+  }
+
+  /** Clips a rendered Pending block to `limit` by whole lines — never mid-action —
+   * naming how many were dropped. Clipped on its own, separately from the rest of
+   * the roster, so an overflowing roster still cuts detail rows first. */
+  function clipPendingBlock(lines: string[], limit: number): string {
+    const joined = lines.join("\n");
+    if (joined.length <= limit) return joined;
+    const [header, ...items] = lines;
+    const kept: string[] = [];
+    let used = header!.length;
+    for (const item of items) {
+      const next = used + 1 + item.length;
+      if (next > limit) break;
+      used = next;
+      kept.push(item);
+    }
+    let suffix = `…and ${items.length - kept.length} more pending`;
+    while (kept.length > 0 && used + 1 + suffix.length > limit) {
+      used -= 1 + kept.pop()!.length;
+      suffix = `…and ${items.length - kept.length} more pending`;
+    }
+    return [header, ...kept, suffix].join("\n");
   }
 
   async function lastOutput(threadId: string) {
@@ -2196,11 +2261,15 @@ export default async function plugin(bb: BbPluginApi) {
       const juniorCount = allWorkers.filter((row) => row.tier === "junior").length;
       const seniorCount = allWorkers.filter((row) => row.tier === "senior").length;
       const reversed = [...rows].reverse();
-      return clip([
-        ...pendingLines(reversed),
+      // The Pending block is clipped on its own so it always survives whole (or
+      // ends with "…and N more pending"), then the rest gets whatever budget is
+      // left — otherwise one clip() across both could cut a pending action off mid-line.
+      const pendingBlock = clipPendingBlock(pendingLines(reversed), 6_000);
+      const rest = clip([
         `Tier split: ${juniorCount} junior, ${seniorCount} senior`,
         ...reversed.map((row) => rosterRowLines(row).join("\n  ")),
-      ].join("\n"), 6_000);
+      ].join("\n"), Math.max(0, 6_000 - pendingBlock.length - 1));
+      return `${pendingBlock}\n${rest}`;
     },
   });
   bb.agents.registerTool({

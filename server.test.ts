@@ -1060,6 +1060,53 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).input[0].text).toContain(`chief_review (workerThreadId: ${worker.threadId})`);
   });
 
+  test("dedups the worker's pending review even when the report and reviewer turnaround share a millisecond", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+
+    // Freeze the clock across the worker's report, the reviewer spawn, and the
+    // reviewer's own report: comparing updated_at would find them all equal and
+    // wrongly still recommend a review, since nothing in that comparison could
+    // tell the two reports apart. The report_seq tie has to do it instead.
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+      await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+      const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Looks correct", verdict: "approve",
+      }, { threadId: reviewer.threadId, projectId: "proj_1" });
+
+      const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+      expect(roster).not.toContain(`- worker “Fix checkout totals” (${worker.threadId}):`);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("does not bring back a spurious review once its reviewer is completed directly", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Looks correct", verdict: "approve",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+
+    // Complete the reviewer thread directly, not the worker — its row's state
+    // moves to complete, which a state-filtered lookup would then skip, wrongly
+    // making the worker look unreviewed again.
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: reviewer.threadId, result: "Reviewed" }, opts);
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).not.toContain(`- worker “Fix checkout totals” (${worker.threadId}):`);
+  });
+
   test("routes on a reviewer's structured verdict and names a pair that stops converging", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -1365,6 +1412,39 @@ describe("Chief backend", () => {
     expect(bigRoster).toContain(`“${lastTitle}”`);
   });
 
+  test("clips an overflowing Pending block by whole lines, never mid-action", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+
+    // Each ready-but-unreviewed worker contributes one full pending line; enough
+    // of them push the Pending block itself (not just the whole roster) past
+    // 6,000 characters, so the block's own clip has to kick in.
+    for (let i = 0; i < 60; i += 1) {
+      const worker = await delegate(state, chief.threadId, `Worker ${i}`);
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Done",
+      }, { threadId: worker.threadId, projectId: "proj_1" });
+    }
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    // The rest of the roster (tier split, row details) is clipped too and may no
+    // longer contain "Tier split:" intact, so find the pending block's own end by
+    // its "…and N more pending" suffix instead of searching for what follows it.
+    const suffixMatch = roster.match(/^…and \d+ more pending$/m);
+    expect(suffixMatch).not.toBeNull();
+    const pendingBlock = roster.slice(0, suffixMatch!.index! + suffixMatch![0].length);
+    expect(pendingBlock.length).toBeLessThanOrEqual(6_000);
+    const lines = pendingBlock.split("\n");
+    expect(lines[0]).toBe("Pending:");
+    // Whole-line clipping, never a mid-action cut: every kept line is a complete,
+    // unclipped pending entry, and the block ends with how many got dropped.
+    for (const line of lines.slice(1, -1)) {
+      expect(line).toMatch(/^- worker “Worker \d+” \(thr_\d+\): Start its review now: chief_review \(workerThreadId: thr_\d+\)\. Complete the work only on the reviewer's approve\.$/);
+    }
+    expect(lines.at(-1)).toBe(suffixMatch![0]);
+  });
+
   test("chief_roster prints Pending: none. when nothing is pending", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -1467,7 +1547,7 @@ describe("Chief backend", () => {
     const worker = JSON.parse(result.stdout!) as { threadId: string };
 
     const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain("waves: 1/2 delegated");
+    expect(roster).toContain("waves: 0/2 done, wave 1 starting");
     expect(roster).toContain(`wave 1 of 2 (junior): ${path1}`);
     expect(roster).toContain(`wave 2 of 2 (senior): ${path2}`);
     expect(roster).toContain(`wave: 1 of 2 (plan ${planner.threadId})`);
@@ -2178,6 +2258,8 @@ describe("Chief backend", () => {
     expect(columns).toContain("stop_alerted_cycle");
     // The persisted wave schedule and its worker-side links must survive the chain too.
     expect(columns).toEqual(expect.arrayContaining(["plan_waves", "plan_thread_id", "plan_wave"]));
+    // The report-counter dedup columns must survive the chain too.
+    expect(columns).toEqual(expect.arrayContaining(["report_seq", "reviewed_report_seq"]));
   });
 
   test("adds reject_streak to an existing database and survives a restart", async () => {
@@ -2834,6 +2916,71 @@ describe("Chief backend", () => {
       "chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" },
     ));
     expect(roster).toContain(`(${fixWorker.threadId}): Start its review now: chief_review (workerThreadId: ${fixWorker.threadId})`);
+  });
+
+  test("walks a 3-wave run through final review, updating the wave line at each stage", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      opts,
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready",
+      result: "Three waves: schema, migration, then delegation.",
+      plan: [
+        { tier: "junior", body: PLAN_FIXTURE },
+        { tier: "senior", body: "# Wave 2\nMigrate the data." },
+        { tier: "senior", body: "# Wave 3\nWire up delegation." },
+      ],
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+
+    const w1 = JSON.parse((await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "1", "--json",
+    ], opts)).stdout!) as { threadId: string };
+    let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("waves: 0/3 done, wave 1 starting");
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Wave 1 of 3 done",
+    }, { threadId: w1.threadId, projectId: "proj_1" });
+    const w2 = JSON.parse((await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "2", "--replaces", w1.threadId, "--json",
+    ], opts)).stdout!) as { threadId: string };
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("waves: 1/3 done, wave 2 starting");
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Wave 2 of 3 done",
+    }, { threadId: w2.threadId, projectId: "proj_1" });
+    const w3 = JSON.parse((await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
+      "--plan-thread", planner.threadId, "--wave", "3", "--replaces", w2.threadId, "--json",
+    ], opts)).stdout!) as { threadId: string };
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("waves: 2/3 done, wave 3 starting");
+
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Wave 3 of 3 done",
+    }, { threadId: w3.threadId, projectId: "proj_1" });
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("waves: 2/3 done, wave 3 ready");
+
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: w3.threadId }, opts);
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("waves: 2/3 done, wave 3 in review");
+
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Looks correct", verdict: "approve",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("waves: 3/3 done, wave 3 approved");
   });
 
   test("tells the worker the forge is Chief's even when only a pull request was created", async () => {
