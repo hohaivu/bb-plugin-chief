@@ -51,7 +51,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string } = {}) {
+async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -69,7 +69,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   const tabsStore = new Map<string, { revision: number; tabs: any[] }>();
   let tabsUpdateFailures = 0;
   const { bb, harness } = createFakePluginHost({
-    pluginId: "chief",
+    pluginId: options.pluginId ?? "chief",
     agentSkillIds: ["chief", "chief-worker"],
     sdk: {
       threadSections: {
@@ -489,8 +489,24 @@ describe("Chief backend", () => {
 
     expect(state.tabs("thr_1")).toEqual([
       { kind: "git-diff", id: "user_diff" },
-      { kind: "plugin-panel", id: "plugin-panel:chief:pending", pluginId: "chief", actionId: "pending", title: "Chief pending work", paramsJson: null },
+      { kind: "plugin-panel", id: "plugin-panel:chief%3Apending%3A:none", pluginId: "chief", actionId: "pending", title: "Chief pending work", paramsJson: null },
     ]);
+  });
+
+  test("pins the pending tab under the host's canonical id so opening the action reuses it", async () => {
+    const pluginId = "chief.dev:v2/@x";
+    const state = await setup({ pluginId });
+    await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // Host recipe (buildFixedPanelTabId): path `${pluginId}:${actionId}:${paramsJson ?? ""}`, encoded once, then `:none`.
+    const hostId = "plugin-panel:chief.dev%3Av2%2F%40x%3Apending%3A:none";
+    expect(state.tabs("thr_1")).toEqual([
+      { kind: "plugin-panel", id: hostId, pluginId, actionId: "pending", title: "Chief pending work", paramsJson: null },
+    ]);
+    // Opening the host action upserts by id: an existing id is focused, not duplicated.
+    const opened = (tabs: any[]) => tabs.some((tab) => tab.id === hostId) ? tabs : [...tabs, { id: hostId }];
+    expect(opened(state.tabs("thr_1"))).toHaveLength(1);
   });
 
   test("a failing tab pin never fails Chief start", async () => {

@@ -1062,7 +1062,9 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.sdk.threads.tabs.update({
           threadId, expectedRevision: revision,
           tabs: [...tabs, {
-            kind: "plugin-panel", id: `plugin-panel:${bb.pluginId}:pending`, pluginId: bb.pluginId,
+            // Must match the host's id so opening the action finds this tab: get-bb/bb
+            // packages/client-core/src/panel/fixed-panel-tabs-state.ts buildFixedPanelTabId.
+            kind: "plugin-panel", id: `plugin-panel:${encodeURIComponent(`${bb.pluginId}:pending:`)}:none`, pluginId: bb.pluginId,
             actionId: "pending", title: "Chief pending work", paramsJson: null,
           }],
         });
