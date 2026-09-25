@@ -168,8 +168,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
       selections: {
         chief: { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const },
         planner: null,
-        junior: null,
-        senior: null,
+        worker: null,
         reviewer: null,
         advisor: null,
       },
@@ -192,7 +191,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
   unmounts.push(() => rendered.lifecycle.unmount());
 
   await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(4);
 
   fireEvent.click(rendered.getByRole("button", { name: "Use BB default" }));
 
@@ -202,7 +201,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
       input: { hostId: "host_1", role: "chief", selection: null },
     }),
   );
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(6);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
 });
 
 test("the thread panel's Chief to-do tab lists items as a checklist and refetches on the realtime signal", async () => {

@@ -244,13 +244,10 @@ async function delegate(
   state: Awaited<ReturnType<typeof setup>>,
   chiefThreadId: string,
   title = "Fix checkout totals",
-  tier?: "junior" | "senior",
   forge?: { branch?: string; issueUrl?: string; prUrl?: string; replaces?: string },
 ) {
-  const resolvedTier = tier ?? "senior";
   const result = await state.harness.behavior.runCli([
     "delegate", "--title", title, "--mission", "Correct and verify totals", "--criteria", "Regression passes",
-    "--tier", resolvedTier,
     ...(forge?.branch ? ["--branch", forge.branch] : []),
     ...(forge?.issueUrl ? ["--issue-url", forge.issueUrl] : []),
     ...(forge?.prUrl ? ["--pr-url", forge.prUrl] : []),
@@ -265,7 +262,7 @@ async function status(state: Awaited<ReturnType<typeof setup>>) {
   return state.harness.behavior.callRpc("status", null);
 }
 
-// A two-wave schedule (junior then senior, wave 1 carrying the required "What
+// A two-wave schedule (wave 1 carrying the required "What
 // we're NOT doing" section) shared by every delegate()-from-plan test below.
 async function planTwoWaves(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string) {
   await state.harness.behavior.runCli(
@@ -277,8 +274,8 @@ async function planTwoWaves(state: Awaited<ReturnType<typeof setup>>, chiefThrea
     state: "ready",
     result: "Two waves: schema, then delegation.",
     plan: [
-      { tier: "junior", body: PLAN_FIXTURE },
-      { tier: "senior", body: "# Wave 2\nWire up delegation." },
+      { body: PLAN_FIXTURE },
+      { body: "# Wave 2\nWire up delegation." },
     ],
   }, { threadId: planner.threadId, projectId: state.live.get(chiefThreadId)!.projectId });
   return {
@@ -1111,7 +1108,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Totals are off by the discount", verdict: "request_changes",
     }, { threadId: firstReviewer.threadId, projectId: "proj_1" });
-    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
 
     await ready();
 
@@ -1240,7 +1237,7 @@ describe("Chief backend", () => {
     // Second round on the same objection: the fix cycle spawns a fresh reviewer,
     // which carries the reject_streak forward — Chief is told to escalate, not to
     // fund a third round.
-    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
     await ready();
     const secondReviewer = (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
     expect(secondReviewer.threadId).not.toBe(reviewer.threadId);
@@ -1273,11 +1270,11 @@ describe("Chief backend", () => {
     await ready("Phase 1 implemented");
     await verdict((await latestReviewer()).threadId, "approve");
 
-    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
     await ready("Phase 2 implemented");
     await verdict((await latestReviewer()).threadId, "approve");
 
-    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
     await ready("Phase 3 implemented");
 
     // Phase 3's very first rejection must not read as two rounds of disagreement.
@@ -1381,7 +1378,6 @@ describe("Chief backend", () => {
     const planPath = "/Users/example/.bb/thread-storage/thr_plan123/plan.md";
     const result = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", mission,
-      "--tier", "senior",
       "--context", `Plan file: ${planPath}`, "--unplanned-reason", "Bounded test fixture", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(result.exitCode).toBe(0);
@@ -1422,7 +1418,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Found an issue", verdict: "request_changes",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
-    worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { replaces: worker.threadId });
+    worker = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: longResult,
     }, { threadId: worker.threadId, projectId: "proj_1" });
@@ -1454,7 +1450,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await expect(state.harness.behavior.callAgentTool("chief_delegate", {
-      title: "Unauthorized", mission: "Must not start", tier: "senior",
+      title: "Unauthorized", mission: "Must not start",
     }, { threadId: worker.threadId, projectId: "proj_1" })).rejects.toThrow("active registered Chief");
     expect((await state.harness.behavior.runCli(["complete", worker.threadId])).exitCode).toBe(0);
     await expect(state.harness.behavior.callAgentTool("chief_report", {
@@ -1525,8 +1521,7 @@ describe("Chief backend", () => {
     }
 
     const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    // The rest of the roster (tier split, row details) is clipped too and may no
-    // longer contain "Tier split:" intact, so find the pending block's own end by
+    // The rest of the roster (row details) is clipped too, so find the pending block's own end by
     // its "…and N more pending" suffix instead of searching for what follows it.
     const suffixMatch = roster.match(/^…and \d+ more pending$/m);
     expect(suffixMatch).not.toBeNull();
@@ -1725,7 +1720,7 @@ describe("Chief backend", () => {
     const { planner } = await planTwoWaves(state, chief.threadId);
 
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Delegate wave 1 now: chief_delegate (planThreadId: ${planner.threadId}, wave: 1). The plugin supplies its plan file and tier; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`);
+    expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Delegate wave 1 now: chief_delegate (planThreadId: ${planner.threadId}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`);
 
     await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
@@ -1750,8 +1745,8 @@ describe("Chief backend", () => {
 
     const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain("waves: 0/2 done, wave 1 starting");
-    expect(roster).toContain(`wave 1 of 2 (junior): ${path1}`);
-    expect(roster).toContain(`wave 2 of 2 (senior): ${path2}`);
+    expect(roster).toContain(`wave 1 of 2: ${path1}`);
+    expect(roster).toContain(`wave 2 of 2: ${path2}`);
     expect(roster).toContain(`wave: 1 of 2 (plan ${planner.threadId})`);
     expect(roster).toContain(worker.threadId);
   });
@@ -1912,7 +1907,7 @@ describe("Chief backend", () => {
     else expect(result).toContain("so run it yourself");
   });
 
-  test("says the tier policy and the project rules once", async () => {
+  test("says the delegation policy and the project rules once", async () => {
     const state = await setup();
     const chief = await start(state);
     const prompt = state.spawned[0].prompt as string;
@@ -1965,15 +1960,15 @@ describe("Chief backend", () => {
     const state = await setup();
     const chief = await start(state);
     await expect(state.harness.behavior.callAgentTool("chief_delegate", {
-      title: "Fix checkout totals", mission: "Correct and verify totals", tier: "senior",
+      title: "Fix checkout totals", mission: "Correct and verify totals",
     }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(/chief_plan first/);
     await expect(state.harness.behavior.callAgentTool("chief_delegate", {
-      title: "Fix checkout totals", mission: "Correct and verify totals", tier: "senior",
+      title: "Fix checkout totals", mission: "Correct and verify totals",
     }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(/unplannedReason/);
     expect(state.spawned).toHaveLength(1);
 
     const result = await state.harness.behavior.runCli([
-      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals", "--tier", "senior", "--json",
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/chief_plan first/);
@@ -1985,7 +1980,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const delegateResult = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix a typo", "--mission", "Fix the typo in the README",
-      "--tier", "junior", "--unplanned-reason", "Typo fix", "--json",
+      "--unplanned-reason", "Typo fix", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(delegateResult.exitCode).toBe(0);
     const worker = JSON.parse(delegateResult.stdout!) as { threadId: string };
@@ -1997,12 +1992,12 @@ describe("Chief backend", () => {
     expect(inspected).toContain("Unplanned: Typo fix");
   });
 
-  test("keeps planning off: tier-only delegate succeeds with no unplanned line", async () => {
+  test("keeps planning off: plain delegate succeeds with no unplanned line", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: false });
     const chief = await start(state);
     const result = await state.harness.behavior.runCli([
-      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals", "--tier", "senior", "--json",
+      "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(result.exitCode).toBe(0);
 
@@ -2015,7 +2010,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const delegateResult = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix a typo", "--mission", "Fix the typo in the README",
-      "--tier", "junior", "--unplanned-reason", "Typo fix", "--json",
+      "--unplanned-reason", "Typo fix", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     const worker = JSON.parse(delegateResult.stdout!) as { threadId: string };
     await state.harness.behavior.callAgentTool("chief_report", {
@@ -2025,7 +2020,7 @@ describe("Chief backend", () => {
 
     const replaceResult = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix a typo", "--mission", "One more typo",
-      "--tier", "junior", "--replaces", worker.threadId, "--json",
+      "--replaces", worker.threadId, "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(replaceResult.exitCode).toBe(0);
 
@@ -2037,7 +2032,7 @@ describe("Chief backend", () => {
     const state = await setup();
     const chief = await start(state);
     await expect(state.harness.behavior.callAgentTool("chief_delegate", {
-      title: "Fix checkout totals", mission: "Correct and verify totals", tier: "senior",
+      title: "Fix checkout totals", mission: "Correct and verify totals",
       planThreadId: "thr_planner", wave: 1, unplannedReason: "Typo fix",
     } as any, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(/cannot be combined/);
   });
@@ -2135,7 +2130,7 @@ describe("Chief backend", () => {
     expect(reported).toContain("Planner report");
     const planPath = join(state.storageRoot, planner.threadId, "plan.md");
     expect(reported).toContain("Plan: 1 wave(s)");
-    expect(reported).toContain(`Wave 1 of 1 (senior): ${planPath}`);
+    expect(reported).toContain(`Wave 1 of 1: ${planPath}`);
     expect(reported).toContain(`Delegate wave 1 now: chief_delegate (planThreadId: ${planner.threadId}, wave: 1)`);
     expect(await readFile(planPath, "utf8")).toBe(`${planBody}\n`);
 
@@ -2202,7 +2197,7 @@ describe("Chief backend", () => {
 
     const reported = state.sent.at(-1).input[0].text;
     const planPath = join(state.storageRoot, planner.threadId, "plan.md");
-    expect(reported).toContain(`Wave 1 of 1 (senior): ${planPath}`);
+    expect(reported).toContain(`Wave 1 of 1: ${planPath}`);
     expect(reported).toContain("Delegate wave 1 now: chief_delegate");
   });
 
@@ -2220,9 +2215,9 @@ describe("Chief backend", () => {
       state: "ready",
       result: "Three waves: schema, migration, then delegation.",
       plan: [
-        { tier: "junior", body: PLAN_FIXTURE },
-        { tier: "senior", body: "# Wave 2\nMigrate the data." },
-        { tier: "senior", body: "# Wave 3\nWire up delegation." },
+        { body: PLAN_FIXTURE },
+        { body: "# Wave 2\nMigrate the data." },
+        { body: "# Wave 3\nWire up delegation." },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" });
 
@@ -2235,9 +2230,9 @@ describe("Chief backend", () => {
 
     const reported = state.sent.at(-1).input[0].text;
     expect(reported).toContain("Plan: 3 wave(s)");
-    expect(reported).toContain(`Wave 1 of 3 (junior): ${path1}`);
-    expect(reported).toContain(`Wave 2 of 3 (senior): ${path2}`);
-    expect(reported).toContain(`Wave 3 of 3 (senior): ${path3}`);
+    expect(reported).toContain(`Wave 1 of 3: ${path1}`);
+    expect(reported).toContain(`Wave 2 of 3: ${path2}`);
+    expect(reported).toContain(`Wave 3 of 3: ${path3}`);
     // Mirrored into Chief's storage so Chief can echo inline-vis previews.
     expect(await readFile(join(state.storageRoot, chief.threadId, "plans", planner.threadId, "plan-2.md"), "utf8")).toBe("# Wave 2\nMigrate the data.\n");
     expect(reported).toContain(`::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-1.md"}`);
@@ -2247,9 +2242,9 @@ describe("Chief backend", () => {
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
-      { path: path1, tier: "junior" },
-      { path: path2, tier: "senior" },
-      { path: path3, tier: "senior" },
+      { path: path1 },
+      { path: path2 },
+      { path: path3 },
     ]);
   });
 
@@ -2267,8 +2262,8 @@ describe("Chief backend", () => {
       state: "ready",
       result: "Two waves, JSON-encoded.",
       plan: JSON.stringify([
-        { tier: "junior", body: PLAN_FIXTURE },
-        { tier: "senior", body: "# Wave 2\nMigrate the data." },
+        { body: PLAN_FIXTURE },
+        { body: "# Wave 2\nMigrate the data." },
       ]),
     }, { threadId: planner.threadId, projectId: "proj_1" });
 
@@ -2283,8 +2278,8 @@ describe("Chief backend", () => {
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
-      { path: path1, tier: "junior" },
-      { path: path2, tier: "senior" },
+      { path: path1 },
+      { path: path2 },
     ]);
   });
 
@@ -2301,7 +2296,7 @@ describe("Chief backend", () => {
     await expect(state.harness.behavior.callAgentTool("chief_report", {
       state: "ready",
       result: "One bad wave, JSON-encoded.",
-      plan: JSON.stringify([{ tier: "mid", body: PLAN_FIXTURE }]),
+      plan: JSON.stringify([{ body: "" }]),
     }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/JSON-encoded wave array/);
   });
 
@@ -2315,7 +2310,6 @@ describe("Chief backend", () => {
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     const waves = Array.from({ length: 8 }, (_, index) => ({
-      tier: (index % 2 === 0 ? "junior" : "senior") as "junior" | "senior",
       body: index === 0 ? PLAN_FIXTURE : `# Wave ${index + 1}\nDo the work.`,
     }));
 
@@ -2327,9 +2321,9 @@ describe("Chief backend", () => {
 
     const reported = state.sent.at(-1).input[0].text as string;
     expect(reported.length).toBeLessThanOrEqual(3_000);
-    for (const [index, wave] of waves.entries()) {
+    for (const index of waves.keys()) {
       const path = join(state.storageRoot, planner.threadId, `plan-${index + 1}.md`);
-      expect(reported).toContain(`Wave ${index + 1} of 8 (${wave.tier}): ${path}`);
+      expect(reported).toContain(`Wave ${index + 1} of 8: ${path}`);
     }
     expect(reported).toContain(`Delegate wave 1 now: chief_delegate (planThreadId: ${planner.threadId}, wave: 1)`);
   });
@@ -2344,7 +2338,6 @@ describe("Chief backend", () => {
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     const tooManyWaves = Array.from({ length: 9 }, (_, index) => ({
-      tier: "senior" as const,
       body: index === 0 ? PLAN_FIXTURE : `# Wave ${index + 1}`,
     }));
 
@@ -2367,8 +2360,8 @@ describe("Chief backend", () => {
       state: "ready",
       result: "Two waves, neither scoped",
       plan: [
-        { tier: "junior", body: "# Wave 1\nDo a thing." },
-        { tier: "senior", body: "# Wave 2\nDo another thing." },
+        { body: "# Wave 1\nDo a thing." },
+        { body: "# Wave 2\nDo another thing." },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/NOT doing/);
   });
@@ -2387,7 +2380,7 @@ describe("Chief backend", () => {
       state: "ready",
       result: "Wave with prose mention only",
       plan: [
-        { tier: "senior", body: "# Wave 1\nWe have not added a What we're NOT doing section to this plan." },
+        { body: "# Wave 1\nWe have not added a What we're NOT doing section to this plan." },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/NOT doing/);
   });
@@ -2406,7 +2399,7 @@ describe("Chief backend", () => {
       state: "ready",
       result: "Wave with newline separating hash from NOT-doing prose",
       plan: [
-        { tier: "senior", body: "# Plan\n#\nWhat we are not doing is documented elsewhere." },
+        { body: "# Plan\n#\nWhat we are not doing is documented elsewhere." },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(/NOT doing/);
 
@@ -2431,7 +2424,7 @@ describe("Chief backend", () => {
       state: "ready",
       result: "Wave with accepted heading",
       plan: [
-        { tier: "senior", body: "# Wave 1\n\n## What we are not doing\n- No extra scope." },
+        { body: "# Wave 1\n\n## What we are not doing\n- No extra scope." },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" })).resolves.toBeDefined();
   });
@@ -2547,7 +2540,7 @@ describe("Chief backend", () => {
       selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", "senior", { branch: "feature/fix-checkout-totals" });
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { branch: "feature/fix-checkout-totals" });
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
@@ -2667,7 +2660,7 @@ describe("Chief backend", () => {
 
     expect(db.prepare(`SELECT title, state, chief_thread_id FROM managed_threads WHERE thread_id='thr_old'`).get())
       .toEqual({ title: "Existing work", state: "ready", chief_thread_id: "thr_chief" });
-    expect(db.prepare(`SELECT model, reasoning_level FROM chief_models WHERE host_id='host_1' AND role='senior'`).get())
+    expect(db.prepare(`SELECT model, reasoning_level FROM chief_models WHERE host_id='host_1' AND role='worker'`).get())
       .toEqual({ model: "gpt-6-astra", reasoning_level: "high" });
     // Widening that CHECK is the whole point of the rebuild.
     expect(() => db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, title, state, created_at, updated_at)
@@ -2696,7 +2689,7 @@ describe("Chief backend", () => {
 
     expect(db.prepare(`SELECT title, state, reject_streak, parent_thread_id FROM managed_threads WHERE thread_id='thr_old'`).get())
       .toEqual({ title: "Existing work", state: "ready", reject_streak: 2, parent_thread_id: "thr_parent" });
-    expect(db.prepare(`SELECT model, reasoning_level FROM chief_models WHERE host_id='host_1' AND role='senior'`).get())
+    expect(db.prepare(`SELECT model, reasoning_level FROM chief_models WHERE host_id='host_1' AND role='worker'`).get())
       .toEqual({ model: "gpt-6-astra", reasoning_level: "high" });
     // Widening that CHECK is the whole point of the rebuild.
     expect(() => db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, title, state, created_at, updated_at)
@@ -2898,7 +2891,7 @@ describe("Chief backend", () => {
       selection: { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" },
     });
     await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "senior",
+      hostId: "host_1", role: "worker",
       selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const chief = await start(state);
@@ -2940,7 +2933,7 @@ describe("Chief backend", () => {
   test("reports each machine's scanned fallback and stored selections", async () => {
     const state = await setup();
     await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "senior",
+      hostId: "host_1", role: "worker",
       selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
@@ -2953,22 +2946,21 @@ describe("Chief backend", () => {
       selections: {
         chief: null,
         planner: null,
-        junior: null,
-        senior: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+        worker: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
         reviewer: null,
         advisor: null,
       },
       unusable: [],
     }]);
 
-    await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "senior", selection: null });
+    await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "worker", selection: null });
     const cleared = await state.harness.behavior.callRpc("modelConfiguration", null);
-    expect(cleared.hosts[0]!.selections.senior).toBeNull();
+    expect(cleared.hosts[0]!.selections.worker).toBeNull();
   });
 
   test("scans a machine's provider once no matter how many roles picked it", async () => {
     const state = await setup();
-    for (const role of ["chief", "junior", "senior", "reviewer"]) {
+    for (const role of ["chief", "planner", "worker", "reviewer"]) {
       await state.harness.behavior.callRpc("setRoleModel", {
         hostId: "host_1", role,
         selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
@@ -2983,7 +2975,7 @@ describe("Chief backend", () => {
   test("bases the worker's worktree on the task branch Chief created", async () => {
     const state = await setup();
     const chief = await start(state);
-    await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+    await delegate(state, chief.threadId, "Fix checkout totals", {
       branch: "feature/fix-checkout-totals",
       issueUrl: "https://github.com/acme/shop/issues/7",
       prUrl: "https://github.com/acme/shop/pull/8",
@@ -3015,12 +3007,11 @@ describe("Chief backend", () => {
   test("refuses a second live worker on a branch another one already holds", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { branch: "feature/fix-checkout-totals" });
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { branch: "feature/fix-checkout-totals" });
 
     // A second worktree cannot check the branch out, so this has to fail here, not in git.
     const result = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals again", "--mission", "Correct and verify totals",
-      "--tier", "senior",
       "--branch", "feature/fix-checkout-totals", "--unplanned-reason", "Bounded test fixture", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(result.exitCode).toBe(1);
@@ -3029,14 +3020,14 @@ describe("Chief backend", () => {
 
     // Once that worker is complete the branch is free again.
     await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, { threadId: chief.threadId, projectId: "proj_1" });
-    await delegate(state, chief.threadId, "Fix checkout totals follow-up", undefined, { branch: "feature/fix-checkout-totals" });
+    await delegate(state, chief.threadId, "Fix checkout totals follow-up", { branch: "feature/fix-checkout-totals" });
     expect(state.spawned).toHaveLength(3);
   });
 
   test("hands a repair round to a fresh worker in the same worktree", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", {
       branch: "feature/fix-checkout-totals",
       prUrl: "https://github.com/acme/shop/pull/8",
     });
@@ -3056,7 +3047,7 @@ describe("Chief backend", () => {
 
     const replaceResult = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Fix the discount bug the reviewer found",
-      "--criteria", "Regression passes", "--tier", "senior",
+      "--criteria", "Regression passes",
       "--replaces", worker.threadId, "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(replaceResult.exitCode).toBe(0);
@@ -3096,13 +3087,13 @@ describe("Chief backend", () => {
 
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
     await expect(state.harness.behavior.callAgentTool("chief_delegate", {
-      title: "Fix checkout totals", mission: "Patch the fix", tier: "senior", replaces: worker.threadId,
+      title: "Fix checkout totals", mission: "Patch the fix", replaces: worker.threadId,
     }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow("wait until it is idle");
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
 
     const otherChief = await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string };
     await expect(state.harness.behavior.callAgentTool("chief_delegate", {
-      title: "Fix checkout totals", mission: "Patch the fix", tier: "senior", replaces: worker.threadId,
+      title: "Fix checkout totals", mission: "Patch the fix", replaces: worker.threadId,
     }, { threadId: otherChief.threadId, projectId: "proj_1" })).rejects.toThrow("for this Chief");
 
     // Neither refusal spawned a replacement worker.
@@ -3112,7 +3103,7 @@ describe("Chief backend", () => {
   test("keeps one active worker per branch around a replacement", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { branch: "feature/fix-checkout-totals" });
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { branch: "feature/fix-checkout-totals" });
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
@@ -3120,7 +3111,7 @@ describe("Chief backend", () => {
 
     const replaceResult = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
-      "--criteria", "Regression passes", "--tier", "senior",
+      "--criteria", "Regression passes",
       "--replaces", worker.threadId, "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(replaceResult.exitCode).toBe(0);
@@ -3129,7 +3120,7 @@ describe("Chief backend", () => {
     // Plain delegation onto the same branch is still refused: the fresh worker holds it now.
     const collision = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals again", "--mission", "Correct and verify totals",
-      "--tier", "senior", "--branch", "feature/fix-checkout-totals", "--unplanned-reason", "Bounded test fixture", "--json",
+      "--branch", "feature/fix-checkout-totals", "--unplanned-reason", "Bounded test fixture", "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(collision.exitCode).toBe(1);
     expect(collision.stderr).toContain("already carries the active worker");
@@ -3137,7 +3128,7 @@ describe("Chief backend", () => {
     // Replacing again with a different branch is refused too: replaces carries the prior branch.
     const mismatchedBranch = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
-      "--tier", "senior", "--branch", "feature/other", "--replaces", freshWorker.threadId, "--json",
+      "--branch", "feature/other", "--replaces", freshWorker.threadId, "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(mismatchedBranch.exitCode).toBe(1);
     expect(mismatchedBranch.stderr).toContain("carries branch feature/fix-checkout-totals");
@@ -3146,7 +3137,7 @@ describe("Chief backend", () => {
   test("replaces: prefers an explicit issueUrl/prUrl over the prior worker's, and inherits when omitted", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", {
       issueUrl: "https://github.com/acme/shop/issues/7",
       prUrl: "https://github.com/acme/shop/pull/8",
     });
@@ -3154,7 +3145,7 @@ describe("Chief backend", () => {
     // Explicit issueUrl/prUrl on the replaces: call override the prior worker's.
     const overrideResult = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
-      "--tier", "senior", "--replaces", worker.threadId,
+      "--replaces", worker.threadId,
       "--issue-url", "https://github.com/acme/shop/issues/9",
       "--pr-url", "https://github.com/acme/shop/pull/10",
       "--json",
@@ -3172,7 +3163,7 @@ describe("Chief backend", () => {
     // Omitting issueUrl/prUrl on a further replaces: call inherits the prior worker's.
     const inheritResult = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug again",
-      "--tier", "senior", "--replaces", overrideWorker.threadId, "--json",
+      "--replaces", overrideWorker.threadId, "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(inheritResult.exitCode).toBe(0);
     const inheritedWorker = JSON.parse(inheritResult.stdout!) as { threadId: string };
@@ -3183,7 +3174,7 @@ describe("Chief backend", () => {
     expect(inheritedRow.pr_url).toBe("https://github.com/acme/shop/pull/10");
   });
 
-  test("a wave delegation takes its tier and plan file from the schedule, and stores the link", async () => {
+  test("a wave delegation takes its plan file from the schedule, and stores the link", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
@@ -3200,22 +3191,41 @@ describe("Chief backend", () => {
     expect(state.spawned.at(-1).prompt).toContain('Wave 1 of 2. Implement only this wave\'s plan file. Name "Wave 1 of 2" in your ready result.');
     expect(state.spawned.at(-1).prompt).toContain("No review runs after this wave.");
 
-    const row = state.db.prepare(`SELECT tier, plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
-    expect(row).toEqual({ tier: "junior", plan_thread_id: planner.threadId, plan_wave: 1 });
+    const row = state.db.prepare(`SELECT plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
+    expect(row).toEqual({ plan_thread_id: planner.threadId, plan_wave: 1 });
   });
 
-  test("rejects an explicit tier that does not match the scheduled wave's tier", async () => {
+  test("delegate ignores a stray tier from an older Chief", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix a typo", "--mission", "Fix the typo in the README",
+      "--tier", "junior", "--unplanned-reason", "Typo fix", "--json",
+    ], opts);
+    expect(result.exitCode).toBe(0);
+    await state.harness.behavior.callAgentTool("chief_delegate", {
+      title: "Fix another typo", mission: "Fix the other typo", tier: "senior", unplannedReason: "Typo fix",
+    } as any, opts);
+    expect(state.spawned.slice(1).map((spawn) => spawn.pluginMetadata?.role)).toEqual(["worker", "worker"]);
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).not.toContain("Tier split");
+  });
+
+  test("a planner report whose waves still carry tier is accepted without persisting it", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
-    const { planner } = await planTwoWaves(state, chief.threadId);
-
-    const result = await state.harness.behavior.runCli([
-      "delegate", "--title", "Wave 1 work", "--mission", "Correct and verify totals",
-      "--plan-thread", planner.threadId, "--wave", "1", "--tier", "senior", "--json",
-    ], { threadId: chief.threadId, projectId: "proj_1" });
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/scheduled as junior, not senior/);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "One wave.", plan: [{ tier: "senior", body: PLAN_FIXTURE }],
+    } as any, { threadId: planner.threadId, projectId: "proj_1" });
+    const row = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as any;
+    expect(JSON.parse(row.plan_waves)).toEqual([{ path: join(state.storageRoot, planner.threadId, "plan-1.md") }]);
   });
 
   test("rejects an out-of-range wave", async () => {
@@ -3304,9 +3314,9 @@ describe("Chief backend", () => {
       state: "ready",
       result: "Three waves: schema, migration, then delegation.",
       plan: [
-        { tier: "junior", body: PLAN_FIXTURE },
-        { tier: "senior", body: "# Wave 2\nMigrate the data." },
-        { tier: "senior", body: "# Wave 3\nWire up delegation." },
+        { body: PLAN_FIXTURE },
+        { body: "# Wave 2\nMigrate the data." },
+        { body: "# Wave 3\nWire up delegation." },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" });
     const path1 = join(state.storageRoot, planner.threadId, "plan-1.md");
@@ -3360,9 +3370,9 @@ describe("Chief backend", () => {
     );
     const reviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!;
     expect(reviewSpawn.prompt).toContain(`This is the final wave (3 of 3). Review the whole branch against its base`);
-    expect(reviewSpawn.prompt).toContain(`Wave 1 of 3 (junior): ${path1}`);
-    expect(reviewSpawn.prompt).toContain(`Wave 2 of 3 (senior): ${path2}`);
-    expect(reviewSpawn.prompt).toContain(`Wave 3 of 3 (senior): ${path3}`);
+    expect(reviewSpawn.prompt).toContain(`Wave 1 of 3: ${path1}`);
+    expect(reviewSpawn.prompt).toContain(`Wave 2 of 3: ${path2}`);
+    expect(reviewSpawn.prompt).toContain(`Wave 3 of 3: ${path3}`);
 
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
@@ -3410,9 +3420,9 @@ describe("Chief backend", () => {
       state: "ready",
       result: "Three waves: schema, migration, then delegation.",
       plan: [
-        { tier: "junior", body: PLAN_FIXTURE },
-        { tier: "senior", body: "# Wave 2\nMigrate the data." },
-        { tier: "senior", body: "# Wave 3\nWire up delegation." },
+        { body: PLAN_FIXTURE },
+        { body: "# Wave 2\nMigrate the data." },
+        { body: "# Wave 3\nWire up delegation." },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" });
 
@@ -3465,7 +3475,7 @@ describe("Chief backend", () => {
     const state = await setup();
     const chief = await start(state);
     // Branch creation can fail after the draft PR exists; the constraint still has to reach the worker.
-    await delegate(state, chief.threadId, "Fix checkout totals", undefined, { prUrl: "https://github.com/acme/shop/pull/8" });
+    await delegate(state, chief.threadId, "Fix checkout totals", { prUrl: "https://github.com/acme/shop/pull/8" });
     expect(state.spawned[1].prompt).toContain("## Git workflow");
     expect(state.spawned[1].prompt).toContain("https://github.com/acme/shop/pull/8");
     expect(state.spawned[1].prompt).toContain("Do not create, merge, or mark ready any pull request");
@@ -3474,7 +3484,7 @@ describe("Chief backend", () => {
   test("records the branch and forge links on the thread and shows them in the roster and inspect", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", {
       branch: "feature/fix-checkout-totals",
       issueUrl: "https://github.com/acme/shop/issues/7",
       prUrl: "https://github.com/acme/shop/pull/8",
@@ -3494,7 +3504,7 @@ describe("Chief backend", () => {
   test("refuses to adopt a managed worker, keeping its branch and forge links intact", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, {
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", {
       branch: "feature/fix-checkout-totals",
       issueUrl: "https://github.com/acme/shop/issues/7",
       prUrl: "https://github.com/acme/shop/pull/8",
@@ -3508,13 +3518,13 @@ describe("Chief backend", () => {
     const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
     expect(roster).toContain("branch: feature/fix-checkout-totals");
     expect(roster).toContain("pr: https://github.com/acme/shop/pull/8");
-    expect(roster).toContain("worker (senior)");
+    expect(roster).toContain("worker | ");
   });
 
   test("stops a stuck worker and hands its worktree to a fresh worker", async () => {
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", undefined, { branch: "feature/fix-checkout-totals" });
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { branch: "feature/fix-checkout-totals" });
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
 
     const text = await state.harness.behavior.callAgentTool("chief_stop", {
@@ -3529,7 +3539,7 @@ describe("Chief backend", () => {
 
     const replaceResult = await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Patch the remaining bug",
-      "--criteria", "Regression passes", "--tier", "senior",
+      "--criteria", "Regression passes",
       "--replaces", worker.threadId, "--json",
     ], { threadId: chief.threadId, projectId: "proj_1" });
     expect(replaceResult.exitCode).toBe(0);
@@ -3576,70 +3586,7 @@ describe("Chief backend", () => {
     expect(missing.exitCode).toBe(1);
   });
 
-  test("chief_delegate rejects a call with no tier, naming both valid values in the error", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    await expect(
-      state.harness.behavior.callAgentTool(
-        "chief_delegate",
-        { title: "Fix typo", mission: "Fix typo in README" } as any,
-        { threadId: chief.threadId, projectId: "proj_1" },
-      ),
-    ).rejects.toThrow(/junior.*senior|senior.*junior/);
-  });
-
-  test("bb chief delegate without --tier fails naming both valid values in the error", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const result = await state.harness.behavior.runCli([
-      "delegate", "--title", "Fix typo", "--mission", "Fix typo in README", "--json",
-    ], { threadId: chief.threadId, projectId: "proj_1" });
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/junior.*senior|senior.*junior/);
-  });
-
-  test("surfaces the running junior/senior split in chief_roster", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    await delegate(state, chief.threadId, "Trivial fix", "junior");
-    await delegate(state, chief.threadId, "Complex architectural change", "senior");
-    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" }));
-    expect(roster).toContain("Tier split: 1 junior, 1 senior");
-  });
-
-  test("spawns a junior delegation on the junior model selection", async () => {
-    const state = await setup();
-    await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "junior",
-      selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
-    });
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix typo", "junior");
-    expect(state.spawned[1]).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
-    const row = state.db.prepare("SELECT * FROM managed_threads WHERE thread_id=?").get(worker.threadId) as any;
-    expect(row.tier).toBe("junior");
-  });
-
-  test("falls back to the BB default when a junior pick leaves the machine's catalog, never to the senior pick", async () => {
-    const state = await setup();
-    await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "junior",
-      selection: { providerId: "codex", model: "gpt-5-retired", reasoningLevel: "high" },
-    });
-    await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "senior",
-      selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
-    });
-    const chief = await start(state);
-    await delegate(state, chief.threadId, "Fix typo", "junior");
-    expect(state.spawned[1]).not.toHaveProperty("providerId");
-    expect(state.spawned[1]).not.toHaveProperty("model");
-
-    const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
-    expect(configuration.hosts[0]!.unusable).toEqual(["junior"]);
-  });
-
-  test("migration rewrites an existing worker model pick to senior, preserving provider/model/reasoning", async () => {
+  test("migration rewrites an existing worker model pick to worker, preserving provider/model/reasoning", async () => {
     const { bb, harness } = createFakePluginHost({ pluginId: "chief", agentSkillIds: ["chief", "chief-worker"] });
     const db = bb.storage.database();
     db.exec(`CREATE TABLE chief_models (
@@ -3657,10 +3604,26 @@ describe("Chief backend", () => {
     await plugin(bb);
     disposals.push(() => harness.lifecycle.dispose());
 
-    const rewritten = db.prepare(`SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`).get("host_1", "senior");
+    const rewritten = db.prepare(`SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`).get("host_1", "worker");
     expect(rewritten).toEqual({ provider_id: "codex", model: "gpt-6-astra", reasoning_level: "high" });
-    const stale = db.prepare(`SELECT * FROM chief_models WHERE role=?`).get("worker");
-    expect(stale).toBeUndefined();
+    expect(db.prepare(`SELECT * FROM chief_models WHERE role IN ('junior','senior')`).all()).toEqual([]);
+  });
+
+  test("migration carries senior picks over as worker and drops junior picks", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-worker" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    bb.storage.migrate(db, MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("chief_models_v5"))));
+    const insert = db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    insert.run("host_1", "junior", "codex", "gpt-6-mini", "low", 1);
+    insert.run("host_1", "senior", "codex", "gpt-6-astra", "high", 2);
+    insert.run("host_2", "junior", "codex", "gpt-6-mini", "low", 3);
+
+    bb.storage.migrate(db, MIGRATIONS);
+
+    expect(db.prepare(`SELECT host_id, role, provider_id, model, reasoning_level FROM chief_models ORDER BY host_id, role`).all())
+      .toEqual([{ host_id: "host_1", role: "worker", provider_id: "codex", model: "gpt-6-astra", reasoning_level: "high" }]);
+    expect(() => insert.run("host_1", "junior", "codex", "gpt-6-mini", "low", 4)).toThrow();
   });
 
   test("explains a machine with no signed-in provider instead of offering a model", async () => {

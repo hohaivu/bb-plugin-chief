@@ -100,16 +100,11 @@ const spawnMetadataSchema = z.object({
   role: roleSchema,
   chiefThreadId: z.string().nullable().optional(),
 });
-/** A worker's tier, chosen by Chief at delegation time. Separate from the
- * lifecycle role above: every tier is still a "worker" for role-gated tools,
- * lifecycle alerts, and the managed_threads role CHECK. */
-const tierSchema = z.enum(["junior", "senior"]);
 /** A reviewer's structured judgement. Chief routes on this field instead of
  * parsing a ship-or-fix opinion out of the report prose. */
 const verdictSchema = z.enum(["approve", "request_changes"]);
-/** The role key chief_models stores a per-machine model pick under: the
- * lifecycle roles, but with "worker" split into its two tiers. */
-const modelRoleSchema = z.enum(["chief", "planner", "junior", "senior", "reviewer", "advisor"]);
+/** The role key chief_models stores a per-machine model pick under: the lifecycle roles. */
+const modelRoleSchema = roleSchema;
 const stateSchema = z.enum([
   "starting",
   "pending",
@@ -151,8 +146,7 @@ const modelConfigurationSchema = z.object({
     selections: z.object({
       chief: modelSelectionSchema.nullable(),
       planner: modelSelectionSchema.nullable(),
-      junior: modelSelectionSchema.nullable(),
-      senior: modelSelectionSchema.nullable(),
+      worker: modelSelectionSchema.nullable(),
       reviewer: modelSelectionSchema.nullable(),
       advisor: modelSelectionSchema.nullable(),
     }),
@@ -194,28 +188,18 @@ const delegateShape = z.object({
   successCriteria: z.array(z.string().trim().min(1).max(1_000)).max(30).optional(),
   constraints: z.array(z.string().trim().min(1).max(1_000)).max(30).optional(),
   context: z.string().trim().max(12_000).optional(),
-  // The policy behind this choice lives in the chief skill, which is loaded into
-  // every Chief turn. Here it stays a one-line gloss of the two enum values.
-  tier: tierSchema.optional().describe(
-    "junior for renames, typos, formatting, decided APIs, tests for existing behavior, or localized fixes; senior for multi-file changes, design decisions, unknown causes, or new features. Required unless planThreadId is set: the plugin then takes the tier from the scheduled wave.",
-  ),
   branch: z.string().trim().min(1).max(300).optional().describe(
     "The task branch Chief already created and pushed. The worktree is based on it and the worker commits there. Omit to base the worktree on the project default.",
   ),
   issueUrl: z.string().trim().min(1).max(500).optional().describe("URL of the tracking issue Chief opened for this task, when the forge has issues."),
   prUrl: z.string().trim().min(1).max(500).optional().describe("URL of the draft pull request Chief opened from the task branch. The worker never marks it ready."),
   replaces: z.string().trim().min(1).optional().describe("A finished worker's thread id to hand off from: the new worker starts in that worker's worktree and branch, gets its latest review findings, and the old worker is marked complete."),
-  planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file and tier from that schedule instead of tier being set explicitly."),
+  planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
-  unplannedReason: z.string().trim().min(1).max(300).optional().describe("Planning is on and this work skips chief_plan: a short reason why. Only for junior-sized, bounded work whose shape and cause are already known. Not needed with planThreadId/wave or replaces."),
+  unplannedReason: z.string().trim().min(1).max(300).optional().describe("Planning is on and this work skips chief_plan: a short reason why. Only for bounded work whose shape and cause are already known. Not needed with planThreadId/wave or replaces."),
 });
 
 const delegateParams = delegateShape.superRefine((value, ctx) => {
-  // A replaces: call with no explicit wave may still resolve its tier at runtime,
-  // by inheriting the prior worker's plan link — delegate() enforces it there instead.
-  if (value.tier === undefined && !value.planThreadId && !value.replaces) {
-    ctx.addIssue({ code: "custom", path: ["tier"], message: "tier is required: junior or senior." });
-  }
   if (value.unplannedReason && value.planThreadId) {
     ctx.addIssue({ code: "custom", path: ["unplannedReason"], message: "unplannedReason cannot be combined with planThreadId." });
   }
@@ -252,7 +236,6 @@ const optionalReport = z.object({
   recommendation: z.string().trim().max(4_000).optional(),
 });
 const planWavesSchema = z.array(z.object({
-  tier: tierSchema,
   body: z.string().trim().min(1).max(MAX_PLAN_LENGTH),
 })).min(1).max(MAX_WAVES);
 const readyReport = z.object({
@@ -268,7 +251,7 @@ const readyReport = z.object({
     z.string().trim().min(1).max(MAX_PLAN_LENGTH),
     planWavesSchema,
   ]).optional().describe(
-    "A planner's ready report requires this: either the full plan body as Markdown (one wave, tier senior), or an array of up to 8 {tier, body} waves. Chief receives each wave as its own file, not inline. No other role sets this.",
+    "A planner's ready report requires this: either the full plan body as Markdown (one wave), or an array of up to 8 {body} waves. Chief receives each wave as its own file, not inline. No other role sets this.",
   ),
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
@@ -324,7 +307,6 @@ interface TodoRow {
 interface ManagedRow {
   thread_id: string;
   role: z.infer<typeof roleSchema>;
-  tier: z.infer<typeof tierSchema> | null;
   branch: string | null;
   issue_url: string | null;
   pr_url: string | null;
@@ -350,7 +332,7 @@ interface ManagedRow {
   stall_alerted_cycle: number | null;
   stop_alerted_cycle: number | null;
   lifecycle_alert_key: string | null;
-  /** Planner row only: JSON `[{path, tier}]`, the schedule a planner-ready report persisted. */
+  /** Planner row only: JSON `[{path}]`, the schedule a planner-ready report persisted. */
   plan_waves: string | null;
   /** Worker row only: the planner it was delegated from, with plan_wave, when planThreadId/wave was given. */
   plan_thread_id: string | null;
@@ -395,7 +377,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled — a well-specified issue included. Order: chief_plan → chief_forge_init → chief_delegate. chief_delegate rejects a call without planThreadId and wave; only junior-sized, bounded work whose shape and cause are already known may skip the plan, with unplannedReason saying why. Its ready alert lists the wave schedule and the exact next call — delegate wave 1 right away without waiting for user sign-off, and without reading the plan file yourself. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. A plan is never implementation: only a worker changes code.";
+  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled — a well-specified issue included. Order: chief_plan → chief_forge_init → chief_delegate. chief_delegate rejects a call without planThreadId and wave; only bounded work whose shape and cause are already known may skip the plan, with unplannedReason saying why. Its ready alert lists the wave schedule and the exact next call — delegate wave 1 right away without waiting for user sign-off, and without reading the plan file yourself. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. A plan is never implementation: only a worker changes code.";
 
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
@@ -658,6 +640,11 @@ export const MIGRATIONS = [
     // Chief's own todos, per project so they survive replacement Chiefs.
     `CREATE TABLE IF NOT EXISTS chief_todos (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, text TEXT NOT NULL, after TEXT, state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','done','dropped')), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS chief_todos_project ON chief_todos (project_id, state, id)`,
+    // One worker type: senior picks carry over as worker; junior picks are dropped.
+    `CREATE TABLE chief_models_v5 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
+    `INSERT INTO chief_models_v5 (host_id, role, provider_id, model, reasoning_level, updated_at) SELECT host_id, CASE role WHEN 'senior' THEN 'worker' ELSE role END, provider_id, model, reasoning_level, updated_at FROM chief_models WHERE role <> 'junior'`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_v5 RENAME TO chief_models`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -777,7 +764,6 @@ export default async function plugin(bb: BbPluginApi) {
     title: string;
     state?: ManagedRow["state"];
     status?: string | null;
-    tier?: ManagedRow["tier"];
     brief?: string | null;
     branch?: string | null;
     issueUrl?: string | null;
@@ -790,19 +776,19 @@ export default async function plugin(bb: BbPluginApi) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, tier, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       chief_thread_id=excluded.chief_thread_id, worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
-      title=excluded.title, state=excluded.state, status=excluded.status, tier=excluded.tier,
+      title=excluded.title, state=excluded.state, status=excluded.status,
       brief=excluded.brief, branch=excluded.branch, issue_url=excluded.issue_url, pr_url=excluded.pr_url,
       plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
       reviewed_report_seq=excluded.reviewed_report_seq, unplanned_reason=excluded.unplanned_reason,
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.parentThreadId ?? null, input.title, input.state ?? "starting",
-      input.status ?? "starting", input.tier ?? null, input.brief ?? null, input.branch ?? null,
+      input.status ?? "starting", input.brief ?? null, input.branch ?? null,
       input.issueUrl ?? null, input.prUrl ?? null, input.planThreadId ?? null, input.planWave ?? null,
       input.reviewedReportSeq ?? null, input.unplannedReason ?? null,
       input.state === "active" ? now : null,
@@ -1068,7 +1054,7 @@ export default async function plugin(bb: BbPluginApi) {
     const prompt = [
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
-      "When chief_plan is available, implementation work goes plan → forge → delegate: chief_plan, then chief_forge_init, then chief_delegate with the planThreadId and wave its ready alert names; chief_delegate refuses anything else unless it is junior-sized, bounded work you pass unplannedReason for. Without chief_plan, use chief_delegate directly. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
+      "When chief_plan is available, implementation work goes plan → forge → delegate: chief_plan, then chief_forge_init, then chief_delegate with the planThreadId and wave its ready alert names; chief_delegate refuses anything else unless it is bounded work of known shape and cause that you pass unplannedReason for. Without chief_plan, use chief_delegate directly. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
       "You own the forge for every delegation: run chief_forge_init, and pass the branch, issueUrl and prUrl it returns to chief_delegate — if it returns a script instead, run it from the project checkout and use the CHIEF_FORGE line it prints. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
       "A worker's ready alert names the next call: an intermediate wave hands off to the next wave with no review in between; the final wave, or a worker with no plan link, tells you to start the one review of the whole run with chief_review, whose reviewer reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want — including a pull request or branch with no managed worker.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
@@ -1175,9 +1161,9 @@ export default async function plugin(bb: BbPluginApi) {
       "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
       `- ${PLAN_ONLY}`,
       "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
-      "- Report with chief_report state ready, passing the plan through chief_report's `plan` field: an array of `{tier, body}` per wave, or a single string for one wave. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file.",
+      "- Report with chief_report state ready, passing the plan through chief_report's `plan` field: an array of `{body}` per wave, or a single string for one wave. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file.",
       "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
-      "- Split the work into at most 8 sequential waves, each a self-contained plan one worker finishes on the same branch; one wave by default, more only when one worker cannot finish it. Give each wave a tier: junior for bounded, known work, senior otherwise. Submit `plan` as an array of `{tier, body}`. Waves contain no phases.",
+      "- Split the work into at most 8 sequential waves, each a self-contained plan one worker finishes on the same branch; one wave by default, more only when one worker cannot finish it. Submit `plan` as an array of `{body}`. Waves contain no phases.",
       "- Add an explicit \"What we're NOT doing\" section naming what this plan leaves out of scope.",
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
@@ -1306,10 +1292,9 @@ export default async function plugin(bb: BbPluginApi) {
     // Planning on means every new delegation starts from a plan wave. replaces: hands off
     // an already-gated delegation, so it passes; the escape hatch must say why.
     if (planThreadId === undefined && !prior && !params.unplannedReason && await plannerEnabled()) {
-      throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. Only junior-sized, bounded work whose shape and cause are already known may skip the plan — pass unplannedReason (CLI: --unplanned-reason) with a short reason why.");
+      throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. Only bounded work whose shape and cause are already known may skip the plan — pass unplannedReason (CLI: --unplanned-reason) with a short reason why.");
     }
     const unplannedReason = params.unplannedReason ?? (planThreadId === undefined ? prior?.unplanned_reason ?? undefined : undefined);
-    let tier = params.tier;
     let planPath: string | undefined;
     let waveTotal: number | undefined;
     if (planThreadId !== undefined) {
@@ -1322,14 +1307,9 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error(`Wave ${wave ?? "?"} is out of range: planner ${planThreadId} scheduled ${waves.length} wave(s).`);
       }
       const scheduled = waves[wave - 1]!;
-      if (params.tier !== undefined && params.tier !== scheduled.tier) {
-        throw new Error(`Wave ${wave} is scheduled as ${scheduled.tier}, not ${params.tier}. Omit tier to use the schedule's.`);
-      }
-      tier = scheduled.tier;
       planPath = scheduled.path;
       waveTotal = waves.length;
     }
-    if (tier === undefined) throw new Error("tier is required: junior or senior.");
     // One task branch carries one active worker: a second worktree cannot check out a
     // branch another one already holds, and the spawn would fail with a raw git error.
     const holder = branch
@@ -1405,14 +1385,14 @@ export default async function plugin(bb: BbPluginApi) {
       parentThreadId: chief.thread_id,
       visibility: "visible",
       title: params.title,
-      ...(await execution(tier, hostId)),
+      ...(await execution("worker", hostId)),
       ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id },
     });
     insertThread({
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
-      state: "starting", status: thread.status, tier, brief: reviewerBrief,
+      state: "starting", status: thread.status, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason,
     });
     if (prior) {
@@ -1465,10 +1445,10 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** A worker's linked planner's persisted wave schedule, or [] when unlinked. */
-  function planWavesFor(planThreadId: string | null): { path: string; tier: z.infer<typeof tierSchema> }[] {
+  function planWavesFor(planThreadId: string | null): { path: string }[] {
     if (!planThreadId) return [];
     const planner = roles.get(planThreadId);
-    return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as { path: string; tier: z.infer<typeof tierSchema> }[]) : [];
+    return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as { path: string }[]) : [];
   }
 
   /** A ready worker's exact next call: the next wave (no review runs between waves), or
@@ -1478,7 +1458,7 @@ export default async function plugin(bb: BbPluginApi) {
     const waves = planWavesFor(row.plan_thread_id);
     if (row.plan_thread_id && row.plan_wave != null && row.plan_wave < waves.length) {
       const next = waves[row.plan_wave]!;
-      return `Wave ${row.plan_wave} of ${waves.length} is ready. Once it is idle, delegate wave ${row.plan_wave + 1} (${next.tier}): ${next.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave + 1}, replaces: ${row.thread_id}). Do not review between waves.`;
+      return `Wave ${row.plan_wave} of ${waves.length} is ready. Once it is idle, delegate wave ${row.plan_wave + 1}: ${next.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave + 1}, replaces: ${row.thread_id}). Do not review between waves.`;
     }
     return `Start its review now: chief_review (workerThreadId: ${row.thread_id}). Complete the work only on the reviewer's approve.`;
   }
@@ -1492,7 +1472,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "planner") {
       if (!row.plan_waves) return null;
       const delegated = [...roles.values()].some((other) => other.role === "worker" && other.plan_thread_id === row.thread_id);
-      return delegated ? null : `Delegate wave 1 now: chief_delegate (planThreadId: ${row.thread_id}, wave: 1). The plugin supplies its plan file and tier; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`;
+      return delegated ? null : `Delegate wave 1 now: chief_delegate (planThreadId: ${row.thread_id}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`;
     }
     if (row.role === "worker") {
       // A reviewer that still covers this worker's latest report — either busy
@@ -1594,7 +1574,7 @@ export default async function plugin(bb: BbPluginApi) {
           ] : []),
           ...(waves.length > 1 ? [
             "", `This is the final wave (${waves.length} of ${waves.length}). Review the whole branch against its base — every wave's changes — against every wave's plan:`,
-            ...waves.map((wave, index) => `Wave ${index + 1} of ${waves.length} (${wave.tier}): ${wave.path}`),
+            ...waves.map((wave, index) => `Wave ${index + 1} of ${waves.length}: ${wave.path}`),
           ] : []),
         ],
       });
@@ -1799,17 +1779,16 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The server, not the planner, owns writing the plan: the planner submits it
    * through chief_report and this lands it at the thread's own storage location. */
-  async function writePlan(threadId: string, plan: string | { tier: z.infer<typeof tierSchema>; body: string }[], mirrorRoot?: string) {
+  async function writePlan(threadId: string, plan: string | { body: string }[], mirrorRoot?: string) {
     const { storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
-    const bodies = typeof plan === "string" ? [{ name: "plan.md", body: plan, tier: "senior" as const }]
-      // A plain string is one wave, tier senior: conservative, since Chief never picks it.
-      : plan.map((wave, index) => ({ name: `plan-${index + 1}.md`, body: wave.body, tier: wave.tier }));
+    const bodies = typeof plan === "string" ? [{ name: "plan.md", body: plan }]
+      : plan.map((wave, index) => ({ name: `plan-${index + 1}.md`, body: wave.body }));
     // mirrorRoot writes a copy elsewhere; the returned paths stay the canonical planner ones.
     for (const root of [mirrorRoot ?? storageRootPath]) {
       await mkdir(root, { recursive: true });
       for (const wave of bodies) await writeFile(join(root, wave.name), `${wave.body}\n`);
     }
-    return bodies.map((wave) => ({ path: join(storageRootPath, wave.name), tier: wave.tier }));
+    return bodies.map((wave) => ({ path: join(storageRootPath, wave.name) }));
   }
 
   async function report(threadId: string, params: z.infer<typeof reportParams>, callerProjectId: string) {
@@ -1855,7 +1834,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (Array.isArray(decoded)) {
         const waves = planWavesSchema.safeParse(decoded);
         if (!waves.success) {
-          throw new Error(`plan is a JSON-encoded wave array that is not valid (${waves.error.issues[0]?.message ?? "check the waves"}). Pass plan as an array of {tier, body}, not a string.`);
+          throw new Error(`plan is a JSON-encoded wave array that is not valid (${waves.error.issues[0]?.message ?? "check the waves"}). Pass plan as an array of {body}, not a string.`);
         }
         plan = waves.data;
       }
@@ -1871,7 +1850,7 @@ export default async function plugin(bb: BbPluginApi) {
       // ponytail: headings inside code blocks are deliberately out of scope (user decision).
       if (!bodies.some((body) => /^[ \t]*#{1,6}[ \t]+what we(?:'re|’re| are) not doing/im.test(body))) {
         const hint = typeof plan === "string" && plan.startsWith("[")
-          ? " If you meant to send several waves, pass plan as an actual array of {tier, body}, not a JSON string."
+          ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string."
           : "";
         throw new Error(`A planner's ready report requires a "What we're NOT doing" section in some wave.${hint}`);
       }
@@ -1914,7 +1893,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...(plannerReady && planWaves
         ? [
             `Plan: ${planWaves.length} wave(s)`,
-            ...planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length} (${wave.tier}): ${wave.path}`),
+            ...planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`),
             ...(inlinePlans.length
               ? ["To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):", ...inlinePlans]
               : []),
@@ -2221,7 +2200,7 @@ export default async function plugin(bb: BbPluginApi) {
       const done = Math.max(0, currentWave - 1) + (approved ? 1 : 0);
       return [
         `waves: ${done}/${waves.length} done, wave ${currentWave} ${state}`,
-        ...waves.map((wave, index) => `  wave ${index + 1} of ${waves.length} (${wave.tier}): ${wave.path}`),
+        ...waves.map((wave, index) => `  wave ${index + 1} of ${waves.length}: ${wave.path}`),
       ];
     }
     if (row.role === "worker" && row.plan_thread_id && row.plan_wave != null) {
@@ -2233,7 +2212,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** One row's full detail block, reused by chief_roster and bb chief status. */
   function rosterRowLines(row: ManagedRow): string[] {
     return [
-      `${row.role}${row.tier ? ` (${row.tier})` : ""} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
+      `${row.role} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
       ...(row.branch ? [`branch: ${row.branch}`] : []),
       ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
@@ -2350,7 +2329,6 @@ export default async function plugin(bb: BbPluginApi) {
     return [
       `Thread: ${row.title} (${threadId})`,
       `Role: ${row.role}`,
-      ...(row.tier ? [`Tier: ${row.tier}`] : []),
       ...(row.branch ? [`Branch: ${row.branch}`] : []),
       ...(row.issue_url ? [`Issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
@@ -2430,7 +2408,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_plan",
     presentation: { label: { pending: "Starting planner…", completed: "Started planner" } },
-    description: "Send one unit of work to a read-only planner. It proposes an implementation plan, split into waves with a tier each; its ready alert names the exact next call.",
+    description: "Send one unit of work to a read-only planner. It proposes an implementation plan, split into waves; its ready alert names the exact next call.",
     parameters: planParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -2500,16 +2478,12 @@ export default async function plugin(bb: BbPluginApi) {
         reloadRoles();
       }
       const rows = rosterForChief(caller.thread_id, includeComplete);
-      const allWorkers = rosterForChief(caller.thread_id, true).filter((row) => row.role === "worker");
-      const juniorCount = allWorkers.filter((row) => row.tier === "junior").length;
-      const seniorCount = allWorkers.filter((row) => row.tier === "senior").length;
       const reversed = [...rows].reverse();
       // The Pending block is clipped on its own so it always survives whole (or
       // ends with "…and N more pending"), then the rest gets whatever budget is
       // left — otherwise one clip() across both could cut a pending action off mid-line.
       const pending = pendingBlock(caller.thread_id);
       const rest = clip([
-        `Tier split: ${juniorCount} junior, ${seniorCount} senior`,
         ...reversed.map((row) => rosterRowLines(row).join("\n  ")),
         ...(includeComplete ? (closedTodosForProject.all(caller.project_id) as TodoRow[]).map(todoLine) : []),
       ].join("\n"), Math.max(0, 6_000 - pending.length - 1));
@@ -2686,8 +2660,7 @@ export default async function plugin(bb: BbPluginApi) {
         const selections = {
           chief: readRoleModel(host.id, "chief"),
           planner: readRoleModel(host.id, "planner"),
-          junior: readRoleModel(host.id, "junior"),
-          senior: readRoleModel(host.id, "senior"),
+          worker: readRoleModel(host.id, "worker"),
           reviewer: readRoleModel(host.id, "reviewer"),
           advisor: readRoleModel(host.id, "advisor"),
         };
@@ -2729,7 +2702,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
     "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id] [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
@@ -2747,7 +2720,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
       { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id] [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" --tier junior|senior [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
@@ -2829,7 +2802,6 @@ export default async function plugin(bb: BbPluginApi) {
           const parsed = delegateParams.safeParse({
             title: args.one("title"), mission: args.one("mission"),
             successCriteria: args.all("criteria"), constraints: args.all("constraint"), context: args.one("context"),
-            tier: args.one("tier"),
             branch: args.one("branch"), issueUrl: args.one("issue-url"), prUrl: args.one("pr-url"),
             replaces: args.one("replaces"),
             planThreadId: args.one("plan-thread"),
