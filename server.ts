@@ -724,43 +724,62 @@ export default async function plugin(bb: BbPluginApi) {
 
   let pendingReady = false; // set once everything pendingSnapshot() touches is initialised
   let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
-  const liveSeen = new Set<string>(); // threads whose live BB status this process has observed
   const load = () => new Map((allRows.all() as ManagedRow[]).map((row) => [row.thread_id, row]));
-  /** Completes supporting rows whose work was absorbed: reviewers and advisors of a complete
-   * worker, and a planner once its final wave is complete and every linked worker is terminal.
-   * Idempotent; rows whose live status is busy or not yet observed this process are left alone
-   * and swept on the reload after they are seen idle. */
-  function completeAbsorbed() {
-    const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
-    const rows = [...roles.values()];
-    const ids = rows.filter((row) => {
-      if (terminal(row.state) || BUSY_STATUSES.has(row.state)) return false;
-      if (!liveSeen.has(row.thread_id) || !row.status || BUSY_STATUSES.has(row.status)) return false;
-      if (row.role === "reviewer" || row.role === "advisor") {
-        return !!row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete";
-      }
-      if (row.role !== "planner" || !row.plan_waves) return false;
-      const waves = planWavesFor(row.thread_id).length;
-      const linked = rows.filter((other) => other.role === "worker" && other.plan_thread_id === row.thread_id);
-      return linked.some((w) => w.plan_wave === waves && w.state === "complete") && linked.every((w) => terminal(w.state));
-    }).map((row) => row.thread_id);
-    if (!ids.length) return 0;
-    const now = Date.now();
-    const complete = db.prepare<[number, string]>(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`);
-    db.transaction(() => { for (const id of ids) complete.run(now, id); })();
-    return ids.length;
+  const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
+  /** A supporting row whose work was absorbed: a reviewer or advisor of a complete worker,
+   * or a planner once its final wave is complete and every linked worker is terminal. */
+  function absorbed(row: ManagedRow) {
+    if (terminal(row.state) || BUSY_STATUSES.has(row.state)) return false;
+    if (row.role === "reviewer" || row.role === "advisor") {
+      return !!row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete";
+    }
+    if (row.role !== "planner" || !row.plan_waves) return false;
+    const waves = planWavesFor(row.thread_id).length;
+    const linked = [...roles.values()].filter((other) => other.role === "worker" && other.plan_thread_id === row.thread_id);
+    return linked.some((w) => w.plan_wave === waves && w.state === "complete") && linked.every((w) => terminal(w.state));
   }
-  function reloadRoles() {
-    roles = load();
-    if (!pendingReady) return;
-    // ponytail: sweeps on every reload, O(planners × rows); index by plan_thread_id if rosters grow large.
-    if (completeAbsorbed()) roles = load();
+  /** Completes absorbed rows, each only after a fresh threads.get shows it live and not busy.
+   * A failed or busy read leaves the row alone (fail closed); a later reload retries. */
+  async function completeAbsorbed() {
+    let completed = 0;
+    for (const id of [...roles.values()].filter(absorbed).map((row) => row.thread_id)) {
+      const live = await bb.sdk.threads.get({ threadId: id }).catch(() => null);
+      if (!live || BUSY_STATUSES.has(live.status) || live.deletedAt !== null || live.archivedAt !== null) continue;
+      const row = roles.get(id);
+      if (!row || !absorbed(row)) continue; // changed while the read was in flight
+      db.prepare(`UPDATE managed_threads SET state='complete', status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(live.status, Date.now(), id);
+      roles = load();
+      completed += 1;
+    }
+    return completed;
+  }
+  let sweeping: Promise<void> | null = null;
+  let sweepAgain = false;
+  /** Single-flight: a reload during a sweep queues exactly one more pass instead of a racing one. */
+  function sweep() {
+    if (sweeping) { sweepAgain = true; return sweeping; }
+    sweeping = (async () => {
+      do {
+        sweepAgain = false;
+        if (await completeAbsorbed()) publishPending();
+      } while (sweepAgain);
+    })().catch((error) => bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`)).finally(() => { sweeping = null; });
+    return sweeping;
+  }
+  function publishPending() {
     // ponytail: recomputes every Chief's Pending block per reload; debounce if rosters grow large.
     const next = JSON.stringify(pendingSnapshot());
     if (next !== publishedPending) {
       publishedPending = next;
       bb.realtime.publish("pending", null);
     }
+  }
+  function reloadRoles() {
+    roles = load();
+    if (!pendingReady) return;
+    // ponytail: sweeps on every reload, O(planners × rows); index by plan_thread_id if rosters grow large.
+    void sweep();
+    publishPending();
   }
   reloadRoles();
 
@@ -802,7 +821,6 @@ export default async function plugin(bb: BbPluginApi) {
     unplannedReason?: string | null;
   }) {
     const now = Date.now();
-    if (input.status) liveSeen.add(input.threadId);
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
       state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, active_since, active_cycle, created_at, updated_at
@@ -1964,7 +1982,6 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`Transient thread read failure for ${row.thread_id}; will retry: ${String(error)}`);
       return false;
     }
-    liveSeen.add(row.thread_id);
     const now = Date.now();
     if (thread.deletedAt !== null) {
       db.prepare(`UPDATE managed_threads SET state='deleted', status=NULL, active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, row.thread_id);
@@ -2013,7 +2030,6 @@ export default async function plugin(bb: BbPluginApi) {
   async function lifecycle(kind: string, thread: { id: string; status?: string }) {
     const row = roles.get(thread.id);
     if (!row) return;
-    liveSeen.add(thread.id);
     const now = Date.now();
     if (row.role === "chief") {
       const state = kind === "active" ? "active"
@@ -2915,6 +2931,8 @@ export default async function plugin(bb: BbPluginApi) {
   } catch (error) {
     bb.log.warn(`Initial reconciliation deferred: ${String(error)}`);
   }
+  reloadRoles();
+  await sweeping;
   await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
   const initial = await settings.get();
   if (initial.autoSpawn && initial.chiefProject) {

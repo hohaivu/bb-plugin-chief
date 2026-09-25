@@ -3713,6 +3713,8 @@ describe("Chief backend", () => {
 
 describe("auto-completing absorbed supporting threads", () => {
   const P = { projectId: "proj_1" };
+  // The sweep runs off the reload and awaits a fresh threads.get per row; let it drain.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
   const stateOf = (state: Awaited<ReturnType<typeof setup>>, id: string) =>
     (state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(id) as { state: string }).state;
   const call = (state: Awaited<ReturnType<typeof setup>>, tool: string, params: object, threadId: string) =>
@@ -3738,6 +3740,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
     const advisor = await consulted(state, chief.threadId, worker.threadId);
     await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
+    await settle();
     expect([stateOf(state, reviewer), stateOf(state, advisor)]).toEqual(["complete", "complete"]);
     const before = state.db.prepare(`SELECT thread_id, state, updated_at FROM managed_threads ORDER BY thread_id`).all();
     await call(state, "chief_roster", {}, chief.threadId);
@@ -3754,9 +3757,11 @@ describe("auto-completing absorbed supporting threads", () => {
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" });
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
     await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
+    await settle();
     expect(stateOf(state, reviewer)).toBe("active");
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "idle" });
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(reviewer)!, lastAssistantText: "done" });
+    await settle();
     expect(stateOf(state, reviewer)).toBe("complete");
   });
 
@@ -3767,7 +3772,9 @@ describe("auto-completing absorbed supporting threads", () => {
     const reviewer = await reviewed(state, chief.threadId, worker.threadId, "request_changes");
     const advisor = await consulted(state, chief.threadId, worker.threadId);
     const fresh = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
+    await settle();
     expect(stateOf(state, advisor)).toBe("complete");
+    await settle();
     expect(stateOf(state, reviewer)).toBe("ready");
     const roster = String(await call(state, "chief_roster", {}, chief.threadId));
     expect(roster).not.toContain(`replaces: ${fresh.threadId}`);
@@ -3786,12 +3793,17 @@ describe("auto-completing absorbed supporting threads", () => {
     };
     const wave1 = await cli(["--plan-thread", planner.threadId, "--wave", "1"]);
     const wave2 = await cli(["--replaces", wave1, "--plan-thread", planner.threadId, "--wave", "2"]);
+    await settle();
     expect(stateOf(state, wave1)).toBe("complete");
+    await settle();
     expect(stateOf(state, planner.threadId)).toBe("ready");
     const fix = await cli(["--replaces", wave2]);
+    await settle();
     expect(stateOf(state, wave2)).toBe("complete");
+    await settle();
     expect(stateOf(state, planner.threadId)).toBe("ready");
     await call(state, "chief_complete", { threadId: fix }, chief.threadId);
+    await settle();
     expect(stateOf(state, planner.threadId)).toBe("complete");
   });
 
@@ -3806,10 +3818,31 @@ describe("auto-completing absorbed supporting threads", () => {
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
     await call(state, "chief_report", { state: "ready", result: "Checked", verdict: "approve" }, reviewer);
     await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
+    await settle();
     expect(stateOf(state, reviewer)).toBe("ready");
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "idle" });
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(reviewer)!, lastAssistantText: "done" });
+    await settle();
     expect(stateOf(state, reviewer)).toBe("complete");
+  });
+
+  test("a reviewer seen idle once is not swept when it later turns active unseen or its read fails", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(reviewer)!, lastAssistantText: "done" });
+    state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" }); // no lifecycle event
+    const other = await delegate(state, chief.threadId, "Other");
+    const failing = await reviewed(state, chief.threadId, other.threadId, "approve");
+    await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
+    state.failNextGet(failing);
+    await call(state, "chief_complete", { threadId: other.threadId }, chief.threadId);
+    await settle();
+    expect([stateOf(state, reviewer), stateOf(state, failing)]).toEqual(["ready", "ready"]);
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(failing)!, lastAssistantText: "done" }); // a later reload retries
+    await settle();
+    expect(stateOf(state, failing)).toBe("complete");
   });
 
   test("startup sweeps absorbed rows only once their live status is known and idle", async () => {
