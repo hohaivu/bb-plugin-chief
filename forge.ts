@@ -1,7 +1,7 @@
 // The forge pre-flight Chief runs before delegating: tracking issue, task branch,
-// draft pull request. The plugin SDK exposes no shell, so Chief runs the script —
-// but it no longer composes it. Every value is substituted and quoted here, once,
-// instead of being re-derived by a model on every delegation.
+// draft pull request. The server runs the script in the project checkout when it
+// can; Chief runs it only on fallback. Every value is substituted and quoted here,
+// once, instead of being re-derived by a model on every delegation.
 
 /** POSIX single-quoting: the only interpolation this script does. */
 function quote(value: string) {
@@ -98,7 +98,7 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     "# worktree that would fail to check it out.",
     'git rev-parse --verify -q "refs/heads/$BRANCH" >/dev/null 2>&1 || BRANCH=\'\'',
     "",
-    "printf 'CHIEF_FORGE branch=%s base=%s issue_url=%s pr_url=%s\\n' \"$BRANCH\" \"$BASE\" \"$ISSUE_URL\" \"$PR_URL\"",
+    "printf 'CHIEF_FORGE branch=%s base=%s issue_url=%s pr_url=%s forge=%s\\n' \"$BRANCH\" \"$BASE\" \"$ISSUE_URL\" \"$PR_URL\" \"$FORGE\"",
   ].join("\n");
   return { branch, script };
 }

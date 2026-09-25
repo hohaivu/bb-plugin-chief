@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import {
   defineRpcContract,
@@ -36,6 +36,7 @@ const CONSULT_AFTER_REJECTIONS = 2;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const execFileAsync = promisify(execFile);
+const FORGE_SCRIPT_TIMEOUT_MS = 120_000;
 
 type Forge = "github" | "gitlab";
 
@@ -1021,7 +1022,7 @@ export default async function plugin(bb: BbPluginApi) {
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
       "When chief_plan is available, implementation work goes plan → forge → delegate: chief_plan, then chief_forge_init, then chief_delegate with the planThreadId and wave its ready alert names; chief_delegate refuses anything else unless it is junior-sized, bounded work you pass unplannedReason for. Without chief_plan, use chief_delegate directly. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
-      "You own the forge for every delegation: run chief_forge_init, run the script it returns from the project checkout, and pass the branch, issueUrl and prUrl it prints to chief_delegate. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
+      "You own the forge for every delegation: run chief_forge_init, and pass the branch, issueUrl and prUrl it returns to chief_delegate — if it returns a script instead, run it from the project checkout and use the CHIEF_FORGE line it prints. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
       "A worker's ready alert names the next call: an intermediate wave hands off to the next wave with no review in between; the final wave, or a worker with no plan link, tells you to start the one review of the whole run with chief_review, whose reviewer reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want — including a pull request or branch with no managed worker.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "", "Acknowledge the operating rules you were given briefly, call chief_roster for the current work list, and wait for work.",
@@ -1746,22 +1747,17 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The server, not the planner, owns writing the plan: the planner submits it
    * through chief_report and this lands it at the thread's own storage location. */
-  async function writePlan(threadId: string, plan: string | { tier: z.infer<typeof tierSchema>; body: string }[]) {
+  async function writePlan(threadId: string, plan: string | { tier: z.infer<typeof tierSchema>; body: string }[], mirrorRoot?: string) {
     const { storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
-    await mkdir(storageRootPath, { recursive: true });
-    if (typeof plan === "string") {
-      const path = join(storageRootPath, "plan.md");
-      await writeFile(path, `${plan}\n`);
+    const bodies = typeof plan === "string" ? [{ name: "plan.md", body: plan, tier: "senior" as const }]
       // A plain string is one wave, tier senior: conservative, since Chief never picks it.
-      return [{ path, tier: "senior" as const }];
+      : plan.map((wave, index) => ({ name: `plan-${index + 1}.md`, body: wave.body, tier: wave.tier }));
+    // mirrorRoot writes a copy elsewhere; the returned paths stay the canonical planner ones.
+    for (const root of [mirrorRoot ?? storageRootPath]) {
+      await mkdir(root, { recursive: true });
+      for (const wave of bodies) await writeFile(join(root, wave.name), `${wave.body}\n`);
     }
-    const waves: { path: string; tier: z.infer<typeof tierSchema> }[] = [];
-    for (const [index, wave] of plan.entries()) {
-      const path = join(storageRootPath, `plan-${index + 1}.md`);
-      await writeFile(path, `${wave.body}\n`);
-      waves.push({ path, tier: wave.tier });
-    }
-    return waves;
+    return bodies.map((wave) => ({ path: join(storageRootPath, wave.name), tier: wave.tier }));
   }
 
   async function report(threadId: string, params: z.infer<typeof reportParams>, callerProjectId: string) {
@@ -1830,6 +1826,17 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const plannerReady = row.role === "planner" && params.state === "ready";
     const planWaves = plannerReady && plan ? await writePlan(threadId, plan) : null;
+    // Best-effort mirror into Chief's storage: inline-vis resolves paths against the rendering thread.
+    let inlinePlans: string[] = [];
+    if (planWaves && plan && row.chief_thread_id) {
+      try {
+        const { storageRootPath } = await bb.sdk.threads.storageLocation({ threadId: row.chief_thread_id });
+        await writePlan(threadId, plan, join(storageRootPath, "plans", threadId));
+        inlinePlans = planWaves.map((wave) => `::inline-vis{source="thread-storage" file="plans/${threadId}/${basename(wave.path)}"}`);
+      } catch (error) {
+        bb.log.warn(`Could not mirror ${threadId}'s plan into Chief's storage: ${String(error)}`);
+      }
+    }
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, not rejection rounds — a
     // reviewer resumed for an unrelated reason must not read as a deadlock.
@@ -1856,6 +1863,9 @@ export default async function plugin(bb: BbPluginApi) {
         ? [
             `Plan: ${planWaves.length} wave(s)`,
             ...planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length} (${wave.tier}): ${wave.path}`),
+            ...(inlinePlans.length
+              ? ["To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):", ...inlinePlans]
+              : []),
             action,
           ]
         : []),
@@ -2268,8 +2278,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "chief_forge_init",
-    presentation: { label: { pending: "Building forge pre-flight…", completed: "Built forge pre-flight" } },
-    description: "Build the forge pre-flight for one task — tracking issue, task branch, draft pull request — as one script to run before chief_delegate.",
+    presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
+    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Returns the values, or a script to run yourself when the server could not.",
     parameters: z.object({
       title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
       base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request."),
@@ -2281,7 +2291,33 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error("chief_forge_init requires an active registered Chief thread.");
       }
       const { branch, script } = forgeInitScript(params);
+      const cwd = await projectPath(caller.project_id);
+      let failure: string | null = null;
+      if (cwd) {
+        // ponytail: a remote-host project whose path also exists on the server would run against the wrong checkout; unlikely.
+        try {
+          const { stdout } = await execFileAsync("sh", ["-c", script], {
+            cwd, timeout: FORGE_SCRIPT_TIMEOUT_MS,
+            // ponytail: heuristic for GUI-launched servers whose PATH lacks Homebrew; upgrade path is a configured forge PATH.
+            env: { ...process.env, PATH: `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin` },
+          });
+          const line = String(stdout).match(/^CHIEF_FORGE (.*)$/gm)?.at(-1)?.slice("CHIEF_FORGE ".length);
+          const values = Object.fromEntries((line ?? "").split(" ").map((pair) => {
+            const at = pair.indexOf("=");
+            return [pair.slice(0, at), pair.slice(at + 1)];
+          }));
+          if (line && values.branch && values.forge) {
+            return `The forge pre-flight already ran in the project checkout: branch=${values.branch} base=${values.base ?? ""} issue_url=${values.issue_url ?? ""} pr_url=${values.pr_url ?? ""}. Pass branch, issueUrl and prUrl to chief_delegate, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, not a failure. Do not run anything yourself.`;
+          }
+          failure = !line ? "no CHIEF_FORGE line" : !values.branch ? "the branch was not cut" : "no gh or glab found on the server";
+        } catch (error) {
+          failure = String(error);
+        }
+        failure = clip(failure, 200);
+        bb.log.warn(`Server-side forge pre-flight fell back to Chief: ${failure}`);
+      }
       return [
+        ...(failure ? [`Running it on the server did not finish (${failure}), so run it yourself.`] : []),
         "Run this from the project checkout, verbatim. Every value is already substituted and quoted, every forge step is best-effort, and your own checkout never moves:",
         "", "```sh", script, "```", "",
         `The last line is CHIEF_FORGE branch=… base=… issue_url=… pr_url=…. Pass those to chief_delegate as branch, issueUrl and prUrl, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, and an empty branch means the cut failed, so delegate without one and the worktree uses the project default. Neither is a failure to report as one. The branch will be ${branch}.`,

@@ -27,7 +27,7 @@ describe("forgeInitScript", () => {
 
   test("reports what it created on one machine-readable line", () => {
     const { script } = forgeInitScript({ title: "Ordinary work" });
-    expect(script).toContain("CHIEF_FORGE branch=%s base=%s issue_url=%s pr_url=%s");
+    expect(script).toContain("CHIEF_FORGE branch=%s base=%s issue_url=%s pr_url=%s forge=%s");
     execFileSync("sh", ["-n"], { input: script });
   });
 });
