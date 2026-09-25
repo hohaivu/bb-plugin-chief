@@ -66,6 +66,8 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   const spawned: any[] = [];
   const stopped: string[] = [];
   const catalogReads: (string | undefined)[] = [];
+  const tabsStore = new Map<string, { revision: number; tabs: any[] }>();
+  let tabsUpdateFailures = 0;
   const { bb, harness } = createFakePluginHost({
     pluginId: "chief",
     agentSkillIds: ["chief", "chief-worker"],
@@ -160,6 +162,17 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           return { ok: true, delivery: "sent" as const };
         },
         output: async ({ threadId }: { threadId: string }) => ({ output: `last output from ${threadId}` }),
+        tabs: {
+          get: async ({ threadId }: { threadId: string }) => tabsStore.get(threadId) ?? { revision: 0, tabs: [] },
+          update: async ({ threadId, expectedRevision, tabs }: any) => {
+            if (tabsUpdateFailures > 0) { tabsUpdateFailures -= 1; throw new Error("tabs update failed"); }
+            const current = tabsStore.get(threadId) ?? { revision: 0, tabs: [] };
+            if (current.revision !== expectedRevision) throw new Error("revision conflict");
+            const next = { revision: current.revision + 1, tabs };
+            tabsStore.set(threadId, next);
+            return next;
+          },
+        },
         queuedMessages: {
           list: async ({ threadId }: { threadId: string }) => queuedMessagesStore.get(threadId) ?? [],
         },
@@ -194,6 +207,9 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
+    tabs: (threadId: string) => tabsStore.get(threadId)?.tabs ?? [],
+    seedTabs(threadId: string, tabs: any[]) { tabsStore.set(threadId, { revision: 7, tabs }); },
+    failTabsUpdates(count: number) { tabsUpdateFailures = count; },
     setPatch(next: string) { patch = next; },
     seedQueuedMessage(threadId: string, text: string) {
       const existing = queuedMessagesStore.get(threadId) ?? [];
@@ -461,6 +477,28 @@ describe("Chief backend", () => {
     expect(first).toEqual({ threadId: "thr_1", created: true });
     expect(second).toEqual({ threadId: "thr_1", created: false });
     expect(state.spawned[0]).toMatchObject({ projectId: "proj_2", title: "Chief · Second" });
+  });
+
+  test("pins one Chief pending tab after the user's tabs when Chief starts", async () => {
+    const state = await setup();
+    state.seedTabs("thr_1", [{ kind: "git-diff", id: "user_diff" }]);
+    await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(state.tabs("thr_1")).toEqual([
+      { kind: "git-diff", id: "user_diff" },
+      { kind: "plugin-panel", id: "plugin-panel:chief:pending", pluginId: "chief", actionId: "pending", title: "Chief pending work", paramsJson: null },
+    ]);
+  });
+
+  test("a failing tab pin never fails Chief start", async () => {
+    const state = await setup();
+    state.failTabsUpdates(2);
+    expect(await state.harness.behavior.callRpc("start", { projectId: "proj_1" })).toEqual({ threadId: "thr_1", created: true });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(state.tabs("thr_1")).toEqual([]);
   });
 
   test("creates multiple independent Chiefs for one project", async () => {

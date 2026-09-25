@@ -1049,7 +1049,29 @@ export default async function plugin(bb: BbPluginApi) {
       })();
     }
     insertThread({ threadId: thread.id, role: "chief", projectId: target, title, state: "starting", status: thread.status });
+    void pinPendingTab(thread.id);
     return { threadId: thread.id, created: true as const };
+  }
+
+  /** Best-effort: appends the pending panel tab to a Chief thread once. Never throws. */
+  async function pinPendingTab(threadId: string) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { revision, tabs } = await bb.sdk.threads.tabs.get({ threadId });
+        if (tabs.some((tab) => tab.kind === "plugin-panel" && tab.pluginId === bb.pluginId && tab.actionId === "pending")) return;
+        await bb.sdk.threads.tabs.update({
+          threadId, expectedRevision: revision,
+          tabs: [...tabs, {
+            kind: "plugin-panel", id: `plugin-panel:${bb.pluginId}:pending`, pluginId: bb.pluginId,
+            actionId: "pending", title: "Chief pending work", paramsJson: null,
+          }],
+        });
+        return;
+      } catch (error) {
+        // ponytail: retries any error once, not only revision conflicts
+        if (attempt === 1) bb.log.warn(`Could not pin the pending tab on ${threadId}: ${String(error)}`);
+      }
+    }
   }
 
   async function createChief(projectId: string) {
