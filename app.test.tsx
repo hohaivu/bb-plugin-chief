@@ -130,6 +130,32 @@ test("marks Chief conversations with a compact header badge", async () => {
   );
 });
 
+test("shows the role chip on managed threads and nothing on others", async () => {
+  const worker = {
+    threadId: "thr_worker", role: "worker" as const, projectId: "proj_1", chiefThreadId: "thr_chief",
+    workerThreadId: null, title: "Fix totals", state: "idle" as const, status: "idle",
+    result: null, blocker: null, recommendation: null, createdAt: 1, updatedAt: 1,
+  };
+  const render = (threadId: string) => {
+    const rendered = renderSlot<
+      { threadId: string; projectId: string; isCompactViewport: boolean },
+      typeof rpcContract
+    >(
+      app.threadHeaderActions[0]!,
+      { threadId, projectId: "proj_1", isCompactViewport: false },
+      { rpc: { status: () => ({ sectionId: "sec_chief", threads: [worker] }) } },
+    );
+    unmounts.push(() => rendered.lifecycle.unmount());
+    return rendered;
+  };
+  const managed = render(worker.threadId);
+  await vi.waitFor(() => expect(managed.getByLabelText("Chief worker").textContent).toBe("Worker"));
+  managed.lifecycle.unmount();
+  const other = render("thr_other");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(other.queryByLabelText(/Chief/)).toBeNull();
+});
+
 test("picks a scanned model per role and clears back to the BB default", async () => {
   const section = app.settingsSections.find((candidate) => candidate.id === "models")!;
   const configuration = {

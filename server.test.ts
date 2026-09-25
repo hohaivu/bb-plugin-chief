@@ -742,6 +742,7 @@ describe("Chief backend", () => {
     await state.supervisorCycle();
     expect(state.sent).toHaveLength(1);
     expect(state.sent[0].threadId).toBe(chief.threadId);
+    expect(state.sent[0].senderThreadId).toBe(worker.threadId);
   });
 
   test("sends no plugin alert on a plain idle or failed event", async () => {
@@ -1697,6 +1698,9 @@ describe("Chief backend", () => {
     expect(chief.skills).toEqual(["chief"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker"]);
+    for (const tool of [...chief.tools, ...worker.tools] as any[]) {
+      expect(tool.presentation?.label, tool.name).toMatchObject({ pending: expect.any(String), completed: expect.any(String) });
+    }
     expect(ordinary.tools).toEqual([]);
   });
 
@@ -1934,6 +1938,20 @@ describe("Chief backend", () => {
       title: "Rework checkout", mission: "Propose how to fix totals",
     }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(/Planning is off/);
     expect(state.spawned).toHaveLength(1);
+  });
+
+  test("does not double a role prefix Chief already typed", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.callAgentTool("chief_plan", {
+      title: "Plan · X", mission: "Propose how to fix totals",
+    }, { threadId: chief.threadId, projectId: "proj_1" });
+    expect(state.spawned.at(-1)?.title).toBe("Plan · X");
+    await state.harness.behavior.callAgentTool("chief_consult", {
+      title: "Consult · X", mission: "Diagnose totals",
+    }, { threadId: chief.threadId, projectId: "proj_1" });
+    expect(state.spawned.at(-1)?.title).toBe("Consult · X");
   });
 
   test("plans read-only in the project's own checkout and spends no worktree", async () => {
