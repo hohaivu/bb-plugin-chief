@@ -47,13 +47,9 @@ one project. `autoSpawn` (default `false`) controls whether Chief should automat
 
 Settings → **Chief models by machine** scans every enrolled machine for its signed-in providers
 and their live model catalogs, and lets you pick a provider, model, and reasoning level per role:
-Chief, planner, junior worker, senior worker, reviewer, and advisor. A role without a selection spawns on BB's own
+Chief, planner, worker, reviewer, and advisor. A role without a selection spawns on BB's own
 default for the project, and a selection the machine can no longer serve (signed out, model
 retired) falls back to that default rather than failing the spawn.
-
-Every delegation picks a worker tier — junior or senior — and each tier can run on its own model.
-Junior fits trivial, mechanical, or already-specified bounded work; senior covers everything else.
-See [`skills/chief/SKILL.md`](skills/chief/SKILL.md) for how Chief chooses.
 
 ### Git workflow
 
@@ -70,12 +66,12 @@ of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 Settings → **Plan before delegating** (on by default). With it on, Chief gains `chief_plan`: it sends
 one unit of work to a read-only planner that reads the project's own checkout on a plain prompt, with
 no provider plan mode and no approval prompt, and splits the work into up to 8 sequential waves, each
-a self-contained plan for one worker with its own tier. It submits those waves through `chief_report`'s
+a self-contained plan for one worker. It submits those waves through `chief_report`'s
 `plan` field, and the plugin saves each one to the thread's own storage as `plan-1.md … plan-N.md` (or
 `plan.md` for the legacy string form) and persists the schedule.
 
 The handoff is the plugin's, not Chief's: the planner's ready alert lists the wave schedule and the
-exact next call, `chief_delegate (planThreadId: …, wave: 1)`, which takes the plan file and tier from
+exact next call, `chief_delegate (planThreadId: …, wave: 1)`, which takes the plan file from
 the schedule. Chief never opens or reads a plan file, and delegates wave 1 right away without waiting
 for user sign-off. It escalates to you only for a genuine product or scope open question the planner
 named. Nothing is implemented until it delegates, and no worktree is spent on a plan.
@@ -85,7 +81,7 @@ The toggle reaches Chief threads that are already running. Turn it off to delega
 With planning on, `chief_delegate` refuses any call that is not tied to a plan wave (`planThreadId`
 and `wave`). A `replaces:` handoff is exempt — the original delegation already passed the gate — and
 inherits the prior worker's reason when it gave one. The one escape hatch is `unplannedReason`
-(`--unplanned-reason` on the CLI): a short reason why, meant only for junior-sized, bounded work whose
+(`--unplanned-reason` on the CLI): a short reason why, meant only for bounded work whose
 shape and cause are already known. It is persisted and shown as `unplanned: <reason>` in `chief_roster`
 and `bb chief status`, and `Unplanned: <reason>` in `chief_inspect`. With planning off, nothing changes.
 
@@ -122,7 +118,7 @@ bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
 bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--json]
 bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_...] [--context "..."] [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." --tier junior|senior [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--json]
+bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief stop thr_... [--reason "..."] [--json]
