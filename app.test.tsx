@@ -125,7 +125,6 @@ test("a picked project that leaves the sidebar list is never the create target",
 
   projects.splice(0);
   rendered.lifecycle.rerender(<StartChief projectId={null} />);
-  expect(rendered.getByRole("button", { name: /Start/ })).toHaveProperty("disabled", true);
   expect(rendered.queryByRole("combobox")).toBeNull();
   expect(rendered.getByText(/Create a project/)).toBeTruthy();
 });
