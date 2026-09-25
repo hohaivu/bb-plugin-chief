@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   experimental_ProviderModelPicker as ProviderModelPicker,
   useBbNavigate,
   useRealtime,
+  useRealtimeConnectionState,
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
@@ -294,6 +295,13 @@ function ChiefPendingPanel({ threadId }: { threadId: string }) {
     void load();
   }, [load]);
   useRealtime("pending", () => void load());
+  // Signals published while the socket was down are lost, so refetch on reconnect.
+  const connection = useRealtimeConnectionState();
+  const previousConnection = useRef(connection);
+  useEffect(() => {
+    if (connection === "connected" && previousConnection.current !== "connected") void load();
+    previousConnection.current = connection;
+  }, [connection, load]);
 
   return (
     <div className="space-y-2">

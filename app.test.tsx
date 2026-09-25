@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from "vitest";
-import { fireEvent } from "@testing-library/react";
+import { act, fireEvent } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { rpcContract } from "./server";
 
@@ -229,4 +229,36 @@ test("the thread panel's Chief pending tab shows the Chief's block and refetches
   await vi.waitFor(() =>
     expect(rendered.rpcCalls.filter((call) => call.method === "pending")).toHaveLength(2),
   );
+});
+
+test("the Chief pending tab refetches once after the realtime connection reconnects", async () => {
+  let text = "Pending: none.";
+  const rendered = renderSlot<{ threadId: string; params: null }, typeof rpcContract>(
+    app.threadPanelActions[0]!,
+    { threadId: "thr_chief", params: null },
+    {
+      realtimeConnectionState: "connected",
+      rpc: {
+        status: () => emptyStatus,
+        start: () => ({ threadId: "thr_1", created: false }),
+        create: () => ({ threadId: "thr_1", created: true }),
+        pending: () => ({ chief: true, text }),
+      },
+    },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+  const calls = () => rendered.rpcCalls.filter((call) => call.method === "pending").length;
+
+  const shown = () => rendered.container.querySelector("pre")?.textContent;
+
+  await act(async () => {});
+  await vi.waitFor(() => expect(shown()).toBe("Pending: none."));
+  expect(calls()).toBe(1);
+  text = "Pending:\n- todo #1: Follow up";
+  await act(async () => rendered.setRealtimeConnectionState("reconnecting"));
+  expect(calls()).toBe(1);
+  expect(shown()).toBe("Pending: none.");
+  await act(async () => rendered.setRealtimeConnectionState("connected"));
+  await vi.waitFor(() => expect(shown()).toBe(text));
+  expect(calls()).toBe(2);
 });
