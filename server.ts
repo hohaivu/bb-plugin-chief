@@ -294,6 +294,10 @@ export const rpcContract = defineRpcContract({
     }).strict(),
     output: z.object({ ok: z.literal(true) }).strict(),
   },
+  pending: {
+    input: z.null(),
+    output: z.object({ chiefs: z.array(z.object({ threadId: z.string(), title: z.string(), block: z.string() })) }),
+  },
 });
 
 interface ManagedRow {
@@ -688,8 +692,17 @@ export default async function plugin(bb: BbPluginApi) {
   const alertDeliveries = new Map<string, Promise<boolean>>();
   const reviewStarts = new Map<string, Promise<{ threadId: string; title: string; workerThreadId: string | null; created: boolean }>>();
 
+  let pendingReady = false; // set once everything pendingSnapshot() touches is initialised
+  let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
   function reloadRoles() {
     roles = new Map((allRows.all() as ManagedRow[]).map((row) => [row.thread_id, row]));
+    if (!pendingReady) return;
+    // ponytail: recomputes every Chief's Pending block per reload; debounce if rosters grow large.
+    const next = JSON.stringify(pendingSnapshot());
+    if (next !== publishedPending) {
+      publishedPending = next;
+      bb.realtime.publish("pending", null);
+    }
   }
   reloadRoles();
 
@@ -2180,6 +2193,19 @@ export default async function plugin(bb: BbPluginApi) {
     return [header, ...kept, suffix].join("\n");
   }
 
+  /** The Pending block exactly as chief_roster prints it — shared with the panel RPC so the two never disagree. */
+  function pendingBlock(chiefThreadId: string) {
+    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].reverse()), 6_000);
+  }
+
+  function pendingSnapshot() {
+    return [...roles.values()].filter(isActiveChief).map((chief) => ({
+      threadId: chief.thread_id,
+      title: chief.title,
+      block: pendingBlock(chief.thread_id),
+    }));
+  }
+
   async function lastOutput(threadId: string) {
     try {
       return (await bb.sdk.threads.output({ threadId })).output;
@@ -2308,12 +2334,12 @@ export default async function plugin(bb: BbPluginApi) {
       // The Pending block is clipped on its own so it always survives whole (or
       // ends with "…and N more pending"), then the rest gets whatever budget is
       // left — otherwise one clip() across both could cut a pending action off mid-line.
-      const pendingBlock = clipPendingBlock(pendingLines(reversed), 6_000);
+      const pending = pendingBlock(caller.thread_id);
       const rest = clip([
         `Tier split: ${juniorCount} junior, ${seniorCount} senior`,
         ...reversed.map((row) => rosterRowLines(row).join("\n  ")),
-      ].join("\n"), Math.max(0, 6_000 - pendingBlock.length - 1));
-      return `${pendingBlock}\n${rest}`;
+      ].join("\n"), Math.max(0, 6_000 - pending.length - 1));
+      return `${pending}\n${rest}`;
     },
   });
   bb.agents.registerTool({
@@ -2472,6 +2498,7 @@ export default async function plugin(bb: BbPluginApi) {
     status: () => ({ sectionId: storedSectionId(), threads: [...roles.values()].map(toManaged) }),
     start: ({ projectId }) => ensureChief(projectId ?? undefined),
     create: ({ projectId }) => createChief(projectId),
+    pending: () => ({ chiefs: pendingSnapshot() }),
     modelConfiguration: async () => ({
       hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
         const connected = host.status === "connected";
@@ -2684,6 +2711,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  pendingReady = true;
+  publishedPending = JSON.stringify(pendingSnapshot());
   try {
     await reconcile();
   } catch (error) {

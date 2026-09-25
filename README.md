@@ -100,6 +100,8 @@ the next worker round or escalates.
 action, in the same wording its lifecycle alert already used, so the two never disagree. Chief
 is instructed to call `chief_roster` at the start of every turn and again after any compaction,
 so the Pending block — not memory — is what it works from.
+The same block, for every active Chief, is in a thread's side panel under **Actions → Chief
+pending**, and it updates live as managed threads change.
 
 ## CLI
 
