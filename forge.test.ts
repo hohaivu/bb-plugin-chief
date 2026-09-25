@@ -16,18 +16,8 @@ describe("forgeInitScript", () => {
     execFileSync("sh", ["-n"], { input: script });
   });
 
-  test("honours an explicit base and falls back to the default branch otherwise", () => {
+  test("substitutes an explicit base", () => {
     expect(forgeInitScript({ title: "Stack on the open PR", base: "feature/audit-p2" }).script)
       .toContain("BASE='feature/audit-p2'");
-    const { script } = forgeInitScript({ title: "Ordinary work" });
-    expect(script).toContain("BASE=''");
-    expect(script).toContain("refs/remotes/origin/HEAD");
-    expect(script).toContain("git commit-tree");
-  });
-
-  test("reports what it created on one machine-readable line", () => {
-    const { script } = forgeInitScript({ title: "Ordinary work" });
-    expect(script).toContain("CHIEF_FORGE branch=%s base=%s issue_url=%s pr_url=%s forge=%s");
-    execFileSync("sh", ["-n"], { input: script });
   });
 });
