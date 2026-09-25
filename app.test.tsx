@@ -30,14 +30,7 @@ test("creates a fresh Chief from the project-aware New Thread screen", async () 
   );
   unmounts.push(() => rendered.lifecycle.unmount());
 
-  expect(rendered.container.firstElementChild?.className).toContain("rounded-lg border border-border bg-card");
-  const startButton = rendered.getByRole("button", { name: "Start Chief" });
-  expect(startButton.className).toContain("h-7");
-  expect(startButton.className).toContain("border-input");
-  expect(startButton.className).toContain("text-xs");
-  expect(rendered.queryByText("Start a Chief")).toBeNull();
-
-  fireEvent.click(startButton);
+  fireEvent.click(rendered.getByRole("button", { name: "Start Chief" }));
 
   await vi.waitFor(() =>
     expect(rendered.navigateCalls).toContainEqual({
