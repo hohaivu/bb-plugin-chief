@@ -277,6 +277,7 @@ function ChiefHeaderBadge({
 /** This Chief's Pending block, word for word as chief_roster prints it. */
 function ChiefPendingPanel({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
   const [pending, setPending] = useState<{ chief: boolean; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -298,7 +299,17 @@ function ChiefPendingPanel({ threadId }: { threadId: string }) {
     <div className="space-y-2">
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {pending && !pending.chief ? <p className="text-sm text-muted-foreground">Not a Chief thread.</p> : null}
-      {pending?.chief ? <pre className="whitespace-pre-wrap text-xs text-foreground">{pending.text}</pre> : null}
+      {pending?.chief ? (
+        <pre className="whitespace-pre-wrap text-xs text-foreground">
+          {pending.text.split(/(thr_[a-z0-9]+)/).map((piece, index) =>
+            index % 2 ? (
+              <button key={index} type="button" onClick={() => navigate.toThread(piece)} className="cursor-pointer underline underline-offset-2 hover:text-primary">
+                {piece}
+              </button>
+            ) : piece,
+          )}
+        </pre>
+      ) : null}
     </div>
   );
 }

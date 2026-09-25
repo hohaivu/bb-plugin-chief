@@ -318,6 +318,22 @@ describe("Chief backend", () => {
       .toEqual([chief.threadId, chief.threadId, chief.threadId]);
   });
 
+  test.each([false, true])("sets lifecycleOwnerThreadId on child spawns only when cascadeArchive is %s", async (cascadeArchive) => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true, cascadeArchive });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: state.live.get(chief.threadId)!.projectId };
+    expect((await state.harness.behavior.runCli(
+      ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals"], opts,
+    )).exitCode).toBe(0);
+    const worker = await delegate(state, chief.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+    expect((await state.harness.behavior.runCli(["review", worker.threadId], opts)).exitCode).toBe(0);
+    expect(state.spawned[0].lifecycleOwnerThreadId).toBeUndefined();
+    expect(state.spawned.slice(1).map((entry: any) => entry.lifecycleOwnerThreadId))
+      .toEqual(Array(3).fill(cascadeArchive ? chief.threadId : undefined));
+  });
+
   test("allows Chief to inspect, roster, and continue child threads even if chief_thread_id was transferred", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -1786,6 +1802,39 @@ describe("Chief backend", () => {
     )).rejects.toThrow(/active registered Chief/);
   });
 
+  test("runs the forge pre-flight on the server and hands Chief the values", async () => {
+    execFileMock.mockResolvedValue({ stdout: "noise\nCHIEF_FORGE branch=feature/x base=main issue_url=https://i/1 pr_url=https://p/2 forge=gh\n", stderr: "" });
+    const state = await setup({ projectPath: "/repo/proj1" });
+    const chief = await start(state);
+    const result = await state.harness.behavior.callAgentTool(
+      "chief_forge_init", { title: "Fix checkout totals" }, { threadId: chief.threadId, projectId: "proj_1" },
+    ) as string;
+    expect(result).toContain("branch=feature/x");
+    expect(result).toContain("https://p/2");
+    expect(result).not.toContain("```sh");
+    const [file, , options] = execFileMock.mock.calls.at(-1)!;
+    expect(file).toBe("sh");
+    expect(options.cwd).toBe("/repo/proj1");
+    expect(options.env.PATH).toContain("/opt/homebrew/bin");
+  });
+
+  test.each([
+    ["a rejected run", () => execFileMock.mockRejectedValue(new Error("boom")), "/repo/proj1"],
+    ["no forge CLI on the server", () => execFileMock.mockResolvedValue({ stdout: "CHIEF_FORGE branch=feature/x base=main issue_url= pr_url= forge=\n", stderr: "" }), "/repo/proj1"],
+    ["no project path", () => {}, undefined],
+  ])("falls back to the forge script on %s", async (_name, arrange, projectPath) => {
+    arrange();
+    const state = await setup({ projectPath });
+    const chief = await start(state);
+    const result = await state.harness.behavior.callAgentTool(
+      "chief_forge_init", { title: "Fix checkout totals" }, { threadId: chief.threadId, projectId: "proj_1" },
+    ) as string;
+    expect(result).toContain("```sh");
+    expect(result).toContain("CHIEF_FORGE");
+    if (!projectPath) expect(execFileMock.mock.calls.filter(([file]) => file === "sh")).toHaveLength(0);
+    else expect(result).toContain("so run it yourself");
+  });
+
   test("says the tier policy and the project rules once", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -2112,6 +2161,9 @@ describe("Chief backend", () => {
     expect(reported).toContain(`Wave 1 of 3 (junior): ${path1}`);
     expect(reported).toContain(`Wave 2 of 3 (senior): ${path2}`);
     expect(reported).toContain(`Wave 3 of 3 (senior): ${path3}`);
+    // Mirrored into Chief's storage so Chief can echo inline-vis previews.
+    expect(await readFile(join(state.storageRoot, chief.threadId, "plans", planner.threadId, "plan-2.md"), "utf8")).toBe("# Wave 2\nMigrate the data.\n");
+    expect(reported).toContain(`::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-1.md"}`);
     expect(reported).toContain(`Delegate wave 1 now: chief_delegate (planThreadId: ${planner.threadId}, wave: 1)`);
     expect(reported).not.toContain("Read that file in full");
     expect(reported).not.toContain("chief_consult");

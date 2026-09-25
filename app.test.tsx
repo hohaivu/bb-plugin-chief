@@ -223,6 +223,8 @@ test("the thread panel's Chief pending tab shows the Chief's block and refetches
   unmounts.push(() => rendered.lifecycle.unmount());
 
   await vi.waitFor(() => expect(rendered.container.querySelector("pre")?.textContent).toBe(block));
+  fireEvent.click(rendered.getByRole("button", { name: "thr_w" }));
+  expect(rendered.navigateCalls).toContainEqual({ method: "toThread", threadId: "thr_w" });
   rendered.emitRealtime("pending", null);
   await vi.waitFor(() =>
     expect(rendered.rpcCalls.filter((call) => call.method === "pending")).toHaveLength(2),

@@ -13,7 +13,7 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 1. Open BB's project-aware **New Thread** screen and click **Start Chief**. Each click creates and opens a fresh independent Chief for that project; the CLI remains available for automation.
 2. Talk to `Chief · <project name>` in the normal thread UI.
 3. Planning is on by default: Chief plans first, then forges, then delegates wave 1. For planned work, Chief sends it to a read-only planner first, which splits it into waves; the plugin persists the schedule and its ready alert names the exact next delegation, so Chief relays it without reading any plan file. `chief_delegate` refuses an unplanned call unless it carries `unplannedReason`.
-4. Chief owns the forge: `chief_forge_init` returns one ready-to-run script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. Chief runs the script and reads the `CHIEF_FORGE branch=… issue_url=… pr_url=…` line it prints. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
+4. Chief owns the forge: `chief_forge_init` builds one script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. The server runs it in the project checkout and hands Chief the `CHIEF_FORGE branch=… issue_url=… pr_url=…` values; when that cannot finish (no local checkout, no `gh`/`glab` on the server's PATH, an error), the tool returns the script and Chief runs it instead. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
 5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
 6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled — with its last output and the next steps; at twice `stallMinutes` the alert tells Chief to stop it with `chief_stop`. Alerts use a durable SQLite outbox and retry after transient delivery failures.
@@ -39,6 +39,10 @@ button on the root New thread screen, which bb gives no project of its own. It d
 one project. `autoSpawn` (default `false`) controls whether Chief should automatically start upon BB launch or settings changes.
 `stallMinutes` (default 30) sets the soft stall alert; twice that sends the stop alert.
 
+### Archiving with Chief
+
+`cascadeArchive` (default `false`) makes each Chief the BB lifecycle owner of the planners, workers, reviewers, and advisors it starts. Archiving a Chief then archives and stops them, and **deleting a Chief deletes them too, worktrees included**; unpushed commits are lost. Ownership is set when a thread starts and never changes: toggling the setting affects only threads started afterwards, and a replacement Chief does not inherit the children of the Chief it replaced — archiving or deleting the old Chief still takes them along.
+
 ### Models
 
 Settings → **Chief models by machine** scans every enrolled machine for its signed-in providers
@@ -55,9 +59,9 @@ See [`skills/chief/SKILL.md`](skills/chief/SKILL.md) for how Chief chooses.
 
 `chief_delegate` takes three optional forge fields alongside the brief: `branch` bases the worker's
 managed worktree on that branch instead of the project default, and `issueUrl` and `prUrl` are
-recorded with the thread and shown in `chief_roster` and `chief_inspect`. The plugin never runs
-`git`, `gh`, or `glab` itself — the BB plugin SDK exposes no shell — so `chief_forge_init` generates
-the script, with every value substituted and quoted, and Chief runs it from its own thread. Both GitHub (`gh`) and GitLab (`glab`) are covered;
+recorded with the thread and shown in `chief_roster` and `chief_inspect`. `chief_forge_init` generates
+the script, with every value substituted and quoted, and runs it on the BB server in the project
+checkout; if that fails, it returns the script and Chief runs it from its own thread. Both GitHub (`gh`) and GitLab (`glab`) are covered;
 the surrounding policy, including what to skip when a forge step fails, is the **Git workflow** section
 of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 
