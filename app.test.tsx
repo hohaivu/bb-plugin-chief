@@ -230,3 +230,28 @@ test("the thread panel's Chief pending tab shows the Chief's block and refetches
     expect(rendered.rpcCalls.filter((call) => call.method === "pending")).toHaveLength(2),
   );
 });
+
+test("the Chief pending tab refetches once after the realtime connection reconnects", async () => {
+  const rendered = renderSlot<{ threadId: string; params: null }, typeof rpcContract>(
+    app.threadPanelActions[0]!,
+    { threadId: "thr_chief", params: null },
+    {
+      realtimeConnectionState: "connected",
+      rpc: {
+        status: () => emptyStatus,
+        start: () => ({ threadId: "thr_1", created: false }),
+        create: () => ({ threadId: "thr_1", created: true }),
+        pending: () => ({ chief: true, text: "Pending: none." }),
+      },
+    },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+  const calls = () => rendered.rpcCalls.filter((call) => call.method === "pending").length;
+
+  await vi.waitFor(() => expect(rendered.container.querySelector("pre")?.textContent).toBe("Pending: none."));
+  expect(calls()).toBe(1);
+  await rendered.setRealtimeConnectionState("reconnecting");
+  expect(calls()).toBe(1);
+  await rendered.setRealtimeConnectionState("connected");
+  await vi.waitFor(() => expect(calls()).toBe(2));
+});

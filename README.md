@@ -105,12 +105,17 @@ action, in the same wording its lifecycle alert already used, so the two never d
 is instructed to call `chief_roster` at the start of every turn and again after any compaction,
 so the Pending block — not memory — is what it works from.
 On a Chief thread the same block is in the side panel under **Actions → Chief
-pending work**, and it updates live as managed threads change.
+pending work**, and it updates live as managed threads change (and refetches after the
+realtime connection reconnects).
+Chief's own todos — including queued work nobody has delegated yet — live there too as
+`todo #N` lines: `chief_roster` with `todo: { text, after? }` adds one, `todo: { id, text?, after?, state? }`
+changes or closes it (`done`/`dropped`). Todos persist per project, so a new or replacement Chief
+sees them; Chief is told to use them instead of Memory files, TodoWrite, or Task tools.
 
 ## CLI
 
 ```sh
-bb chief status [--project proj_...] [--json]
+bb chief status [--project proj_...] [--json]   # Pending block includes open todos
 bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
@@ -124,7 +129,7 @@ bb chief review thr_worker [--focus "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
 ```
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
 
 ## Build and verify
 

@@ -1550,6 +1550,52 @@ describe("Chief backend", () => {
     expect(roster.startsWith("Pending: none.")).toBe(true);
   });
 
+  test("chief_roster todos add, update, and close in the shared Pending block", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const roster = async (params: object) => String(await state.harness.behavior.callAgentTool("chief_roster", params, opts));
+    const pendingText = async () => ((await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { text: string }).text;
+    const signals = () => state.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "pending").length;
+
+    const count = signals();
+    const added = await roster({ todo: { text: "Rebase onto main", after: "PR #42 merges" } });
+    expect(added.startsWith("Pending:\n- todo #1: Rebase onto main (after: PR #42 merges)")).toBe(true);
+    expect(await pendingText()).toBe("Pending:\n- todo #1: Rebase onto main (after: PR #42 merges)");
+    expect(signals()).toBe(count + 1);
+    const cli = await state.harness.behavior.runCli(["status", "--project", "proj_1"]);
+    expect(cli.stdout).toContain("- todo #1: Rebase onto main (after: PR #42 merges)");
+
+    await roster({ todo: { id: 1, text: "Rebase onto #43", after: "" } });
+    expect(await pendingText()).toBe("Pending:\n- todo #1: Rebase onto #43");
+    await roster({ todo: { id: 1, state: "done" } });
+    expect(await pendingText()).toBe("Pending: none.");
+    expect(await roster({ includeComplete: true })).toContain("- todo #1 [done]: Rebase onto #43");
+
+    await expect(roster({ todo: { after: "later" } })).rejects.toThrow("needs text");
+    await expect(roster({ todo: { id: 99, state: "done" } })).rejects.toThrow("No todo #99");
+  });
+
+  test("chief todos are project-scoped and survive a replacement Chief", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await state.harness.behavior.callAgentTool("chief_roster", { todo: { text: "Ship docs" } }, { threadId: chief.threadId, projectId: "proj_1" });
+    const replacement = await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string };
+    expect(String(await state.harness.behavior.callAgentTool(
+      "chief_roster", {}, { threadId: replacement.threadId, projectId: "proj_1" },
+    ))).toContain("- todo #1: Ship docs");
+
+    const other = await start(state, "proj_2");
+    const otherOpts = { threadId: other.threadId, projectId: "proj_2" };
+    expect(String(await state.harness.behavior.callAgentTool("chief_roster", {}, otherOpts))).not.toContain("todo #1");
+    await expect(state.harness.behavior.callAgentTool("chief_roster", { todo: { id: 1, state: "done" } }, otherOpts)).rejects.toThrow("No todo #1");
+
+    const worker = await delegate(state, replacement.threadId, "Fix checkout totals");
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_roster", { todo: { text: "Sneaky" } }, { threadId: worker.threadId, projectId: "proj_1" },
+    )).rejects.toThrow("requires a registered Chief");
+  });
+
   test("the pending RPC matches chief_roster's Pending block and signals only on change", async () => {
     const state = await setup();
     const chief = await start(state);
