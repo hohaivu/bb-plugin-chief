@@ -18,7 +18,7 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled — with its last output and the next steps; at twice `stallMinutes` the alert tells Chief to stop it with `chief_stop`. Alerts use a durable SQLite outbox and retry after transient delivery failures.
 8. A worker that reports `ready` names its own next call: an intermediate wave tells Chief to delegate the next wave (`chief_delegate` with `replaces:`), with no review in between; the final wave, or any worker with no plan link, tells Chief to start the one review of the whole run with `chief_review`. The reviewer reads the worker's brief (a long mission or context is clipped), plus every wave's plan file on a multi-wave run, and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes to a fresh worker in the same worktree.
-9. Chief inspects live status and bounded output, nudges threads that are still working (a finished worker's follow-up always goes to a fresh worker with `chief_delegate` `replaces:`), marks verified non-running work complete, and escalates only genuine decisions.
+9. Chief inspects live status and bounded output, nudges threads that are still working (a finished worker's follow-up always goes to a fresh worker with `chief_delegate` `replaces:`), marks verified non-running work complete, and escalates only genuine decisions. Completing a worker (or handing it off with `replaces:`) also completes its reviewers and advisors, and its planner once the final wave is done.
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
 
@@ -102,7 +102,9 @@ is instructed to call `chief_roster` at the start of every turn and again after 
 so the Pending block — not memory — is what it works from.
 On a Chief thread the side panel's **Actions → Chief to-do** is a read-only checklist of
 every managed thread and todo: items with a next action first, then in-progress threads and
-open todos, with done items (the newest 50) struck through in a collapsed group. It updates
+open todos, with done items (the newest 50) struck through in a collapsed group. An item is unchecked only
+while it names a next action (the same one Pending shows) or is still in progress; supporting
+threads close with their worker. It updates
 live as managed threads change (and refetches after the realtime connection reconnects).
 Chief's own todos — including queued work nobody has delegated yet — live there too as
 `todo #N` lines: `chief_roster` with `todo: { text, after? }` adds one, `todo: { id, text?, after?, state? }`
