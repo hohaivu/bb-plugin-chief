@@ -10,7 +10,7 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 
 ## Workflow
 
-1. Open BB's project-aware **New Thread** screen and click **Start Chief**. Each click creates and opens a fresh independent Chief for that project; the CLI remains available for automation.
+1. Open BB's project-aware **New Thread** screen and click **Start Chief** (the projectless New Thread screen offers a project picker instead). Each click creates and opens a fresh independent Chief for that project; the CLI remains available for automation.
 2. Talk to `Chief · <project name>` in the normal thread UI.
 3. Planning is on by default: Chief plans first, then forges, then delegates wave 1. For planned work, Chief sends it to a read-only planner first, which splits it into waves; the plugin persists the schedule and its ready alert names the exact next delegation, so Chief relays it without reading any plan file. `chief_delegate` refuses an unplanned call unless it carries `unplannedReason`.
 4. Chief owns the forge: `chief_forge_init` builds one script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. The server runs it in the project checkout and hands Chief the `CHIEF_FORGE branch=… issue_url=… pr_url=…` values; when that cannot finish (no local checkout, no `gh`/`glab` on the server's PATH, an error), the tool returns the script and Chief runs it instead. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
@@ -34,8 +34,8 @@ bb plugin config chief set stallMinutes 15
 bb plugin config chief set autoSpawn false
 ```
 
-`chiefProject` is the default used outside an existing project context — including the **Start Chief**
-button on the root New thread screen, which bb gives no project of its own. It does not limit Chief to
+`chiefProject` is the default used outside an existing project context — including the project
+preselected in the **Start Chief** picker on the root New thread screen, which bb gives no project of its own. It does not limit Chief to
 one project. `autoSpawn` (default `false`) controls whether Chief should automatically start upon BB launch or settings changes.
 `stallMinutes` (default 15) sets the soft stall alert; twice that sends the stop alert.
 
@@ -140,4 +140,4 @@ npm test
 bb plugin build
 ```
 
-The plugin adds a project-aware **Start Chief** launcher to BB's New Thread screen and a compact Crown + Chief badge to Chief thread headers. It has no standalone Chief workspace, custom sidebar replacement, or task-management UI.
+The plugin adds a project-aware **Start Chief** launcher (with a project picker on the projectless screen) to BB's New Thread screen and a compact Crown + Chief badge to Chief thread headers. It has no standalone Chief workspace, custom sidebar replacement, or task-management UI.
