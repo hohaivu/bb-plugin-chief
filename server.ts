@@ -295,8 +295,8 @@ export const rpcContract = defineRpcContract({
     output: z.object({ ok: z.literal(true) }).strict(),
   },
   pending: {
-    input: z.null(),
-    output: z.object({ chiefs: z.array(z.object({ threadId: z.string(), title: z.string(), block: z.string() })) }),
+    input: z.object({ threadId: z.string() }).strict(),
+    output: z.object({ chief: z.boolean(), text: z.string() }).strict(),
   },
 });
 
@@ -2198,12 +2198,9 @@ export default async function plugin(bb: BbPluginApi) {
     return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].reverse()), 6_000);
   }
 
+  /** Every active Chief's block, only to detect a change worth a realtime signal. */
   function pendingSnapshot() {
-    return [...roles.values()].filter(isActiveChief).map((chief) => ({
-      threadId: chief.thread_id,
-      title: chief.title,
-      block: pendingBlock(chief.thread_id),
-    }));
+    return [...roles.values()].filter(isActiveChief).map((chief) => [chief.thread_id, pendingBlock(chief.thread_id)]);
   }
 
   async function lastOutput(threadId: string) {
@@ -2498,7 +2495,8 @@ export default async function plugin(bb: BbPluginApi) {
     status: () => ({ sectionId: storedSectionId(), threads: [...roles.values()].map(toManaged) }),
     start: ({ projectId }) => ensureChief(projectId ?? undefined),
     create: ({ projectId }) => createChief(projectId),
-    pending: () => ({ chiefs: pendingSnapshot() }),
+    pending: ({ threadId }) =>
+      isActiveChief(roles.get(threadId)) ? { chief: true, text: pendingBlock(threadId) } : { chief: false, text: "" },
     modelConfiguration: async () => ({
       hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
         const connected = host.status === "connected";

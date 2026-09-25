@@ -1481,22 +1481,23 @@ describe("Chief backend", () => {
 
   test("the pending RPC matches chief_roster's Pending block and signals only on change", async () => {
     const state = await setup();
-    expect(await state.harness.behavior.callRpc("pending", null)).toEqual({ chiefs: [] });
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const signals = () => state.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "pending").length;
 
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
     let count = signals();
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    expect(signals()).toBe(count); // an active worker has no next action, so Pending did not change
+    expect(await state.harness.behavior.callRpc("pending", { threadId: worker.threadId })).toEqual({ chief: false, text: "" });
+    count = signals();
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
     expect(signals()).toBe(count + 1);
 
     const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    const { chiefs } = await state.harness.behavior.callRpc("pending", null) as { chiefs: Array<{ threadId: string; block: string }> };
-    expect(chiefs).toHaveLength(1);
-    expect(chiefs[0]!.threadId).toBe(chief.threadId);
-    expect(chiefs[0]!.block).toContain(worker.threadId);
-    expect(roster.startsWith(`${chiefs[0]!.block}\nTier split:`)).toBe(true);
+    const pending = await state.harness.behavior.callRpc("pending", { threadId: chief.threadId }) as { chief: boolean; text: string };
+    expect(pending.chief).toBe(true);
+    expect(pending.text).toContain(worker.threadId);
+    expect(roster.startsWith(`${pending.text}\nTier split:`)).toBe(true);
 
     count = signals();
     await state.supervisorCycle();

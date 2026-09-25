@@ -276,23 +276,20 @@ function ChiefHeaderBadge({
   );
 }
 
-type PendingChief = { threadId: string; title: string; block: string };
-
-/** Every active Chief's Pending block, word for word as chief_roster prints it. */
-function ChiefPending() {
-  const navigate = useBbNavigate();
+/** This Chief's Pending block, word for word as chief_roster prints it. */
+function ChiefPendingPanel({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [chiefs, setChiefs] = useState<PendingChief[] | null>(null);
+  const [pending, setPending] = useState<{ chief: boolean; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setChiefs((await rpc.call("pending", null)).chiefs);
+      setPending(await rpc.call("pending", { threadId }));
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [rpc]);
+  }, [rpc, threadId]);
 
   useEffect(() => {
     void load();
@@ -300,21 +297,10 @@ function ChiefPending() {
   useRealtime("pending", () => void load());
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-2">
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      {chiefs?.length === 0 ? <p className="text-sm text-muted-foreground">No active Chief.</p> : null}
-      {chiefs?.map((chief) => (
-        <div key={chief.threadId} className="space-y-1">
-          <button
-            type="button"
-            onClick={() => navigate.toThread(chief.threadId)}
-            className="cursor-pointer text-sm font-medium text-foreground hover:underline"
-          >
-            {chief.title}
-          </button>
-          <p className="whitespace-pre-wrap text-xs text-muted-foreground">{chief.block}</p>
-        </div>
-      ))}
+      {pending && !pending.chief ? <p className="text-sm text-muted-foreground">Not a Chief thread.</p> : null}
+      {pending?.chief ? <pre className="whitespace-pre-wrap text-xs text-foreground">{pending.text}</pre> : null}
     </div>
   );
 }
@@ -336,8 +322,10 @@ export default definePluginApp((app) => {
     title: "Chief role",
     component: ChiefHeaderBadge,
   });
-  // The thread's right panel; the New thread screen's panel is a separate slot.
-  const pendingAction = { id: "pending", title: "Chief pending", icon: "Crown", component: ChiefPending } as const;
-  app.slots.threadPanelAction(pendingAction);
-  app.slots.experimental_newThreadPanelAction(pendingAction);
+  app.slots.threadPanelAction({
+    id: "pending",
+    title: "Chief pending work",
+    icon: "Crown",
+    component: ChiefPendingPanel,
+  });
 });
