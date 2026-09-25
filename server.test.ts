@@ -51,7 +51,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string } = {}) {
+async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -66,8 +66,10 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   const spawned: any[] = [];
   const stopped: string[] = [];
   const catalogReads: (string | undefined)[] = [];
+  const tabsStore = new Map<string, { revision: number; tabs: any[] }>();
+  let tabsUpdateFailures = 0;
   const { bb, harness } = createFakePluginHost({
-    pluginId: "chief",
+    pluginId: options.pluginId ?? "chief",
     agentSkillIds: ["chief", "chief-worker"],
     sdk: {
       threadSections: {
@@ -160,6 +162,17 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           return { ok: true, delivery: "sent" as const };
         },
         output: async ({ threadId }: { threadId: string }) => ({ output: `last output from ${threadId}` }),
+        tabs: {
+          get: async ({ threadId }: { threadId: string }) => tabsStore.get(threadId) ?? { revision: 0, tabs: [] },
+          update: async ({ threadId, expectedRevision, tabs }: any) => {
+            if (tabsUpdateFailures > 0) { tabsUpdateFailures -= 1; throw new Error("tabs update failed"); }
+            const current = tabsStore.get(threadId) ?? { revision: 0, tabs: [] };
+            if (current.revision !== expectedRevision) throw new Error("revision conflict");
+            const next = { revision: current.revision + 1, tabs };
+            tabsStore.set(threadId, next);
+            return next;
+          },
+        },
         queuedMessages: {
           list: async ({ threadId }: { threadId: string }) => queuedMessagesStore.get(threadId) ?? [],
         },
@@ -194,6 +207,9 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
+    tabs: (threadId: string) => tabsStore.get(threadId)?.tabs ?? [],
+    seedTabs(threadId: string, tabs: any[]) { tabsStore.set(threadId, { revision: 7, tabs }); },
+    failTabsUpdates(count: number) { tabsUpdateFailures = count; },
     setPatch(next: string) { patch = next; },
     seedQueuedMessage(threadId: string, text: string) {
       const existing = queuedMessagesStore.get(threadId) ?? [];
@@ -461,6 +477,44 @@ describe("Chief backend", () => {
     expect(first).toEqual({ threadId: "thr_1", created: true });
     expect(second).toEqual({ threadId: "thr_1", created: false });
     expect(state.spawned[0]).toMatchObject({ projectId: "proj_2", title: "Chief · Second" });
+  });
+
+  test("pins one Chief pending tab after the user's tabs when Chief starts", async () => {
+    const state = await setup();
+    state.seedTabs("thr_1", [{ kind: "git-diff", id: "user_diff" }]);
+    await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(state.tabs("thr_1")).toEqual([
+      { kind: "git-diff", id: "user_diff" },
+      { kind: "plugin-panel", id: "plugin-panel:chief%3Apending%3A:none", pluginId: "chief", actionId: "pending", title: "Chief pending work", paramsJson: null },
+    ]);
+  });
+
+  test("pins the pending tab under the host's canonical id so opening the action reuses it", async () => {
+    const pluginId = "chief.dev:v2/@x";
+    const state = await setup({ pluginId });
+    await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // Host recipe (buildFixedPanelTabId): path `${pluginId}:${actionId}:${paramsJson ?? ""}`, encoded once, then `:none`.
+    const hostId = "plugin-panel:chief.dev%3Av2%2F%40x%3Apending%3A:none";
+    expect(state.tabs("thr_1")).toEqual([
+      { kind: "plugin-panel", id: hostId, pluginId, actionId: "pending", title: "Chief pending work", paramsJson: null },
+    ]);
+    // Opening the host action upserts by id: an existing id is focused, not duplicated.
+    const opened = (tabs: any[]) => tabs.some((tab) => tab.id === hostId) ? tabs : [...tabs, { id: hostId }];
+    expect(opened(state.tabs("thr_1"))).toHaveLength(1);
+  });
+
+  test("a failing tab pin never fails Chief start", async () => {
+    const state = await setup();
+    state.failTabsUpdates(2);
+    expect(await state.harness.behavior.callRpc("start", { projectId: "proj_1" })).toEqual({ threadId: "thr_1", created: true });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(state.tabs("thr_1")).toEqual([]);
   });
 
   test("creates multiple independent Chiefs for one project", async () => {
@@ -1477,6 +1531,35 @@ describe("Chief backend", () => {
       "chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" },
     ));
     expect(roster.startsWith("Pending: none.")).toBe(true);
+  });
+
+  test("the pending RPC matches chief_roster's Pending block and signals only on change", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const signals = () => state.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "pending").length;
+
+    let count = signals();
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    expect(signals()).toBe(count); // an active worker has no next action, so Pending did not change
+    expect(await state.harness.behavior.callRpc("pending", { threadId: worker.threadId })).toEqual({ chief: false, text: "" });
+    count = signals();
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+    expect(signals()).toBe(count + 1);
+
+    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    const pending = await state.harness.behavior.callRpc("pending", { threadId: chief.threadId }) as { chief: boolean; text: string };
+    expect(pending.chief).toBe(true);
+    expect(pending.text).toContain(worker.threadId);
+    expect(roster.startsWith(`${pending.text}\nTier split:`)).toBe(true);
+
+    count = signals();
+    await state.supervisorCycle();
+    await state.harness.behavior.callAgentTool("chief_roster", {}, opts);
+    expect(signals()).toBe(count);
+
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Shipped" }, opts);
+    expect(signals()).toBe(count + 1);
   });
 
   test("the roster's Pending block uses the same wording as the lifecycle alert", async () => {

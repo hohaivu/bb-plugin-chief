@@ -178,3 +178,27 @@ test("picks a scanned model per role and clears back to the BB default", async (
   );
   expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(6);
 });
+
+test("the thread panel's Chief pending tab shows the Chief's block and refetches on the realtime signal", async () => {
+  expect(app.threadPanelActions.map((action) => action.id)).toEqual(["pending"]);
+  const block = "Pending:\n- worker “Fix totals” (thr_w): Start its review now.";
+  const rendered = renderSlot<{ threadId: string; params: null }, typeof rpcContract>(
+    app.threadPanelActions[0]!,
+    { threadId: "thr_chief", params: null },
+    {
+      rpc: {
+        status: () => emptyStatus,
+        start: () => ({ threadId: "thr_1", created: false }),
+        create: () => ({ threadId: "thr_1", created: true }),
+        pending: ({ threadId }) => (threadId === "thr_chief" ? { chief: true, text: block } : { chief: false, text: "" }),
+      },
+    },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+
+  await vi.waitFor(() => expect(rendered.container.querySelector("pre")?.textContent).toBe(block));
+  rendered.emitRealtime("pending", null);
+  await vi.waitFor(() =>
+    expect(rendered.rpcCalls.filter((call) => call.method === "pending")).toHaveLength(2),
+  );
+});

@@ -294,6 +294,10 @@ export const rpcContract = defineRpcContract({
     }).strict(),
     output: z.object({ ok: z.literal(true) }).strict(),
   },
+  pending: {
+    input: z.object({ threadId: z.string() }).strict(),
+    output: z.object({ chief: z.boolean(), text: z.string() }).strict(),
+  },
 });
 
 interface ManagedRow {
@@ -688,8 +692,17 @@ export default async function plugin(bb: BbPluginApi) {
   const alertDeliveries = new Map<string, Promise<boolean>>();
   const reviewStarts = new Map<string, Promise<{ threadId: string; title: string; workerThreadId: string | null; created: boolean }>>();
 
+  let pendingReady = false; // set once everything pendingSnapshot() touches is initialised
+  let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
   function reloadRoles() {
     roles = new Map((allRows.all() as ManagedRow[]).map((row) => [row.thread_id, row]));
+    if (!pendingReady) return;
+    // ponytail: recomputes every Chief's Pending block per reload; debounce if rosters grow large.
+    const next = JSON.stringify(pendingSnapshot());
+    if (next !== publishedPending) {
+      publishedPending = next;
+      bb.realtime.publish("pending", null);
+    }
   }
   reloadRoles();
 
@@ -1036,7 +1049,31 @@ export default async function plugin(bb: BbPluginApi) {
       })();
     }
     insertThread({ threadId: thread.id, role: "chief", projectId: target, title, state: "starting", status: thread.status });
+    void pinPendingTab(thread.id);
     return { threadId: thread.id, created: true as const };
+  }
+
+  /** Best-effort: appends the pending panel tab to a Chief thread once. Never throws. */
+  async function pinPendingTab(threadId: string) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { revision, tabs } = await bb.sdk.threads.tabs.get({ threadId });
+        if (tabs.some((tab) => tab.kind === "plugin-panel" && tab.pluginId === bb.pluginId && tab.actionId === "pending")) return;
+        await bb.sdk.threads.tabs.update({
+          threadId, expectedRevision: revision,
+          tabs: [...tabs, {
+            // Must match the host's id so opening the action finds this tab: get-bb/bb
+            // packages/client-core/src/panel/fixed-panel-tabs-state.ts buildFixedPanelTabId.
+            kind: "plugin-panel", id: `plugin-panel:${encodeURIComponent(`${bb.pluginId}:pending:`)}:none`, pluginId: bb.pluginId,
+            actionId: "pending", title: "Chief pending work", paramsJson: null,
+          }],
+        });
+        return;
+      } catch (error) {
+        // ponytail: retries any error once, not only revision conflicts
+        if (attempt === 1) bb.log.warn(`Could not pin the pending tab on ${threadId}: ${String(error)}`);
+      }
+    }
   }
 
   async function createChief(projectId: string) {
@@ -2180,6 +2217,16 @@ export default async function plugin(bb: BbPluginApi) {
     return [header, ...kept, suffix].join("\n");
   }
 
+  /** The Pending block exactly as chief_roster prints it — shared with the panel RPC so the two never disagree. */
+  function pendingBlock(chiefThreadId: string) {
+    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].reverse()), 6_000);
+  }
+
+  /** Every active Chief's block, only to detect a change worth a realtime signal. */
+  function pendingSnapshot() {
+    return [...roles.values()].filter(isActiveChief).map((chief) => [chief.thread_id, pendingBlock(chief.thread_id)]);
+  }
+
   async function lastOutput(threadId: string) {
     try {
       return (await bb.sdk.threads.output({ threadId })).output;
@@ -2308,12 +2355,12 @@ export default async function plugin(bb: BbPluginApi) {
       // The Pending block is clipped on its own so it always survives whole (or
       // ends with "…and N more pending"), then the rest gets whatever budget is
       // left — otherwise one clip() across both could cut a pending action off mid-line.
-      const pendingBlock = clipPendingBlock(pendingLines(reversed), 6_000);
+      const pending = pendingBlock(caller.thread_id);
       const rest = clip([
         `Tier split: ${juniorCount} junior, ${seniorCount} senior`,
         ...reversed.map((row) => rosterRowLines(row).join("\n  ")),
-      ].join("\n"), Math.max(0, 6_000 - pendingBlock.length - 1));
-      return `${pendingBlock}\n${rest}`;
+      ].join("\n"), Math.max(0, 6_000 - pending.length - 1));
+      return `${pending}\n${rest}`;
     },
   });
   bb.agents.registerTool({
@@ -2472,6 +2519,8 @@ export default async function plugin(bb: BbPluginApi) {
     status: () => ({ sectionId: storedSectionId(), threads: [...roles.values()].map(toManaged) }),
     start: ({ projectId }) => ensureChief(projectId ?? undefined),
     create: ({ projectId }) => createChief(projectId),
+    pending: ({ threadId }) =>
+      isActiveChief(roles.get(threadId)) ? { chief: true, text: pendingBlock(threadId) } : { chief: false, text: "" },
     modelConfiguration: async () => ({
       hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
         const connected = host.status === "connected";
@@ -2684,6 +2733,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  pendingReady = true;
+  publishedPending = JSON.stringify(pendingSnapshot());
   try {
     await reconcile();
   } catch (error) {
