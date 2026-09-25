@@ -104,9 +104,10 @@ the next worker round or escalates.
 action, in the same wording its lifecycle alert already used, so the two never disagree. Chief
 is instructed to call `chief_roster` at the start of every turn and again after any compaction,
 so the Pending block — not memory — is what it works from.
-On a Chief thread the same block is in the side panel under **Actions → Chief
-pending work**, and it updates live as managed threads change (and refetches after the
-realtime connection reconnects).
+On a Chief thread the side panel's **Actions → Chief to-do** is a read-only checklist of
+every managed thread and todo: items with a next action first, then in-progress threads and
+open todos, with done items (the newest 50) struck through in a collapsed group. It updates
+live as managed threads change (and refetches after the realtime connection reconnects).
 Chief's own todos — including queued work nobody has delegated yet — live there too as
 `todo #N` lines: `chief_roster` with `todo: { text, after? }` adds one, `todo: { id, text?, after?, state? }`
 changes or closes it (`done`/`dropped`). Todos persist per project, so a new or replacement Chief
