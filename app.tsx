@@ -308,13 +308,17 @@ function ChiefPendingPanel({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof rpcContract>();
   const [pending, setPending] = useState<{ chief: boolean; items: TodoItem[]; doneOmitted: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   const load = useCallback(async () => {
+    setIsLoading(true);
     try {
       setPending(await rpc.call("pending", { threadId }));
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIsLoading(false);
     }
   }, [rpc, threadId]);
 
@@ -332,6 +336,16 @@ function ChiefPendingPanel({ threadId }: { threadId: string }) {
 
   return (
     <div className="space-y-2">
+      <div className="flex justify-end">
+        <button
+          type="button"
+          disabled={isLoading}
+          onClick={() => void load()}
+          className="h-7 shrink-0 cursor-pointer rounded-md border border-input px-3 text-xs font-medium disabled:opacity-50"
+        >
+          {isLoading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {pending && !pending.chief ? <p className="text-sm text-muted-foreground">Not a Chief thread.</p> : null}
       {pending?.chief && !pending.items.length ? <p className="text-sm text-muted-foreground">Nothing tracked yet.</p> : null}
