@@ -318,6 +318,22 @@ describe("Chief backend", () => {
       .toEqual([chief.threadId, chief.threadId, chief.threadId]);
   });
 
+  test.each([false, true])("sets lifecycleOwnerThreadId on child spawns only when cascadeArchive is %s", async (cascadeArchive) => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true, cascadeArchive });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: state.live.get(chief.threadId)!.projectId };
+    expect((await state.harness.behavior.runCli(
+      ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals"], opts,
+    )).exitCode).toBe(0);
+    const worker = await delegate(state, chief.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+    expect((await state.harness.behavior.runCli(["review", worker.threadId], opts)).exitCode).toBe(0);
+    expect(state.spawned[0].lifecycleOwnerThreadId).toBeUndefined();
+    expect(state.spawned.slice(1).map((entry: any) => entry.lifecycleOwnerThreadId))
+      .toEqual(Array(3).fill(cascadeArchive ? chief.threadId : undefined));
+  });
+
   test("allows Chief to inspect, roster, and continue child threads even if chief_thread_id was transferred", async () => {
     const state = await setup();
     const chief = await start(state);

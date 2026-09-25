@@ -653,6 +653,12 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Automatically start a Chief supervisor when BB opens, the default project changes, or an active project Chief is missing.",
       default: false,
     },
+    cascadeArchive: {
+      type: "boolean",
+      label: "Archive managed threads with their Chief",
+      description: "Planners, workers, reviewers, and advisors started while this is on are archived when their Chief is archived — and deleted when it is deleted, worktrees included. Ownership is fixed at start: threads already running keep their current behavior, and a replacement Chief does not inherit the children of the one it replaced.",
+      default: false,
+    },
   });
 
   const db = bb.storage.database();
@@ -942,6 +948,11 @@ export default async function plugin(bb: BbPluginApi) {
    * the machine can no longer serve all fall through to BB's own defaults —
    * a stale pick must not block the work.
    */
+  // Spread into child spawns only; BB cascades archive/delete from the owner.
+  async function lifecycleOwner(chiefThreadId: string | null) {
+    return chiefThreadId && (await settings.get()).cascadeArchive ? { lifecycleOwnerThreadId: chiefThreadId } : {};
+  }
+
   async function execution(role: ModelRole, hostId: string | null) {
     const selection = hostId === null ? null : readRoleModel(hostId, role);
     if (!hostId || !selection) return {};
@@ -1144,6 +1155,7 @@ export default async function plugin(bb: BbPluginApi) {
       visibility: "visible",
       title,
       ...(await execution("planner", await projectHostId(projectId))),
+      ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
     });
@@ -1214,6 +1226,7 @@ export default async function plugin(bb: BbPluginApi) {
       visibility: "visible",
       title,
       ...(await execution("advisor", hostId)),
+      ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "advisor", chiefThreadId: chief.thread_id },
     });
@@ -1357,6 +1370,7 @@ export default async function plugin(bb: BbPluginApi) {
       visibility: "visible",
       title: params.title,
       ...(await execution(tier, hostId)),
+      ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id },
     });
@@ -1556,6 +1570,7 @@ export default async function plugin(bb: BbPluginApi) {
         visibility: "visible",
         title,
         ...(await execution("reviewer", await environmentHostId(live.environmentId))),
+        ...(await lifecycleOwner(worker.chief_thread_id)),
         prompt,
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
@@ -1620,6 +1635,7 @@ export default async function plugin(bb: BbPluginApi) {
         visibility: "visible",
         title,
         ...(await execution("reviewer", hostId)),
+        ...(await lifecycleOwner(chiefThreadId)),
         prompt,
         pluginMetadata: { role: "reviewer", chiefThreadId },
       });

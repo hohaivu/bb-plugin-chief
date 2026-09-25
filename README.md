@@ -39,6 +39,10 @@ button on the root New thread screen, which bb gives no project of its own. It d
 one project. `autoSpawn` (default `false`) controls whether Chief should automatically start upon BB launch or settings changes.
 `stallMinutes` (default 30) sets the soft stall alert; twice that sends the stop alert.
 
+### Archiving with Chief
+
+`cascadeArchive` (default `false`) makes each Chief the BB lifecycle owner of the planners, workers, reviewers, and advisors it starts. Archiving a Chief then archives and stops them, and **deleting a Chief deletes them too, worktrees included**; unpushed commits are lost. Ownership is set when a thread starts and never changes: toggling the setting affects only threads started afterwards, and a replacement Chief does not inherit the children of the Chief it replaced — archiving or deleting the old Chief still takes them along.
+
 ### Models
 
 Settings → **Chief models by machine** scans every enrolled machine for its signed-in providers
