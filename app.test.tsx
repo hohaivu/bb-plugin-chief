@@ -239,6 +239,28 @@ test("the thread panel's Chief to-do tab lists items as a checklist and refetche
   );
 });
 
+test("the Chief to-do tab's Refresh button refetches the list", async () => {
+  const rendered = renderSlot<{ threadId: string; params: null }, typeof rpcContract>(
+    app.threadPanelActions[0]!,
+    { threadId: "thr_chief", params: null },
+    {
+      rpc: {
+        status: () => emptyStatus,
+        start: () => ({ threadId: "thr_1", created: false }),
+        create: () => ({ threadId: "thr_1", created: true }),
+        pending: () => ({ chief: true, items: [], doneOmitted: 0 }),
+      },
+    },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+  const calls = () => rendered.rpcCalls.filter((call) => call.method === "pending").length;
+
+  await vi.waitFor(() => expect(rendered.getByRole("button", { name: "Refresh" })).toBeTruthy());
+  expect(calls()).toBe(1);
+  fireEvent.click(rendered.getByRole("button", { name: "Refresh" }));
+  await vi.waitFor(() => expect(calls()).toBe(2));
+});
+
 test("the Chief pending tab refetches once after the realtime connection reconnects", async () => {
   let items: TodoItem[] = [];
   const rendered = renderSlot<{ threadId: string; params: null }, typeof rpcContract>(
@@ -260,12 +282,12 @@ test("the Chief pending tab refetches once after the realtime connection reconne
   const shown = () => rendered.container.textContent;
 
   await act(async () => {});
-  await vi.waitFor(() => expect(shown()).toBe("Nothing tracked yet."));
+  await vi.waitFor(() => expect(shown()).toContain("Nothing tracked yet."));
   expect(calls()).toBe(1);
   items = [{ id: "todo #1", label: "Follow up", status: "open", action: null, done: false }];
   await act(async () => rendered.setRealtimeConnectionState("reconnecting"));
   expect(calls()).toBe(1);
-  expect(shown()).toBe("Nothing tracked yet.");
+  expect(shown()).toContain("Nothing tracked yet.");
   await act(async () => rendered.setRealtimeConnectionState("connected"));
   await vi.waitFor(() => expect(shown()).toContain("Follow up"));
   expect(calls()).toBe(2);

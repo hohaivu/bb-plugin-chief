@@ -663,7 +663,7 @@ export const MIGRATIONS = [
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     chiefProject: { type: "project", label: "Default Chief project" },
-    stallMinutes: { type: "string", label: "Stall threshold (minutes)", default: "30" },
+    stallMinutes: { type: "string", label: "Stall threshold (minutes)", default: "15" },
     plannerEnabled: {
       type: "boolean",
       label: "Plan before delegating",
@@ -680,7 +680,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Archive managed threads with their Chief",
       description: "Planners, workers, reviewers, and advisors started while this is on are archived when their Chief is archived — and deleted when it is deleted, worktrees included. Ownership is fixed at start: threads already running keep their current behavior, and a replacement Chief does not inherit the children of the one it replaced.",
-      default: false,
+      default: true,
     },
   });
 
@@ -2043,7 +2043,7 @@ export default async function plugin(bb: BbPluginApi) {
           await reconcile();
           const values = await settings.get();
           const parsed = Number(values.stallMinutes);
-          const threshold = (Number.isFinite(parsed) && parsed > 0 ? parsed : 30) * 60_000;
+          const threshold = (Number.isFinite(parsed) && parsed > 0 ? parsed : 15) * 60_000;
           const now = Date.now();
           for (const row of [...roles.values()]) {
             if (row.role === "chief" || row.state !== "active" || row.active_since === null) continue;
