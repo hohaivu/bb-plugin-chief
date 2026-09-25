@@ -98,6 +98,38 @@ test("projectless screen preselects the first project when no default is set", a
   );
 });
 
+test("a picked project that leaves the sidebar list is never the create target", async () => {
+  // The harness reads this array on every render, so mutating it and
+  // rerendering stands in for a live sidebar update.
+  const projects = [project("proj_a"), project("proj_b")];
+  const StartChief = app.homepageSections[0]!.component;
+  const rendered = renderSlot<{ projectId: string | null }, typeof rpcContract>(
+    app.homepageSections[0]!,
+    { projectId: null },
+    { sidebarThreads: { projects }, rpc: createRpc },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+
+  fireEvent.change(rendered.getByRole("combobox", { name: "Chief project" }), {
+    target: { value: "proj_a" },
+  });
+
+  projects.splice(0, 1);
+  rendered.lifecycle.rerender(<StartChief projectId={null} />);
+  const select = rendered.getByRole("combobox", { name: "Chief project" }) as HTMLSelectElement;
+  expect(select.value).toBe("proj_b");
+  fireEvent.click(rendered.getByRole("button", { name: "Start Chief" }));
+  await vi.waitFor(() =>
+    expect(rendered.rpcCalls).toEqual([{ method: "create", input: { projectId: "proj_b" } }]),
+  );
+
+  projects.splice(0);
+  rendered.lifecycle.rerender(<StartChief projectId={null} />);
+  expect(rendered.getByRole("button", { name: /Start/ })).toHaveProperty("disabled", true);
+  expect(rendered.queryByRole("combobox")).toBeNull();
+  expect(rendered.getByText(/Create a project/)).toBeTruthy();
+});
+
 test("button disabled when there are no projects to pick", async () => {
   const rendered = renderSlot<{ projectId: string | null }, typeof rpcContract>(
     app.homepageSections[0]!,

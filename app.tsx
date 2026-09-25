@@ -48,10 +48,12 @@ function StartChief({ projectId }: { projectId: string | null }) {
 
   // The slot only carries a project on a project route. On the root New thread
   // screen the user picks one, preselected to the default Chief project, or the
-  // first project when that default is unset or gone.
+  // first project when that default is unset or gone. A pick that has left the
+  // list is ignored the same way.
   const configured = typeof values?.chiefProject === "string" ? values.chiefProject : null;
   const fallback = projects.find((p) => p.id === configured)?.id ?? projects[0]?.id ?? null;
-  const target = projectId ?? picked ?? fallback;
+  const listedPick = projects.some((p) => p.id === picked) ? picked : null;
+  const target = projectId ?? listedPick ?? fallback;
 
   const launch = useCallback(async () => {
     if (!target || isLaunching) return;
