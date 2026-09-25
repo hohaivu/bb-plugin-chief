@@ -22,6 +22,8 @@ const MAX_PLAN_LENGTH = 64_000;
 const MAX_NUDGE_LENGTH = 500;
 // ponytail: arbitrary cap so a runaway plan can't schedule an unbounded worker chain.
 const MAX_WAVES = 8;
+// ponytail: done capped at 50, newest first
+const MAX_DONE_ITEMS = 50;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 const FORGE_CLI_TIMEOUT_MS = 10_000;
 /** One wording for the reviewer's read-only rule, said when the review starts and
@@ -160,6 +162,15 @@ const modelConfigurationSchema = z.object({
 });
 export type ModelConfiguration = z.infer<typeof modelConfigurationSchema>;
 
+const todoItemSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  status: z.string(),
+  action: z.string().nullable(),
+  done: z.boolean(),
+});
+export type TodoItem = z.infer<typeof todoItemSchema>;
+
 const managedThreadSchema = z.object({
   threadId: z.string(),
   role: roleSchema,
@@ -297,7 +308,7 @@ export const rpcContract = defineRpcContract({
   },
   pending: {
     input: z.object({ threadId: z.string() }).strict(),
-    output: z.object({ chief: z.boolean(), text: z.string() }).strict(),
+    output: z.object({ chief: z.boolean(), items: z.array(todoItemSchema), doneOmitted: z.number() }).strict(),
   },
 });
 
@@ -307,6 +318,7 @@ interface TodoRow {
   text: string;
   after: string | null;
   state: "open" | "done" | "dropped";
+  updated_at: number;
 }
 
 interface ManagedRow {
@@ -1101,7 +1113,7 @@ export default async function plugin(bb: BbPluginApi) {
             // Must match the host's id so opening the action finds this tab: get-bb/bb
             // packages/client-core/src/panel/fixed-panel-tabs-state.ts buildFixedPanelTabId.
             kind: "plugin-panel", id: `plugin-panel:${encodeURIComponent(`${bb.pluginId}:pending:`)}:none`, pluginId: bb.pluginId,
-            actionId: "pending", title: "Chief pending work", paramsJson: null,
+            actionId: "pending", title: "Chief to-do", paramsJson: null,
           }],
         });
         return;
@@ -2277,14 +2289,42 @@ export default async function plugin(bb: BbPluginApi) {
     return [header, ...kept, suffix].join("\n");
   }
 
-  /** The Pending block exactly as chief_roster prints it — shared with the panel RPC so the two never disagree. */
+  /** The Pending block exactly as chief_roster prints it. */
   function pendingBlock(chiefThreadId: string) {
     return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].reverse(), todoLines(roles.get(chiefThreadId)?.project_id)), 6_000);
   }
 
-  /** Every active Chief's block, only to detect a change worth a realtime signal. */
+  /** The panel's checklist: action threads, in-progress threads (newest first), open
+   * todos, then done threads and closed todos by recency, capped at MAX_DONE_ITEMS. */
+  function todoItems(chiefThreadId: string): { items: TodoItem[]; doneOmitted: number } {
+    const rows = rosterForChief(chiefThreadId, true).filter((row) => row.thread_id !== chiefThreadId).reverse();
+    const threadItem = (row: ManagedRow, done: boolean) => ({
+      id: row.thread_id, label: `${row.role} “${row.title}”`, status: row.state, action: done ? null : nextAction(row), done,
+    });
+    const todoItem = (todo: TodoRow) => ({
+      id: `todo #${todo.id}`, label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`,
+      status: todo.state, action: null, done: todo.state !== "open",
+    });
+    const open = rows.filter((row) => !INACTIVE_CHIEF_STATES.includes(row.state)).map((row) => threadItem(row, false));
+    const projectId = roles.get(chiefThreadId)?.project_id;
+    const doneRows = [
+      ...rows.filter((row) => INACTIVE_CHIEF_STATES.includes(row.state)).map((row) => [row.updated_at, threadItem(row, true)] as const),
+      ...(projectId ? closedTodosForProject.all(projectId) as TodoRow[] : []).map((todo) => [todo.updated_at, todoItem(todo)] as const),
+    ].sort((a, b) => b[0] - a[0]);
+    return {
+      items: [
+        ...open.filter((item) => item.action),
+        ...open.filter((item) => !item.action),
+        ...(projectId ? todosForProject.all(projectId) as TodoRow[] : []).map(todoItem),
+        ...doneRows.slice(0, MAX_DONE_ITEMS).map(([, item]) => item),
+      ],
+      doneOmitted: Math.max(0, doneRows.length - MAX_DONE_ITEMS),
+    };
+  }
+
+  /** Every active Chief's checklist, only to detect a change worth a realtime signal. */
   function pendingSnapshot() {
-    return [...roles.values()].filter(isActiveChief).map((chief) => [chief.thread_id, pendingBlock(chief.thread_id)]);
+    return [...roles.values()].filter(isActiveChief).map((chief) => [chief.thread_id, todoItems(chief.thread_id)]);
   }
 
   async function lastOutput(threadId: string) {
@@ -2639,7 +2679,7 @@ export default async function plugin(bb: BbPluginApi) {
     start: ({ projectId }) => ensureChief(projectId ?? undefined),
     create: ({ projectId }) => createChief(projectId),
     pending: ({ threadId }) =>
-      isActiveChief(roles.get(threadId)) ? { chief: true, text: pendingBlock(threadId) } : { chief: false, text: "" },
+      isActiveChief(roles.get(threadId)) ? { chief: true, ...todoItems(threadId) } : { chief: false, items: [], doneOmitted: 0 },
     modelConfiguration: async () => ({
       hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
         const connected = host.status === "connected";

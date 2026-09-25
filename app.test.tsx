@@ -2,7 +2,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { act, fireEvent } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import type { rpcContract } from "./server";
+import type { rpcContract, TodoItem } from "./server";
 
 const app = await loadPluginApp(() => import("./app"));
 const unmounts: Array<() => void> = [];
@@ -205,9 +205,12 @@ test("picks a scanned model per role and clears back to the BB default", async (
   expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(6);
 });
 
-test("the thread panel's Chief pending tab shows the Chief's block and refetches on the realtime signal", async () => {
+test("the thread panel's Chief to-do tab lists items as a checklist and refetches on the realtime signal", async () => {
   expect(app.threadPanelActions.map((action) => action.id)).toEqual(["pending"]);
-  const block = "Pending:\n- worker “Fix totals” (thr_w): Start its review now.";
+  const items = [
+    { id: "thr_w", label: "worker “Fix totals”", status: "ready", action: "Review thr_w now.", done: false },
+    { id: "todo #1", label: "Ship docs", status: "done", action: null, done: true },
+  ];
   const rendered = renderSlot<{ threadId: string; params: null }, typeof rpcContract>(
     app.threadPanelActions[0]!,
     { threadId: "thr_chief", params: null },
@@ -216,14 +219,19 @@ test("the thread panel's Chief pending tab shows the Chief's block and refetches
         status: () => emptyStatus,
         start: () => ({ threadId: "thr_1", created: false }),
         create: () => ({ threadId: "thr_1", created: true }),
-        pending: ({ threadId }) => (threadId === "thr_chief" ? { chief: true, text: block } : { chief: false, text: "" }),
+        pending: ({ threadId }) => (threadId === "thr_chief" ? { chief: true, items, doneOmitted: 0 } : { chief: false, items: [], doneOmitted: 0 }),
       },
     },
   );
   unmounts.push(() => rendered.lifecycle.unmount());
 
-  await vi.waitFor(() => expect(rendered.container.querySelector("pre")?.textContent).toBe(block));
-  fireEvent.click(rendered.getByRole("button", { name: "thr_w" }));
+  await vi.waitFor(() => expect(rendered.getByRole("checkbox", { name: "worker “Fix totals”" })).toBeTruthy());
+  expect((rendered.getByRole("checkbox", { name: "worker “Fix totals”" }) as HTMLInputElement).checked).toBe(false);
+  const done = rendered.container.querySelector("details input[type=checkbox]") as HTMLInputElement;
+  expect(done.checked).toBe(true);
+  expect(done.getAttribute("aria-label")).toBe("Ship docs");
+  expect(rendered.container.querySelector("summary")?.textContent).toBe("Done (1)");
+  fireEvent.click(rendered.getAllByRole("button", { name: "thr_w" })[0]!);
   expect(rendered.navigateCalls).toContainEqual({ method: "toThread", threadId: "thr_w" });
   rendered.emitRealtime("pending", null);
   await vi.waitFor(() =>
@@ -232,7 +240,7 @@ test("the thread panel's Chief pending tab shows the Chief's block and refetches
 });
 
 test("the Chief pending tab refetches once after the realtime connection reconnects", async () => {
-  let text = "Pending: none.";
+  let items: TodoItem[] = [];
   const rendered = renderSlot<{ threadId: string; params: null }, typeof rpcContract>(
     app.threadPanelActions[0]!,
     { threadId: "thr_chief", params: null },
@@ -242,23 +250,23 @@ test("the Chief pending tab refetches once after the realtime connection reconne
         status: () => emptyStatus,
         start: () => ({ threadId: "thr_1", created: false }),
         create: () => ({ threadId: "thr_1", created: true }),
-        pending: () => ({ chief: true, text }),
+        pending: () => ({ chief: true, items, doneOmitted: 0 }),
       },
     },
   );
   unmounts.push(() => rendered.lifecycle.unmount());
   const calls = () => rendered.rpcCalls.filter((call) => call.method === "pending").length;
 
-  const shown = () => rendered.container.querySelector("pre")?.textContent;
+  const shown = () => rendered.container.textContent;
 
   await act(async () => {});
-  await vi.waitFor(() => expect(shown()).toBe("Pending: none."));
+  await vi.waitFor(() => expect(shown()).toBe("Nothing tracked yet."));
   expect(calls()).toBe(1);
-  text = "Pending:\n- todo #1: Follow up";
+  items = [{ id: "todo #1", label: "Follow up", status: "open", action: null, done: false }];
   await act(async () => rendered.setRealtimeConnectionState("reconnecting"));
   expect(calls()).toBe(1);
-  expect(shown()).toBe("Pending: none.");
+  expect(shown()).toBe("Nothing tracked yet.");
   await act(async () => rendered.setRealtimeConnectionState("connected"));
-  await vi.waitFor(() => expect(shown()).toBe(text));
+  await vi.waitFor(() => expect(shown()).toContain("Follow up"));
   expect(calls()).toBe(2);
 });

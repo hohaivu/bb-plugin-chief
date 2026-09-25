@@ -8,7 +8,7 @@ import {
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
-import type { ModelConfiguration, ModelSelection, rpcContract } from "./server";
+import type { ModelConfiguration, ModelSelection, rpcContract, TodoItem } from "./server";
 
 const ROLES = [
   { role: "chief", label: "Chief", hint: "Supervises and decides." },
@@ -275,11 +275,38 @@ function ChiefHeaderBadge({
   );
 }
 
-/** This Chief's Pending block, word for word as chief_roster prints it. */
+/** Text with every thread id turned into a navigate button. */
+function Linked({ text }: { text: string }) {
+  const navigate = useBbNavigate();
+  return (
+    <>
+      {text.split(/(thr_[a-z0-9]+)/).map((piece, index) =>
+        index % 2 ? (
+          <button key={index} type="button" onClick={() => navigate.toThread(piece)} className="cursor-pointer underline underline-offset-2 hover:text-primary">
+            {piece}
+          </button>
+        ) : piece,
+      )}
+    </>
+  );
+}
+
+function TodoEntry({ item }: { item: TodoItem }) {
+  return (
+    <li className="flex items-start gap-2 text-xs">
+      <input type="checkbox" checked={item.done} readOnly disabled aria-label={item.label} className="mt-0.5" />
+      <div className={item.done ? "line-through text-muted-foreground" : "text-foreground"}>
+        <Linked text={item.label} /> <span className="text-muted-foreground">(<Linked text={item.id} />, {item.status})</span>
+        {item.action ? <div className="text-xs text-muted-foreground"><Linked text={item.action} /></div> : null}
+      </div>
+    </li>
+  );
+}
+
+/** This Chief's to-do checklist: every managed thread and project todo, done items collapsed. */
 function ChiefPendingPanel({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof rpcContract>();
-  const navigate = useBbNavigate();
-  const [pending, setPending] = useState<{ chief: boolean; text: string } | null>(null);
+  const [pending, setPending] = useState<{ chief: boolean; items: TodoItem[]; doneOmitted: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -307,16 +334,17 @@ function ChiefPendingPanel({ threadId }: { threadId: string }) {
     <div className="space-y-2">
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {pending && !pending.chief ? <p className="text-sm text-muted-foreground">Not a Chief thread.</p> : null}
-      {pending?.chief ? (
-        <pre className="whitespace-pre-wrap text-xs text-foreground">
-          {pending.text.split(/(thr_[a-z0-9]+)/).map((piece, index) =>
-            index % 2 ? (
-              <button key={index} type="button" onClick={() => navigate.toThread(piece)} className="cursor-pointer underline underline-offset-2 hover:text-primary">
-                {piece}
-              </button>
-            ) : piece,
-          )}
-        </pre>
+      {pending?.chief && !pending.items.length ? <p className="text-sm text-muted-foreground">Nothing tracked yet.</p> : null}
+      {pending?.chief && pending.items.some((item) => !item.done) ? (
+        <ul className="space-y-1">{pending.items.filter((item) => !item.done).map((item) => <TodoEntry key={item.id} item={item} />)}</ul>
+      ) : null}
+      {pending?.chief && pending.items.some((item) => item.done) ? (
+        <details>
+          <summary className="cursor-pointer text-xs text-muted-foreground">
+            Done ({pending.items.filter((item) => item.done).length}{pending.doneOmitted ? `, ${pending.doneOmitted} older not shown` : ""})
+          </summary>
+          <ul className="mt-1 space-y-1">{pending.items.filter((item) => item.done).map((item) => <TodoEntry key={item.id} item={item} />)}</ul>
+        </details>
       ) : null}
     </div>
   );
@@ -341,7 +369,7 @@ export default definePluginApp((app) => {
   });
   app.slots.threadPanelAction({
     id: "pending",
-    title: "Chief pending work",
+    title: "Chief to-do",
     icon: "Crown",
     component: ChiefPendingPanel,
   });

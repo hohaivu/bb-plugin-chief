@@ -10,6 +10,7 @@ import {
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
 import plugin, { MIGRATIONS } from "./server";
+import type { TodoItem } from "./server";
 
 // Stands in for git/gh/glab so pull-request resolution tests never shell out for real.
 const execFileMock = vi.hoisted(() => vi.fn());
@@ -505,7 +506,7 @@ describe("Chief backend", () => {
 
     expect(state.tabs("thr_1")).toEqual([
       { kind: "git-diff", id: "user_diff" },
-      { kind: "plugin-panel", id: "plugin-panel:chief%3Apending%3A:none", pluginId: "chief", actionId: "pending", title: "Chief pending work", paramsJson: null },
+      { kind: "plugin-panel", id: "plugin-panel:chief%3Apending%3A:none", pluginId: "chief", actionId: "pending", title: "Chief to-do", paramsJson: null },
     ]);
   });
 
@@ -518,7 +519,7 @@ describe("Chief backend", () => {
     // Host recipe (buildFixedPanelTabId): path `${pluginId}:${actionId}:${paramsJson ?? ""}`, encoded once, then `:none`.
     const hostId = "plugin-panel:chief.dev%3Av2%2F%40x%3Apending%3A:none";
     expect(state.tabs("thr_1")).toEqual([
-      { kind: "plugin-panel", id: hostId, pluginId, actionId: "pending", title: "Chief pending work", paramsJson: null },
+      { kind: "plugin-panel", id: hostId, pluginId, actionId: "pending", title: "Chief to-do", paramsJson: null },
     ]);
     // Opening the host action upserts by id: an existing id is focused, not duplicated.
     const opened = (tabs: any[]) => tabs.some((tab) => tab.id === hostId) ? tabs : [...tabs, { id: hostId }];
@@ -1555,21 +1556,21 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const roster = async (params: object) => String(await state.harness.behavior.callAgentTool("chief_roster", params, opts));
-    const pendingText = async () => ((await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { text: string }).text;
+    const todo = async () => ((await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { items: TodoItem[] }).items.find((item) => item.id === "todo #1");
     const signals = () => state.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "pending").length;
 
     const count = signals();
     const added = await roster({ todo: { text: "Rebase onto main", after: "PR #42 merges" } });
     expect(added.startsWith("Pending:\n- todo #1: Rebase onto main (after: PR #42 merges)")).toBe(true);
-    expect(await pendingText()).toBe("Pending:\n- todo #1: Rebase onto main (after: PR #42 merges)");
+    expect(await todo()).toMatchObject({ id: "todo #1", label: "Rebase onto main (after: PR #42 merges)", status: "open", done: false });
     expect(signals()).toBe(count + 1);
     const cli = await state.harness.behavior.runCli(["status", "--project", "proj_1"]);
     expect(cli.stdout).toContain("- todo #1: Rebase onto main (after: PR #42 merges)");
 
     await roster({ todo: { id: 1, text: "Rebase onto #43", after: "" } });
-    expect(await pendingText()).toBe("Pending:\n- todo #1: Rebase onto #43");
+    expect(await todo()).toMatchObject({ label: "Rebase onto #43", done: false });
     await roster({ todo: { id: 1, state: "done" } });
-    expect(await pendingText()).toBe("Pending: none.");
+    expect(await todo()).toMatchObject({ label: "Rebase onto #43", status: "done", done: true });
     expect(await roster({ includeComplete: true })).toContain("- todo #1 [done]: Rebase onto #43");
 
     await expect(roster({ todo: { after: "later" } })).rejects.toThrow("needs text");
@@ -1596,25 +1597,26 @@ describe("Chief backend", () => {
     )).rejects.toThrow("requires a registered Chief");
   });
 
-  test("the pending RPC matches chief_roster's Pending block and signals only on change", async () => {
+  test("the pending RPC lists every item and signals only on change", async () => {
     const state = await setup();
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const signals = () => state.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "pending").length;
+    const items = async () => ((await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { items: TodoItem[] }).items;
 
     let count = signals();
     const worker = await delegate(state, chief.threadId, "Fix checkout totals");
-    expect(signals()).toBe(count); // an active worker has no next action, so Pending did not change
-    expect(await state.harness.behavior.callRpc("pending", { threadId: worker.threadId })).toEqual({ chief: false, text: "" });
+    expect(signals()).toBeGreaterThan(count);
+    expect(await items()).toEqual([expect.objectContaining({ id: worker.threadId, label: "worker “Fix checkout totals”", action: null, done: false })]);
+    expect(await state.harness.behavior.callRpc("pending", { threadId: worker.threadId })).toEqual({ chief: false, items: [], doneOmitted: 0 });
     count = signals();
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
     expect(signals()).toBe(count + 1);
 
     const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    const pending = await state.harness.behavior.callRpc("pending", { threadId: chief.threadId }) as { chief: boolean; text: string };
-    expect(pending.chief).toBe(true);
-    expect(pending.text).toContain(worker.threadId);
-    expect(roster.startsWith(`${pending.text}\nTier split:`)).toBe(true);
+    const [item] = await items();
+    expect(item).toMatchObject({ id: worker.threadId, status: "ready", done: false });
+    expect(roster).toContain(item!.action!);
 
     count = signals();
     await state.supervisorCycle();
@@ -1623,6 +1625,35 @@ describe("Chief backend", () => {
 
     await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Shipped" }, opts);
     expect(signals()).toBe(count + 1);
+    expect(await items()).toEqual([expect.objectContaining({ id: worker.threadId, status: "complete", action: null, done: true })]);
+  });
+
+  test("the to-do list orders action, in-progress, open todos, then capped done", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const roster = (params: object) => state.harness.behavior.callAgentTool("chief_roster", params, opts);
+    const pending = async () => (await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { items: TodoItem[]; doneOmitted: number };
+
+    const ready = await delegate(state, chief.threadId, "Ready work");
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: ready.threadId, projectId: "proj_1" });
+    const active = await delegate(state, chief.threadId, "Active work");
+    await roster({ todo: { text: "Open todo" } });
+    await roster({ todo: { text: "Dropped todo" } });
+    await roster({ todo: { id: 2, state: "dropped" } });
+
+    let list = await pending();
+    expect(list.items.map((item) => item.id)).toEqual([ready.threadId, active.threadId, "todo #1", "todo #2"]);
+    expect(list.items.some((item) => item.id === chief.threadId)).toBe(false);
+    expect(list.items[3]).toMatchObject({ status: "dropped", done: true });
+    expect(list.doneOmitted).toBe(0);
+
+    const insert = state.db.prepare(`INSERT INTO chief_todos (project_id, text, after, state, created_at, updated_at) VALUES ('proj_1', ?, NULL, 'done', 1, 1)`);
+    for (let index = 0; index < 51; index++) insert.run(`Old ${index}`);
+    list = await pending();
+    expect(list.items.filter((item) => item.done)).toHaveLength(50);
+    expect(list.items.filter((item) => item.done)[0]!.id).toBe("todo #2"); // newest first
+    expect(list.doneOmitted).toBe(2);
   });
 
   test("the roster's Pending block uses the same wording as the lifecycle alert", async () => {
