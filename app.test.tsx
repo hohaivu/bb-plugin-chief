@@ -41,48 +41,73 @@ test("creates a fresh Chief from the project-aware New Thread screen", async () 
   expect(rendered.rpcCalls).toEqual([
     { method: "create", input: { projectId: "proj_2" } },
   ]);
+  expect(rendered.queryByRole("combobox")).toBeNull();
 });
 
-test("falls back to the default Chief project on the projectless root screen", async () => {
+const project = (id: string, isPersonal = false) => ({
+  id,
+  name: `Project ${id}`,
+  isPersonal,
+  href: `/p/${id}`,
+  settingsHref: `/p/${id}/settings`,
+});
+const createRpc = {
+  status: () => emptyStatus,
+  start: () => ({ threadId: "thr_existing", created: false }),
+  create: ({ projectId }: { projectId: string }) => ({ threadId: `thr_${projectId}_new`, created: true }),
+};
+
+test("projectless screen preselects the default Chief project and starts in the picked one", async () => {
   const rendered = renderSlot<{ projectId: string | null }, typeof rpcContract>(
     app.homepageSections[0]!,
     { projectId: null },
     {
       settings: { chiefProject: "proj_default" },
-      rpc: {
-        status: () => emptyStatus,
-        start: () => ({ threadId: "thr_existing", created: false }),
-        create: ({ projectId }) => ({ threadId: `thr_${projectId}_new`, created: true }),
+      sidebarThreads: {
+        projects: [project("proj_a"), project("proj_default"), project("proj_me", true)],
       },
+      rpc: createRpc,
     },
   );
   unmounts.push(() => rendered.lifecycle.unmount());
 
-  // The copy must admit which project it is about to use, since the screen shows none.
-  expect(rendered.getByText(/default Chief project/)).toBeTruthy();
+  const select = rendered.getByRole("combobox", { name: "Chief project" }) as HTMLSelectElement;
+  expect(select.value).toBe("proj_default");
+  expect(rendered.queryByRole("option", { name: "Project proj_me" })).toBeNull();
+
+  fireEvent.change(select, { target: { value: "proj_a" } });
   fireEvent.click(rendered.getByRole("button", { name: "Start Chief" }));
 
   await vi.waitFor(() =>
-    expect(rendered.rpcCalls).toEqual([{ method: "create", input: { projectId: "proj_default" } }]),
+    expect(rendered.rpcCalls).toEqual([{ method: "create", input: { projectId: "proj_a" } }]),
   );
 });
 
-test("asks for a project when the root screen has no default", async () => {
+test("projectless screen preselects the first project when no default is set", async () => {
   const rendered = renderSlot<{ projectId: string | null }, typeof rpcContract>(
     app.homepageSections[0]!,
     { projectId: null },
-    {
-      rpc: {
-        status: () => emptyStatus,
-        start: () => ({ threadId: "thr_existing", created: false }),
-        create: () => ({ threadId: "thr_new", created: true }),
-      },
-    },
+    { sidebarThreads: { projects: [project("proj_a"), project("proj_b")] }, rpc: createRpc },
+  );
+  unmounts.push(() => rendered.lifecycle.unmount());
+
+  fireEvent.click(rendered.getByRole("button", { name: "Start Chief" }));
+
+  await vi.waitFor(() =>
+    expect(rendered.rpcCalls).toEqual([{ method: "create", input: { projectId: "proj_a" } }]),
+  );
+});
+
+test("button disabled when there are no projects to pick", async () => {
+  const rendered = renderSlot<{ projectId: string | null }, typeof rpcContract>(
+    app.homepageSections[0]!,
+    { projectId: null },
+    { rpc: createRpc },
   );
   unmounts.push(() => rendered.lifecycle.unmount());
 
   expect(rendered.getByRole("button", { name: "Start Chief" })).toHaveProperty("disabled", true);
-  expect(rendered.getByText(/set a default Chief project in Settings/)).toBeTruthy();
+  expect(rendered.getByText(/Create a project/)).toBeTruthy();
 });
 
 test("marks Chief conversations with a compact header badge", async () => {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
+  experimental_useSidebarThreads,
   experimental_ProviderModelPicker as ProviderModelPicker,
   useBbNavigate,
   useRealtime,
@@ -40,10 +41,17 @@ function StartChief({ projectId }: { projectId: string | null }) {
   const [isLaunching, setIsLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // The slot only carries a project on a project route; the root New thread
-  // screen has none, so fall back to the configured default Chief project.
-  const configured = values?.chiefProject;
-  const target = projectId ?? (typeof configured === "string" && configured ? configured : null);
+  const { projects: allProjects } = experimental_useSidebarThreads();
+  // ponytail: personal project hidden; it has no repo for workers to branch from
+  const projects = allProjects.filter((project) => !project.isPersonal);
+  const [picked, setPicked] = useState<string | null>(null);
+
+  // The slot only carries a project on a project route. On the root New thread
+  // screen the user picks one, preselected to the default Chief project, or the
+  // first project when that default is unset or gone.
+  const configured = typeof values?.chiefProject === "string" ? values.chiefProject : null;
+  const fallback = projects.find((p) => p.id === configured)?.id ?? projects[0]?.id ?? null;
+  const target = projectId ?? picked ?? fallback;
 
   const launch = useCallback(async () => {
     if (!target || isLaunching) return;
@@ -68,12 +76,26 @@ function StartChief({ projectId }: { projectId: string | null }) {
             </p>
           ) : projectId ? (
             <p>Create an independent supervisor for this project. You can start more than one.</p>
-          ) : target ? (
-            <p>No project is in view here, so this starts a Chief in your default Chief project.</p>
+          ) : projects.length ? (
+            <p>Pick the project this Chief supervises. You can start more than one.</p>
           ) : (
-            <p>Open a project, or set a default Chief project in Settings, to start one from here.</p>
+            <p>Create a project to start a Chief from here.</p>
           )}
         </div>
+        {!projectId && projects.length ? (
+          <select
+            aria-label="Chief project"
+            value={target ?? ""}
+            onChange={(event) => setPicked(event.target.value)}
+            className="h-7 shrink-0 cursor-pointer rounded-md border border-input bg-transparent px-2 text-xs font-medium text-foreground transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <button
           type="button"
           disabled={!target || isLaunching}
