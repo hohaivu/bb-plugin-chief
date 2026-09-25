@@ -3795,19 +3795,57 @@ describe("auto-completing absorbed supporting threads", () => {
     expect(stateOf(state, planner.threadId)).toBe("complete");
   });
 
-  test("startup sweeps rows absorbed before this version", async () => {
-    const { bb, harness } = createFakePluginHost({ pluginId: "chief-sweep" });
+  test("a reviewer that reported ready while still live-active is swept only after it goes idle", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await call(state, "chief_report", { state: "ready", result: "Done" }, worker.threadId);
+    await call(state, "chief_review", { workerThreadId: worker.threadId }, chief.threadId);
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!.threadId;
+    state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" });
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
+    await call(state, "chief_report", { state: "ready", result: "Checked", verdict: "approve" }, reviewer);
+    await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
+    expect(stateOf(state, reviewer)).toBe("ready");
+    state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "idle" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(reviewer)!, lastAssistantText: "done" });
+    expect(stateOf(state, reviewer)).toBe("complete");
+  });
+
+  test("startup sweeps absorbed rows only once their live status is known and idle", async () => {
+    const liveStatus: Record<string, string> = { thr_plan: "idle", thr_work: "idle", thr_rev: "idle", thr_busy: "active" };
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "chief-sweep",
+      sdk: {
+        threadSections: { list: async () => [{ id: "sec", name: "Chief", createdAt: 1, updatedAt: 1 }], create: async () => ({ id: "sec" }) },
+        projects: { get: async () => ({ id: "proj_1", name: "P", kind: "standard" }), fileContent: async () => { throw new Error("missing"); } },
+        threads: {
+          // thr_unknown has no live answer: its read keeps failing, so its status stays unobserved.
+          get: async ({ threadId }: { threadId: string }) => {
+            if (!liveStatus[threadId]) throw new Error("transient get");
+            return makeThreadResponse({ id: threadId, projectId: "proj_1", sectionId: "sec", visibility: "visible", status: liveStatus[threadId] });
+          },
+          update: async () => ({}),
+        },
+      },
+    });
     disposals.push(() => harness.lifecycle.dispose());
     const db = bb.storage.database();
     bb.storage.migrate(db, MIGRATIONS);
-    const insert = db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, worker_thread_id, title, state, verdict, plan_waves, plan_thread_id, plan_wave, reviewed_report_seq, created_at, updated_at)
-      VALUES (?, ?, 'proj_1', 'thr_chief', ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`);
+    const insert = db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, worker_thread_id, title, state, status, verdict, plan_waves, plan_thread_id, plan_wave, reviewed_report_seq, created_at, updated_at)
+      VALUES (?, ?, 'proj_1', 'thr_chief', ?, ?, ?, 'idle', ?, ?, ?, ?, ?, 1, 1)`);
     insert.run("thr_plan", "planner", null, "Plan", "ready", null, JSON.stringify([{ path: "a" }]), null, null, null);
     insert.run("thr_work", "worker", null, "Work", "complete", null, null, "thr_plan", 1, null);
     insert.run("thr_rev", "reviewer", "thr_work", "Review", "ready", "approve", null, null, null, 1);
+    insert.run("thr_busy", "reviewer", "thr_work", "Busy review", "ready", "approve", null, null, null, 1);
+    insert.run("thr_unknown", "advisor", "thr_work", "Advice", "ready", null, null, null, null, null);
     await plugin(bb);
-    expect(db.prepare(`SELECT thread_id, state FROM managed_threads WHERE thread_id IN ('thr_plan','thr_rev') ORDER BY thread_id`).all())
-      .toEqual([{ thread_id: "thr_plan", state: "complete" }, { thread_id: "thr_rev", state: "complete" }]);
+    expect(db.prepare(`SELECT thread_id, state FROM managed_threads WHERE thread_id<>'thr_work' ORDER BY thread_id`).all()).toEqual([
+      { thread_id: "thr_busy", state: "ready" },
+      { thread_id: "thr_plan", state: "complete" },
+      { thread_id: "thr_rev", state: "complete" },
+      { thread_id: "thr_unknown", state: "ready" },
+    ]);
   });
 
   test("panel unchecked actions equal Pending lines; action-less supporting rows are done", async () => {
