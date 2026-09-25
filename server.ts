@@ -382,7 +382,7 @@ const PLANNER_CHIEF_INSTRUCTIONS =
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
 const ROSTER_CHIEF_INSTRUCTIONS =
-  "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list. Track every todo — including work the user queued that nobody has delegated yet — with chief_roster's `todo` field; never use Memory files, TodoWrite, or Task tools for Chief work.";
+  "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list. Track every todo — including work the user queued that nobody has delegated yet — with chief_roster's `todo` field; never use Memory files, TodoWrite, or Task tools for Chief work. When work a todo tracks is finished, close that todo in the same turn with chief_roster todo { id, state: \"done\" }.";
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -724,15 +724,62 @@ export default async function plugin(bb: BbPluginApi) {
 
   let pendingReady = false; // set once everything pendingSnapshot() touches is initialised
   let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
-  function reloadRoles() {
-    roles = new Map((allRows.all() as ManagedRow[]).map((row) => [row.thread_id, row]));
-    if (!pendingReady) return;
+  const load = () => new Map((allRows.all() as ManagedRow[]).map((row) => [row.thread_id, row]));
+  const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
+  /** A supporting row whose work was absorbed: a reviewer or advisor of a complete worker,
+   * or a planner once its final wave is complete and every linked worker is terminal. */
+  function absorbed(row: ManagedRow) {
+    if (terminal(row.state) || BUSY_STATUSES.has(row.state)) return false;
+    if (row.role === "reviewer" || row.role === "advisor") {
+      return !!row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete";
+    }
+    if (row.role !== "planner" || !row.plan_waves) return false;
+    const waves = planWavesFor(row.thread_id).length;
+    const linked = [...roles.values()].filter((other) => other.role === "worker" && other.plan_thread_id === row.thread_id);
+    return linked.some((w) => w.plan_wave === waves && w.state === "complete") && linked.every((w) => terminal(w.state));
+  }
+  /** Completes absorbed rows, each only after a fresh threads.get shows it live and not busy.
+   * A failed or busy read leaves the row alone (fail closed); a later reload retries. */
+  async function completeAbsorbed() {
+    let completed = 0;
+    for (const id of [...roles.values()].filter(absorbed).map((row) => row.thread_id)) {
+      const live = await bb.sdk.threads.get({ threadId: id }).catch(() => null);
+      if (!live || BUSY_STATUSES.has(live.status) || live.deletedAt !== null || live.archivedAt !== null) continue;
+      const row = roles.get(id);
+      if (!row || !absorbed(row)) continue; // changed while the read was in flight
+      db.prepare(`UPDATE managed_threads SET state='complete', status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(live.status, Date.now(), id);
+      roles = load();
+      completed += 1;
+    }
+    return completed;
+  }
+  let sweeping: Promise<void> | null = null;
+  let sweepAgain = false;
+  /** Single-flight: a reload during a sweep queues exactly one more pass instead of a racing one. */
+  function sweep() {
+    if (sweeping) { sweepAgain = true; return sweeping; }
+    sweeping = (async () => {
+      do {
+        sweepAgain = false;
+        if (await completeAbsorbed()) publishPending();
+      } while (sweepAgain);
+    })().catch((error) => bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`)).finally(() => { sweeping = null; });
+    return sweeping;
+  }
+  function publishPending() {
     // ponytail: recomputes every Chief's Pending block per reload; debounce if rosters grow large.
     const next = JSON.stringify(pendingSnapshot());
     if (next !== publishedPending) {
       publishedPending = next;
       bb.realtime.publish("pending", null);
     }
+  }
+  function reloadRoles() {
+    roles = load();
+    if (!pendingReady) return;
+    // ponytail: sweeps on every reload, O(planners × rows); index by plan_thread_id if rosters grow large.
+    void sweep();
+    publishPending();
   }
   reloadRoles();
 
@@ -1491,6 +1538,8 @@ export default async function plugin(bb: BbPluginApi) {
       return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${row.worker_thread_id ? ` (replaces: ${row.worker_thread_id})` : " (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
     }
     if (row.role !== "reviewer" || !row.verdict) return null;
+    // replaces: re-pointed this reviewer to a fresh worker (snapshot reset to null): its findings were handed off.
+    if (row.worker_thread_id && row.reviewed_report_seq === null) return null;
     // A worker independently marked complete already absorbed this reviewer's verdict.
     if (row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete") return null;
     if (row.verdict === "approve") return "The reviewer approves. Complete this work, then mark the pull request ready.";
@@ -1503,6 +1552,14 @@ export default async function plugin(bb: BbPluginApi) {
     return row.worker_thread_id
       ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`
       : "The reviewer requires changes. Continue the worker with the specific fixes, or escalate if the disagreement is a genuine decision.";
+  }
+
+  /** The one open/done test: the panel's unchecked items are exactly Pending's actions plus work
+   * still in progress. A worker is open until complete; a planner, reviewer, or advisor only while
+   * it runs or names a next action. */
+  function isOpenItem(row: ManagedRow) {
+    if (["complete", "archived", "deleted"].includes(row.state)) return false;
+    return row.role === "worker" || BUSY_STATUSES.has(row.state) || nextAction(row) !== null;
   }
 
   /** Shared reviewer prompt: REVIEW_ONLY and the chief_report/verdict contract are
@@ -2284,10 +2341,10 @@ export default async function plugin(bb: BbPluginApi) {
       id: `todo #${todo.id}`, label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`,
       status: todo.state, action: null, done: todo.state !== "open",
     });
-    const open = rows.filter((row) => !INACTIVE_CHIEF_STATES.includes(row.state)).map((row) => threadItem(row, false));
+    const open = rows.filter(isOpenItem).map((row) => threadItem(row, false));
     const projectId = roles.get(chiefThreadId)?.project_id;
     const doneRows = [
-      ...rows.filter((row) => INACTIVE_CHIEF_STATES.includes(row.state)).map((row) => [row.updated_at, threadItem(row, true)] as const),
+      ...rows.filter((row) => !isOpenItem(row)).map((row) => [row.updated_at, threadItem(row, true)] as const),
       ...(projectId ? closedTodosForProject.all(projectId) as TodoRow[] : []).map((todo) => [todo.updated_at, todoItem(todo)] as const),
     ].sort((a, b) => b[0] - a[0]);
     return {
@@ -2574,7 +2631,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_complete",
     presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
-    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence.",
+    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional() }),
     async execute({ threadId, result }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -2585,7 +2642,11 @@ export default async function plugin(bb: BbPluginApi) {
       }
       touchCallerChief(caller);
       const row = await markComplete(threadId, result);
-      return `Marked “${row.title}” complete.`;
+      const todos = row.role === "worker" ? todosForProject.all(caller.project_id) as TodoRow[] : [];
+      const todoLine = todos.length
+        ? `\n${clip(`Open todos: ${todos.map((todo) => `#${todo.id} ${clip(todo.text, 80)}`).join(", ")} — close any this work finished with chief_roster todo { id, state: "done" }.`, 1_000)}`
+        : "";
+      return `Marked “${row.title}” complete.${todoLine}`;
     },
   });
   bb.agents.registerTool({
@@ -2865,12 +2926,13 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   pendingReady = true;
-  publishedPending = JSON.stringify(pendingSnapshot());
   try {
-    await reconcile();
+    await reconcile(); // each reconciled row's reloadRoles() sweeps rows absorbed before this version
   } catch (error) {
     bb.log.warn(`Initial reconciliation deferred: ${String(error)}`);
   }
+  reloadRoles();
+  await sweeping;
   await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
   const initial = await settings.get();
   if (initial.autoSpawn && initial.chiefProject) {
