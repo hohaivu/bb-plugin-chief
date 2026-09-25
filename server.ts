@@ -1118,7 +1118,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every planner turn, so the spawn prompt does not repeat them.
     await readRules(projectId);
-    const title = `Plan · ${params.title}`;
+    const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = [
       `You are the managed planner for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
       "", "## Problem", params.mission,
@@ -1170,7 +1170,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every advisor turn, so the spawn prompt does not repeat them.
     await readRules(projectId);
-    const title = `Consult · ${params.title}`;
+    const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
     const reviews = worker ? taskReviews(worker) : [];
     const prompt = [
       `You are the managed advisor for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
@@ -1714,6 +1714,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         await bb.sdk.threads.send({
           threadId: alert.target_thread_id,
+          senderThreadId: alert.source_thread_id,
           mode: "queue-if-active",
           input: [{ type: "text", text: clip(alert.message), mentions: [] }],
         });
@@ -2267,6 +2268,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "chief_forge_init",
+    presentation: { label: { pending: "Building forge pre-flight…", completed: "Built forge pre-flight" } },
     description: "Build the forge pre-flight for one task — tracking issue, task branch, draft pull request — as one script to run before chief_delegate.",
     parameters: z.object({
       title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
@@ -2288,6 +2290,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_delegate",
+    presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
     description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree.",
     parameters: delegateParams,
     async execute(params, context) {
@@ -2301,6 +2304,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_plan",
+    presentation: { label: { pending: "Starting planner…", completed: "Started planner" } },
     description: "Send one unit of work to a read-only planner. It proposes an implementation plan, split into waves with a tier each; its ready alert names the exact next call.",
     parameters: planParams,
     async execute(params, context) {
@@ -2314,6 +2318,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_consult",
+    presentation: { label: { pending: "Starting advisor…", completed: "Started advisor" } },
     description: "Start a read-only advisor on a hard problem or a change that keeps failing review. It may read code and run commands to reproduce it, never edits, and reports its advice back to you.",
     parameters: consultParams,
     async execute(params, context) {
@@ -2341,6 +2346,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "chief_roster",
+    presentation: { label: { pending: "Reading roster…", completed: "Read roster" } },
     description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert.",
     parameters: z.object({ includeComplete: z.boolean().optional() }),
     async execute({ includeComplete }, context) {
@@ -2365,6 +2371,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_inspect",
+    presentation: { label: { pending: "Inspecting thread…", completed: "Inspected thread" } },
     description: "Inspect one managed thread's live status, persisted report, and bounded last assistant output before deciding what to do.",
     parameters: z.object({ threadId: z.string() }),
     async execute({ threadId }, context) {
@@ -2380,6 +2387,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_continue",
+    presentation: { label: { pending: "Nudging thread…", completed: "Nudged thread" } },
     description: "Send a short nudge (at most 500 characters) to a managed thread that is still working. Never reuse a worker for more work: once it has reported ready, finishing skipped acceptance criteria, a rebase or restack, or any new task goes to a fresh worker with chief_delegate replaces: (same worktree, branch, and PR). Reviewers stay read-only; a repair goes to a fresh worker.",
     parameters: z.object({
       threadId: z.string(),
@@ -2399,6 +2407,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_stop",
+    presentation: { label: { pending: "Stopping thread…", completed: "Stopped thread" } },
     description: "Interrupt a running managed thread that is stuck or looping. Keeps its worktree and branch so a fresh worker can replace it with chief_delegate replaces.",
     parameters: stopParams,
     async execute({ threadId, reason }, context) {
@@ -2415,6 +2424,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_review",
+    presentation: { label: { pending: "Starting review…", completed: "Started review" } },
     description: "Start or return an independent read-only review: in an idle worker's existing worktree, or in a fresh worktree for a pull request or branch no managed worker owns.",
     parameters: reviewParams,
     async execute(params, context) {
@@ -2442,6 +2452,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_complete",
+    presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
     description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional() }),
     async execute({ threadId, result }, context) {
@@ -2458,6 +2469,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.agents.registerTool({
     name: "chief_report",
+    presentation: { label: { pending: "Reporting to Chief…", completed: "Reported to Chief" } },
     description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file.",
     parameters: reportParams,
     async execute(params, context) {

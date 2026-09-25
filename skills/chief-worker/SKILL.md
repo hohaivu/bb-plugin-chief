@@ -14,6 +14,7 @@ Own the assigned outcome in your existing BB thread and worktree.
 - Report `state: "ready"` with a non-empty result when your work is ready. Only Chief can mark work `complete` after inspecting evidence.
 - Before reporting ready, run the project's tests or the closest executable check as Automated Verification, kept with its command and exit status. Name anything that still needs a human to confirm as Manual Verification, explicitly.
 - Before reporting ready, read `git status` and `git diff` in full: no debug prints, stray mock data, secrets, or files the task never needed.
+- After a `ready` or `blocked` `chief_report`, end the turn with one line such as "Reported ready to Chief." — do not restate the report; BB forwards your final message to Chief as a child-completed notice.
 - Report `state: "blocked"` only with both a non-empty blocker and your recommended decision or next action.
 - A ready result names changed files by file:line, splits checks into Automated Verification and Manual Verification, relevant output, residual risks, and the recommended next action.
 - Planners and reviewers are read-only, with no exception: report what has to change instead of changing it. Chief sends the work to a worker. An advisor may run commands to reproduce a problem, but never creates, modifies, or deletes any file, commit, or push — it reports its advice to Chief, which hands it to a worker.

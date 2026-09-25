@@ -233,17 +233,13 @@ function ChiefHeaderBadge({
   isCompactViewport: boolean;
 }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [isChief, setIsChief] = useState(false);
+  const [role, setRole] = useState<string | null>(null);
 
   useEffect(() => {
     let current = true;
     void rpc.call("status", null).then((result) => {
       if (current) {
-        setIsChief(
-          result.threads.some(
-            (thread) => thread.threadId === threadId && thread.role === "chief",
-          ),
-        );
+        setRole(result.threads.find((thread) => thread.threadId === threadId)?.role ?? null);
       }
     }).catch(() => undefined);
     return () => {
@@ -251,11 +247,13 @@ function ChiefHeaderBadge({
     };
   }, [rpc, threadId]);
 
-  if (!isChief) return null;
+  if (!role) return null;
+  const isChief = role === "chief";
+  const label = isChief ? "Chief supervisor" : `Chief ${role}`;
   return (
     <span
-      aria-label="Chief supervisor"
-      title="Chief supervisor"
+      aria-label={label}
+      title={label}
       style={{
         alignItems: "center",
         background: "color-mix(in srgb, var(--primary) 10%, transparent)",
@@ -270,8 +268,8 @@ function ChiefHeaderBadge({
         padding: isCompactViewport ? "0 6px" : "0 9px",
       }}
     >
-      <Crown />
-      {isCompactViewport ? null : "Chief"}
+      {isChief ? <Crown /> : null}
+      {isChief ? (isCompactViewport ? null : "Chief") : role.charAt(0).toUpperCase() + role.slice(1)}
     </span>
   );
 }
