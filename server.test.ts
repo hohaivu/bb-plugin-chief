@@ -2498,15 +2498,27 @@ describe("Chief backend", () => {
     const db = bb.storage.database();
     bb.storage.migrate(db, MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes(`'${role}'`))));
 
-    db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, title, state, created_at, updated_at)
-      VALUES ('thr_old', 'worker', 'proj_1', 'thr_chief', 'Existing work', 'ready', 1, 2)`).run();
+    if (role === "advisor") {
+      // reject_streak and parent_thread_id are pre-existing columns by this point
+      // in the migration chain; the rebuild must carry their nondefault values over.
+      db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, title, state, created_at, updated_at, reject_streak, parent_thread_id)
+        VALUES ('thr_old', 'worker', 'proj_1', 'thr_chief', 'Existing work', 'ready', 1, 2, 2, 'thr_parent')`).run();
+    } else {
+      db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, title, state, created_at, updated_at)
+        VALUES ('thr_old', 'worker', 'proj_1', 'thr_chief', 'Existing work', 'ready', 1, 2)`).run();
+    }
     db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at)
       VALUES ('host_1', 'senior', 'codex', 'gpt-6-astra', 'high', 3)`).run();
 
     bb.storage.migrate(db, MIGRATIONS);
 
-    expect(db.prepare(`SELECT title, state, chief_thread_id FROM managed_threads WHERE thread_id='thr_old'`).get())
-      .toEqual({ title: "Existing work", state: "ready", chief_thread_id: "thr_chief" });
+    if (role === "advisor") {
+      expect(db.prepare(`SELECT title, state, reject_streak, parent_thread_id FROM managed_threads WHERE thread_id='thr_old'`).get())
+        .toEqual({ title: "Existing work", state: "ready", reject_streak: 2, parent_thread_id: "thr_parent" });
+    } else {
+      expect(db.prepare(`SELECT title, state, chief_thread_id FROM managed_threads WHERE thread_id='thr_old'`).get())
+        .toEqual({ title: "Existing work", state: "ready", chief_thread_id: "thr_chief" });
+    }
     expect(db.prepare(`SELECT model, reasoning_level FROM chief_models WHERE host_id='host_1' AND role='worker'`).get())
       .toEqual({ model: "gpt-6-astra", reasoning_level: "high" });
     // Widening that CHECK is the whole point of the rebuild.
