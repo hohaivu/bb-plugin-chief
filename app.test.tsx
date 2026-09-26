@@ -166,7 +166,7 @@ test("marks Chief conversations with a compact header badge", async () => {
     { threadId: chief.threadId, projectId: chief.projectId, isCompactViewport: false },
     {
       rpc: {
-        status: () => ({ sectionId: "sec_chief", threads: [chief] }),
+        role: ({ threadId }) => ({ role: threadId === chief.threadId ? chief.role : null }),
         start: () => ({ threadId: chief.threadId, created: false }),
         create: () => ({ threadId: "thr_new", created: true }),
       },
@@ -192,7 +192,7 @@ test("shows the role chip on managed threads and nothing on others", async () =>
     >(
       app.threadHeaderActions[0]!,
       { threadId, projectId: "proj_1", isCompactViewport: false },
-      { rpc: { status: () => ({ sectionId: "sec_chief", threads: [worker] }) } },
+      { rpc: { role: ({ threadId }) => ({ role: threadId === worker.threadId ? worker.role : null }) } },
     );
     unmounts.push(() => rendered.lifecycle.unmount());
     return rendered;

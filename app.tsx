@@ -261,10 +261,8 @@ function ChiefHeaderBadge({
 
   useEffect(() => {
     let current = true;
-    void rpc.call("status", null).then((result) => {
-      if (current) {
-        setRole(result.threads.find((thread) => thread.threadId === threadId)?.role ?? null);
-      }
+    void rpc.call("role", { threadId }).then((result) => {
+      if (current) setRole(result.role);
     }).catch(() => undefined);
     return () => {
       current = false;

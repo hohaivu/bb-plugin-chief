@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,6 +87,15 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         fileContent: async () => { throw new Error("missing"); },
       },
       hosts: { list: async () => [{ id: "host_1", name: "Local", status: options.hostStatus ?? "connected" }] },
+      // Thread storage sits on host_storage, not this machine: a plan must be written through it.
+      files: {
+        write: async ({ hostId, path, content }: { hostId?: string; path: string; content: string }) => {
+          if (hostId !== "host_storage") throw new Error(`wrote ${path} to host ${hostId}`);
+          await mkdir(dirname(path), { recursive: true });
+          await writeFile(path, content);
+          return {};
+        },
+      },
       environments: {
         get: async ({ environmentId }: { environmentId: string }) => ({ id: environmentId, hostId: "host_1" }),
         diffFiles: async () => ({ outcome: "available", files: [{ path: "totals.ts" }] }),
@@ -131,7 +140,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           return thread;
         },
         getPluginMetadata: async ({ threadId }: { threadId: string }) => pluginMetadataStore.get(threadId) ?? {},
-        storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_1", storageRootPath: join(storageRoot, threadId) }),
+        storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_storage", storageRootPath: join(storageRoot, threadId) }),
         get: async ({ threadId }: { threadId: string }) => {
           const failures = getFailures.get(threadId) ?? 0;
           if (failures > 0) {
@@ -1549,7 +1558,7 @@ describe("Chief backend", () => {
     const worker = await delegate(state, replacement.threadId, "Fix checkout totals");
     await expect(state.harness.behavior.callAgentTool(
       "chief_roster", { todo: { text: "Sneaky" } }, { threadId: worker.threadId, projectId: "proj_1" },
-    )).rejects.toThrow("requires a registered Chief");
+    )).rejects.toThrow("requires an active registered Chief");
   });
 
   test("the pending RPC lists every item and signals only on change", async () => {
@@ -1886,10 +1895,13 @@ describe("Chief backend", () => {
       expect(text).not.toContain("## Project rules");
     }
 
+    // The built-in rules are Chief's own; a managed thread would only be told to call tools it lacks.
+    expect((await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId))).instructions)
+      .toContain("Chief operating rules");
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
-    for (const threadId of [chief.threadId, worker.threadId, planner.threadId, workerReview.threadId, branchReview.threadId]) {
+    for (const threadId of [worker.threadId, planner.threadId, workerReview.threadId, branchReview.threadId]) {
       const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
-      expect(configured.instructions).toContain("Chief operating rules");
+      expect(configured.instructions).not.toContain("Chief operating rules");
     }
   });
 
@@ -3522,6 +3534,54 @@ describe("Chief backend", () => {
     const result = await state.harness.behavior.runCli(["review", "--pull-request", "acme/widgets#9", "--json"], opts);
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout!).title).toBe("Review · feature/from-gitlab");
+  });
+
+  test("a completed worker stays complete through later turns and reconciles", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    expect((await state.harness.behavior.runCli(["complete", worker.threadId])).exitCode).toBe(0);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
+    await state.supervisorCycle();
+    expect((await status(state)).threads.find((row) => row.threadId === worker.threadId)!.state).toBe("complete");
+  });
+
+  test("two concurrent delegations cannot share one branch", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const call = (title: string) => state.harness.behavior.callAgentTool("chief_delegate", {
+      title, mission: "Correct totals", branch: "feature/shared", unplannedReason: "Bounded test fixture",
+    }, opts);
+    const results = await Promise.allSettled([call("First"), call("Second")]);
+    expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect(String((results.find((result) => result.status === "rejected") as PromiseRejectedResult).reason))
+      .toContain("already carries the active worker");
+  });
+
+  test("the CLI refuses a managed thread's lifecycle commands; --json never eats a thread id", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const refused = await state.harness.behavior.runCli(
+      ["delegate", "--title", "Sneaky", "--mission", "Spawn a sibling", "--unplanned-reason", "x"],
+      { threadId: worker.threadId, projectId: "proj_1" },
+    );
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain("chief_report");
+    const inspected = await state.harness.behavior.runCli(["inspect", "--json", worker.threadId], { threadId: chief.threadId, projectId: "proj_1" });
+    expect(inspected.exitCode).toBe(0);
+    expect(JSON.parse(inspected.stdout!).threadId).toBe(worker.threadId);
+  });
+
+  test("a long worker result never clips the next call out of Chief's alert", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "x".repeat(7_900) }, { threadId: worker.threadId, projectId: "proj_1" });
+    const alert = JSON.stringify(state.sent.at(-1));
+    expect(alert).toContain("chief_review");
   });
 });
 

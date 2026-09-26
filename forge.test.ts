@@ -8,6 +8,16 @@ describe("forgeInitScript", () => {
       .toBe("feature/fix-checkout-totals-tax");
   });
 
+  test("keeps titles that differ only in non-Latin letters or past the cut on separate branches", () => {
+    const branch = (title: string) => forgeInitScript({ title }).branch;
+    expect(branch("Café menu")).toBe("feature/cafe-menu");
+    expect(branch("修复结账")).not.toBe(branch("修复登录"));
+    expect(branch("修复结账")).toMatch(/^feature\/task-[0-9a-f]{8}$/);
+    const long = "Refactor the checkout totals pipeline so every tax rule is applied once";
+    expect(branch(`${long} in carts`)).not.toBe(branch(`${long} in orders`));
+    expect(branch(`${long} in carts`).length).toBeLessThanOrEqual("feature/".length + 60);
+  });
+
   test("quotes a title the shell would otherwise eat", () => {
     const { script } = forgeInitScript({ title: "Chief's forge; rm -rf /" });
     expect(script).toContain("TITLE='Chief'\\''s forge; rm -rf /'");
