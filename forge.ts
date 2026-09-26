@@ -3,14 +3,23 @@
 // can; Chief runs it only on fallback. Every value is substituted and quoted here,
 // once, instead of being re-derived by a model on every delegation.
 
+import { createHash } from "node:crypto";
+
 /** POSIX single-quoting: the only interpolation this script does. */
 function quote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function slug(title: string) {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60)
-    .replace(/-+$/, "") || "task";
+  // NFKD splits "é" into "e" plus a combining mark, so accented titles keep their letters.
+  const ascii = title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const full = ascii.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  // Two titles that differ only in letters the slug drops (a non-Latin title) or in what
+  // the length cut drops would share one branch; a hash of the whole title keeps them apart.
+  const lossy = full.length > 60 || /[\p{L}\p{N}]/u.test(ascii.replace(/[a-z0-9]/g, ""));
+  if (!lossy) return full || "task";
+  const hash = createHash("sha256").update(title).digest("hex").slice(0, 8);
+  return `${full.slice(0, 51).replace(/-+$/, "") || "task"}-${hash}`;
 }
 
 export function forgeInitScript(input: { title: string; base?: string; body?: string }) {
@@ -41,9 +50,14 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     "# repository with issues disabled, leaves a value empty and never stops the branch",
     "# from being created.",
     "FORGE=''",
-    'case "$(git remote get-url origin 2>/dev/null)" in',
-    "  *github.com*) command -v gh >/dev/null 2>&1 && FORGE=gh ;;",
-    "  *) command -v glab >/dev/null 2>&1 && FORGE=glab ;;",
+    "# https://host/..., ssh://git@host:port/... and git@host:org/repo all reduce to host.",
+    "HOST=$(git remote get-url origin 2>/dev/null | sed -E 's#^[a-z+]+://##; s#^[^@/]*@##; s#[:/].*##')",
+    'case "$HOST" in',
+    "  *github*) command -v gh >/dev/null 2>&1 && FORGE=gh ;;",
+    "  *gitlab*) command -v glab >/dev/null 2>&1 && FORGE=glab ;;",
+    "  # A self-hosted forge under another name belongs to whichever CLI is logged in to it.",
+    '  ?*) if command -v gh >/dev/null 2>&1 && gh auth status --hostname "$HOST" >/dev/null 2>&1; then FORGE=gh',
+    "      elif command -v glab >/dev/null 2>&1; then FORGE=glab; fi ;;",
     "esac",
     "",
     "# Reuse an issue whose title matches exactly. A bare term search returns near",
@@ -90,8 +104,14 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     '      | grep -o "https://[^ ]*" | tail -1 || true)',
     "  fi",
     'elif [ "$FORGE" = glab ]; then',
-    '  PR_URL=$(glab mr create --draft --source-branch "$BRANCH" --target-branch "$BASE" -t "$TITLE" -d "$PR_BODY" --yes 2>/dev/null \\',
-    '    | grep -o "https://[^ ]*" | tail -1 || true)',
+    "  # Reuse the open merge request a partial earlier run left; glab mr list lists open ones.",
+    '  if command -v jq >/dev/null 2>&1; then',
+    '    PR_URL=$(glab mr list --source-branch "$BRANCH" -F json 2>/dev/null | jq -r \'.[0].web_url // ""\' 2>/dev/null || true)',
+    "  fi",
+    '  if [ -z "$PR_URL" ]; then',
+    '    PR_URL=$(glab mr create --draft --source-branch "$BRANCH" --target-branch "$BASE" -t "$TITLE" -d "$PR_BODY" --yes 2>/dev/null \\',
+    '      | grep -o "https://[^ ]*" | tail -1 || true)',
+    "  fi",
     "fi",
     "",
     "# A branch that could not be cut at all is reported empty rather than handed to a",
