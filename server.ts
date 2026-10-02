@@ -385,7 +385,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 - When the user or a worker corrects a factual claim, verify it against the code before accepting the correction.
 - Start extra reviews with chief_review — a worker's worktree, or a fresh one for a pull request or branch with no worker — whenever a change deserves a second pass.
 - Keep thread titles literal and recognizable. Never invent codenames.
-- Do not delete user threads. Mark managed work complete: completing an approved worker whose worktree is clean and pushed archives its environment's threads so BB frees the worktree, and a planner is archived after its final wave. When chief_complete says it kept a worktree, resolve the reason it gives or tell the user.`;
+- Do not delete user threads. Mark managed work complete: completing the approved current worker of a final wave or unplanned run, with a clean and pushed worktree, archives its environment's threads so BB frees the worktree, and a planner is archived after its final wave. After replaces:, review and complete the successor, not the predecessor. When chief_complete says it kept a worktree, resolve the reason it gives or tell the user.`;
 
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
@@ -707,6 +707,10 @@ export default async function plugin(bb: BbPluginApi) {
   // chief_review recommendation.
   const latestReviewForWorker = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  );
+  // Insertion order, not created_at (same-ms ties); no state filter, so a finished successor still counts.
+  const newerWorkers = db.prepare<[string, string]>(
+    `SELECT thread_id FROM managed_threads WHERE role='worker' AND project_id=? AND rowid > (SELECT rowid FROM managed_threads WHERE thread_id=?)`,
   );
   const existingBranchReview = db.prepare<[string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
@@ -1763,8 +1767,19 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Archives a finished worker's environment so BB frees its worktree, only when it is approved,
-   * idle, clean and pushed. Returns one sentence for the completion reply; never throws. */
+  /** An unplanned worker, or the one whose wave is the last of its planner's persisted schedule.
+   * A missing planner or malformed schedule is unknown, never unplanned. */
+  function isFinalUnit(row: ManagedRow) {
+    if (row.plan_thread_id === null && row.plan_wave === null) return true;
+    const planner = row.plan_thread_id ? roles.get(row.plan_thread_id) : undefined;
+    if (!planner || planner.role !== "planner" || planner.project_id !== row.project_id || !planner.plan_waves) return false;
+    let waves: unknown;
+    try { waves = JSON.parse(planner.plan_waves); } catch { return false; }
+    return Array.isArray(waves) && waves.length > 0 && row.plan_wave === waves.length;
+  }
+
+  /** Archives a finished worker's environment so BB frees its worktree, only when it is the current final unit,
+   * approved, idle, clean and pushed. Returns one sentence for the completion reply; never throws. */
   async function releaseWorktree(row: ManagedRow, priorState: ManagedRow["state"], environmentId: string | null): Promise<string> {
     const resolve = "Resolve it, then chief_complete again to release it.";
     try {
@@ -1773,7 +1788,14 @@ export default async function plugin(bb: BbPluginApi) {
       if (!review || review.verdict !== "approve" || review.reviewed_report_seq !== row.report_seq) {
         return `Worktree kept: no approving review covers its latest report.`;
       }
+      if (!isFinalUnit(row)) return `Worktree kept: it is not the final wave of its plan, or its plan schedule is unknown.`;
       if (!environmentId) return `Worktree kept: it has no environment.`;
+      // A replaces: successor reuses this environment; releasing it here would skip the successor's review.
+      for (const { thread_id } of newerWorkers.all(row.project_id, row.thread_id) as { thread_id: string }[]) {
+        if ((await bb.sdk.threads.get({ threadId: thread_id })).environmentId === environmentId) {
+          return `Worktree kept: this worker was superseded by ${thread_id}; complete the current worker instead.`;
+        }
+      }
       if ((await bb.sdk.environments.get({ environmentId })).workspaceProvisionType !== "managed-worktree") {
         return `Worktree kept: its environment is not a managed worktree.`;
       }
@@ -2719,7 +2741,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_complete",
     presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
-    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. For a worker with an approving review whose worktree is clean and pushed, it then archives every thread in that worktree so BB frees it; otherwise it says why it kept it.",
+    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. For the current final-wave or unplanned worker with an approving review whose worktree is clean and pushed, it then archives every thread in that worktree so BB frees it; otherwise it says why it kept it.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional() }),
     async execute({ threadId, result }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
