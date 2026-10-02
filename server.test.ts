@@ -69,6 +69,17 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   const catalogReads: (string | undefined)[] = [];
   const tabsStore = new Map<string, { revision: number; tabs: any[] }>();
   let tabsUpdateFailures = 0;
+  const archivedEnvs: string[] = [];
+  const archivedThreads: string[] = [];
+  // Default: clean, on feature/x, and pushed (origin/feature/x exists with nothing ahead).
+  let envStatus = (mergeBaseBranch?: string): any => ({
+    outcome: "available",
+    workspace: {
+      workingTree: { hasUncommittedChanges: false, files: [] },
+      checkout: { kind: "branch", branchName: "feature/x" },
+      mergeBase: mergeBaseBranch ? { baseRef: "abc", aheadCount: 0, behindCount: 0 } : null,
+    },
+  });
   const { bb, harness } = createFakePluginHost({
     pluginId: options.pluginId ?? "chief",
     agentSkillIds: ["chief", "chief-worker"],
@@ -97,7 +108,14 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         },
       },
       environments: {
-        get: async ({ environmentId }: { environmentId: string }) => ({ id: environmentId, hostId: "host_1" }),
+        get: async ({ environmentId }: { environmentId: string }) => ({
+          id: environmentId, hostId: "host_1", workspaceProvisionType: environmentId === "env_worker" ? "managed-worktree" : null,
+        }),
+        status: async ({ mergeBaseBranch }: { mergeBaseBranch?: string }) => envStatus(mergeBaseBranch),
+        archiveThreads: async ({ environmentId }: { environmentId: string }) => {
+          archivedEnvs.push(environmentId);
+          return { ok: true, archivedThreadIds: [...live.values()].filter((t) => t.environmentId === environmentId).map((t) => t.id) };
+        },
         diffFiles: async () => ({ outcome: "available", files: [{ path: "totals.ts" }] }),
         diffPatch: async () => ({ outcome: "available", patches: [{ patch, truncated: false }] }),
       },
@@ -139,6 +157,8 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           if (args.pluginMetadata) pluginMetadataStore.set(id, args.pluginMetadata);
           return thread;
         },
+        list: async ({ environmentId }: { environmentId: string }) => [...live.values()].filter((t) => t.environmentId === environmentId && !t.archivedAt),
+        archive: async ({ threadId }: { threadId: string }) => { archivedThreads.push(threadId); return { ok: true }; },
         getPluginMetadata: async ({ threadId }: { threadId: string }) => pluginMetadataStore.get(threadId) ?? {},
         storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_storage", storageRootPath: join(storageRoot, threadId) }),
         get: async ({ threadId }: { threadId: string }) => {
@@ -213,6 +233,9 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     stopped,
     live,
     catalogReads,
+    archivedEnvs,
+    archivedThreads,
+    setEnvStatus(fn: (mergeBaseBranch?: string) => any) { envStatus = fn; },
     section: () => section,
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
@@ -3676,9 +3699,84 @@ describe("auto-completing absorbed supporting threads", () => {
     expect(stateOf(state, wave2)).toBe("complete");
     await settle();
     expect(stateOf(state, planner.threadId)).toBe("ready");
+    expect(state.archivedThreads).toEqual([]);
     await call(state, "chief_complete", { threadId: fix }, chief.threadId);
     await settle();
     expect(stateOf(state, planner.threadId)).toBe("complete");
+    expect(state.archivedThreads).toEqual([planner.threadId]);
+  });
+
+  test("completing an approved, clean, pushed worker archives its environment", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await reviewed(state, chief.threadId, worker.threadId, "approve");
+    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
+    expect(reply).toContain("Archived");
+    expect(state.archivedEnvs).toEqual(["env_worker"]);
+  });
+
+  const kept: [string, (b?: string) => any, string][] = [
+    ["dirty", () => ({ outcome: "available", workspace: { workingTree: { hasUncommittedChanges: true, files: [] }, checkout: { kind: "branch", branchName: "feature/x" }, mergeBase: null } }), "Worktree kept: it has uncommitted changes"],
+    ["ahead", (b) => ({ outcome: "available", workspace: { workingTree: { hasUncommittedChanges: false, files: [] }, checkout: { kind: "branch", branchName: "feature/x" }, mergeBase: b ? { baseRef: "abc", aheadCount: 2, behindCount: 0 } : null } }), "not pushed"],
+    ["never pushed", (b) => ({ outcome: "available", workspace: { workingTree: { hasUncommittedChanges: false, files: [] }, checkout: { kind: "branch", branchName: "feature/x" }, mergeBase: b ? { baseRef: null, aheadCount: 0, behindCount: 0 } : null } }), "no origin/feature/x"],
+    ["status throws", () => { throw new Error("host down"); }, "could not check"],
+  ];
+  test.each(kept)("an approved worker whose worktree is %s keeps it", async (_name, envStatus, expected) => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await reviewed(state, chief.threadId, worker.threadId, "approve");
+    state.setEnvStatus(envStatus);
+    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
+    expect(reply).toContain(expected);
+    expect(state.archivedEnvs).toEqual([]);
+    expect(stateOf(state, worker.threadId)).toBe("complete");
+  });
+
+  test("a busy thread in the worker's environment keeps the worktree", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await reviewed(state, chief.threadId, worker.threadId, "approve");
+    const advisor = await consulted(state, chief.threadId, worker.threadId);
+    state.live.set(advisor, { ...state.live.get(advisor)!, status: "active" });
+    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
+    expect(reply).toContain(`thread ${advisor} in its environment is still active`);
+    expect(state.archivedEnvs).toEqual([]);
+  });
+
+  test("a worker without an approving review keeps its worktree", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const rejected = await delegate(state, chief.threadId);
+    await reviewed(state, chief.threadId, rejected.threadId, "request_changes");
+    const unreviewed = await delegate(state, chief.threadId, "Other");
+    for (const id of [rejected.threadId, unreviewed.threadId]) {
+      expect(String(await call(state, "chief_complete", { threadId: id }, chief.threadId))).toContain("no approving review");
+    }
+    expect(state.archivedEnvs).toEqual([]);
+  });
+
+  test("a replaces: hand-off completes the prior worker without archiving", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await reviewed(state, chief.threadId, worker.threadId, "approve");
+    await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
+    await settle();
+    expect(stateOf(state, worker.threadId)).toBe("complete");
+    expect([state.archivedEnvs, state.archivedThreads]).toEqual([[], []]);
+  });
+
+  test("archiving a complete worker keeps its row complete", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, archivedAt: 2 });
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(worker.threadId)! });
+    expect(stateOf(state, worker.threadId)).toBe("complete");
   });
 
   test("a reviewer that reported ready while still live-active is swept only after it goes idle", async () => {
