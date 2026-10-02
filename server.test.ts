@@ -3822,6 +3822,10 @@ describe("auto-completing absorbed supporting threads", () => {
     ["threads.list throws", ({ state }) => state.failSdk("threads.list"), "threads.list down"],
     ["archiveThreads throws", ({ state }) => state.failSdk("archiveThreads"), "archiveThreads down"],
     ["missing planner", ({ state, worker }) => state.db.prepare(`UPDATE managed_threads SET plan_thread_id='thr_gone', plan_wave=1 WHERE thread_id=?`).run(worker.threadId), "not the final wave"],
+    ["successor with unknown environment", async ({ state, chief }) => {
+      const other = await delegate(state, chief.threadId, "Other");
+      state.live.set(other.threadId, { ...state.live.get(other.threadId)!, environmentId: null });
+    }, "could not check it (successor"],
     ["wave without planner link", ({ state, worker }) => state.db.prepare(`UPDATE managed_threads SET plan_wave=1 WHERE thread_id=?`).run(worker.threadId), "not the final wave"],
   ];
   test.each(guards)("%s keeps the worktree but completes the worker", async (_name, breakIt, reason) => {
@@ -3845,6 +3849,17 @@ describe("auto-completing absorbed supporting threads", () => {
     for (const [waves, wave] of [[null, 2], ["[]", 0], ["{}", 2], ["nope", 2], [valid, null], [valid, 0], [valid, 1], [valid, 3]] as const) {
       link(waves, wave);
       expect(await s.complete(), `${waves} @ ${wave}`).toContain("not the final wave");
+    }
+    // Length-bearing non-arrays, a non-planner link and a cross-project planner are unknown, not final.
+    for (const waves of ['"ab"', '{"length":2}']) {
+      link(waves, 2);
+      expect(await s.complete(), waves).toContain("not the final wave");
+    }
+    link(valid, 2);
+    for (const [column, value, restore] of [["role", "advisor", "planner"], ["project_id", "proj_other", "proj_1"]]) {
+      s.state.db.prepare(`UPDATE managed_threads SET ${column}=? WHERE thread_id=?`).run(value, planner.threadId);
+      expect(await s.complete(), column).toContain("not the final wave");
+      s.state.db.prepare(`UPDATE managed_threads SET ${column}=? WHERE thread_id=?`).run(restore, planner.threadId);
     }
     expect(s.state.archivedEnvs).toEqual([]);
     link(valid, 2);

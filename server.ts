@@ -1792,7 +1792,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (!environmentId) return `Worktree kept: it has no environment.`;
       // A replaces: successor reuses this environment; releasing it here would skip the successor's review.
       for (const { thread_id } of newerWorkers.all(row.project_id, row.thread_id) as { thread_id: string }[]) {
-        if ((await bb.sdk.threads.get({ threadId: thread_id })).environmentId === environmentId) {
+        const successorEnv = (await bb.sdk.threads.get({ threadId: thread_id })).environmentId;
+        if (!successorEnv) return `Worktree kept: could not check it (successor ${thread_id} has no known environment). ${resolve}`;
+        if (successorEnv === environmentId) {
           return `Worktree kept: this worker was superseded by ${thread_id}; complete the current worker instead.`;
         }
       }
