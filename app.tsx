@@ -268,7 +268,7 @@ function HostModelPicker({ hostId, value, disabled, onPick }: {
   );
 }
 
-const inRange =(value: number, max: number) => Number.isInteger(value) && value >= 1 && value <= max;
+const inRange = (value: number, max: number) => Number.isInteger(value) && value >= 1 && value <= max;
 
 type ResearchMode = keyof ResearchConfiguration["settings"]["timeoutMinutes"];
 const RESEARCH_MODE_SECTIONS: { mode: ResearchMode; label: string }[] = [
