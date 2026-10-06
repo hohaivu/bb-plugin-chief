@@ -4,12 +4,29 @@ import { act, fireEvent, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { rpcContract, type TodoItem } from "./server";
 
+const hostPicker = vi.hoisted(() => ({ normalizes: false }));
+vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@get-bb/plugin-sdk/app")>();
+  const { createElement, useEffect } = await import("react");
+  // Like bb's picker: every render it re-reports its own state, here with a service tier Chief does not store.
+  function HostLikePicker(props: any) {
+    useEffect(() => {
+      if (hostPicker.normalizes && props.value.serviceTier === undefined) props.onChange({ ...props.value, serviceTier: "default" });
+    });
+    // Resolved lazily: the harness installs the runtime inside loadPluginApp.
+    const Picker = (globalThis as any).__bbPluginRuntime.pluginSdkApp.experimental_ProviderModelPicker;
+    return createElement(Picker, props);
+  }
+  return { ...actual, experimental_ProviderModelPicker: HostLikePicker };
+});
+
 const app = await loadPluginApp(() => import("./app"));
 const unmounts: Array<() => void> = [];
 const emptyStatus = { sectionId: null, threads: [] };
 
 afterEach(() => {
   while (unmounts.length) unmounts.pop()!();
+  hostPicker.normalizes = false;
 });
 
 test("creates a fresh Chief from the project-aware New Thread screen", async () => {
@@ -253,6 +270,27 @@ test("picks a scanned model per role and clears back to the BB default", async (
   expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
 });
 
+test("a picker re-reporting a service tier saves no role model", async () => {
+  hostPicker.normalizes = true;
+  const section = app.settingsSections.find((candidate) => candidate.id === "models")!;
+  const configuration = {
+    hosts: [{
+      hostId: "host_1", hostName: "Local", connected: true, error: null,
+      fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
+      selections: { chief: null, planner: null, worker: null, reviewer: null, advisor: null },
+      unusable: [],
+    }],
+  };
+  const rendered = renderSlot<Record<string, never>, typeof rpcContract>(section, {}, {
+    rpc: { modelConfiguration: () => configuration, setRoleModel: () => ({ ok: true as const }) } as never,
+  });
+  unmounts.push(() => rendered.lifecycle.unmount());
+  await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+  await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
+  expect(rendered.rpcCalls.filter((call) => call.method === "setRoleModel")).toHaveLength(0);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
+});
+
 test("the thread panel's Chief to-do tab lists items as a checklist and refetches on the realtime signal", async () => {
   expect(app.threadPanelActions.map((action) => action.id)).toEqual(["pending"]);
   const items = [
@@ -382,6 +420,17 @@ describe("Chief researcher settings", () => {
   };
   const picker = (rendered: ReturnType<typeof render>) => within(rendered.getAllByTestId("bb-provider-model-picker")[0]!);
   const inheriting = "Inherit caller · uses the calling thread's model";
+
+  test("a picker re-reporting a service tier saves nothing and the screen settles", async () => {
+    hostPicker.normalizes = true;
+    const { rpc, store } = fake();
+    const rendered = render(rpc);
+    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
+    await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(rendered.rpcCalls.filter((call) => call.method === "setResearchModel")).toHaveLength(0);
+    expect(store.selections).toEqual({ survey: null, review: null, investigate: null });
+    expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(1);
+  });
 
   test("the Researcher switch is on by default", async () => {
     const rendered = render(fake().rpc);
