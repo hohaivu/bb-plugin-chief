@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, expect, test, vi } from "vitest";
-import { act, fireEvent } from "@testing-library/react";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { act, fireEvent, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import type { rpcContract, TodoItem } from "./server";
+import { rpcContract, type TodoItem } from "./server";
 
 const app = await loadPluginApp(() => import("./app"));
 const unmounts: Array<() => void> = [];
@@ -339,4 +339,131 @@ test("the Chief pending tab refetches once after the realtime connection reconne
   await act(async () => rendered.setRealtimeConnectionState("connected"));
   await vi.waitFor(() => expect(shown()).toContain("Follow up"));
   expect(calls()).toBe(2);
+});
+
+test("registers the Chief researcher settings section after the models section", () => {
+  expect(app.settingsSections.map((section) => section.id)).toEqual(["models", "research"]);
+});
+
+describe("Chief researcher settings", () => {
+  const triple = { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const };
+  const stages = () => ({ scan: null, verify: null, combine: null }) as Record<string, typeof triple | null>;
+  const fake = () => {
+    const settings = {
+      enabled: true,
+      roles: {
+        chief: { enabled: true, maxAgentCalls: 100 },
+        planner: { enabled: true, maxAgentCalls: 24 },
+        reviewer: { enabled: true, maxAgentCalls: 24 },
+      },
+    };
+    const selections = { chief: stages(), planner: stages(), reviewer: stages() };
+    const rpc = {
+      researchConfiguration: () => ({
+        settings: structuredClone(settings),
+        hosts: [{
+          hostId: "host_1", hostName: "Local", connected: true, error: null,
+          fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
+          selections: structuredClone(selections), unusable: [],
+        }],
+      }),
+      // The harness does not validate input, so the fake applies the real contract schema.
+      setResearchModel: (input: unknown) => {
+        const parsed = rpcContract.setResearchModel.input.safeParse(input);
+        if (!parsed.success) throw new Error("Invalid model selection");
+        const { role, stage, selection } = parsed.data;
+        selections[role][stage] = selection;
+        return { ok: true as const };
+      },
+      setResearchSettings: (patch: { enabled?: boolean; planner?: { maxAgentCalls?: number } }) => {
+        if (patch.enabled !== undefined) settings.enabled = patch.enabled;
+        if (patch.planner?.maxAgentCalls) settings.roles.planner.maxAgentCalls = patch.planner.maxAgentCalls;
+        return structuredClone(settings);
+      },
+    };
+    return { rpc, selections };
+  };
+  const render = (rpc: ReturnType<typeof fake>["rpc"]) => {
+    const section = app.settingsSections.find((candidate) => candidate.id === "research")!;
+    const rendered = renderSlot<Record<string, never>, typeof rpcContract>(section, {}, { rpc: rpc as never });
+    unmounts.push(() => rendered.lifecycle.unmount());
+    return rendered;
+  };
+  // Cells render chief, planner, reviewer × scan, verify, combine; index 3 is planner · scan.
+  const plannerScan = (rendered: ReturnType<typeof render>) =>
+    within(rendered.getAllByTestId("bb-provider-model-picker")[3]!);
+
+  test("saves a full triple and shows it after a reload", async () => {
+    const { rpc } = fake();
+    const first = render(rpc);
+    await vi.waitFor(() => expect(first.getByText("Local")).toBeTruthy());
+    expect(first.getAllByText("Inherit caller · uses the calling thread's model")).toHaveLength(9);
+    const cell = plannerScan(first);
+    fireEvent.change(cell.getByLabelText("Provider ID"), { target: { value: triple.providerId } });
+    fireEvent.change(cell.getByLabelText("Model"), { target: { value: triple.model } });
+    fireEvent.change(cell.getByLabelText("Reasoning level"), { target: { value: triple.reasoningLevel } });
+    fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
+    await vi.waitFor(() =>
+      expect(first.rpcCalls).toContainEqual({
+        method: "setResearchModel",
+        input: { hostId: "host_1", role: "planner", stage: "scan", selection: triple },
+      }),
+    );
+    first.lifecycle.unmount();
+
+    const second = render(rpc);
+    await vi.waitFor(() => expect(second.getByText("Local")).toBeTruthy());
+    expect((plannerScan(second).getByLabelText("Model") as HTMLInputElement).value).toBe(triple.model);
+    expect(second.getAllByRole("button", { name: "Inherit caller" })).toHaveLength(1);
+    expect(second.getAllByText("Inherit caller · uses the calling thread's model")).toHaveLength(8);
+  });
+
+  test("rejects a partial triple, stores nothing, and shows the error after reload", async () => {
+    const { rpc, selections } = fake();
+    const rendered = render(rpc);
+    await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+    const cell = plannerScan(rendered);
+    fireEvent.change(cell.getByLabelText("Model"), { target: { value: "" } });
+    fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
+    await vi.waitFor(() => expect(rendered.getByRole("alert").textContent).toContain("Invalid model selection"));
+    expect(selections.planner.scan).toBeNull();
+    await vi.waitFor(() =>
+      expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(2),
+    );
+    expect(rendered.getAllByText("Inherit caller · uses the calling thread's model")).toHaveLength(9);
+  });
+
+  test("the feature switch and caps save valid values only", async () => {
+    const { rpc } = fake();
+    const rendered = render(rpc);
+    await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+    const sent = () => rendered.rpcCalls.filter((call) => call.method === "setResearchSettings").map((call) => call.input);
+
+    fireEvent.click(rendered.getByRole("checkbox", { name: "Researcher" }));
+    await vi.waitFor(() => expect(sent()).toEqual([{ enabled: false }]));
+
+    const cap = rendered.getByLabelText("Planner agent calls per run");
+    fireEvent.change(cap, { target: { value: "0" } });
+    expect(cap.getAttribute("aria-invalid")).toBe("true");
+    expect(sent()).toHaveLength(1);
+    fireEvent.change(cap, { target: { value: "30" } });
+    await vi.waitFor(() => expect(sent()).toEqual([{ enabled: false }, { planner: { maxAgentCalls: 30 } }]));
+    expect(cap.getAttribute("aria-invalid")).toBe("false");
+  });
+
+  test("Inherit caller clears a stage selection", async () => {
+    const { rpc, selections } = fake();
+    selections.planner.scan = triple;
+    const rendered = render(rpc);
+    await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+    fireEvent.click(rendered.getByRole("button", { name: "Inherit caller" }));
+    await vi.waitFor(() =>
+      expect(rendered.rpcCalls).toContainEqual({
+        method: "setResearchModel",
+        input: { hostId: "host_1", role: "planner", stage: "scan", selection: null },
+      }),
+    );
+    expect(rendered.getAllByText("Inherit caller · uses the calling thread's model")).toHaveLength(9);
+    expect(selections.planner.scan).toBeNull();
+  });
 });

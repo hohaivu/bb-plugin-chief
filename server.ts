@@ -37,6 +37,17 @@ const CONSULT_AFTER_REJECTIONS = 2;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const execFileAsync = promisify(execFile);
+/** How long one chief_research call waits before handing back a runId to resume with. */
+const RESEARCH_WAIT_MS = 10 * 60_000;
+const RESEARCH_POLL_MS = 3_000;
+const MAX_RESEARCH_OUTPUT = 32_000;
+const RESEARCH_PREAMBLE = "READ-ONLY: Do not edit, create, or delete files, commit, push, or run mutating commands; you share the caller's checkout.";
+
+/** Homebrew bins appended to the server's PATH.
+ * ponytail: heuristic for GUI-launched servers whose PATH lacks Homebrew; upgrade path is a configured PATH. */
+function serverPath() {
+  return `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`;
+}
 const FORGE_SCRIPT_TIMEOUT_MS = 120_000;
 
 type Forge = "github" | "gitlab";
@@ -143,6 +154,216 @@ const modelSelectionSchema = z.object({
   reasoningLevel: reasoningSchema,
 });
 export type ModelSelection = z.infer<typeof modelSelectionSchema>;
+
+const researchRoleSchema = z.enum(["chief", "planner", "reviewer"]);
+const stageSchema = z.enum(["scan", "verify", "combine"]);
+const researchModeSchema = z.enum(["survey", "review", "investigate"]);
+type ResearchRole = z.infer<typeof researchRoleSchema>;
+type Stage = z.infer<typeof stageSchema>;
+/** Which modes each role may run; wave 1 only implements survey. */
+const RESEARCH_MODES: Record<ResearchRole, z.infer<typeof researchModeSchema>[]> = {
+  chief: ["survey", "review", "investigate"],
+  planner: ["survey", "investigate"],
+  reviewer: ["review", "survey"],
+};
+const agentCapSchema = z.number().int().min(1).max(100);
+const researchRoleSettingsSchema = z.object({ enabled: z.boolean(), maxAgentCalls: agentCapSchema });
+const researchSettingsSchema = z.object({
+  enabled: z.boolean(),
+  roles: z.object({ chief: researchRoleSettingsSchema, planner: researchRoleSettingsSchema, reviewer: researchRoleSettingsSchema }),
+});
+type ResearchSettings = z.infer<typeof researchSettingsSchema>;
+const stageSelectionsSchema = z.object({
+  scan: modelSelectionSchema.nullable(),
+  verify: modelSelectionSchema.nullable(),
+  combine: modelSelectionSchema.nullable(),
+});
+const researchConfigurationSchema = z.object({
+  settings: researchSettingsSchema,
+  hosts: z.array(z.object({
+    hostId: z.string(),
+    hostName: z.string(),
+    connected: z.boolean(),
+    fallback: modelSelectionSchema.nullable(),
+    error: z.string().nullable(),
+    selections: z.object({ chief: stageSelectionsSchema, planner: stageSelectionsSchema, reviewer: stageSelectionsSchema }),
+    /** "role.stage" picks this machine can no longer serve, so the stage inherits the caller's model. */
+    unusable: z.array(z.string()),
+  })),
+});
+export type ResearchConfiguration = z.infer<typeof researchConfigurationSchema>;
+const researchRolePatchSchema = z.object({ enabled: z.boolean().optional(), maxAgentCalls: agentCapSchema.optional() }).strict();
+const researchSettingsPatchSchema = z.object({
+  enabled: z.boolean().optional(),
+  chief: researchRolePatchSchema.optional(),
+  planner: researchRolePatchSchema.optional(),
+  reviewer: researchRolePatchSchema.optional(),
+}).strict();
+/** A workflow agent selection: all three fields or none, never a partial triple. */
+const workflowSelectionSchema = z.object({
+  provider: z.string().trim().min(1),
+  model: z.string().trim().min(1),
+  reasoningLevel: reasoningSchema,
+}).strict();
+type WorkflowSelection = z.infer<typeof workflowSelectionSchema>;
+const textList = (what: string) => z.array(z.string().trim().min(1).max(1_000)).min(1).max(20).optional().describe(what);
+/** One flat object with a per-mode check, not a union: tool parameters must publish as a JSON Schema of type object. */
+const researchParams = z.object({
+  mode: researchModeSchema.optional().describe("survey: one row per item. review: findings on a diff, one scan per concern. investigate: one answer per sub-question, merged into a brief. Required unless resuming with runId."),
+  question: z.string().trim().min(1).max(4_000).optional().describe("The overall question or goal. Required unless resuming."),
+  items: z.array(z.string().trim().min(1).max(1_000)).min(1).max(100).optional().describe("survey: files, symbols, or topics; each gets a row."),
+  batchSize: z.number().int().min(1).max(100).default(1).describe("survey: items per scan agent."),
+  concerns: textList("review: what to look for, one scan agent each (e.g. correctness, security)."),
+  diffRef: z.string().trim().min(1).max(200).optional().describe("review: a git diff range. Defaults to committed work since the merge base with origin/HEAD."),
+  questions: textList("investigate: sub-questions, one scan agent each."),
+  verify: z.boolean().default(true).describe("survey and review: add one agent that drops results it cannot confirm in the code."),
+  models: z.object({
+    scan: workflowSelectionSchema.optional(),
+    verify: workflowSelectionSchema.optional(),
+    combine: workflowSelectionSchema.optional(),
+  }).strict().optional().describe("Per-stage overrides: a full {provider, model, reasoningLevel} or nothing."),
+  runId: z.string().trim().min(1).optional().describe("Keep waiting on a run an earlier call started instead of starting a new one."),
+}).superRefine((value, ctx) => {
+  if (value.runId) return;
+  const need = (field: string) => ctx.addIssue({ code: "custom", path: [field], message: `${field} is required${value.mode ? ` for ${value.mode}` : ""}` });
+  if (!value.mode) need("mode");
+  if (!value.question) need("question");
+  if (value.mode === "survey" && !value.items) need("items");
+  if (value.mode === "review" && !value.concerns) need("concerns");
+  if (value.mode === "investigate" && !value.questions) need("questions");
+});
+type ResearchParams = z.infer<typeof researchParams>;
+
+/** The one chief_research instruction line for a role, or null when the feature or that role's switch is off. */
+function researchLine(role: string, settings: ResearchSettings | null) {
+  const parsed = researchRoleSchema.safeParse(role);
+  if (!parsed.success || !settings?.enabled || !settings.roles[parsed.data].enabled) return null;
+  return `Use chief_research (modes: ${RESEARCH_MODES[parsed.data].join(", ")}) for parallel read-only research; it waits for the result.`;
+}
+
+/** Agent calls a fresh run needs; feeds the per-role cap check. */
+function agentCount(params: ResearchParams) {
+  if (params.mode === "review") return params.concerns!.length + (params.verify ? 1 : 0);
+  if (params.mode === "investigate") return params.questions!.length + 1;
+  return Math.ceil(params.items!.length / params.batchSize) + (params.verify ? 1 : 0);
+}
+
+/** Inline workflow source. It reads only `args`, so no value is ever interpolated into it. */
+const RESEARCH_SCRIPTS = {
+  survey: String.raw`export const meta = {
+  name: "chief-research-survey",
+  description: "Read-only survey: one question answered per item",
+  phases: [{ title: "Scan" }, { title: "Verify" }],
+};
+const PRE = args.preamble + "\n\n";
+const models = args.models || {};
+const ROW = {
+  type: "object",
+  properties: { item: { type: "string" }, finding: { type: "string" }, evidence: { type: "string" } },
+  required: ["item", "finding", "evidence"],
+  additionalProperties: false,
+};
+const SCHEMA = { type: "object", properties: { rows: { type: "array", items: ROW } }, required: ["rows"], additionalProperties: false };
+const size = Math.max(1, args.batchSize || 1);
+const batches = [];
+for (let i = 0; i < args.items.length; i += size) batches.push(args.items.slice(i, i + size));
+const limit = Math.min(args.cap, budget().maxAgentCalls);
+const needed = batches.length + (args.verify ? 1 : 0);
+if (needed > limit) throw new Error("Survey needs " + needed + " agent calls; the limit is " + limit + ".");
+const scanned = await parallel(batches.map((batch) => () => agent(
+  PRE + "Question: " + args.question + "\n\nAnswer it for each item below, one row per item. Evidence is file:line or command output.\n" + batch.map((x) => "- " + x).join("\n"),
+  Object.assign({ phase: "Scan", schema: SCHEMA }, models.scan || {}),
+)));
+let rows = [];
+const missed = [];
+scanned.forEach((result, i) => {
+  if (result && result.rows) rows = rows.concat(result.rows);
+  else missed.push(...batches[i]);
+});
+if (missed.length) log("No result for: " + missed.join(", "));
+if (args.verify && rows.length) {
+  const checked = await agent(
+    PRE + "Check each row against the code. Drop rows whose evidence does not support the finding; return the rest unchanged.\n\nQuestion: " + args.question + "\n\nRows:\n" + JSON.stringify(rows),
+    Object.assign({ phase: "Verify", schema: SCHEMA }, models.verify || {}),
+  );
+  if (checked && checked.rows) rows = checked.rows;
+}
+const cell = (value) => String(value).replace(/\|/g, "\\|").replace(/\n/g, " ");
+const table = ["| Item | Finding | Evidence |", "| --- | --- | --- |"]
+  .concat(rows.map((r) => "| " + cell(r.item) + " | " + cell(r.finding) + " | " + cell(r.evidence) + " |"))
+  .join("\n");
+return { rows, table, missed };
+`,
+  review: String.raw`export const meta = {
+  name: "chief-research-review",
+  description: "Read-only review: one scan per concern over a diff, then verify",
+  phases: [{ title: "Scan" }, { title: "Verify" }],
+};
+const PRE = args.preamble + "\n\n";
+const models = args.models || {};
+const FINDING = {
+  type: "object",
+  properties: { file: { type: "string" }, line: { type: "integer" }, summary: { type: "string" }, severity: { type: "string", enum: ["high", "medium", "low"] } },
+  required: ["file", "line", "summary", "severity"],
+  additionalProperties: false,
+};
+const SCHEMA = { type: "object", properties: { findings: { type: "array", items: FINDING } }, required: ["findings"], additionalProperties: false };
+const range = args.diffRef
+  ? "Read the change with git diff, passing this range as one argument: " + JSON.stringify(args.diffRef)
+  : "Read the change with: git diff \"$(git merge-base HEAD origin/HEAD)..HEAD\" (committed work only).";
+const limit = Math.min(args.cap, budget().maxAgentCalls);
+const needed = args.concerns.length + (args.verify ? 1 : 0);
+if (needed > limit) throw new Error("Review needs " + needed + " agent calls; the limit is " + limit + ".");
+const scanned = await parallel(args.concerns.map((concern) => () => agent(
+  PRE + range + "\n\nGoal: " + args.question + "\nConcern: " + concern + "\n\nReport only real problems for this concern in the changed code, each with file, line, summary, and severity. Return an empty list when there are none.",
+  Object.assign({ phase: "Scan", schema: SCHEMA }, models.scan || {}),
+)));
+const seen = new Set();
+let findings = [];
+scanned.forEach((result) => ((result && result.findings) || []).forEach((f) => {
+  const key = f.file + ":" + f.line + ":" + f.summary;
+  if (!seen.has(key)) { seen.add(key); findings.push(f); }
+}));
+if (args.verify && findings.length) {
+  const checked = await agent(
+    PRE + range + "\n\nCheck each finding against the code. Drop findings you cannot confirm; return the rest unchanged.\n\nFindings:\n" + JSON.stringify(findings),
+    Object.assign({ phase: "Verify", schema: SCHEMA }, models.verify || {}),
+  );
+  if (checked && checked.findings) findings = checked.findings;
+}
+const markdown = findings.length
+  ? findings.map((f) => "- **" + f.severity + "** " + f.file + ":" + f.line + " " + String(f.summary).replace(/\n/g, " ")).join("\n")
+  : "No confirmed findings.";
+return { findings, markdown };
+`,
+  investigate: String.raw`export const meta = {
+  name: "chief-research-investigate",
+  description: "Read-only investigation: one agent per question, merged into a brief",
+  phases: [{ title: "Scan" }, { title: "Combine" }],
+};
+const PRE = args.preamble + "\n\n";
+const models = args.models || {};
+const ANSWER = {
+  type: "object",
+  properties: { answer: { type: "string" }, evidence: { type: "string" }, confirmed: { type: "boolean" } },
+  required: ["answer", "evidence", "confirmed"],
+  additionalProperties: false,
+};
+const limit = Math.min(args.cap, budget().maxAgentCalls);
+const needed = args.questions.length + 1;
+if (needed > limit) throw new Error("Investigation needs " + needed + " agent calls; the limit is " + limit + ".");
+const scanned = await parallel(args.questions.map((q) => () => agent(
+  PRE + "Goal: " + args.question + "\nQuestion: " + q + "\n\nAnswer it from the code. Evidence is file:line or command output. Set confirmed only when the evidence settles it.",
+  Object.assign({ phase: "Scan", schema: ANSWER }, models.scan || {}),
+)));
+const answers = args.questions.map((q, i) => Object.assign({ question: q }, scanned[i] || { answer: "(no result)", evidence: "", confirmed: false }));
+const brief = await agent(
+  PRE + "Merge these answers into a short Markdown brief for: " + args.question + "\nUse two sections, ## Confirmed and ## Unconfirmed, keeping each answer's evidence.\n\nAnswers:\n" + JSON.stringify(answers),
+  Object.assign({ phase: "Combine" }, models.combine || {}),
+);
+return { answers, brief };
+`,
+} as const;
 
 const modelConfigurationSchema = z.object({
   hosts: z.array(z.object({
@@ -289,6 +510,23 @@ export const rpcContract = defineRpcContract({
   modelConfiguration: {
     input: z.null(),
     output: modelConfigurationSchema,
+  },
+  researchConfiguration: {
+    input: z.null(),
+    output: researchConfigurationSchema,
+  },
+  setResearchModel: {
+    input: z.object({
+      hostId: z.string().trim().min(1),
+      role: researchRoleSchema,
+      stage: stageSchema,
+      selection: modelSelectionSchema.nullable(),
+    }).strict(),
+    output: z.object({ ok: z.literal(true) }).strict(),
+  },
+  setResearchSettings: {
+    input: researchSettingsPatchSchema,
+    output: researchSettingsSchema,
   },
   setRoleModel: {
     input: z.object({
@@ -663,6 +901,8 @@ export const MIGRATIONS = [
     `ALTER TABLE chief_models_v5 RENAME TO chief_models`,
     // Worker row only: a worktree release deferred behind a busy thread, retried by sweep().
     `ALTER TABLE managed_threads ADD COLUMN release_pending INTEGER NOT NULL DEFAULT 0`,
+    // chief_research's per-machine model pick for each role and stage; no row means inherit the caller's.
+    `CREATE TABLE IF NOT EXISTS research_models (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','reviewer')), stage TEXT NOT NULL CHECK(stage IN ('scan','verify','combine')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role, stage))`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -675,6 +915,18 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Lets Chief send work to a read-only planner first, read the plan, and delegate it.",
       default: true,
     },
+    researchEnabled: {
+      type: "boolean",
+      label: "Researcher",
+      description: "Lets Chief, planners, and reviewers run read-only chief_research surveys, reviews, and investigations as BB workflows.",
+      default: true,
+    },
+    researchChief: { type: "boolean", label: "Researcher: Chief", default: true },
+    researchPlanner: { type: "boolean", label: "Researcher: planners", default: true },
+    researchReviewer: { type: "boolean", label: "Researcher: reviewers", default: true },
+    researchCallsChief: { type: "number", label: "Researcher: Chief agent calls (1–100)", default: 100, experimental_schema: agentCapSchema },
+    researchCallsPlanner: { type: "number", label: "Researcher: planner agent calls (1–100)", default: 24, experimental_schema: agentCapSchema },
+    researchCallsReviewer: { type: "number", label: "Researcher: reviewer agent calls (1–100)", default: 24, experimental_schema: agentCapSchema },
     autoSpawn: {
       type: "boolean",
       label: "Auto-spawn Chief",
@@ -730,6 +982,9 @@ export default async function plugin(bb: BbPluginApi) {
   const roleModelRow = db.prepare<[string, string]>(
     `SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`,
   );
+  const researchModelRow = db.prepare<[string, string, string]>(
+    `SELECT provider_id, model, reasoning_level FROM research_models WHERE host_id=? AND role=? AND stage=?`,
+  );
   const todosForProject = db.prepare<[string]>(
     `SELECT * FROM chief_todos WHERE project_id=? AND state='open' ORDER BY id ASC`,
   );
@@ -745,6 +1000,8 @@ export default async function plugin(bb: BbPluginApi) {
   );
   let roles = new Map<string, ManagedRow>();
   let plannerActive = false;
+  // ponytail: cached for wave 2's synchronous configure(); the chief_research gate reads live settings.
+  let researchActive: ResearchSettings | null = null;
   const rulesCache = new Map<string, string>();
   const alertDeliveries = new Map<string, Promise<boolean>>();
   const reviewStarts = new Map<string, Promise<{ threadId: string; title: string; workerThreadId: string | null; created: boolean }>>();
@@ -922,17 +1179,36 @@ export default async function plugin(bb: BbPluginApi) {
 
   type ModelRole = z.infer<typeof modelRoleSchema>;
 
-  function readRoleModel(hostId: string, role: ModelRole): ModelSelection | null {
-    const row = roleModelRow.get(hostId, role) as
-      | { provider_id: string; model: string; reasoning_level: string }
-      | undefined;
-    if (!row) return null;
+  function parseSelectionRow(row: unknown): ModelSelection | null {
+    const value = row as { provider_id: string; model: string; reasoning_level: string } | undefined;
+    if (!value) return null;
     const parsed = modelSelectionSchema.safeParse({
-      providerId: row.provider_id,
-      model: row.model,
-      reasoningLevel: row.reasoning_level,
+      providerId: value.provider_id,
+      model: value.model,
+      reasoningLevel: value.reasoning_level,
     });
     return parsed.success ? parsed.data : null;
+  }
+
+  function readRoleModel(hostId: string, role: ModelRole): ModelSelection | null {
+    return parseSelectionRow(roleModelRow.get(hostId, role));
+  }
+
+  function readResearchModel(hostId: string, role: ResearchRole, stage: Stage): ModelSelection | null {
+    return parseSelectionRow(researchModelRow.get(hostId, role, stage));
+  }
+
+  function writeResearchModel(hostId: string, role: ResearchRole, stage: Stage, selection: ModelSelection | null) {
+    if (!selection) {
+      db.prepare(`DELETE FROM research_models WHERE host_id=? AND role=? AND stage=?`).run(hostId, role, stage);
+      return;
+    }
+    db.prepare(`INSERT INTO research_models (host_id, role, stage, provider_id, model, reasoning_level, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(host_id, role, stage) DO UPDATE SET provider_id=excluded.provider_id, model=excluded.model,
+        reasoning_level=excluded.reasoning_level, updated_at=excluded.updated_at`).run(
+      hostId, role, stage, selection.providerId, selection.model, selection.reasoningLevel, Date.now(),
+    );
   }
 
   function writeRoleModel(hostId: string, role: ModelRole, selection: ModelSelection | null) {
@@ -1124,6 +1400,23 @@ export default async function plugin(bb: BbPluginApi) {
     return plannerActive;
   }
 
+  function researchFrom(values: Awaited<ReturnType<typeof settings.get>>): ResearchSettings {
+    return {
+      enabled: values.researchEnabled,
+      roles: {
+        chief: { enabled: values.researchChief, maxAgentCalls: values.researchCallsChief },
+        planner: { enabled: values.researchPlanner, maxAgentCalls: values.researchCallsPlanner },
+        reviewer: { enabled: values.researchReviewer, maxAgentCalls: values.researchCallsReviewer },
+      },
+    };
+  }
+
+  /** A live read that also refreshes the cache. The chief_research gate calls this, never the cache. */
+  async function researchSettings() {
+    researchActive = researchFrom(await settings.get());
+    return researchActive;
+  }
+
   async function spawnChief(target: string, previous?: ManagedRow) {
     const sectionId = await ensureSection();
     const name = await projectName(target);
@@ -1249,6 +1542,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- Split the work into at most 8 sequential waves, each a self-contained plan one worker finishes on the same branch; one wave by default, more only when one worker cannot finish it. Submit `plan` as an array of `{body}`. Waves contain no phases.",
       "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
+      ...(researchLine("planner", await researchSettings()) ? ["- For a broad survey across many files, or several open questions at once, use chief_research instead of reading everything yourself."] : []),
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -1617,6 +1911,7 @@ export default async function plugin(bb: BbPluginApi) {
     chiefThreadId: string | null;
     focus?: string;
     provenance: string[];
+    research: boolean;
   }) {
     return [
       opts.subject,
@@ -1624,6 +1919,7 @@ export default async function plugin(bb: BbPluginApi) {
       REVIEW_ONLY,
       "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When the worker's brief context names a plan file, read that file in full before judging the change against it.",
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
+      ...(opts.research ? ["For a large diff or several concerns at once, chief_research review gives you verified findings to check; the verdict stays yours."] : []),
       `Report your findings to Chief thread ${opts.chiefThreadId} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
       "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
       "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
@@ -1656,6 +1952,7 @@ export default async function plugin(bb: BbPluginApi) {
       const title = `Review · ${worker.title}`;
       const waves = planWavesFor(worker.plan_thread_id);
       const prompt = reviewerPrompt({
+        research: !!researchLine("reviewer", await researchSettings()),
         subject: `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
         chiefThreadId: worker.chief_thread_id,
         focus,
@@ -1734,6 +2031,7 @@ export default async function plugin(bb: BbPluginApi) {
       await readRules(projectId);
       const title = `Review · ${branch}`;
       const prompt = reviewerPrompt({
+        research: !!researchLine("reviewer", await researchSettings()),
         // This worktree is cut from the branch itself, so "its base" would be an empty diff.
         subject: pullRequestRef
           ? `Independently review pull request ${pullRequestRef} (branch ${branch}). No managed worker owns this change. This worktree is checked out on that branch: diff it against the pull request's target branch (gh pr view ${pullRequestRef} --json baseRefName, or glab mr view ${pullRequestRef}).`
@@ -1982,7 +2280,8 @@ export default async function plugin(bb: BbPluginApi) {
     return bodies.map((wave) => ({ path: join(root, wave.name) }));
   }
 
-  async function report(threadId: string, params: z.infer<typeof reportParams>, callerProjectId: string) {
+  /** The caller's managed row, recovered from spawn-seeded metadata while insertThread has not run yet. */
+  async function managedRow(threadId: string, callerProjectId: string) {
     let row = roles.get(threadId);
     if (!row) {
       // configure() already falls back to pluginMetadata seeded at spawn time
@@ -2009,6 +2308,11 @@ export default async function plugin(bb: BbPluginApi) {
         row = roles.get(threadId);
       }
     }
+    return row;
+  }
+
+  async function report(threadId: string, params: z.infer<typeof reportParams>, callerProjectId: string) {
+    const row = await managedRow(threadId, callerProjectId);
     if (!row || row.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
     if (["complete", "archived", "deleted"].includes(row.state)) {
       throw new Error(`Managed thread ${threadId} is ${row.state} and can no longer report.`);
@@ -2279,6 +2583,7 @@ export default async function plugin(bb: BbPluginApi) {
       void ensureChief(next.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
     }
     plannerActive = next.plannerEnabled;
+    researchActive = researchFrom(next);
   });
 
   function rosterFor(projectId: string, includeComplete = false) {
@@ -2546,6 +2851,160 @@ export default async function plugin(bb: BbPluginApi) {
     ].join("\n");
   }
 
+  /** Runs `bb workflows <sub>` as the calling thread: the CLI resolves its origin from these env vars. */
+  async function runWorkflowCli(sub: string, args: string[], context: { threadId: string; projectId: string }) {
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync(process.env.BB_CLI ?? "bb", ["workflows", sub, ...args, "--json"], {
+        env: { ...process.env, PATH: serverPath(), BB_THREAD_ID: context.threadId, BB_PROJECT_ID: context.projectId },
+        timeout: 30_000,
+        maxBuffer: 16 * 1024 * 1024,
+      }));
+    } catch (error) {
+      // With --json a failure still prints {"ok":false,"error":{…}} on stdout.
+      const out = String((error as { stdout?: unknown }).stdout ?? "");
+      const parsed = (() => { try { return JSON.parse(out); } catch { return null; } })();
+      throw new Error(parsed?.error?.message ?? (error instanceof Error ? error.message : String(error)));
+    }
+    // `history` prints JSON Lines, one record per line; the other subcommands print one document.
+    const parsed = (() => {
+      try { return JSON.parse(stdout); } catch { return stdout.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line)); }
+    })();
+    if (parsed?.ok === false) throw new Error(parsed.error?.message ?? JSON.stringify(parsed.error));
+    return parsed;
+  }
+
+  /** Who may call chief_research and in which mode. Throws the reason otherwise. */
+  async function researchCaller(threadId: string, projectId: string, mode?: z.infer<typeof researchModeSchema>) {
+    // Unmanaged threads (workflow agents included) have no row, which also stops recursion.
+    const row = await managedRow(threadId, projectId);
+    if (!row || terminal(row.state)) throw new Error("chief_research is available only in an active Chief, planner, or reviewer thread.");
+    if (row.role === "chief" && !isActiveChief(row)) throw new Error("chief_research requires an active registered Chief thread.");
+    const role = researchRoleSchema.safeParse(row.role);
+    if (!role.success) throw new Error(`chief_research is not available to a managed ${row.role}.`);
+    if (mode && !RESEARCH_MODES[role.data].includes(mode)) {
+      throw new Error(`A ${role.data} may use chief_research modes ${RESEARCH_MODES[role.data].join(", ")}, not ${mode}.`);
+    }
+    const current = await researchSettings();
+    if (!current.enabled || !current.roles[role.data].enabled) {
+      throw new Error("chief_research is off in Chief settings → Chief researcher.");
+    }
+    return { row, role: role.data, cap: current.roles[role.data].maxAgentCalls };
+  }
+
+  /** Per stage: a call override, else the caller machine's stored pick if it can still serve it, else inherit. */
+  async function researchModels(threadId: string, role: ResearchRole, overrides: Partial<Record<Stage, WorkflowSelection>> = {}) {
+    const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
+    const hostId = live?.environmentId ? await environmentHostId(live.environmentId) : null;
+    const read = hostId ? catalogReader(hostId) : null;
+    const models: Partial<Record<Stage, WorkflowSelection>> = {};
+    for (const stage of stageSchema.options) {
+      const override = overrides[stage];
+      if (override) { models[stage] = override; continue; }
+      const stored = hostId ? readResearchModel(hostId, role, stage) : null;
+      const usable = stored && hostId && read ? await usableSelection(hostId, stored, read) : null;
+      if (usable) models[stage] = { provider: usable.providerId, model: usable.model, reasoningLevel: usable.reasoningLevel };
+    }
+    return models;
+  }
+
+  /** Waits for abortable sleeps; an abort rejects with the signal's reason. */
+  function researchSleep(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) return reject(signal.reason);
+      const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, ms);
+      const stop = () => { clearTimeout(timer); reject(signal!.reason); };
+      signal?.addEventListener("abort", stop, { once: true });
+    });
+  }
+
+  function researchOutput(text: string) {
+    if (text.length <= MAX_RESEARCH_OUTPUT) return text;
+    const tail = "\n…clipped. Read the full result with `bb workflows history <runId> --cursor 0 --limit 1`.";
+    return text.slice(0, MAX_RESEARCH_OUTPUT - tail.length) + tail;
+  }
+
+  /** The workflows plugin's run statuses are queued, running, succeeded, failed, and cancelled. */
+  const RUNNING_WORKFLOW = new Set(["queued", "running"]);
+
+  /** Polls a run until it finishes or RESEARCH_WAIT_MS passes, then says what happened. */
+  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
+    const deadline = Date.now() + RESEARCH_WAIT_MS;
+    try {
+      for (;;) {
+        let run: { status: string; result?: unknown; resultOmitted?: boolean; error?: unknown; calls?: unknown };
+        try {
+          run = await runWorkflowCli("status", [runId], context);
+        } catch (error) {
+          context.signal?.throwIfAborted();
+          bb.log.warn(`chief_research could not read ${runId}: ${clip(String(error), 200)}`);
+          return `Could not read workflow ${runId} from the plugin server. Check it yourself with \`bb workflows status ${runId}\`.`;
+        }
+        if (run.status === "succeeded") {
+          let result = run.result;
+          if (run.resultOmitted) {
+            const history: unknown = await runWorkflowCli("history", [runId, "--cursor", "0", "--limit", "1"], context).catch(() => null);
+            const record = (Array.isArray(history) ? history : [history]).find((line) => line?.type === "run");
+            result = record?.result ?? "(result omitted; read it with bb workflows history)";
+          }
+          // survey's table, review's markdown, or investigate's brief, shown above the raw result.
+          const shown = result as { table?: unknown; markdown?: unknown; brief?: unknown } | null;
+          const summary = [shown?.table, shown?.markdown, shown?.brief].find((value) => typeof value === "string");
+          return researchOutput([
+            `runId: ${runId}`, `status: ${run.status}`,
+            ...(summary ? ["", summary as string] : []),
+            "", "result:", JSON.stringify(result, null, 2),
+          ].join("\n"));
+        }
+        if (!RUNNING_WORKFLOW.has(run.status)) {
+          return researchOutput(`runId: ${runId}\nstatus: ${run.status}\nerror: ${JSON.stringify(run.error)}\ncalls: ${JSON.stringify(run.calls)}`);
+        }
+        context.signal?.throwIfAborted();
+        if (Date.now() >= deadline) return `Still running. Call chief_research again with runId: ${runId} to keep waiting.`;
+        await researchSleep(RESEARCH_POLL_MS, context.signal);
+      }
+    } catch (error) {
+      if (context.signal?.aborted) {
+        await runWorkflowCli("stop", [runId], context).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  async function research(params: ResearchParams, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
+    const { role, cap } = await researchCaller(context.threadId, context.projectId, params.mode);
+    if (params.runId) return awaitResearch(params.runId, context);
+    const mode = params.mode!;
+    const calls = agentCount(params);
+    if (calls > cap) {
+      const fix = mode === "survey" ? "Raise batchSize or split the items." : mode === "review" ? "Use fewer concerns." : "Ask fewer questions.";
+      throw new Error(`This ${mode} needs ${calls} agent calls; a ${role}'s limit is ${cap}. ${fix}`);
+    }
+    const script = RESEARCH_SCRIPTS[mode];
+    const args = {
+      preamble: RESEARCH_PREAMBLE, question: params.question, verify: params.verify, cap,
+      models: await researchModels(context.threadId, role, params.models),
+      ...(mode === "survey" ? { items: params.items, batchSize: params.batchSize } : {}),
+      ...(mode === "review" ? { concerns: params.concerns, diffRef: params.diffRef ?? null } : {}),
+      ...(mode === "investigate" ? { questions: params.questions } : {}),
+    };
+    let runId: string;
+    try {
+      const started = await runWorkflowCli("run", ["--script", script, "--args", JSON.stringify(args)], context);
+      if (typeof started?.runId !== "string") throw new Error("bb workflows run returned no runId");
+      runId = started.runId;
+    } catch (error) {
+      const failure = clip(error instanceof Error ? error.message : String(error), 200);
+      bb.log.warn(`chief_research could not start a workflow from the server: ${failure}`);
+      return [
+        `The plugin server could not start the workflow (${failure}), so start it yourself:`,
+        "call bb_workflow_run with exactly this script and args, then call chief_research with mode and the runId it returns to wait for the result.",
+        "", "script:", "```js", script, "```", "", "args:", "```json", JSON.stringify(args), "```",
+      ].join("\n");
+    }
+    return awaitResearch(runId, context);
+  }
+
   bb.agents.registerTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
@@ -2568,8 +3027,7 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           const { stdout } = await execFileAsync("sh", ["-c", script], {
             cwd, timeout: FORGE_SCRIPT_TIMEOUT_MS,
-            // ponytail: heuristic for GUI-launched servers whose PATH lacks Homebrew; upgrade path is a configured forge PATH.
-            env: { ...process.env, PATH: `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin` },
+            env: { ...process.env, PATH: serverPath() },
           });
           const line = String(stdout).match(/^CHIEF_FORGE (.*)$/gm)?.at(-1)?.slice("CHIEF_FORGE ".length);
           const values = Object.fromEntries((line ?? "").split(" ").map((pair) => {
@@ -2807,6 +3265,24 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  bb.agents.registerTool({
+    name: "chief_research",
+    presentation: { label: { pending: "Researching…", completed: "Researched" } },
+    description: [
+      "Fan a read-only question out to parallel BB workflow agents. survey: answer `question` for each of `items` (files, symbols, topics), one verified row each with evidence.",
+      "review: one agent per `concerns` entry reads `git diff` (default: committed work since the merge base with origin/HEAD, or `diffRef`), then one agent drops findings it cannot confirm; returns deduplicated findings. Advisory: you still own the verdict.",
+      "investigate: one agent per `questions` entry, then one merges the answers into a brief with Confirmed and Unconfirmed sections.",
+      "Chief may use survey, review, investigate; a planner survey, investigate; a reviewer review, survey.",
+      "Read-only by prompt only: the agents share your checkout and permissions, and are told not to edit, commit, or push.",
+      "Waits up to 10 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting.",
+    ].join(" "),
+    parameters: researchParams,
+    async execute(params, context) {
+      if (!context.threadId) throw new Error("chief_research requires a thread context.");
+      return research(params, context);
+    },
+  });
+
   bb.agents.configure((context) => {
     const row = roles.get(context.thread.id);
     if (row && ["complete", "archived", "deleted"].includes(row.state)) return { tools: [], skills: [] };
@@ -2825,12 +3301,14 @@ export default async function plugin(bb: BbPluginApi) {
     const role = row?.role ?? (seeded?.success ? seeded.data.role : undefined);
     if (!role) return { tools: [], skills: [] };
     const rules = rulesCache.get(context.project.id) ?? BUILT_IN_RULES;
+    const research = researchLine(role, researchActive);
     if (role === "chief") {
       return {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
           "chief_consult",
           "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete",
+          ...(research ? ["chief_research"] : []),
         ],
         skills: ["chief"],
         instructions: [
@@ -2838,6 +3316,7 @@ export default async function plugin(bb: BbPluginApi) {
           "",
           ROSTER_CHIEF_INSTRUCTIONS,
           ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
+          ...(research ? ["", research] : []),
           "",
           rules,
         ].join("\n"),
@@ -2847,10 +3326,11 @@ export default async function plugin(bb: BbPluginApi) {
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skill cover the rest.
     return {
-      tools: ["chief_report"],
+      tools: ["chief_report", ...(research ? ["chief_research"] : [])],
       skills: ["chief-worker"],
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}.`,
+        ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
       ].join("\n"),
     };
@@ -2898,6 +3378,47 @@ export default async function plugin(bb: BbPluginApi) {
         };
       })),
     }),
+    researchConfiguration: async () => ({
+      settings: await researchSettings(),
+      hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
+        const connected = host.status === "connected";
+        const read = catalogReader(host.id);
+        const stages = (role: ResearchRole) => Object.fromEntries(
+          stageSchema.options.map((stage) => [stage, readResearchModel(host.id, role, stage)]),
+        ) as Record<Stage, ModelSelection | null>;
+        const selections = { chief: stages("chief"), planner: stages("planner"), reviewer: stages("reviewer") };
+        const [scan, flagged] = await Promise.all([
+          connected
+            ? hostFallback(host.id, read)
+            : { fallback: null, error: "Machine is disconnected; its model catalog is unavailable." },
+          Promise.all(researchRoleSchema.options.flatMap((role) => stageSchema.options.map(async (stage) => {
+            const selection = selections[role][stage];
+            if (!connected || !selection) return null;
+            return (await usableSelection(host.id, selection, read)) ? null : `${role}.${stage}`;
+          }))),
+        ]);
+        return {
+          hostId: host.id, hostName: host.name, connected, ...scan, selections,
+          unusable: flagged.filter((entry): entry is string => entry !== null),
+        };
+      })),
+    }),
+    setResearchModel: ({ hostId, role, stage, selection }) => {
+      writeResearchModel(hostId, role, stage, selection);
+      return { ok: true as const };
+    },
+    setResearchSettings: async (patch) => {
+      const keys = { chief: ["researchChief", "researchCallsChief"], planner: ["researchPlanner", "researchCallsPlanner"], reviewer: ["researchReviewer", "researchCallsReviewer"] } as const;
+      const values: Record<string, boolean | number> = {};
+      if (patch.enabled !== undefined) values.researchEnabled = patch.enabled;
+      for (const role of researchRoleSchema.options) {
+        const change = patch[role];
+        if (change?.enabled !== undefined) values[keys[role][0]] = change.enabled;
+        if (change?.maxAgentCalls !== undefined) values[keys[role][1]] = change.maxAgentCalls;
+      }
+      researchActive = researchFrom(await settings.experimental_set(values));
+      return researchActive;
+    },
     setRoleModel: ({ hostId, role, selection }) => {
       writeRoleModel(hostId, role, selection);
       return { ok: true as const };
@@ -3083,6 +3604,7 @@ export default async function plugin(bb: BbPluginApi) {
   reloadRoles();
   await sweeping;
   await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
+  await researchSettings().catch((error) => bb.log.warn(`Could not read the researcher settings: ${String(error)}`));
   const initial = await settings.get();
   if (initial.autoSpawn && initial.chiefProject) {
     void ensureChief(initial.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
