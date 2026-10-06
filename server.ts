@@ -358,6 +358,8 @@ interface ManagedRow {
    * the tie nextAction uses to know whether it already covers the worker's latest
    * report, instead of comparing updated_at timestamps. */
   reviewed_report_seq: number | null;
+  /** Worker row only: 1 while a worktree release waits on a busy thread; sweep() retries it. */
+  release_pending: number;
   created_at: number;
   updated_at: number;
 }
@@ -659,6 +661,8 @@ export const MIGRATIONS = [
     `INSERT INTO chief_models_v5 (host_id, role, provider_id, model, reasoning_level, updated_at) SELECT host_id, CASE role WHEN 'senior' THEN 'worker' ELSE role END, provider_id, model, reasoning_level, updated_at FROM chief_models WHERE role <> 'junior'`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_v5 RENAME TO chief_models`,
+    // Worker row only: a worktree release deferred behind a busy thread, retried by sweep().
+    `ALTER TABLE managed_threads ADD COLUMN release_pending INTEGER NOT NULL DEFAULT 0`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -783,13 +787,15 @@ export default async function plugin(bb: BbPluginApi) {
   }
   let sweeping: Promise<void> | null = null;
   let sweepAgain = false;
-  /** Single-flight: a reload during a sweep queues exactly one more pass instead of a racing one. */
+  /** Single-flight: a reload during a sweep queues exactly one more pass instead of a racing one.
+   * Each pass also retries worktree releases deferred behind a busy thread. */
   function sweep() {
     if (sweeping) { sweepAgain = true; return sweeping; }
     sweeping = (async () => {
       do {
         sweepAgain = false;
         if (await completeAbsorbed()) publishPending();
+        await retryDeferredReleases();
       } while (sweepAgain);
     })().catch((error) => bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`)).finally(() => { sweeping = null; });
     return sweeping;
@@ -1802,7 +1808,11 @@ export default async function plugin(bb: BbPluginApi) {
         return `Worktree kept: its environment is not a managed worktree.`;
       }
       const busy = (await bb.sdk.threads.list({ environmentId, archived: false, includeHidden: true })).find((t) => BUSY_STATUSES.has(t.status));
-      if (busy) return `Worktree kept: thread ${busy.id} in its environment is still ${busy.status}.`;
+      if (busy) {
+        // No reloadRoles(): it would re-enter sweep() and retry while the thread is still busy.
+        db.prepare(`UPDATE managed_threads SET release_pending=1 WHERE thread_id=?`).run(row.thread_id);
+        return `Worktree release deferred until thread ${busy.id} in its environment goes idle (it is ${busy.status}); it is released automatically then.`;
+      }
       const first = await bb.sdk.environments.status({ environmentId });
       if (first.outcome !== "available") {
         const message = "message" in first ? first.message : first.failure.message;
@@ -1823,6 +1833,27 @@ export default async function plugin(bb: BbPluginApi) {
       return `Archived ${archivedThreadIds.length} thread(s) in its environment; BB frees the worktree about 5 minutes later and keeps branch ${branch}.`;
     } catch (error) {
       return `Worktree kept: could not check it (${clip(String(error), 200)}). ${resolve}`;
+    }
+  }
+
+  /** Retries releases releaseWorktree deferred behind a busy thread. Reads the DB, not roles: the flag skips reloadRoles().
+   * ponytail: retries every pending worker on any sweep (~4 SDK calls each); the pending window is seconds. */
+  async function retryDeferredReleases() {
+    for (const row of db.prepare(`SELECT * FROM managed_threads WHERE role='worker' AND state='complete' AND release_pending=1`).all() as ManagedRow[]) {
+      db.prepare(`UPDATE managed_threads SET release_pending=0 WHERE thread_id=?`).run(row.thread_id);
+      let live;
+      try {
+        live = await bb.sdk.threads.get({ threadId: row.thread_id });
+      } catch {
+        db.prepare(`UPDATE managed_threads SET release_pending=1 WHERE thread_id=?`).run(row.thread_id);
+        continue;
+      }
+      if (live.archivedAt !== null || live.deletedAt !== null) continue;
+      const note = await releaseWorktree(row, row.state, live.environmentId);
+      if (note.startsWith("Worktree release deferred")) continue;
+      if (note.startsWith("Archived")) { bb.log.info(`Deferred release for ${row.thread_id}: ${note}`); continue; }
+      await alertChief(row, `release:${row.report_seq}`, `Deferred worktree release for worker “${row.title}” (${row.thread_id}): ${note}`)
+        .catch((error) => bb.log.warn(`Deferred-release alert failed: ${String(error)}`));
     }
   }
 
@@ -2138,6 +2169,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function lifecycle(kind: string, thread: { id: string; status?: string }) {
+    // Before the early returns: the blocker may be unmanaged, hidden, or already complete.
+    if ((kind === "idle" || kind === "failed") && pendingReady) void sweep();
     const row = roles.get(thread.id);
     if (!row) return;
     // Complete is final: an archive (often Chief's own auto-archive) keeps the row complete, so a
@@ -2190,6 +2223,7 @@ export default async function plugin(bb: BbPluginApi) {
       while (!signal.aborted) {
         try {
           await reconcile();
+          await sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
           const values = await settings.get();
           const parsed = Number(values.stallMinutes);
           const threshold = (Number.isFinite(parsed) && parsed > 0 ? parsed : 15) * 60_000;
@@ -2743,7 +2777,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_complete",
     presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
-    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. For the current final-wave or unplanned worker with an approving review whose worktree is clean and pushed, it then archives every thread in that worktree so BB frees it; otherwise it says why it kept it.",
+    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. For the current final-wave or unplanned worker with an approving review whose worktree is clean and pushed, it then archives every thread in that worktree so BB frees it; if only a busy thread there blocks it, the release is deferred and runs automatically once that thread goes idle; otherwise it says why it kept it.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional() }),
     async execute({ threadId, result }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
