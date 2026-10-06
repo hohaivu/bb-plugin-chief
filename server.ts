@@ -2905,19 +2905,38 @@ export default async function plugin(bb: BbPluginApi) {
     return { row, role: role.data, cap: current.maxAgentCalls, settings: current };
   }
 
-  /** Per stage: a call override, else the caller machine's stored pick if it can still serve it, else inherit. */
+  /**
+   * Per stage: a call override, else the caller machine's stored pick if it can still serve it, else inherit.
+   * Workflow agents run in the caller's permission mode and the workflows host has no fallback, so a pick
+   * whose provider cannot run that mode is dropped (that stage inherits) with a note.
+   */
   async function researchModels(threadId: string, mode: ResearchMode, overrides: Partial<Record<Stage, WorkflowSelection>> = {}) {
     const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
     const hostId = live?.environmentId ? await environmentHostId(live.environmentId) : null;
     const stored = hostId ? readResearchModel(hostId, mode) : null;
     const usable = stored && hostId ? await usableSelection(hostId, stored, catalogReader(hostId)) : null;
-    const pick = usable ? { provider: usable.providerId, model: usable.model, reasoningLevel: usable.reasoningLevel } : null;
+    let pick: WorkflowSelection | null = usable ? { provider: usable.providerId, model: usable.model, reasoningLevel: usable.reasoningLevel } : null;
+    const callerMode = (await bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null))?.permissionMode ?? null;
+    const providers = hostId && callerMode
+      ? await discover((signal) => bb.sdk.providers.list({ hostId, signal }), "Provider discovery").catch(() => null)
+      : null;
+    const notes: string[] = [];
+    // Fails open: an unknown mode or capability list keeps the pick, as the host does for spawns.
+    const misfit = (selection: WorkflowSelection, label: string) => {
+      const modes = providers?.find((provider) => provider.id === selection.provider)?.capabilities?.permissionModes;
+      if (!callerMode || !modes || modes.includes(callerMode)) return false;
+      notes.push(`Researcher ${label} ${selection.provider}/${selection.model} cannot run in this thread's permission mode "${callerMode}" (it supports ${modes.join(", ")}); its stages used your model.`);
+      return true;
+    };
+    if (pick && misfit(pick, `${mode} model`)) pick = null;
     const models: Partial<Record<Stage, WorkflowSelection>> = {};
     for (const stage of stageSchema.options) {
-      const chosen = overrides[stage] ?? pick;
+      const override = overrides[stage];
+      const chosen = override && !misfit(override, `${stage} override`) ? override : pick;
       if (chosen) models[stage] = chosen;
     }
-    return models;
+    for (const note of notes) bb.log.warn(note);
+    return { models, notes };
   }
 
   /** Waits for abortable sleeps; an abort rejects with the signal's reason. */
@@ -2994,9 +3013,11 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`This ${mode} needs ${calls} agent calls; the limit is ${cap}. ${fix}`);
     }
     const script = RESEARCH_SCRIPTS[mode];
+    const { models, notes } = await researchModels(context.threadId, mode, params.models);
+    const prefix = notes.length ? notes.join("\n") + "\n\n" : "";
     const args = {
       preamble: RESEARCH_PREAMBLE, question: params.question, verify: params.verify, cap,
-      models: await researchModels(context.threadId, mode, params.models),
+      models,
       ...(mode === "survey" ? { items: params.items, batchSize: params.batchSize } : {}),
       ...(mode === "review" ? { concerns: params.concerns, diffRef: params.diffRef ?? null } : {}),
       ...(mode === "investigate" ? { questions: params.questions } : {}),
@@ -3009,13 +3030,13 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) {
       const failure = clip(error instanceof Error ? error.message : String(error), 200);
       bb.log.warn(`chief_research could not start a workflow from the server: ${failure}`);
-      return [
+      return prefix + [
         `The plugin server could not start the workflow (${failure}), so start it yourself:`,
         "call bb_workflow_run with exactly this script and args, then call chief_research with mode and the runId it returns to wait for the result.",
         "", "script:", "```js", script, "```", "", "args:", "```json", JSON.stringify(args), "```",
       ].join("\n");
     }
-    return awaitResearch(runId, context, waitMs);
+    return prefix + await awaitResearch(runId, context, waitMs);
   }
 
   bb.agents.registerTool({

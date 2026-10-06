@@ -57,6 +57,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
   let sendFailures = 0;
+  let callerPermissionMode = "auto";
   let getFailures = new Map<string, number>();
   let patch = "diff --git a/totals.ts b/totals.ts\n+const total = subtotal - discount;";
   let updateFailures = new Map<string, number>();
@@ -124,8 +125,9 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
       },
       providers: {
         list: async () => [
-          { id: "codex", displayName: "Codex", available: options.providerAvailable ?? true },
-          { id: "claude-code", displayName: "Claude Code", available: true },
+          { id: "codex", displayName: "Codex", available: options.providerAvailable ?? true, capabilities: { permissionModes: ["accept-edits", "auto", "full"] } },
+          { id: "claude-code", displayName: "Claude Code", available: true, capabilities: { permissionModes: ["accept-edits", "auto", "full"] } },
+          { id: "acp-antigravity", displayName: "Antigravity", available: true, capabilities: { permissionModes: ["accept-edits", "full"] } },
         ],
         models: async (args?: { providerId?: string }) => {
           catalogReads.push(args?.providerId);
@@ -133,13 +135,15 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
             modelLoadError: null,
             providers: [],
             selectedOnlyModels: [],
-            models: args?.providerId === "claude-code"
+            models: args?.providerId === "acp-antigravity" ? [catalogModel("gemini-3-pro", ["medium", "high"], true)]
+              : args?.providerId === "claude-code"
               ? [catalogModel("claude-opus-5", ["medium", "high"], true)]
               : [catalogModel("gpt-6-astra", ["medium", "high"], true), catalogModel("gpt-6-mini", ["medium"])],
           };
         },
       },
       threads: {
+        defaultExecutionOptions: async () => ({ permissionMode: callerPermissionMode }),
         spawn: async (args: any) => {
           spawned.push(args);
           spawnIndex += 1;
@@ -251,6 +255,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
+    setCallerPermissionMode(mode: string) { callerPermissionMode = mode; },
     tabs: (threadId: string) => tabsStore.get(threadId)?.tabs ?? [],
     seedTabs(threadId: string, tabs: any[]) { tabsStore.set(threadId, { revision: 7, tabs }); },
     failTabsUpdates(count: number) { tabsUpdateFailures = count; },
@@ -4246,6 +4251,33 @@ describe("chief_research", () => {
     await call(state, planner, survey({ models: { scan: override } }));
     expect(sentArgs().models).toEqual({ scan: override, verify: stored, combine: stored });
     await expect(call(state, planner, survey({ models: { scan: { provider: "codex", model: "x" } } }))).rejects.toThrow();
+  });
+
+  test("drops a Researcher pick or override whose provider cannot run the caller's permission mode", async () => {
+    const state = await setup();
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => done });
+    const planner = await roleThread(state, "planner");
+    const antigravity = { provider: "acp-antigravity", model: "gemini-3-pro", reasoningLevel: "high" };
+    await state.harness.behavior.callRpc("setResearchModel", {
+      hostId: "host_1", mode: "survey", selection: { providerId: "acp-antigravity", model: "gemini-3-pro", reasoningLevel: "high" },
+    });
+    const note = `cannot run in this thread's permission mode "auto"`;
+    expect(await call(state, planner, survey())).toContain(note);
+    expect(sentArgs().models).toEqual({});
+
+    state.setCallerPermissionMode("full");
+    execFileMock.mockClear();
+    expect(await call(state, planner, survey())).not.toContain("permission mode");
+    expect(sentArgs().models).toEqual({ scan: antigravity, verify: antigravity, combine: antigravity });
+
+    state.setCallerPermissionMode("auto");
+    await state.harness.behavior.callRpc("setResearchModel", {
+      hostId: "host_1", mode: "survey", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+    });
+    const stored = { provider: "codex", model: "gpt-6-astra", reasoningLevel: "high" };
+    execFileMock.mockClear();
+    expect(await call(state, planner, survey({ models: { scan: antigravity } }))).toContain("scan override acp-antigravity/gemini-3-pro");
+    expect(sentArgs().models).toEqual({ scan: stored, verify: stored, combine: stored });
   });
 
   test("migration copies the single research pick to every mode and drops research_model", async () => {
