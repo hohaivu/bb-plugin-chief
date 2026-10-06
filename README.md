@@ -109,20 +109,20 @@ result. It has three modes:
   with Confirmed and Unconfirmed sections.
 
 Chief gets all three modes, a planner gets survey and investigate, and a reviewer gets review and
-survey. Workers and advisors never get it. Settings has one switch for the feature and one per role.
-A role that is switched off gets neither the tool nor the line about it.
+survey. Workers and advisors never get it. Settings has one **Researcher** switch, on by default;
+while it is off, no role gets the tool or the line about it.
 
 The agents share the caller's checkout and permissions. They are read-only only because the prompt
 tells them to be. Each call waits up to 10 minutes. If the run is still going, the call returns its
 runId, and calling again with that runId keeps waiting. If the plugin server can't start the
 workflow, the tool returns the exact script and args so the agent can start it with
-`bb_workflow_run` and then wait on its runId. Each role has a cap on agent calls per run (1–100;
-default 100 for Chief and 24 for the others). A run that would need more is refused before it starts.
+`bb_workflow_run` and then wait on its runId. One cap on agent calls per run (1–100, default 24)
+applies to every role. A run that would need more is refused before it starts.
 
-Settings → **Chief researcher** holds all of this in one place: the **Researcher** switch, a
-"may research" switch and an agent-call cap for each role, and, per machine, a provider + model +
-reasoning level picker for each role and stage (scan, verify, combine). The pickers offer only models
-the machine's live catalog serves. A stage without a pick shows **Inherit caller** and runs on the
+Settings → **Chief researcher** holds this one config for Chief, planners, and reviewers: the
+**Researcher** switch, the agent-call cap, and, per machine, one provider + model + reasoning level
+pick used for every stage (scan, verify, combine) and every role. The picker offers only models the
+machine's live catalog serves. A machine without a pick shows **Inherit caller** and runs on the
 calling thread's model; the **Inherit caller** button clears a pick back to that default.
 
 ### Work list

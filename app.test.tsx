@@ -347,41 +347,31 @@ test("registers the Chief researcher settings section after the models section",
 
 describe("Chief researcher settings", () => {
   const triple = { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const };
-  const stages = () => ({ scan: null, verify: null, combine: null }) as Record<string, typeof triple | null>;
   const fake = () => {
-    const settings = {
-      enabled: true,
-      roles: {
-        chief: { enabled: true, maxAgentCalls: 100 },
-        planner: { enabled: true, maxAgentCalls: 24 },
-        reviewer: { enabled: true, maxAgentCalls: 24 },
-      },
-    };
-    const selections = { chief: stages(), planner: stages(), reviewer: stages() };
+    const settings = { enabled: true, maxAgentCalls: 24 };
+    const store = { selection: null as typeof triple | null };
     const rpc = {
       researchConfiguration: () => ({
         settings: structuredClone(settings),
         hosts: [{
           hostId: "host_1", hostName: "Local", connected: true, error: null,
           fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
-          selections: structuredClone(selections), unusable: [],
+          selection: structuredClone(store.selection), unusable: false,
         }],
       }),
       // The harness does not validate input, so the fake applies the real contract schema.
       setResearchModel: (input: unknown) => {
         const parsed = rpcContract.setResearchModel.input.safeParse(input);
         if (!parsed.success) throw new Error("Invalid model selection");
-        const { role, stage, selection } = parsed.data;
-        selections[role][stage] = selection;
+        store.selection = parsed.data.selection as typeof triple | null;
         return { ok: true as const };
       },
-      setResearchSettings: (patch: { enabled?: boolean; planner?: { maxAgentCalls?: number } }) => {
-        if (patch.enabled !== undefined) settings.enabled = patch.enabled;
-        if (patch.planner?.maxAgentCalls) settings.roles.planner.maxAgentCalls = patch.planner.maxAgentCalls;
+      setResearchSettings: (patch: { enabled?: boolean; maxAgentCalls?: number }) => {
+        Object.assign(settings, patch);
         return structuredClone(settings);
       },
     };
-    return { rpc, selections };
+    return { rpc, store };
   };
   const render = (rpc: ReturnType<typeof fake>["rpc"]) => {
     const section = app.settingsSections.find((candidate) => candidate.id === "research")!;
@@ -389,51 +379,53 @@ describe("Chief researcher settings", () => {
     unmounts.push(() => rendered.lifecycle.unmount());
     return rendered;
   };
-  // Cells render chief, planner, reviewer × scan, verify, combine; index 3 is planner · scan.
-  const plannerScan = (rendered: ReturnType<typeof render>) =>
-    within(rendered.getAllByTestId("bb-provider-model-picker")[3]!);
+  const picker = (rendered: ReturnType<typeof render>) => within(rendered.getByTestId("bb-provider-model-picker"));
+  const inheriting = "Inherit caller · uses the calling thread's model";
+
+  test("the Researcher switch is on by default", async () => {
+    const rendered = render(fake().rpc);
+    await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+    expect((rendered.getByRole("checkbox", { name: "Researcher" }) as HTMLInputElement).checked).toBe(true);
+  });
 
   test("saves a full triple and shows it after a reload", async () => {
     const { rpc } = fake();
     const first = render(rpc);
     await vi.waitFor(() => expect(first.getByText("Local")).toBeTruthy());
-    expect(first.getAllByText("Inherit caller · uses the calling thread's model")).toHaveLength(9);
-    const cell = plannerScan(first);
+    expect(first.getAllByText(inheriting)).toHaveLength(1);
+    const cell = picker(first);
     fireEvent.change(cell.getByLabelText("Provider ID"), { target: { value: triple.providerId } });
     fireEvent.change(cell.getByLabelText("Model"), { target: { value: triple.model } });
     fireEvent.change(cell.getByLabelText("Reasoning level"), { target: { value: triple.reasoningLevel } });
     fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
     await vi.waitFor(() =>
-      expect(first.rpcCalls).toContainEqual({
-        method: "setResearchModel",
-        input: { hostId: "host_1", role: "planner", stage: "scan", selection: triple },
-      }),
+      expect(first.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", selection: triple } }),
     );
     first.lifecycle.unmount();
 
     const second = render(rpc);
     await vi.waitFor(() => expect(second.getByText("Local")).toBeTruthy());
-    expect((plannerScan(second).getByLabelText("Model") as HTMLInputElement).value).toBe(triple.model);
+    expect((picker(second).getByLabelText("Model") as HTMLInputElement).value).toBe(triple.model);
     expect(second.getAllByRole("button", { name: "Inherit caller" })).toHaveLength(1);
-    expect(second.getAllByText("Inherit caller · uses the calling thread's model")).toHaveLength(8);
+    expect(second.queryByText(inheriting)).toBeNull();
   });
 
   test("rejects a partial triple, stores nothing, and shows the error after reload", async () => {
-    const { rpc, selections } = fake();
+    const { rpc, store } = fake();
     const rendered = render(rpc);
     await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
-    const cell = plannerScan(rendered);
+    const cell = picker(rendered);
     fireEvent.change(cell.getByLabelText("Model"), { target: { value: "" } });
     fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
     await vi.waitFor(() => expect(rendered.getByRole("alert").textContent).toContain("Invalid model selection"));
-    expect(selections.planner.scan).toBeNull();
+    expect(store.selection).toBeNull();
     await vi.waitFor(() =>
       expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(2),
     );
-    expect(rendered.getAllByText("Inherit caller · uses the calling thread's model")).toHaveLength(9);
+    expect(rendered.getAllByText(inheriting)).toHaveLength(1);
   });
 
-  test("the feature switch and caps save valid values only", async () => {
+  test("the switch and the cap save valid values only", async () => {
     const { rpc } = fake();
     const rendered = render(rpc);
     await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
@@ -442,28 +434,25 @@ describe("Chief researcher settings", () => {
     fireEvent.click(rendered.getByRole("checkbox", { name: "Researcher" }));
     await vi.waitFor(() => expect(sent()).toEqual([{ enabled: false }]));
 
-    const cap = rendered.getByLabelText("Planner agent calls per run");
+    const cap = rendered.getByLabelText("Agent calls per run");
     fireEvent.change(cap, { target: { value: "0" } });
     expect(cap.getAttribute("aria-invalid")).toBe("true");
     expect(sent()).toHaveLength(1);
     fireEvent.change(cap, { target: { value: "30" } });
-    await vi.waitFor(() => expect(sent()).toEqual([{ enabled: false }, { planner: { maxAgentCalls: 30 } }]));
+    await vi.waitFor(() => expect(sent()).toEqual([{ enabled: false }, { maxAgentCalls: 30 }]));
     expect(cap.getAttribute("aria-invalid")).toBe("false");
   });
 
-  test("Inherit caller clears a stage selection", async () => {
-    const { rpc, selections } = fake();
-    selections.planner.scan = triple;
+  test("Inherit caller clears the machine's pick", async () => {
+    const { rpc, store } = fake();
+    store.selection = triple;
     const rendered = render(rpc);
     await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
     fireEvent.click(rendered.getByRole("button", { name: "Inherit caller" }));
     await vi.waitFor(() =>
-      expect(rendered.rpcCalls).toContainEqual({
-        method: "setResearchModel",
-        input: { hostId: "host_1", role: "planner", stage: "scan", selection: null },
-      }),
+      expect(rendered.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", selection: null } }),
     );
-    expect(rendered.getAllByText("Inherit caller · uses the calling thread's model")).toHaveLength(9);
-    expect(selections.planner.scan).toBeNull();
+    expect(rendered.getAllByText(inheriting)).toHaveLength(1);
+    expect(store.selection).toBeNull();
   });
 });
