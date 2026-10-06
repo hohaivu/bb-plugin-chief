@@ -348,26 +348,27 @@ test("registers the Chief researcher settings section after the models section",
 describe("Chief researcher settings", () => {
   const triple = { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const };
   const fake = () => {
-    const settings = { enabled: true, maxAgentCalls: 24 };
-    const store = { selection: null as typeof triple | null };
+    const settings = { enabled: true, maxAgentCalls: 24, timeoutMinutes: { survey: 10, review: 10, investigate: 10 } };
+    const store = { selections: { survey: null, review: null, investigate: null } as Record<"survey" | "review" | "investigate", typeof triple | null> };
     const rpc = {
       researchConfiguration: () => ({
         settings: structuredClone(settings),
         hosts: [{
           hostId: "host_1", hostName: "Local", connected: true, error: null,
           fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
-          selection: structuredClone(store.selection), unusable: false,
+          selections: structuredClone(store.selections), unusable: [],
         }],
       }),
       // The harness does not validate input, so the fake applies the real contract schema.
       setResearchModel: (input: unknown) => {
         const parsed = rpcContract.setResearchModel.input.safeParse(input);
         if (!parsed.success) throw new Error("Invalid model selection");
-        store.selection = parsed.data.selection as typeof triple | null;
+        store.selections[parsed.data.mode] = parsed.data.selection as typeof triple | null;
         return { ok: true as const };
       },
-      setResearchSettings: (patch: { enabled?: boolean; maxAgentCalls?: number }) => {
+      setResearchSettings: ({ timeoutMinutes, ...patch }: { enabled?: boolean; maxAgentCalls?: number; timeoutMinutes?: object }) => {
         Object.assign(settings, patch);
+        Object.assign(settings.timeoutMinutes, timeoutMinutes);
         return structuredClone(settings);
       },
     };
@@ -379,56 +380,56 @@ describe("Chief researcher settings", () => {
     unmounts.push(() => rendered.lifecycle.unmount());
     return rendered;
   };
-  const picker = (rendered: ReturnType<typeof render>) => within(rendered.getByTestId("bb-provider-model-picker"));
+  const picker = (rendered: ReturnType<typeof render>) => within(rendered.getAllByTestId("bb-provider-model-picker")[0]!);
   const inheriting = "Inherit caller · uses the calling thread's model";
 
   test("the Researcher switch is on by default", async () => {
     const rendered = render(fake().rpc);
-    await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
     expect((rendered.getByRole("checkbox", { name: "Researcher" }) as HTMLInputElement).checked).toBe(true);
   });
 
   test("saves a full triple and shows it after a reload", async () => {
     const { rpc } = fake();
     const first = render(rpc);
-    await vi.waitFor(() => expect(first.getByText("Local")).toBeTruthy());
-    expect(first.getAllByText(inheriting)).toHaveLength(1);
+    await vi.waitFor(() => expect(first.getAllByText("Local")[0]).toBeTruthy());
+    expect(first.getAllByText(inheriting)).toHaveLength(3);
     const cell = picker(first);
     fireEvent.change(cell.getByLabelText("Provider ID"), { target: { value: triple.providerId } });
     fireEvent.change(cell.getByLabelText("Model"), { target: { value: triple.model } });
     fireEvent.change(cell.getByLabelText("Reasoning level"), { target: { value: triple.reasoningLevel } });
     fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
     await vi.waitFor(() =>
-      expect(first.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", selection: triple } }),
+      expect(first.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", mode: "survey", selection: triple } }),
     );
     first.lifecycle.unmount();
 
     const second = render(rpc);
-    await vi.waitFor(() => expect(second.getByText("Local")).toBeTruthy());
+    await vi.waitFor(() => expect(second.getAllByText("Local")[0]).toBeTruthy());
     expect((picker(second).getByLabelText("Model") as HTMLInputElement).value).toBe(triple.model);
     expect(second.getAllByRole("button", { name: "Inherit caller" })).toHaveLength(1);
-    expect(second.queryByText(inheriting)).toBeNull();
+    expect(second.getAllByText(inheriting)).toHaveLength(2);
   });
 
   test("rejects a partial triple, stores nothing, and shows the error after reload", async () => {
     const { rpc, store } = fake();
     const rendered = render(rpc);
-    await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
     const cell = picker(rendered);
     fireEvent.change(cell.getByLabelText("Model"), { target: { value: "" } });
     fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
     await vi.waitFor(() => expect(rendered.getByRole("alert").textContent).toContain("Invalid model selection"));
-    expect(store.selection).toBeNull();
+    expect(store.selections.survey).toBeNull();
     await vi.waitFor(() =>
       expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(2),
     );
-    expect(rendered.getAllByText(inheriting)).toHaveLength(1);
+    expect(rendered.getAllByText(inheriting)).toHaveLength(3);
   });
 
   test("the switch and the cap save valid values only", async () => {
     const { rpc } = fake();
     const rendered = render(rpc);
-    await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
     const sent = () => rendered.rpcCalls.filter((call) => call.method === "setResearchSettings").map((call) => call.input);
 
     fireEvent.click(rendered.getByRole("checkbox", { name: "Researcher" }));
@@ -445,14 +446,29 @@ describe("Chief researcher settings", () => {
 
   test("Inherit caller clears the machine's pick", async () => {
     const { rpc, store } = fake();
-    store.selection = triple;
+    store.selections.survey = triple;
     const rendered = render(rpc);
-    await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
     fireEvent.click(rendered.getByRole("button", { name: "Inherit caller" }));
     await vi.waitFor(() =>
-      expect(rendered.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", selection: null } }),
+      expect(rendered.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", mode: "survey", selection: null } }),
     );
-    expect(rendered.getAllByText(inheriting)).toHaveLength(1);
-    expect(store.selection).toBeNull();
+    expect(rendered.getAllByText(inheriting)).toHaveLength(3);
+    expect(store.selections.survey).toBeNull();
+  });
+
+  test("a mode's timeout saves valid values only", async () => {
+    const rendered = render(fake().rpc);
+    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
+    const sent = () => rendered.rpcCalls.filter((call) => call.method === "setResearchSettings").map((call) => call.input);
+    const timeout = rendered.getByLabelText("Review timeout (minutes)");
+    for (const value of ["0", "61"]) {
+      fireEvent.change(timeout, { target: { value } });
+      expect(timeout.getAttribute("aria-invalid")).toBe("true");
+    }
+    expect(sent()).toHaveLength(0);
+    fireEvent.change(timeout, { target: { value: "5" } });
+    await vi.waitFor(() => expect(sent()).toEqual([{ timeoutMinutes: { review: 5 } }]));
+    expect(timeout.getAttribute("aria-invalid")).toBe("false");
   });
 });

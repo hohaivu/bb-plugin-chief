@@ -250,7 +250,14 @@ function ChiefModelSettings() {
   );
 }
 
-const validCap = (value: number) => Number.isInteger(value) && value >= 1 && value <= 100;
+const inRange = (value: number, max: number) => Number.isInteger(value) && value >= 1 && value <= max;
+
+type ResearchMode = keyof ResearchConfiguration["settings"]["timeoutMinutes"];
+const RESEARCH_MODE_SECTIONS: { mode: ResearchMode; label: string }[] = [
+  { mode: "survey", label: "Survey" },
+  { mode: "review", label: "Review" },
+  { mode: "investigate", label: "Investigate" },
+];
 
 function ResearchSettings() {
   const rpc = useRpc<typeof rpcContract>();
@@ -259,6 +266,7 @@ function ResearchSettings() {
   const [isLoading, setIsLoading] = useState(true);
   // Cap text as typed, so an out-of-range value stays visible and marked invalid.
   const [cap, setCap] = useState<string | null>(null);
+  const [timeouts, setTimeouts] = useState<Partial<Record<ResearchMode, string>>>({});
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -283,7 +291,7 @@ function ResearchSettings() {
   }, [load]);
 
   const saveSettings = useCallback(
-    (patch: { enabled?: boolean; maxAgentCalls?: number }) => {
+    (patch: { enabled?: boolean; maxAgentCalls?: number; timeoutMinutes?: Partial<Record<ResearchMode, number>> }) => {
       setError(null);
       void rpc.call("setResearchSettings", patch).then(
         (settings) => setConfiguration((current) => current && { ...current, settings }),
@@ -294,13 +302,15 @@ function ResearchSettings() {
   );
 
   const saveModel = useCallback(
-    (hostId: string, selection: ModelSelection | null) => {
+    (hostId: string, mode: ResearchMode, selection: ModelSelection | null) => {
       setError(null);
       setConfiguration((current) => current && {
         ...current,
-        hosts: current.hosts.map((host) => host.hostId === hostId ? { ...host, selection, unusable: false } : host),
+        hosts: current.hosts.map((host) => host.hostId === hostId
+          ? { ...host, selections: { ...host.selections, [mode]: selection }, unusable: host.unusable.filter((m) => m !== mode) }
+          : host),
       });
-      void rpc.call("setResearchModel", { hostId, selection }).catch(fail);
+      void rpc.call("setResearchModel", { hostId, mode, selection }).catch(fail);
     },
     [fail, rpc],
   );
@@ -334,7 +344,7 @@ function ResearchSettings() {
       </div>
       {settings ? (() => {
         const text = cap ?? String(settings.maxAgentCalls);
-        const valid = validCap(Number(text));
+        const valid = inRange(Number(text), 100);
         return (
           <label className="flex flex-wrap items-center gap-3 text-sm text-foreground">
             Agent calls per run
@@ -348,64 +358,92 @@ function ResearchSettings() {
               onChange={(event) => {
                 const next = event.target.value;
                 setCap(next);
-                if (validCap(Number(next))) saveSettings({ maxAgentCalls: Number(next) });
+                if (inRange(Number(next), 100)) saveSettings({ maxAgentCalls: Number(next) });
               }}
               className={`h-7 w-20 rounded-md border bg-transparent px-2 text-xs ${valid ? "border-input" : "border-destructive"}`}
             />
-            <span className="text-xs text-muted-foreground">1–100, for every role</span>
+            <span className="text-xs text-muted-foreground">1–100, shared by Chief, planners, and reviewers</span>
           </label>
         );
       })() : null}
       <p className="text-sm text-muted-foreground">
-        One config covers Chief, planners, and reviewers. Each machine can pick one model for every research
-        stage; without a pick, research inherits the calling thread&apos;s model.
+        One config covers Chief, planners, and reviewers. Each mode picks its own model and thinking level per
+        machine, and its own timeout; a mode without a pick inherits the calling thread&apos;s model.
       </p>
-      {configuration?.hosts.map((host) => {
-        const value = host.selection ?? host.fallback;
+      {settings ? RESEARCH_MODE_SECTIONS.map(({ mode, label }) => {
+        const text = timeouts[mode] ?? String(settings.timeoutMinutes[mode]);
+        const valid = inRange(Number(text), 60);
         return (
-          <div key={host.hostId} className="rounded-lg border border-border p-3">
-            <div className="text-sm font-medium text-foreground">
-              {host.hostName}
-              {host.connected ? null : " · disconnected"}
-            </div>
-            {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              {value ? (
-                <ProviderModelPicker
-                  value={value}
-                  routing={{ kind: "host", hostId: host.hostId }}
-                  disabled={!host.connected}
-                  onChange={(next) => saveModel(host.hostId, {
-                    providerId: next.providerId,
-                    model: next.model,
-                    reasoningLevel: next.reasoningLevel,
-                  })}
-                />
-              ) : (
-                <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
-              )}
-              {host.selection ? (
-                <>
-                  {host.unusable ? (
-                    <span className="text-xs text-destructive">
-                      This machine cannot serve that model; research inherits the caller.
-                    </span>
-                  ) : null}
-                  <button
-                    type="button"
-                    onClick={() => saveModel(host.hostId, null)}
-                    className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
-                  >
-                    Inherit caller
-                  </button>
-                </>
-              ) : (
-                <span className="text-xs text-muted-foreground">Inherit caller · uses the calling thread&apos;s model</span>
-              )}
-            </div>
-          </div>
+          <section key={mode} className="space-y-3 rounded-lg border border-border p-3">
+            <h3 className="text-sm font-semibold text-foreground">{label}</h3>
+            <label className="flex flex-wrap items-center gap-3 text-sm text-foreground">
+              Timeout (minutes)
+              <input
+                type="number"
+                min={1}
+                max={60}
+                aria-label={`${label} timeout (minutes)`}
+                aria-invalid={!valid}
+                value={text}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setTimeouts((current) => ({ ...current, [mode]: next }));
+                  if (inRange(Number(next), 60)) saveSettings({ timeoutMinutes: { [mode]: Number(next) } });
+                }}
+                className={`h-7 w-20 rounded-md border bg-transparent px-2 text-xs ${valid ? "border-input" : "border-destructive"}`}
+              />
+              <span className="text-xs text-muted-foreground">1–60; the run keeps going and can be resumed by runId</span>
+            </label>
+            {configuration?.hosts.map((host) => {
+              const selection = host.selections[mode];
+              const value = selection ?? host.fallback;
+              return (
+                <div key={host.hostId}>
+                  <div className="text-sm font-medium text-foreground">
+                    {host.hostName}
+                    {host.connected ? null : " · disconnected"}
+                  </div>
+                  {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    {value ? (
+                      <ProviderModelPicker
+                        value={value}
+                        routing={{ kind: "host", hostId: host.hostId }}
+                        disabled={!host.connected}
+                        onChange={(next) => saveModel(host.hostId, mode, {
+                          providerId: next.providerId,
+                          model: next.model,
+                          reasoningLevel: next.reasoningLevel,
+                        })}
+                      />
+                    ) : (
+                      <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
+                    )}
+                    {selection ? (
+                      <>
+                        {host.unusable.includes(mode) ? (
+                          <span className="text-xs text-destructive">
+                            This machine cannot serve that model; research inherits the caller.
+                          </span>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => saveModel(host.hostId, mode, null)}
+                          className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
+                        >
+                          Inherit caller
+                        </button>
+                      </>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">Inherit caller · uses the calling thread&apos;s model</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </section>
         );
-      })}
+      }) : null}
       {configuration?.hosts.length === 0 ? (
         <p className="text-sm text-muted-foreground">No machines are enrolled yet.</p>
       ) : null}
@@ -565,7 +603,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "research",
     title: "Chief researcher",
-    description: "Parallel read-only research for Chief, planners, and reviewers, under one shared config.",
+    description: "Parallel read-only research for Chief, planners, and reviewers: one shared switch and cap, plus per-mode models, thinking levels, and timeouts.",
     component: ResearchSettings,
   });
   app.slots.experimental_threadHeaderAction({

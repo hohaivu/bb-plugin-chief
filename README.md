@@ -113,17 +113,22 @@ survey. Workers and advisors never get it. Settings has one **Researcher** switc
 while it is off, no role gets the tool or the line about it.
 
 The agents share the caller's checkout and permissions. They are read-only only because the prompt
-tells them to be. Each call waits up to 10 minutes. If the run is still going, the call returns its
+tells them to be. Each call waits up to its mode's timeout (10 minutes by default). If the run is still going, the call returns its
 runId, and calling again with that runId keeps waiting. If the plugin server can't start the
 workflow, the tool returns the exact script and args so the agent can start it with
 `bb_workflow_run` and then wait on its runId. One cap on agent calls per run (1–100, default 24)
 applies to every role. A run that would need more is refused before it starts.
 
 Settings → **Chief researcher** holds this one config for Chief, planners, and reviewers: the
-**Researcher** switch, the agent-call cap, and, per machine, one provider + model + reasoning level
-pick used for every stage (scan, verify, combine) and every role. The picker offers only models the
-machine's live catalog serves. A machine without a pick shows **Inherit caller** and runs on the
-calling thread's model; the **Inherit caller** button clears a pick back to that default.
+**Researcher** switch and the agent-call cap are shared. Then each mode (survey, review,
+investigate) has its own section with a timeout (1–60 minutes, default 10) and, per machine, one
+provider + model + reasoning level pick used for every stage (scan, verify, combine) of that mode.
+The timeout only limits how long one call waits: the run keeps going and resumes by runId. The
+picker offers only models the machine's live catalog serves. A mode without a pick on a machine
+shows **Inherit caller** and runs on the calling thread's model; the **Inherit caller** button
+clears a pick back to that default. An earlier single per-machine pick was copied to every mode.
+Timeouts can also be set with `bb plugin config chief set researchSurveyTimeoutMinutes 5` (and
+`researchReviewTimeoutMinutes`, `researchInvestigateTimeoutMinutes`).
 
 ### Work list
 
