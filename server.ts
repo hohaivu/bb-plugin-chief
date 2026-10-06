@@ -1811,14 +1811,14 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`chief_continue is a short nudge of at most ${MAX_NUDGE_LENGTH} characters to a thread that is still working. ${row.role === "worker" ? handoff : rerouteSteps(row)}`);
     }
     // Planners, reviewers, and advisors all stay out of the files; only a worker
-    // edits. The instruction leads so consecutive continuations differ from their
-    // first character in the BB queue preview, instead of both starting with the
-    // same read-only reminder.
+    // edits. The instruction leads so the child reads what it says first, ahead of
+    // the read-only reminder. steer-if-active steers a running turn instead of
+    // waiting in BB's queue, and starts a turn when the thread is idle.
     const reminder = ({ reviewer: REVIEW_ONLY, planner: PLAN_ONLY, advisor: ADVISE_ONLY } as Partial<Record<ManagedRow["role"], string>>)[row.role] ?? null;
     const text = reminder ? `${instruction}\n\n${reminder}` : instruction;
     await bb.sdk.threads.send({
       threadId,
-      mode: "queue-if-active",
+      mode: "steer-if-active",
       input: [{ type: "text", text, mentions: [] }],
       senderThreadId: effectiveChiefId,
     });

@@ -2348,7 +2348,7 @@ describe("Chief backend", () => {
     }
   });
 
-  test("puts the instruction first in a continuation, so the queue preview shows what it says", async () => {
+  test("steers a continuation with the instruction first", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
@@ -2359,8 +2359,8 @@ describe("Chief backend", () => {
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     await state.harness.behavior.runCli(["continue", planner.threadId, "--instruction", "Name the test file"]);
 
+    expect(state.sent.at(-1).mode).toBe("steer-if-active");
     const text = state.sent.at(-1).input[0].text as string;
-    // Two different instructions must not share a byte-identical prefix in the BB queue preview.
     expect(text.startsWith("Name the test file")).toBe(true);
     expect(text.startsWith("Remain read-only")).toBe(false);
     // The read-only reminder still follows, unchanged in wording.
