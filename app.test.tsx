@@ -4,14 +4,15 @@ import { act, fireEvent, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { rpcContract, type TodoItem } from "./server";
 
-const hostPicker = vi.hoisted(() => ({ normalizes: false }));
+const hostPicker = vi.hoisted(() => ({ normalizes: false, emits: 0 }));
 vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@get-bb/plugin-sdk/app")>();
   const { createElement, useEffect } = await import("react");
   // Like bb's picker: every render it re-reports its own state, here with a service tier Chief does not store.
+  // Capped so a looping app fails the assertions instead of hanging the run.
   function HostLikePicker(props: any) {
     useEffect(() => {
-      if (hostPicker.normalizes && props.value.serviceTier === undefined) props.onChange({ ...props.value, serviceTier: "default" });
+      if (hostPicker.normalizes && props.value.serviceTier === undefined && hostPicker.emits++ < 50) props.onChange({ ...props.value, serviceTier: "default" });
     });
     // Resolved lazily: the harness installs the runtime inside loadPluginApp.
     const Picker = (globalThis as any).__bbPluginRuntime.pluginSdkApp.experimental_ProviderModelPicker;
@@ -27,6 +28,7 @@ const emptyStatus = { sectionId: null, threads: [] };
 afterEach(() => {
   while (unmounts.length) unmounts.pop()!();
   hostPicker.normalizes = false;
+  hostPicker.emits = 0;
 });
 
 test("creates a fresh Chief from the project-aware New Thread screen", async () => {
