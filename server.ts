@@ -38,7 +38,7 @@ const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const execFileAsync = promisify(execFile);
 /** How long one chief_research call waits before handing back a runId to resume with. */
-const RESEARCH_WAIT_MS = 10 * 60_000;
+const RESEARCH_DEFAULT_TIMEOUT_MINUTES = 10;
 const RESEARCH_POLL_MS = 3_000;
 const MAX_RESEARCH_OUTPUT = 32_000;
 const RESEARCH_PREAMBLE = "READ-ONLY: Do not edit, create, or delete files, commit, push, or run mutating commands; you share the caller's checkout.";
@@ -167,8 +167,14 @@ const RESEARCH_MODES: Record<ResearchRole, z.infer<typeof researchModeSchema>[]>
   reviewer: ["review", "survey"],
 };
 const agentCapSchema = z.number().int().min(1).max(100);
-/** One config for every role: Chief, planners, and reviewers share the switch and the cap. */
-const researchSettingsSchema = z.object({ enabled: z.boolean(), maxAgentCalls: agentCapSchema });
+/** How long one chief_research call waits, in minutes; the run itself keeps going. */
+const timeoutSchema = z.number().int().min(1).max(60);
+/** One config for every role: Chief, planners, and reviewers share the switch, the cap, and each mode's timeout. */
+const researchSettingsSchema = z.object({
+  enabled: z.boolean(),
+  maxAgentCalls: agentCapSchema,
+  timeoutMinutes: z.object({ survey: timeoutSchema, review: timeoutSchema, investigate: timeoutSchema }),
+});
 type ResearchSettings = z.infer<typeof researchSettingsSchema>;
 const researchConfigurationSchema = z.object({
   settings: researchSettingsSchema,
@@ -178,14 +184,26 @@ const researchConfigurationSchema = z.object({
     connected: z.boolean(),
     fallback: modelSelectionSchema.nullable(),
     error: z.string().nullable(),
-    /** One pick for every stage and role; null inherits the caller's model. */
-    selection: modelSelectionSchema.nullable(),
-    /** The pick is one this machine can no longer serve, so every stage inherits the caller's model. */
-    unusable: z.boolean(),
+    /** One pick per mode for every stage and role; null inherits the caller's model. */
+    selections: z.object({
+      survey: modelSelectionSchema.nullable(),
+      review: modelSelectionSchema.nullable(),
+      investigate: modelSelectionSchema.nullable(),
+    }),
+    /** Modes whose pick this machine can no longer serve, so their stages inherit the caller's model. */
+    unusable: z.array(researchModeSchema),
   })),
 });
 export type ResearchConfiguration = z.infer<typeof researchConfigurationSchema>;
-const researchSettingsPatchSchema = z.object({ enabled: z.boolean().optional(), maxAgentCalls: agentCapSchema.optional() }).strict();
+const researchSettingsPatchSchema = z.object({
+  enabled: z.boolean().optional(),
+  maxAgentCalls: agentCapSchema.optional(),
+  timeoutMinutes: z.object({
+    survey: timeoutSchema.optional(),
+    review: timeoutSchema.optional(),
+    investigate: timeoutSchema.optional(),
+  }).strict().optional(),
+}).strict();
 /** A workflow agent selection: all three fields or none, never a partial triple. */
 const workflowSelectionSchema = z.object({
   provider: z.string().trim().min(1),
@@ -505,6 +523,7 @@ export const rpcContract = defineRpcContract({
   setResearchModel: {
     input: z.object({
       hostId: z.string().trim().min(1),
+      mode: researchModeSchema,
       selection: modelSelectionSchema.nullable(),
     }).strict(),
     output: z.object({ ok: z.literal(true) }).strict(),
@@ -891,6 +910,11 @@ export const MIGRATIONS = [
     // One chief_research pick per machine for every stage and role; per-role, per-stage picks are discarded.
     `CREATE TABLE IF NOT EXISTS research_model (host_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
     `DROP TABLE IF EXISTS research_models`,
+    // chief_research's per-machine pick per mode; the single pick is copied to every mode.
+    `CREATE TABLE IF NOT EXISTS research_mode_models (host_id TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('survey','review','investigate')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, mode))`,
+    `INSERT INTO research_mode_models (host_id, mode, provider_id, model, reasoning_level, updated_at) SELECT r.host_id, m.mode, r.provider_id, r.model, r.reasoning_level, r.updated_at FROM research_model r CROSS JOIN (SELECT 'survey' AS mode UNION ALL SELECT 'review' UNION ALL SELECT 'investigate') m`,
+    // The single pick now lives on in every mode.
+    `DROP TABLE IF EXISTS research_model`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -910,6 +934,9 @@ export default async function plugin(bb: BbPluginApi) {
       default: true,
     },
     researchMaxAgentCalls: { type: "number", label: "Researcher: agent calls per run (1–100)", default: 24, experimental_schema: agentCapSchema },
+    researchSurveyTimeoutMinutes: { type: "number", label: "Researcher: survey timeout (minutes, 1–60)", default: RESEARCH_DEFAULT_TIMEOUT_MINUTES, experimental_schema: timeoutSchema },
+    researchReviewTimeoutMinutes: { type: "number", label: "Researcher: review timeout (minutes, 1–60)", default: RESEARCH_DEFAULT_TIMEOUT_MINUTES, experimental_schema: timeoutSchema },
+    researchInvestigateTimeoutMinutes: { type: "number", label: "Researcher: investigate timeout (minutes, 1–60)", default: RESEARCH_DEFAULT_TIMEOUT_MINUTES, experimental_schema: timeoutSchema },
     autoSpawn: {
       type: "boolean",
       label: "Auto-spawn Chief",
@@ -965,8 +992,8 @@ export default async function plugin(bb: BbPluginApi) {
   const roleModelRow = db.prepare<[string, string]>(
     `SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`,
   );
-  const researchModelRow = db.prepare<[string]>(
-    `SELECT provider_id, model, reasoning_level FROM research_model WHERE host_id=?`,
+  const researchModelRow = db.prepare<[string, string]>(
+    `SELECT provider_id, model, reasoning_level FROM research_mode_models WHERE host_id=? AND mode=?`,
   );
   const todosForProject = db.prepare<[string]>(
     `SELECT * FROM chief_todos WHERE project_id=? AND state='open' ORDER BY id ASC`,
@@ -1177,20 +1204,22 @@ export default async function plugin(bb: BbPluginApi) {
     return parseSelectionRow(roleModelRow.get(hostId, role));
   }
 
-  function readResearchModel(hostId: string): ModelSelection | null {
-    return parseSelectionRow(researchModelRow.get(hostId));
+  type ResearchMode = z.infer<typeof researchModeSchema>;
+
+  function readResearchModel(hostId: string, mode: ResearchMode): ModelSelection | null {
+    return parseSelectionRow(researchModelRow.get(hostId, mode));
   }
 
-  function writeResearchModel(hostId: string, selection: ModelSelection | null) {
+  function writeResearchModel(hostId: string, mode: ResearchMode, selection: ModelSelection | null) {
     if (!selection) {
-      db.prepare(`DELETE FROM research_model WHERE host_id=?`).run(hostId);
+      db.prepare(`DELETE FROM research_mode_models WHERE host_id=? AND mode=?`).run(hostId, mode);
       return;
     }
-    db.prepare(`INSERT INTO research_model (host_id, provider_id, model, reasoning_level, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(host_id) DO UPDATE SET provider_id=excluded.provider_id, model=excluded.model,
+    db.prepare(`INSERT INTO research_mode_models (host_id, mode, provider_id, model, reasoning_level, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(host_id, mode) DO UPDATE SET provider_id=excluded.provider_id, model=excluded.model,
         reasoning_level=excluded.reasoning_level, updated_at=excluded.updated_at`).run(
-      hostId, selection.providerId, selection.model, selection.reasoningLevel, Date.now(),
+      hostId, mode, selection.providerId, selection.model, selection.reasoningLevel, Date.now(),
     );
   }
 
@@ -1384,7 +1413,15 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function researchFrom(values: Awaited<ReturnType<typeof settings.get>>): ResearchSettings {
-    return { enabled: values.researchEnabled, maxAgentCalls: values.researchMaxAgentCalls };
+    return {
+      enabled: values.researchEnabled,
+      maxAgentCalls: values.researchMaxAgentCalls,
+      timeoutMinutes: {
+        survey: values.researchSurveyTimeoutMinutes,
+        review: values.researchReviewTimeoutMinutes,
+        investigate: values.researchInvestigateTimeoutMinutes,
+      },
+    };
   }
 
   /** A live read that also refreshes the cache. The chief_research gate calls this, never the cache. */
@@ -2865,14 +2902,14 @@ export default async function plugin(bb: BbPluginApi) {
     if (!current.enabled) {
       throw new Error("chief_research is off in Chief settings → Chief researcher.");
     }
-    return { row, role: role.data, cap: current.maxAgentCalls };
+    return { row, role: role.data, cap: current.maxAgentCalls, settings: current };
   }
 
   /** Per stage: a call override, else the caller machine's stored pick if it can still serve it, else inherit. */
-  async function researchModels(threadId: string, overrides: Partial<Record<Stage, WorkflowSelection>> = {}) {
+  async function researchModels(threadId: string, mode: ResearchMode, overrides: Partial<Record<Stage, WorkflowSelection>> = {}) {
     const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
     const hostId = live?.environmentId ? await environmentHostId(live.environmentId) : null;
-    const stored = hostId ? readResearchModel(hostId) : null;
+    const stored = hostId ? readResearchModel(hostId, mode) : null;
     const usable = stored && hostId ? await usableSelection(hostId, stored, catalogReader(hostId)) : null;
     const pick = usable ? { provider: usable.providerId, model: usable.model, reasoningLevel: usable.reasoningLevel } : null;
     const models: Partial<Record<Stage, WorkflowSelection>> = {};
@@ -2902,9 +2939,9 @@ export default async function plugin(bb: BbPluginApi) {
   /** The workflows plugin's run statuses are queued, running, succeeded, failed, and cancelled. */
   const RUNNING_WORKFLOW = new Set(["queued", "running"]);
 
-  /** Polls a run until it finishes or RESEARCH_WAIT_MS passes, then says what happened. */
-  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
-    const deadline = Date.now() + RESEARCH_WAIT_MS;
+  /** Polls a run until it finishes or waitMs passes, then says what happened; the run keeps going either way. */
+  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, waitMs: number) {
+    const deadline = Date.now() + waitMs;
     try {
       for (;;) {
         let run: { status: string; result?: unknown; resultOmitted?: boolean; error?: unknown; calls?: unknown };
@@ -2947,8 +2984,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function research(params: ResearchParams, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
-    const { cap } = await researchCaller(context.threadId, context.projectId, params.mode);
-    if (params.runId) return awaitResearch(params.runId, context);
+    const { cap, settings } = await researchCaller(context.threadId, context.projectId, params.mode);
+    const waitMs = (params.mode ? settings.timeoutMinutes[params.mode] : RESEARCH_DEFAULT_TIMEOUT_MINUTES) * 60_000;
+    if (params.runId) return awaitResearch(params.runId, context, waitMs);
     const mode = params.mode!;
     const calls = agentCount(params);
     if (calls > cap) {
@@ -2958,7 +2996,7 @@ export default async function plugin(bb: BbPluginApi) {
     const script = RESEARCH_SCRIPTS[mode];
     const args = {
       preamble: RESEARCH_PREAMBLE, question: params.question, verify: params.verify, cap,
-      models: await researchModels(context.threadId, params.models),
+      models: await researchModels(context.threadId, mode, params.models),
       ...(mode === "survey" ? { items: params.items, batchSize: params.batchSize } : {}),
       ...(mode === "review" ? { concerns: params.concerns, diffRef: params.diffRef ?? null } : {}),
       ...(mode === "investigate" ? { questions: params.questions } : {}),
@@ -2977,7 +3015,7 @@ export default async function plugin(bb: BbPluginApi) {
         "", "script:", "```js", script, "```", "", "args:", "```json", JSON.stringify(args), "```",
       ].join("\n");
     }
-    return awaitResearch(runId, context);
+    return awaitResearch(runId, context, waitMs);
   }
 
   bb.agents.registerTool({
@@ -3249,7 +3287,7 @@ export default async function plugin(bb: BbPluginApi) {
       "investigate: one agent per `questions` entry, then one merges the answers into a brief with Confirmed and Unconfirmed sections.",
       "Chief may use survey, review, investigate; a planner survey, investigate; a reviewer review, survey.",
       "Read-only by prompt only: the agents share your checkout and permissions, and are told not to edit, commit, or push.",
-      "Waits up to 10 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting.",
+      "Waits up to the mode's timeout (10 minutes unless set in Chief researcher settings). If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting.",
     ].join(" "),
     parameters: researchParams,
     async execute(params, context) {
@@ -3357,25 +3395,45 @@ export default async function plugin(bb: BbPluginApi) {
       settings: await researchSettings(),
       hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
         const connected = host.status === "connected";
+        const selections = {
+          survey: readResearchModel(host.id, "survey"),
+          review: readResearchModel(host.id, "review"),
+          investigate: readResearchModel(host.id, "investigate"),
+        };
+        // One reader for the whole host: modes sharing a provider scan it once.
         const read = catalogReader(host.id);
-        const selection = readResearchModel(host.id);
-        const [scan, usable] = await Promise.all([
+        const [scan, flagged] = await Promise.all([
           connected
             ? hostFallback(host.id, read)
             : { fallback: null, error: "Machine is disconnected; its model catalog is unavailable." },
-          connected && selection ? usableSelection(host.id, selection, read) : null,
+          Promise.all(researchModeSchema.options.map(async (mode) => {
+            const selection = selections[mode];
+            if (!connected || !selection) return null;
+            return (await usableSelection(host.id, selection, read)) ? null : mode;
+          })),
         ]);
-        return { hostId: host.id, hostName: host.name, connected, ...scan, selection, unusable: connected && !!selection && !usable };
+        return {
+          hostId: host.id,
+          hostName: host.name,
+          connected,
+          ...scan,
+          selections,
+          unusable: flagged.filter((mode): mode is ResearchMode => mode !== null),
+        };
       })),
     }),
-    setResearchModel: ({ hostId, selection }) => {
-      writeResearchModel(hostId, selection);
+    setResearchModel: ({ hostId, mode, selection }) => {
+      writeResearchModel(hostId, mode, selection);
       return { ok: true as const };
     },
     setResearchSettings: async (patch) => {
       const values: Record<string, boolean | number> = {};
       if (patch.enabled !== undefined) values.researchEnabled = patch.enabled;
       if (patch.maxAgentCalls !== undefined) values.researchMaxAgentCalls = patch.maxAgentCalls;
+      const timeouts = patch.timeoutMinutes ?? {};
+      if (timeouts.survey !== undefined) values.researchSurveyTimeoutMinutes = timeouts.survey;
+      if (timeouts.review !== undefined) values.researchReviewTimeoutMinutes = timeouts.review;
+      if (timeouts.investigate !== undefined) values.researchInvestigateTimeoutMinutes = timeouts.investigate;
       researchActive = researchFrom(await settings.experimental_set(values));
       return researchActive;
     },

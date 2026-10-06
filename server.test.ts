@@ -4169,9 +4169,9 @@ describe("chief_research", () => {
     for (const threadId of [chief, planner, reviewer]) await expect(call(state, threadId, survey())).rejects.toThrow(off);
     await state.harness.behavior.setSettings({ plannerEnabled: true, researchEnabled: true });
     await expect(call(state, planner, survey())).resolves.toContain("wfr_1");
-    expect(await state.harness.behavior.callRpc("setResearchSettings", { enabled: false })).toEqual({ enabled: false, maxAgentCalls: 24 });
+    expect(await state.harness.behavior.callRpc("setResearchSettings", { enabled: false })).toEqual({ enabled: false, maxAgentCalls: 24, timeoutMinutes: { survey: 10, review: 10, investigate: 10 } });
     for (const threadId of [chief, planner, reviewer]) await expect(call(state, threadId, survey())).rejects.toThrow(off);
-    expect(await state.harness.behavior.callRpc("setResearchSettings", { enabled: true })).toEqual({ enabled: true, maxAgentCalls: 24 });
+    expect(await state.harness.behavior.callRpc("setResearchSettings", { enabled: true })).toEqual({ enabled: true, maxAgentCalls: 24, timeoutMinutes: { survey: 10, review: 10, investigate: 10 } });
     await expect(call(state, chief, survey())).resolves.toContain("wfr_1");
     await expect(state.harness.behavior.callRpc("setResearchSettings", { planner: { enabled: false } })).rejects.toThrow();
   });
@@ -4179,7 +4179,7 @@ describe("chief_research", () => {
   test("is on by default with no stored values, for every role", async () => {
     const state = await setup();
     const config = await state.harness.behavior.callRpc("researchConfiguration", null) as any;
-    expect(config.settings).toEqual({ enabled: true, maxAgentCalls: 24 });
+    expect(config.settings).toEqual({ enabled: true, maxAgentCalls: 24, timeoutMinutes: { survey: 10, review: 10, investigate: 10 } });
     for (const role of ["chief", "planner", "reviewer"]) {
       const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(await roleThread(state, role)));
       expect(configured.tools.map((tool) => tool.name)).toContain("chief_research");
@@ -4203,23 +4203,26 @@ describe("chief_research", () => {
     await expect(state.harness.behavior.callRpc("setResearchSettings", { maxAgentCalls: 101 })).rejects.toThrow();
   });
 
-  test("stores one model per machine and flags one the catalog dropped", async () => {
+  test("stores one model per machine and mode, and flags one the catalog dropped", async () => {
     const state = await setup();
     const triple = { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" };
+    const none = { survey: null, review: null, investigate: null };
     const host = async () => (await state.harness.behavior.callRpc("researchConfiguration", null) as any).hosts[0];
-    expect(await host()).toMatchObject({ selection: null, unusable: false });
-    await state.harness.behavior.callRpc("setResearchModel", { hostId: "host_1", selection: triple });
-    expect(await host()).toMatchObject({ selection: triple, unusable: false });
+    expect(await host()).toMatchObject({ selections: none, unusable: [] });
+    await state.harness.behavior.callRpc("setResearchModel", { hostId: "host_1", mode: "survey", selection: triple });
+    expect(await host()).toMatchObject({ selections: { ...none, survey: triple }, unusable: [] });
+    await expect(state.harness.behavior.callRpc("setResearchModel", { hostId: "host_1", selection: triple })).rejects.toThrow();
     await expect(state.harness.behavior.callRpc("setResearchModel", {
-      hostId: "host_1", selection: { providerId: "codex", model: "gpt-6-astra" },
+      hostId: "host_1", mode: "survey", selection: { providerId: "codex", model: "gpt-6-astra" },
     })).rejects.toThrow();
-    await state.harness.behavior.callRpc("setResearchModel", { hostId: "host_1", selection: { ...triple, model: "gone" } });
-    expect((await host()).unusable).toBe(true);
-    await state.harness.behavior.callRpc("setResearchModel", { hostId: "host_1", selection: null });
-    expect(await host()).toMatchObject({ selection: null, unusable: false });
+    await state.harness.behavior.callRpc("setResearchModel", { hostId: "host_1", mode: "review", selection: triple });
+    await state.harness.behavior.callRpc("setResearchModel", { hostId: "host_1", mode: "survey", selection: { ...triple, model: "gone" } });
+    expect((await host()).unusable).toEqual(["survey"]);
+    await state.harness.behavior.callRpc("setResearchModel", { hostId: "host_1", mode: "survey", selection: null });
+    expect(await host()).toMatchObject({ selections: { ...none, review: triple }, unusable: [] });
   });
 
-  test("resolves stage models: override, then the machine's stored pick for every stage, else inherit", async () => {
+  test("resolves stage models: override, then the machine's pick for the mode, else inherit", async () => {
     const state = await setup();
     workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => done });
     const planner = await roleThread(state, "planner");
@@ -4227,7 +4230,7 @@ describe("chief_research", () => {
     await call(state, planner, survey());
     expect(sentArgs().models).toEqual({});
     await state.harness.behavior.callRpc("setResearchModel", {
-      hostId: "host_1", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+      hostId: "host_1", mode: "survey", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const stored = { provider: "codex", model: "gpt-6-astra", reasoningLevel: "high" };
     for (const threadId of [planner, chief]) {
@@ -4236,17 +4239,55 @@ describe("chief_research", () => {
       expect(sentArgs().models).toEqual({ scan: stored, verify: stored, combine: stored });
     }
     execFileMock.mockClear();
+    await call(state, planner, { mode: "investigate", question: "Why?", questions: ["a"] });
+    expect(sentArgs().models).toEqual({});
+    execFileMock.mockClear();
     const override = { provider: "claude-code", model: "claude-opus-5", reasoningLevel: "medium" };
     await call(state, planner, survey({ models: { scan: override } }));
     expect(sentArgs().models).toEqual({ scan: override, verify: stored, combine: stored });
     await expect(call(state, planner, survey({ models: { scan: { provider: "codex", model: "x" } } }))).rejects.toThrow();
   });
 
-  test("migrates to one research_model table and drops research_models", async () => {
+  test("migration copies the single research pick to every mode and drops research_model", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-research" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    bb.storage.migrate(db, MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("research_mode_models"))));
+    db.prepare(`INSERT INTO research_model (host_id, provider_id, model, reasoning_level, updated_at) VALUES (?, ?, ?, ?, ?)`)
+      .run("host_1", "codex", "gpt-6-astra", "high", 1);
+
+    bb.storage.migrate(db, MIGRATIONS);
+
+    const copied = { host_id: "host_1", provider_id: "codex", model: "gpt-6-astra", reasoning_level: "high" };
+    expect(db.prepare(`SELECT host_id, mode, provider_id, model, reasoning_level FROM research_mode_models ORDER BY mode`).all())
+      .toEqual(["investigate", "review", "survey"].map((mode) => ({ ...copied, mode })));
+    expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='research_model'`).get()).toBeUndefined();
+    expect(() => db.prepare(`INSERT INTO research_mode_models (host_id, mode, provider_id, model, reasoning_level, updated_at) VALUES ('h', 'bogus', 'p', 'm', 'high', 1)`).run()).toThrow();
+  });
+
+  test("waits each mode's own timeout and rejects one out of range", async () => {
     const state = await setup();
-    const table = (name: string) => state.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name);
-    expect(table("research_model")).toBeDefined();
-    expect(table("research_models")).toBeUndefined();
+    const chief = await roleThread(state, "chief");
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => ({ status: "running" }) });
+    expect(await state.harness.behavior.callRpc("setResearchSettings", { timeoutMinutes: { survey: 2 } }))
+      .toMatchObject({ timeoutMinutes: { survey: 2, review: 10, investigate: 10 } });
+    for (const bad of [{ survey: 0 }, { survey: 61 }, { bogus: 5 }]) {
+      await expect(state.harness.behavior.callRpc("setResearchSettings", { timeoutMinutes: bad })).rejects.toThrow();
+    }
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    try {
+      const surveyed = call(state, chief, survey());
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      expect(await surveyed).toContain("Still running");
+      let settled = false;
+      const reviewed = call(state, chief, { mode: "review", question: "Ok?", concerns: ["x"] }).finally(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(8 * 60_000);
+      expect(await reviewed).toContain("Still running");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("falls back to history, parsed as JSON Lines, when the result was omitted", async () => {
