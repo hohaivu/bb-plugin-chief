@@ -119,6 +119,12 @@ workflow, the tool returns the exact script and args so the agent can start it w
 `bb_workflow_run` and then wait on its runId. Each role has a cap on agent calls per run (1–100;
 default 100 for Chief and 24 for the others). A run that would need more is refused before it starts.
 
+Settings → **Chief researcher** holds all of this in one place: the **Researcher** switch, a
+"may research" switch and an agent-call cap for each role, and, per machine, a provider + model +
+reasoning level picker for each role and stage (scan, verify, combine). The pickers offer only models
+the machine's live catalog serves. A stage without a pick shows **Inherit caller** and runs on the
+calling thread's model; the **Inherit caller** button clears a pick back to that default.
+
 ### Work list
 
 `chief_roster` opens with a **Pending** block: one line per managed thread that has a next

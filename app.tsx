@@ -9,7 +9,9 @@ import {
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
-import type { ModelConfiguration, ModelSelection, rpcContract, TodoItem } from "./server";
+import type { ModelConfiguration, ModelSelection, ResearchConfiguration, rpcContract, TodoItem } from "./server";
+
+const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
 const ROLES = [
   { role: "chief", label: "Chief", hint: "Supervises and decides." },
@@ -63,7 +65,7 @@ function StartChief({ projectId }: { projectId: string | null }) {
       const result = await rpc.call("create", { projectId: target });
       navigate.toThread(result.threadId);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
       setIsLaunching(false);
     }
   }, [isLaunching, navigate, target, rpc]);
@@ -133,7 +135,7 @@ function ChiefModelSettings() {
     try {
       setConfiguration(await rpc.call("modelConfiguration", null));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     } finally {
       setIsLoading(false);
     }
@@ -160,7 +162,7 @@ function ChiefModelSettings() {
         ),
       });
       void rpc.call("setRoleModel", { hostId, role, selection }).catch((cause) => {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(errorMessage(cause));
         void load();
       });
     },
@@ -239,6 +241,196 @@ function ChiefModelSettings() {
               </div>
             );
           })}
+        </div>
+      ))}
+      {configuration?.hosts.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No machines are enrolled yet.</p>
+      ) : null}
+    </div>
+  );
+}
+
+const RESEARCH_ROLES = [
+  { role: "chief", label: "Chief" },
+  { role: "planner", label: "Planner" },
+  { role: "reviewer", label: "Reviewer" },
+] as const;
+const STAGES = ["scan", "verify", "combine"] as const;
+type ResearchRole = (typeof RESEARCH_ROLES)[number]["role"];
+const validCap = (value: number) => Number.isInteger(value) && value >= 1 && value <= 100;
+
+function ResearchSettings() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [configuration, setConfiguration] = useState<ResearchConfiguration | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  // Cap text as typed, so an out-of-range value stays visible and marked invalid.
+  const [caps, setCaps] = useState<Partial<Record<ResearchRole, string>>>({});
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      setConfiguration(await rpc.call("researchConfiguration", null));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [rpc]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Reload first: load() clears the error, and the failure must stay visible.
+  const fail = useCallback(async (cause: unknown) => {
+    await load();
+    setError(errorMessage(cause));
+  }, [load]);
+
+  const saveSettings = useCallback(
+    (patch: { enabled?: boolean } & Partial<Record<ResearchRole, { enabled?: boolean; maxAgentCalls?: number }>>) => {
+      setError(null);
+      void rpc.call("setResearchSettings", patch).then(
+        (settings) => setConfiguration((current) => current && { ...current, settings }),
+        fail,
+      );
+    },
+    [fail, rpc],
+  );
+
+  const saveModel = useCallback(
+    (hostId: string, role: ResearchRole, stage: (typeof STAGES)[number], selection: ModelSelection | null) => {
+      setError(null);
+      setConfiguration((current) => current && {
+        ...current,
+        hosts: current.hosts.map((host) =>
+          host.hostId === hostId
+            ? {
+                ...host,
+                selections: { ...host.selections, [role]: { ...host.selections[role], [stage]: selection } },
+                unusable: host.unusable.filter((stale) => stale !== `${role}.${stage}`),
+              }
+            : host,
+        ),
+      });
+      void rpc.call("setResearchModel", { hostId, role, stage, selection }).catch(fail);
+    },
+    [fail, rpc],
+  );
+
+  if (!configuration && isLoading) {
+    return <p className="text-sm text-muted-foreground">Scanning machines for providers and models…</p>;
+  }
+
+  const settings = configuration?.settings;
+  return (
+    <div className="space-y-4">
+      {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
+      <div className="flex items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-sm text-foreground">
+          <input
+            type="checkbox"
+            checked={settings?.enabled ?? true}
+            disabled={!settings}
+            onChange={(event) => saveSettings({ enabled: event.target.checked })}
+          />
+          Researcher
+        </label>
+        <button
+          type="button"
+          disabled={isLoading}
+          onClick={() => void load()}
+          className="h-7 shrink-0 cursor-pointer rounded-md border border-input px-3 text-xs font-medium disabled:opacity-50"
+        >
+          {isLoading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+      {settings ? RESEARCH_ROLES.map(({ role, label }) => {
+        const text = caps[role] ?? String(settings.roles[role].maxAgentCalls);
+        const valid = validCap(Number(text));
+        return (
+          <div key={role} className="flex flex-wrap items-center gap-3 text-sm text-foreground">
+            <label className="flex w-40 items-center gap-2">
+              <input
+                type="checkbox"
+                aria-label={`${label} may research`}
+                checked={settings.roles[role].enabled}
+                onChange={(event) => saveSettings({ [role]: { enabled: event.target.checked } })}
+              />
+              {label}
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              aria-label={`${label} agent calls per run`}
+              aria-invalid={!valid}
+              value={text}
+              onChange={(event) => {
+                const next = event.target.value;
+                setCaps((current) => ({ ...current, [role]: next }));
+                if (validCap(Number(next))) saveSettings({ [role]: { maxAgentCalls: Number(next) } });
+              }}
+              className={`h-7 w-20 rounded-md border bg-transparent px-2 text-xs ${valid ? "border-input" : "border-destructive"}`}
+            />
+            <span className="text-xs text-muted-foreground">agent calls per run (1–100)</span>
+          </div>
+        );
+      }) : null}
+      <p className="text-sm text-muted-foreground">
+        Each research stage can run on its own model per machine. A stage without a selection inherits the
+        calling thread&apos;s model.
+      </p>
+      {configuration?.hosts.map((host) => (
+        <div key={host.hostId} className="rounded-lg border border-border p-3">
+          <div className="text-sm font-medium text-foreground">
+            {host.hostName}
+            {host.connected ? null : " · disconnected"}
+          </div>
+          {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
+          {RESEARCH_ROLES.map(({ role, label }) => STAGES.map((stage) => {
+            const selection = host.selections[role][stage];
+            const value = selection ?? host.fallback;
+            return (
+              <div key={`${role}.${stage}`} className="mt-3 flex flex-wrap items-center gap-3">
+                <div className="w-32 shrink-0 text-sm text-foreground">{label} · {stage}</div>
+                {value ? (
+                  <ProviderModelPicker
+                    value={value}
+                    routing={{ kind: "host", hostId: host.hostId }}
+                    disabled={!host.connected}
+                    onChange={(next) => saveModel(host.hostId, role, stage, {
+                      providerId: next.providerId,
+                      model: next.model,
+                      reasoningLevel: next.reasoningLevel,
+                    })}
+                  />
+                ) : (
+                  <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
+                )}
+                {selection ? (
+                  <>
+                    {host.unusable.includes(`${role}.${stage}`) ? (
+                      <span className="text-xs text-destructive">
+                        This machine cannot serve that model; the stage inherits the caller.
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => saveModel(host.hostId, role, stage, null)}
+                      className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
+                    >
+                      Inherit caller
+                    </button>
+                  </>
+                ) : (
+                  <span className="text-xs text-muted-foreground">Inherit caller · uses the calling thread&apos;s model</span>
+                )}
+              </div>
+            );
+          }))}
         </div>
       ))}
       {configuration?.hosts.length === 0 ? (
@@ -337,7 +529,7 @@ function ChiefPendingPanel({ threadId }: { threadId: string }) {
       setPending(await rpc.call("pending", { threadId }));
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     } finally {
       setIsLoading(false);
     }
@@ -396,6 +588,12 @@ export default definePluginApp((app) => {
     title: "Chief models by machine",
     description: "Live provider and model choices scanned from each enrolled machine.",
     component: ChiefModelSettings,
+  });
+  app.slots.settingsSection({
+    id: "research",
+    title: "Chief researcher",
+    description: "Parallel read-only research for Chief, planners, and reviewers.",
+    component: ResearchSettings,
   });
   app.slots.experimental_threadHeaderAction({
     id: "chief-role",
