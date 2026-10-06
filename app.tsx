@@ -207,15 +207,11 @@ function ChiefModelSettings() {
                   <div className="text-xs text-muted-foreground">{hint}</div>
                 </div>
                 {value ? (
-                  <ProviderModelPicker
+                  <HostModelPicker
+                    hostId={host.hostId}
                     value={value}
-                    routing={{ kind: "host", hostId: host.hostId }}
                     disabled={!host.connected}
-                    onChange={(next) => save(host.hostId, role, {
-                      providerId: next.providerId,
-                      model: next.model,
-                      reasoningLevel: next.reasoningLevel,
-                    })}
+                    onPick={(selection) => save(host.hostId, role, selection)}
                   />
                 ) : (
                   <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
@@ -250,7 +246,29 @@ function ChiefModelSettings() {
   );
 }
 
-const inRange = (value: number, max: number) => Number.isInteger(value) && value >= 1 && value <= max;
+/** bb's picker re-reports its own normalized state (e.g. a service tier Chief does not store) through
+ * onChange on every render; only a changed triple is a pick, or saving it re-renders into a loop. */
+function HostModelPicker({ hostId, value, disabled, onPick }: {
+  hostId: string;
+  value: ModelSelection;
+  disabled: boolean;
+  onPick: (selection: ModelSelection) => void;
+}) {
+  return (
+    <ProviderModelPicker
+      value={value}
+      routing={{ kind: "host", hostId }}
+      disabled={disabled}
+      onChange={(next) => {
+        const selection = { providerId: next.providerId, model: next.model, reasoningLevel: next.reasoningLevel };
+        if (selection.providerId !== value.providerId || selection.model !== value.model
+          || selection.reasoningLevel !== value.reasoningLevel) onPick(selection);
+      }}
+    />
+  );
+}
+
+const inRange =(value: number, max: number) => Number.isInteger(value) && value >= 1 && value <= max;
 
 type ResearchMode = keyof ResearchConfiguration["settings"]["timeoutMinutes"];
 const RESEARCH_MODE_SECTIONS: { mode: ResearchMode; label: string }[] = [
@@ -406,15 +424,11 @@ function ResearchSettings() {
                   {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
                   <div className="mt-2 flex flex-wrap items-center gap-3">
                     {value ? (
-                      <ProviderModelPicker
+                      <HostModelPicker
+                        hostId={host.hostId}
                         value={value}
-                        routing={{ kind: "host", hostId: host.hostId }}
                         disabled={!host.connected}
-                        onChange={(next) => saveModel(host.hostId, mode, {
-                          providerId: next.providerId,
-                          model: next.model,
-                          reasoningLevel: next.reasoningLevel,
-                        })}
+                        onPick={(selection) => saveModel(host.hostId, mode, selection)}
                       />
                     ) : (
                       <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
