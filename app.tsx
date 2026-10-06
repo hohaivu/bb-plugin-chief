@@ -250,13 +250,6 @@ function ChiefModelSettings() {
   );
 }
 
-const RESEARCH_ROLES = [
-  { role: "chief", label: "Chief" },
-  { role: "planner", label: "Planner" },
-  { role: "reviewer", label: "Reviewer" },
-] as const;
-const STAGES = ["scan", "verify", "combine"] as const;
-type ResearchRole = (typeof RESEARCH_ROLES)[number]["role"];
 const validCap = (value: number) => Number.isInteger(value) && value >= 1 && value <= 100;
 
 function ResearchSettings() {
@@ -265,7 +258,7 @@ function ResearchSettings() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   // Cap text as typed, so an out-of-range value stays visible and marked invalid.
-  const [caps, setCaps] = useState<Partial<Record<ResearchRole, string>>>({});
+  const [cap, setCap] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -290,7 +283,7 @@ function ResearchSettings() {
   }, [load]);
 
   const saveSettings = useCallback(
-    (patch: { enabled?: boolean } & Partial<Record<ResearchRole, { enabled?: boolean; maxAgentCalls?: number }>>) => {
+    (patch: { enabled?: boolean; maxAgentCalls?: number }) => {
       setError(null);
       void rpc.call("setResearchSettings", patch).then(
         (settings) => setConfiguration((current) => current && { ...current, settings }),
@@ -301,21 +294,13 @@ function ResearchSettings() {
   );
 
   const saveModel = useCallback(
-    (hostId: string, role: ResearchRole, stage: (typeof STAGES)[number], selection: ModelSelection | null) => {
+    (hostId: string, selection: ModelSelection | null) => {
       setError(null);
       setConfiguration((current) => current && {
         ...current,
-        hosts: current.hosts.map((host) =>
-          host.hostId === hostId
-            ? {
-                ...host,
-                selections: { ...host.selections, [role]: { ...host.selections[role], [stage]: selection } },
-                unusable: host.unusable.filter((stale) => stale !== `${role}.${stage}`),
-              }
-            : host,
-        ),
+        hosts: current.hosts.map((host) => host.hostId === hostId ? { ...host, selection, unusable: false } : host),
       });
-      void rpc.call("setResearchModel", { hostId, role, stage, selection }).catch(fail);
+      void rpc.call("setResearchModel", { hostId, selection }).catch(fail);
     },
     [fail, rpc],
   );
@@ -347,92 +332,80 @@ function ResearchSettings() {
           {isLoading ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      {settings ? RESEARCH_ROLES.map(({ role, label }) => {
-        const text = caps[role] ?? String(settings.roles[role].maxAgentCalls);
+      {settings ? (() => {
+        const text = cap ?? String(settings.maxAgentCalls);
         const valid = validCap(Number(text));
         return (
-          <div key={role} className="flex flex-wrap items-center gap-3 text-sm text-foreground">
-            <label className="flex w-40 items-center gap-2">
-              <input
-                type="checkbox"
-                aria-label={`${label} may research`}
-                checked={settings.roles[role].enabled}
-                onChange={(event) => saveSettings({ [role]: { enabled: event.target.checked } })}
-              />
-              {label}
-            </label>
+          <label className="flex flex-wrap items-center gap-3 text-sm text-foreground">
+            Agent calls per run
             <input
               type="number"
               min={1}
               max={100}
-              aria-label={`${label} agent calls per run`}
+              aria-label="Agent calls per run"
               aria-invalid={!valid}
               value={text}
               onChange={(event) => {
                 const next = event.target.value;
-                setCaps((current) => ({ ...current, [role]: next }));
-                if (validCap(Number(next))) saveSettings({ [role]: { maxAgentCalls: Number(next) } });
+                setCap(next);
+                if (validCap(Number(next))) saveSettings({ maxAgentCalls: Number(next) });
               }}
               className={`h-7 w-20 rounded-md border bg-transparent px-2 text-xs ${valid ? "border-input" : "border-destructive"}`}
             />
-            <span className="text-xs text-muted-foreground">agent calls per run (1–100)</span>
+            <span className="text-xs text-muted-foreground">1–100, for every role</span>
+          </label>
+        );
+      })() : null}
+      <p className="text-sm text-muted-foreground">
+        One config covers Chief, planners, and reviewers. Each machine can pick one model for every research
+        stage; without a pick, research inherits the calling thread&apos;s model.
+      </p>
+      {configuration?.hosts.map((host) => {
+        const value = host.selection ?? host.fallback;
+        return (
+          <div key={host.hostId} className="rounded-lg border border-border p-3">
+            <div className="text-sm font-medium text-foreground">
+              {host.hostName}
+              {host.connected ? null : " · disconnected"}
+            </div>
+            {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              {value ? (
+                <ProviderModelPicker
+                  value={value}
+                  routing={{ kind: "host", hostId: host.hostId }}
+                  disabled={!host.connected}
+                  onChange={(next) => saveModel(host.hostId, {
+                    providerId: next.providerId,
+                    model: next.model,
+                    reasoningLevel: next.reasoningLevel,
+                  })}
+                />
+              ) : (
+                <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
+              )}
+              {host.selection ? (
+                <>
+                  {host.unusable ? (
+                    <span className="text-xs text-destructive">
+                      This machine cannot serve that model; research inherits the caller.
+                    </span>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => saveModel(host.hostId, null)}
+                    className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
+                  >
+                    Inherit caller
+                  </button>
+                </>
+              ) : (
+                <span className="text-xs text-muted-foreground">Inherit caller · uses the calling thread&apos;s model</span>
+              )}
+            </div>
           </div>
         );
-      }) : null}
-      <p className="text-sm text-muted-foreground">
-        Each research stage can run on its own model per machine. A stage without a selection inherits the
-        calling thread&apos;s model.
-      </p>
-      {configuration?.hosts.map((host) => (
-        <div key={host.hostId} className="rounded-lg border border-border p-3">
-          <div className="text-sm font-medium text-foreground">
-            {host.hostName}
-            {host.connected ? null : " · disconnected"}
-          </div>
-          {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
-          {RESEARCH_ROLES.map(({ role, label }) => STAGES.map((stage) => {
-            const selection = host.selections[role][stage];
-            const value = selection ?? host.fallback;
-            return (
-              <div key={`${role}.${stage}`} className="mt-3 flex flex-wrap items-center gap-3">
-                <div className="w-32 shrink-0 text-sm text-foreground">{label} · {stage}</div>
-                {value ? (
-                  <ProviderModelPicker
-                    value={value}
-                    routing={{ kind: "host", hostId: host.hostId }}
-                    disabled={!host.connected}
-                    onChange={(next) => saveModel(host.hostId, role, stage, {
-                      providerId: next.providerId,
-                      model: next.model,
-                      reasoningLevel: next.reasoningLevel,
-                    })}
-                  />
-                ) : (
-                  <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
-                )}
-                {selection ? (
-                  <>
-                    {host.unusable.includes(`${role}.${stage}`) ? (
-                      <span className="text-xs text-destructive">
-                        This machine cannot serve that model; the stage inherits the caller.
-                      </span>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => saveModel(host.hostId, role, stage, null)}
-                      className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
-                    >
-                      Inherit caller
-                    </button>
-                  </>
-                ) : (
-                  <span className="text-xs text-muted-foreground">Inherit caller · uses the calling thread&apos;s model</span>
-                )}
-              </div>
-            );
-          }))}
-        </div>
-      ))}
+      })}
       {configuration?.hosts.length === 0 ? (
         <p className="text-sm text-muted-foreground">No machines are enrolled yet.</p>
       ) : null}
@@ -592,7 +565,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "research",
     title: "Chief researcher",
-    description: "Parallel read-only research for Chief, planners, and reviewers.",
+    description: "Parallel read-only research for Chief, planners, and reviewers, under one shared config.",
     component: ResearchSettings,
   });
   app.slots.experimental_threadHeaderAction({
