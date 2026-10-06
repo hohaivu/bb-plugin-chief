@@ -4277,6 +4277,34 @@ describe("chief_research", () => {
     expect(calls("stop")[0]![1].slice(0, 3)).toEqual(["workflows", "stop", "wfr_1"]);
   });
 
+  test("abort during a failing status call still stops the run", async () => {
+    const state = await setup();
+    const chief = await roleThread(state, "chief");
+    const controller = new AbortController();
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => { controller.abort(new Error("cancelled")); throw new Error("killed"); }, stop: () => ({ ok: true }) });
+    await expect(call(state, chief, survey(), controller.signal)).rejects.toThrow("cancelled");
+    expect(calls("stop")[0]![1].slice(0, 3)).toEqual(["workflows", "stop", "wfr_1"]);
+  });
+
+  test("abort during the last poll before the deadline stops the run", async () => {
+    const state = await setup();
+    const chief = await roleThread(state, "chief");
+    const controller = new AbortController();
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => { if (Date.now() >= deadline) controller.abort(new Error("cancelled")); return { status: "running" }; }, stop: () => ({ ok: true }) });
+    let deadline = Infinity;
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    try {
+      deadline = Date.now() + 10 * 60_000;
+      const reply = call(state, chief, survey(), controller.signal);
+      const settled = expect(reply).rejects.toThrow("cancelled");
+      await vi.advanceTimersByTimeAsync(11 * 60_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(calls("stop")[0]![1].slice(0, 3)).toEqual(["workflows", "stop", "wfr_1"]);
+  });
+
   test("hands the script back when the server cannot start it, and says check it yourself when status fails", async () => {
     const state = await setup();
     const chief = await roleThread(state, "chief");

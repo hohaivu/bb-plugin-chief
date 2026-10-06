@@ -2936,6 +2936,7 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           run = await runWorkflowCli("status", [runId], context);
         } catch (error) {
+          context.signal?.throwIfAborted();
           bb.log.warn(`chief_research could not read ${runId}: ${clip(String(error), 200)}`);
           return `Could not read workflow ${runId} from the plugin server. Check it yourself with \`bb workflows status ${runId}\`.`;
         }
@@ -2958,6 +2959,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (!RUNNING_WORKFLOW.has(run.status)) {
           return researchOutput(`runId: ${runId}\nstatus: ${run.status}\nerror: ${JSON.stringify(run.error)}\ncalls: ${JSON.stringify(run.calls)}`);
         }
+        context.signal?.throwIfAborted();
         if (Date.now() >= deadline) return `Still running. Call chief_research again with runId: ${runId} to keep waiting.`;
         await researchSleep(RESEARCH_POLL_MS, context.signal);
       }
