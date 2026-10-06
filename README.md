@@ -94,6 +94,31 @@ that worker's own worktree, briefed on the mission, the reviewer verdicts, and t
 one it runs in the project's own checkout, like a plan. Its advice goes back to Chief, which decides
 the next worker round or escalates.
 
+### Researcher
+
+`chief_research` fans a read-only question out to parallel BB workflow agents and waits for the
+result. It has three modes:
+
+- **survey** answers one question for each of a list of items (files, symbols, topics), one row each
+  with evidence.
+- **review** runs one agent per concern over `git diff`, then one agent drops findings it cannot
+  confirm in the code, and returns a deduplicated list. By default it reads the committed work since
+  the merge base with `origin/HEAD`, so uncommitted changes are not reviewed. Pass `diffRef` for
+  another range. The findings are advisory: the reviewer still decides the verdict.
+- **investigate** runs one agent per sub-question, then one agent merges the answers into a brief
+  with Confirmed and Unconfirmed sections.
+
+Chief gets all three modes, a planner gets survey and investigate, and a reviewer gets review and
+survey. Workers and advisors never get it. Settings has one switch for the feature and one per role.
+A role that is switched off gets neither the tool nor the line about it.
+
+The agents share the caller's checkout and permissions. They are read-only only because the prompt
+tells them to be. Each call waits up to 10 minutes. If the run is still going, the call returns its
+runId, and calling again with that runId keeps waiting. If the plugin server can't start the
+workflow, the tool returns the exact script and args so the agent can start it with
+`bb_workflow_run` and then wait on its runId. Each role has a cap on agent calls per run (1–100;
+default 100 for Chief and 24 for the others). A run that would need more is refused before it starts.
+
 ### Work list
 
 `chief_roster` opens with a **Pending** block: one line per managed thread that has a next

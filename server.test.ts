@@ -1785,7 +1785,7 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_research"]);
     expect(chief.skills).toEqual(["chief"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker"]);
@@ -4136,7 +4136,7 @@ describe("chief_research", () => {
     state.addLive("thr_user", "proj_1");
     await expect(call(state, "thr_user", survey())).rejects.toThrow(/only in an active Chief/);
     const planner = await roleThread(state, "planner");
-    await expect(call(state, planner, survey({ mode: "review" }))).rejects.toThrow(/modes survey, investigate, not review/);
+    await expect(call(state, planner, survey({ mode: "review", concerns: ["x"] }))).rejects.toThrow(/modes survey, investigate, not review/);
     const old = (await status(state)).threads.find((row) => row.role === "chief")!.threadId;
     state.live.set(old, { ...state.live.get(old)!, archivedAt: Date.now() });
     await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(old)! });
@@ -4224,14 +4224,19 @@ describe("chief_research", () => {
     await expect(call(state, planner, survey({ models: { scan: { provider: "codex", model: "x" } } }))).rejects.toThrow();
   });
 
-  test("falls back to history when the result was omitted", async () => {
+  test("falls back to history, parsed as JSON Lines, when the result was omitted", async () => {
     const state = await setup();
-    workflowsCli({
-      run: () => ({ runId: "wfr_1" }),
-      status: () => ({ status: "succeeded", resultOmitted: true }),
-      history: () => ({ type: "run", result: { table: "| from history |" } }),
-    });
-    expect(await call(state, await roleThread(state, "chief"), survey())).toContain("| from history |");
+    const chief = await roleThread(state, "chief");
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => ({ status: "succeeded", resultOmitted: true }) });
+    const routed = execFileMock.getMockImplementation()!;
+    execFileMock.mockImplementation(async (file: string, args: string[], options: any) => args[1] === "history"
+      ? { stdout: [
+        { type: "run", logVersion: 1, result: { table: "| from history |" } },
+        { type: "call", callIndex: 0 },
+        { type: "page", nextCursor: null },
+      ].map((record) => JSON.stringify(record)).join("\n") + "\n", stderr: "" }
+      : routed(file, args, options));
+    expect(await call(state, chief, survey())).toContain("| from history |");
     expect(calls("history")[0]![1]).toEqual(["workflows", "history", "wfr_1", "--cursor", "0", "--limit", "1", "--json"]);
   });
 
@@ -4284,5 +4289,75 @@ describe("chief_research", () => {
     expect(await call(state, chief, survey({ runId: "wfr_9" }))).toBe(
       "Could not read workflow wfr_9 from the plugin server. Check it yourself with `bb workflows status wfr_9`.",
     );
+  });
+
+  test("validates per mode and accepts a bare runId resume", async () => {
+    const state = await setup();
+    const chief = await roleThread(state, "chief");
+    await expect(call(state, chief, { mode: "review", question: "Ship it?" })).rejects.toThrow(/concerns/);
+    await expect(call(state, chief, { mode: "investigate", question: "Why?" })).rejects.toThrow(/questions/);
+    await expect(call(state, chief, { mode: "survey", question: "Who?" })).rejects.toThrow(/items/);
+    await expect(call(state, chief, { question: "Who?" })).rejects.toThrow(/mode/);
+    workflowsCli({ status: () => done });
+    expect(await call(state, chief, { runId: "wfr_7" })).toContain("runId: wfr_7");
+    expect(calls("run")).toHaveLength(0);
+  });
+
+  test("starts review and investigate with their scripts and args", async () => {
+    const state = await setup();
+    const chief = await roleThread(state, "chief");
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => ({ status: "succeeded", result: { findings: [], markdown: "No confirmed findings." } }) });
+    expect(await call(state, chief, { mode: "review", question: "Ship it?", concerns: ["correctness", "security"], diffRef: "main..HEAD" })).toContain("No confirmed findings.");
+    const runArgs = () => calls("run").at(-1)![1];
+    expect(runArgs()[3]).toContain('name: "chief-research-review"');
+    expect(JSON.parse(runArgs()[5])).toMatchObject({ concerns: ["correctness", "security"], diffRef: "main..HEAD", verify: true, cap: 100 });
+
+    const combine = { provider: "codex", model: "gpt-6-astra", reasoningLevel: "high" };
+    workflowsCli({ run: () => ({ runId: "wfr_2" }), status: () => ({ status: "succeeded", result: { answers: [], brief: "## Confirmed" } }) });
+    expect(await call(state, chief, { mode: "investigate", question: "Why?", questions: ["a?", "b?"], models: { combine } })).toContain("## Confirmed");
+    expect(runArgs()[3]).toContain('name: "chief-research-investigate"');
+    expect(JSON.parse(runArgs()[5])).toMatchObject({ questions: ["a?", "b?"], models: { combine } });
+
+    const planner = await roleThread(state, "planner");
+    await state.harness.behavior.callRpc("setResearchSettings", { planner: { maxAgentCalls: 2 } });
+    await expect(call(state, planner, { mode: "investigate", question: "Why?", questions: ["a?", "b?"] })).rejects.toThrow(/needs 3 agent calls.*limit is 2/);
+  });
+
+  test.each(["chief", "planner", "reviewer"])("configure gives a %s chief_research and its line only while on", async (role) => {
+    const state = await setup();
+    const threadId = await roleThread(state, role);
+    const configured = () => state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
+    const modes = { chief: "survey, review, investigate", planner: "survey, investigate", reviewer: "review, survey" }[role]!;
+    let config = await configured();
+    expect(config.tools.map((tool) => tool.name)).toContain("chief_research");
+    expect(config.instructions).toContain(`Use chief_research (modes: ${modes})`);
+    await state.harness.behavior.callRpc("setResearchSettings", { [role]: { enabled: false } });
+    config = await configured();
+    expect(config.tools.map((tool) => tool.name)).not.toContain("chief_research");
+    expect(config.instructions).not.toContain("chief_research");
+    await state.harness.behavior.callRpc("setResearchSettings", { enabled: false, [role]: { enabled: true } });
+    expect((await configured()).tools.map((tool) => tool.name)).not.toContain("chief_research");
+  });
+
+  test.each(["worker", "advisor"])("configure never gives a %s chief_research", async (role) => {
+    const state = await setup();
+    const config = await state.harness.behavior.resolveAgentConfiguration(configurationContext(await roleThread(state, role)));
+    expect(config.tools.map((tool) => tool.name)).not.toContain("chief_research");
+    expect(config.instructions).not.toContain("chief_research");
+  });
+
+  test("planner and reviewer spawn prompts mention chief_research only while on", async () => {
+    const state = await setup();
+    await roleThread(state, "planner");
+    await roleThread(state, "reviewer");
+    const prompt = (role: string) => state.spawned.findLast((args) => args.pluginMetadata?.role === role).prompt as string;
+    expect(prompt("planner")).toContain("use chief_research");
+    expect(prompt("reviewer")).toContain("chief_research review");
+    await state.harness.behavior.callRpc("setResearchSettings", { planner: { enabled: false }, reviewer: { enabled: false } });
+    const chief = (await status(state)).threads.find((row) => row.role === "chief" && row.state !== "archived")!.threadId;
+    await state.harness.behavior.runCli(["plan", "--title", "Again", "--mission", "Propose"], { threadId: chief, projectId: "proj_1" });
+    await state.harness.behavior.runCli(["review", "--branch", "feature/y"], { threadId: chief, projectId: "proj_1" });
+    expect(prompt("planner")).not.toContain("chief_research");
+    expect(prompt("reviewer")).not.toContain("chief_research");
   });
 });

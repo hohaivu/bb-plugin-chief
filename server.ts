@@ -206,19 +206,47 @@ const workflowSelectionSchema = z.object({
   reasoningLevel: reasoningSchema,
 }).strict();
 type WorkflowSelection = z.infer<typeof workflowSelectionSchema>;
+const textList = (what: string) => z.array(z.string().trim().min(1).max(1_000)).min(1).max(20).optional().describe(what);
+/** One flat object with a per-mode check, not a union: tool parameters must publish as a JSON Schema of type object. */
 const researchParams = z.object({
-  mode: researchModeSchema.describe("survey answers one question per item. review and investigate are not available yet."),
-  question: z.string().trim().min(1).max(4_000),
-  items: z.array(z.string().trim().min(1).max(1_000)).min(1).max(100).describe("Files, symbols, or topics; each gets a row."),
-  batchSize: z.number().int().min(1).max(100).default(1).describe("Items per scan agent."),
-  verify: z.boolean().default(true).describe("Add one agent that drops rows its evidence does not support."),
+  mode: researchModeSchema.optional().describe("survey: one row per item. review: findings on a diff, one scan per concern. investigate: one answer per sub-question, merged into a brief. Required unless resuming with runId."),
+  question: z.string().trim().min(1).max(4_000).optional().describe("The overall question or goal. Required unless resuming."),
+  items: z.array(z.string().trim().min(1).max(1_000)).min(1).max(100).optional().describe("survey: files, symbols, or topics; each gets a row."),
+  batchSize: z.number().int().min(1).max(100).default(1).describe("survey: items per scan agent."),
+  concerns: textList("review: what to look for, one scan agent each (e.g. correctness, security)."),
+  diffRef: z.string().trim().min(1).max(200).optional().describe("review: a git diff range. Defaults to committed work since the merge base with origin/HEAD."),
+  questions: textList("investigate: sub-questions, one scan agent each."),
+  verify: z.boolean().default(true).describe("survey and review: add one agent that drops results it cannot confirm in the code."),
   models: z.object({
     scan: workflowSelectionSchema.optional(),
     verify: workflowSelectionSchema.optional(),
     combine: workflowSelectionSchema.optional(),
   }).strict().optional().describe("Per-stage overrides: a full {provider, model, reasoningLevel} or nothing."),
   runId: z.string().trim().min(1).optional().describe("Keep waiting on a run an earlier call started instead of starting a new one."),
+}).superRefine((value, ctx) => {
+  if (value.runId) return;
+  const need = (field: string) => ctx.addIssue({ code: "custom", path: [field], message: `${field} is required${value.mode ? ` for ${value.mode}` : ""}` });
+  if (!value.mode) need("mode");
+  if (!value.question) need("question");
+  if (value.mode === "survey" && !value.items) need("items");
+  if (value.mode === "review" && !value.concerns) need("concerns");
+  if (value.mode === "investigate" && !value.questions) need("questions");
 });
+type ResearchParams = z.infer<typeof researchParams>;
+
+/** The one chief_research instruction line for a role, or null when the feature or that role's switch is off. */
+function researchLine(role: string, settings: ResearchSettings | null) {
+  const parsed = researchRoleSchema.safeParse(role);
+  if (!parsed.success || !settings?.enabled || !settings.roles[parsed.data].enabled) return null;
+  return `Use chief_research (modes: ${RESEARCH_MODES[parsed.data].join(", ")}) for parallel read-only research; it waits for the result.`;
+}
+
+/** Agent calls a fresh run needs; feeds the per-role cap check. */
+function agentCount(params: ResearchParams) {
+  if (params.mode === "review") return params.concerns!.length + (params.verify ? 1 : 0);
+  if (params.mode === "investigate") return params.questions!.length + 1;
+  return Math.ceil(params.items!.length / params.batchSize) + (params.verify ? 1 : 0);
+}
 
 /** Inline workflow source. It reads only `args`, so no value is ever interpolated into it. */
 const RESEARCH_SCRIPTS = {
@@ -265,6 +293,75 @@ const table = ["| Item | Finding | Evidence |", "| --- | --- | --- |"]
   .concat(rows.map((r) => "| " + cell(r.item) + " | " + cell(r.finding) + " | " + cell(r.evidence) + " |"))
   .join("\n");
 return { rows, table, missed };
+`,
+  review: String.raw`export const meta = {
+  name: "chief-research-review",
+  description: "Read-only review: one scan per concern over a diff, then verify",
+  phases: [{ title: "Scan" }, { title: "Verify" }],
+};
+const PRE = args.preamble + "\n\n";
+const models = args.models || {};
+const FINDING = {
+  type: "object",
+  properties: { file: { type: "string" }, line: { type: "integer" }, summary: { type: "string" }, severity: { type: "string", enum: ["high", "medium", "low"] } },
+  required: ["file", "line", "summary", "severity"],
+  additionalProperties: false,
+};
+const SCHEMA = { type: "object", properties: { findings: { type: "array", items: FINDING } }, required: ["findings"], additionalProperties: false };
+const range = args.diffRef
+  ? "Read the change with git diff, passing this range as one argument: " + JSON.stringify(args.diffRef)
+  : "Read the change with: git diff \"$(git merge-base HEAD origin/HEAD)..HEAD\" (committed work only).";
+const limit = Math.min(args.cap, budget().maxAgentCalls);
+const needed = args.concerns.length + (args.verify ? 1 : 0);
+if (needed > limit) throw new Error("Review needs " + needed + " agent calls; the limit is " + limit + ".");
+const scanned = await parallel(args.concerns.map((concern) => () => agent(
+  PRE + range + "\n\nGoal: " + args.question + "\nConcern: " + concern + "\n\nReport only real problems for this concern in the changed code, each with file, line, summary, and severity. Return an empty list when there are none.",
+  Object.assign({ phase: "Scan", schema: SCHEMA }, models.scan || {}),
+)));
+const seen = new Set();
+let findings = [];
+scanned.forEach((result) => ((result && result.findings) || []).forEach((f) => {
+  const key = f.file + ":" + f.line + ":" + f.summary;
+  if (!seen.has(key)) { seen.add(key); findings.push(f); }
+}));
+if (args.verify && findings.length) {
+  const checked = await agent(
+    PRE + range + "\n\nCheck each finding against the code. Drop findings you cannot confirm; return the rest unchanged.\n\nFindings:\n" + JSON.stringify(findings),
+    Object.assign({ phase: "Verify", schema: SCHEMA }, models.verify || {}),
+  );
+  if (checked && checked.findings) findings = checked.findings;
+}
+const markdown = findings.length
+  ? findings.map((f) => "- **" + f.severity + "** " + f.file + ":" + f.line + " " + String(f.summary).replace(/\n/g, " ")).join("\n")
+  : "No confirmed findings.";
+return { findings, markdown };
+`,
+  investigate: String.raw`export const meta = {
+  name: "chief-research-investigate",
+  description: "Read-only investigation: one agent per question, merged into a brief",
+  phases: [{ title: "Scan" }, { title: "Combine" }],
+};
+const PRE = args.preamble + "\n\n";
+const models = args.models || {};
+const ANSWER = {
+  type: "object",
+  properties: { answer: { type: "string" }, evidence: { type: "string" }, confirmed: { type: "boolean" } },
+  required: ["answer", "evidence", "confirmed"],
+  additionalProperties: false,
+};
+const limit = Math.min(args.cap, budget().maxAgentCalls);
+const needed = args.questions.length + 1;
+if (needed > limit) throw new Error("Investigation needs " + needed + " agent calls; the limit is " + limit + ".");
+const scanned = await parallel(args.questions.map((q) => () => agent(
+  PRE + "Goal: " + args.question + "\nQuestion: " + q + "\n\nAnswer it from the code. Evidence is file:line or command output. Set confirmed only when the evidence settles it.",
+  Object.assign({ phase: "Scan", schema: ANSWER }, models.scan || {}),
+)));
+const answers = args.questions.map((q, i) => Object.assign({ question: q }, scanned[i] || { answer: "(no result)", evidence: "", confirmed: false }));
+const brief = await agent(
+  PRE + "Merge these answers into a short Markdown brief for: " + args.question + "\nUse two sections, ## Confirmed and ## Unconfirmed, keeping each answer's evidence.\n\nAnswers:\n" + JSON.stringify(answers),
+  Object.assign({ phase: "Combine" }, models.combine || {}),
+);
+return { answers, brief };
 `,
 } as const;
 
@@ -821,7 +918,7 @@ export default async function plugin(bb: BbPluginApi) {
     researchEnabled: {
       type: "boolean",
       label: "Researcher",
-      description: "Lets Chief, planners, and reviewers run read-only chief_research surveys as BB workflows.",
+      description: "Lets Chief, planners, and reviewers run read-only chief_research surveys, reviews, and investigations as BB workflows.",
       default: true,
     },
     researchChief: { type: "boolean", label: "Researcher: Chief", default: true },
@@ -1445,6 +1542,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- Split the work into at most 8 sequential waves, each a self-contained plan one worker finishes on the same branch; one wave by default, more only when one worker cannot finish it. Submit `plan` as an array of `{body}`. Waves contain no phases.",
       "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
+      ...(researchLine("planner", await researchSettings()) ? ["- For a broad survey across many files, or several open questions at once, use chief_research instead of reading everything yourself."] : []),
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -1813,6 +1911,7 @@ export default async function plugin(bb: BbPluginApi) {
     chiefThreadId: string | null;
     focus?: string;
     provenance: string[];
+    research: boolean;
   }) {
     return [
       opts.subject,
@@ -1820,6 +1919,7 @@ export default async function plugin(bb: BbPluginApi) {
       REVIEW_ONLY,
       "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When the worker's brief context names a plan file, read that file in full before judging the change against it.",
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
+      ...(opts.research ? ["For a large diff or several concerns at once, chief_research review gives you verified findings to check; the verdict stays yours."] : []),
       `Report your findings to Chief thread ${opts.chiefThreadId} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
       "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
       "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
@@ -1852,6 +1952,7 @@ export default async function plugin(bb: BbPluginApi) {
       const title = `Review · ${worker.title}`;
       const waves = planWavesFor(worker.plan_thread_id);
       const prompt = reviewerPrompt({
+        research: !!researchLine("reviewer", await researchSettings()),
         subject: `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
         chiefThreadId: worker.chief_thread_id,
         focus,
@@ -1930,6 +2031,7 @@ export default async function plugin(bb: BbPluginApi) {
       await readRules(projectId);
       const title = `Review · ${branch}`;
       const prompt = reviewerPrompt({
+        research: !!researchLine("reviewer", await researchSettings()),
         // This worktree is cut from the branch itself, so "its base" would be an empty diff.
         subject: pullRequestRef
           ? `Independently review pull request ${pullRequestRef} (branch ${branch}). No managed worker owns this change. This worktree is checked out on that branch: diff it against the pull request's target branch (gh pr view ${pullRequestRef} --json baseRefName, or glab mr view ${pullRequestRef}).`
@@ -2764,20 +2866,23 @@ export default async function plugin(bb: BbPluginApi) {
       const parsed = (() => { try { return JSON.parse(out); } catch { return null; } })();
       throw new Error(parsed?.error?.message ?? (error instanceof Error ? error.message : String(error)));
     }
-    const parsed = JSON.parse(stdout);
+    // `history` prints JSON Lines, one record per line; the other subcommands print one document.
+    const parsed = (() => {
+      try { return JSON.parse(stdout); } catch { return stdout.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line)); }
+    })();
     if (parsed?.ok === false) throw new Error(parsed.error?.message ?? JSON.stringify(parsed.error));
     return parsed;
   }
 
   /** Who may call chief_research and in which mode. Throws the reason otherwise. */
-  async function researchCaller(threadId: string, projectId: string, mode: z.infer<typeof researchModeSchema>) {
+  async function researchCaller(threadId: string, projectId: string, mode?: z.infer<typeof researchModeSchema>) {
     // Unmanaged threads (workflow agents included) have no row, which also stops recursion.
     const row = await managedRow(threadId, projectId);
     if (!row || terminal(row.state)) throw new Error("chief_research is available only in an active Chief, planner, or reviewer thread.");
     if (row.role === "chief" && !isActiveChief(row)) throw new Error("chief_research requires an active registered Chief thread.");
     const role = researchRoleSchema.safeParse(row.role);
     if (!role.success) throw new Error(`chief_research is not available to a managed ${row.role}.`);
-    if (!RESEARCH_MODES[role.data].includes(mode)) {
+    if (mode && !RESEARCH_MODES[role.data].includes(mode)) {
       throw new Error(`A ${role.data} may use chief_research modes ${RESEARCH_MODES[role.data].join(", ")}, not ${mode}.`);
     }
     const current = await researchSettings();
@@ -2819,7 +2924,8 @@ export default async function plugin(bb: BbPluginApi) {
     return text.slice(0, MAX_RESEARCH_OUTPUT - tail.length) + tail;
   }
 
-  const RUNNING_WORKFLOW = new Set(["queued", "pending", "running", "starting", "paused"]);
+  /** The workflows plugin's run statuses are queued, running, succeeded, failed, and cancelled. */
+  const RUNNING_WORKFLOW = new Set(["queued", "running"]);
 
   /** Polls a run until it finishes or RESEARCH_WAIT_MS passes, then says what happened. */
   async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
@@ -2833,17 +2939,19 @@ export default async function plugin(bb: BbPluginApi) {
           bb.log.warn(`chief_research could not read ${runId}: ${clip(String(error), 200)}`);
           return `Could not read workflow ${runId} from the plugin server. Check it yourself with \`bb workflows status ${runId}\`.`;
         }
-        if (run.status === "succeeded" || run.status === "completed") {
+        if (run.status === "succeeded") {
           let result = run.result;
           if (run.resultOmitted) {
             const history: unknown = await runWorkflowCli("history", [runId, "--cursor", "0", "--limit", "1"], context).catch(() => null);
-            // History may come back as JSONL text; take the run record's result either way.
-            result = (history as { result?: unknown } | null)?.result ?? "(result omitted; read it with bb workflows history)";
+            const record = (Array.isArray(history) ? history : [history]).find((line) => line?.type === "run");
+            result = record?.result ?? "(result omitted; read it with bb workflows history)";
           }
-          const table = (result as { table?: unknown } | null)?.table;
+          // survey's table, review's markdown, or investigate's brief, shown above the raw result.
+          const shown = result as { table?: unknown; markdown?: unknown; brief?: unknown } | null;
+          const summary = [shown?.table, shown?.markdown, shown?.brief].find((value) => typeof value === "string");
           return researchOutput([
             `runId: ${runId}`, `status: ${run.status}`,
-            ...(typeof table === "string" ? ["", table] : []),
+            ...(summary ? ["", summary as string] : []),
             "", "result:", JSON.stringify(result, null, 2),
           ].join("\n"));
         }
@@ -2861,18 +2969,22 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function research(params: z.infer<typeof researchParams>, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
+  async function research(params: ResearchParams, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
     const { role, cap } = await researchCaller(context.threadId, context.projectId, params.mode);
     if (params.runId) return awaitResearch(params.runId, context);
-    if (params.mode !== "survey") throw new Error(`chief_research mode ${params.mode} is not available yet.`);
-    const calls = Math.ceil(params.items.length / params.batchSize) + (params.verify ? 1 : 0);
+    const mode = params.mode!;
+    const calls = agentCount(params);
     if (calls > cap) {
-      throw new Error(`This survey needs ${calls} agent calls (${params.items.length} items in batches of ${params.batchSize}${params.verify ? " plus 1 verify" : ""}); a ${role}'s limit is ${cap}. Raise batchSize or split the items.`);
+      const fix = mode === "survey" ? "Raise batchSize or split the items." : mode === "review" ? "Use fewer concerns." : "Ask fewer questions.";
+      throw new Error(`This ${mode} needs ${calls} agent calls; a ${role}'s limit is ${cap}. ${fix}`);
     }
-    const script = RESEARCH_SCRIPTS.survey;
+    const script = RESEARCH_SCRIPTS[mode];
     const args = {
-      preamble: RESEARCH_PREAMBLE, question: params.question, items: params.items, batchSize: params.batchSize,
-      verify: params.verify, cap, models: await researchModels(context.threadId, role, params.models),
+      preamble: RESEARCH_PREAMBLE, question: params.question, verify: params.verify, cap,
+      models: await researchModels(context.threadId, role, params.models),
+      ...(mode === "survey" ? { items: params.items, batchSize: params.batchSize } : {}),
+      ...(mode === "review" ? { concerns: params.concerns, diffRef: params.diffRef ?? null } : {}),
+      ...(mode === "investigate" ? { questions: params.questions } : {}),
     };
     let runId: string;
     try {
@@ -3155,8 +3267,10 @@ export default async function plugin(bb: BbPluginApi) {
     name: "chief_research",
     presentation: { label: { pending: "Researching…", completed: "Researched" } },
     description: [
-      "Fan a read-only question out to BB workflow agents and get back a verified table. survey: answer `question` for each of `items` (files, symbols, topics), one row each with evidence.",
-      "Chief may use survey, review, investigate; a planner survey, investigate; a reviewer review, survey. Only survey is available now.",
+      "Fan a read-only question out to parallel BB workflow agents. survey: answer `question` for each of `items` (files, symbols, topics), one verified row each with evidence.",
+      "review: one agent per `concerns` entry reads `git diff` (default: committed work since the merge base with origin/HEAD, or `diffRef`), then one agent drops findings it cannot confirm; returns deduplicated findings. Advisory: you still own the verdict.",
+      "investigate: one agent per `questions` entry, then one merges the answers into a brief with Confirmed and Unconfirmed sections.",
+      "Chief may use survey, review, investigate; a planner survey, investigate; a reviewer review, survey.",
       "Read-only by prompt only: the agents share your checkout and permissions, and are told not to edit, commit, or push.",
       "Waits up to 10 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting.",
     ].join(" "),
@@ -3185,12 +3299,14 @@ export default async function plugin(bb: BbPluginApi) {
     const role = row?.role ?? (seeded?.success ? seeded.data.role : undefined);
     if (!role) return { tools: [], skills: [] };
     const rules = rulesCache.get(context.project.id) ?? BUILT_IN_RULES;
+    const research = researchLine(role, researchActive);
     if (role === "chief") {
       return {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
           "chief_consult",
           "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete",
+          ...(research ? ["chief_research"] : []),
         ],
         skills: ["chief"],
         instructions: [
@@ -3198,6 +3314,7 @@ export default async function plugin(bb: BbPluginApi) {
           "",
           ROSTER_CHIEF_INSTRUCTIONS,
           ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
+          ...(research ? ["", research] : []),
           "",
           rules,
         ].join("\n"),
@@ -3207,10 +3324,11 @@ export default async function plugin(bb: BbPluginApi) {
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skill cover the rest.
     return {
-      tools: ["chief_report"],
+      tools: ["chief_report", ...(research ? ["chief_research"] : [])],
       skills: ["chief-worker"],
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}.`,
+        ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
       ].join("\n"),
     };
