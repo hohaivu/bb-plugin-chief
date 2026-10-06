@@ -3745,7 +3745,7 @@ describe("auto-completing absorbed supporting threads", () => {
     expect(stateOf(state, worker.threadId)).toBe("complete");
   });
 
-  test("a busy thread in the worker's environment keeps the worktree", async () => {
+  test("a busy thread in the worker's environment defers the worktree release", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
@@ -3753,7 +3753,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const advisor = await consulted(state, chief.threadId, worker.threadId);
     state.live.set(advisor, { ...state.live.get(advisor)!, status: "active" });
     const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
-    expect(reply).toContain(`thread ${advisor} in its environment is still active`);
+    expect(reply).toContain(`deferred until thread ${advisor} in its environment goes idle`);
     expect(state.archivedEnvs).toEqual([]);
   });
 
@@ -3807,10 +3807,6 @@ describe("auto-completing absorbed supporting threads", () => {
     ["stale reviewed_report_seq", ({ state, worker }) => call(state, "chief_report", { state: "ready", result: "More" }, worker.threadId), "no approving review"],
     ["missing environment", ({ state, worker }) => state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, environmentId: null }), "it has no environment"],
     ["non-worktree environment", ({ state, worker }) => state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, environmentId: "env_personal" }), "not a managed worktree"],
-    ["hidden busy sibling", ({ state }) => {
-      state.addLive("thr_side", "proj_1");
-      state.live.set("thr_side", { ...state.live.get("thr_side")!, environmentId: "env_worker", visibility: "hidden", status: "pending" });
-    }, "thread thr_side in its environment is still pending"],
     ["first status unavailable", ({ state }) => state.setEnvStatus(() => ({ outcome: "unavailable", failure: { message: "host gone" } })), "could not check it (host gone)"],
     ["first status not_applicable", ({ state }) => state.setEnvStatus(() => ({ outcome: "not_applicable", message: "no git" })), "could not check it (no git)"],
     ["detached checkout", ({ state }) => state.setEnvStatus(ws({ checkout: { kind: "detached" } })), "not on a branch"],
@@ -3835,6 +3831,55 @@ describe("auto-completing absorbed supporting threads", () => {
     expect(reply).toContain(`Worktree kept: `);
     expect(reply).toContain(reason);
     expect(s.state.archivedEnvs).toEqual([]);
+  });
+
+  const pending = (state: any, id: string) =>
+    (state.db.prepare(`SELECT release_pending FROM managed_threads WHERE thread_id=?`).get(id) as { release_pending: number }).release_pending;
+  async function deferredBehindReviewer() {
+    const s = await approved();
+    s.state.live.set(s.reviewer, { ...s.state.live.get(s.reviewer)!, status: "active" });
+    await s.state.harness.behavior.emitThreadEvent("thread.active", { thread: s.state.live.get(s.reviewer)! });
+    const reply = await s.complete();
+    expect(reply).toContain(`Worktree release deferred until thread ${s.reviewer}`);
+    expect(reply).not.toContain("Worktree kept");
+    expect(s.state.archivedEnvs).toEqual([]);
+    expect(pending(s.state, s.worker.threadId)).toBe(1);
+    return s;
+  }
+  const idle = async (state: any, id: string) => {
+    state.live.set(id, { ...state.live.get(id)!, status: "idle" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(id)!, lastAssistantText: "done" });
+  };
+
+  test("a reviewer still active at complete time defers the release until it goes idle", async () => {
+    const { state, worker, reviewer } = await deferredBehindReviewer();
+    await idle(state, reviewer);
+    await vi.waitFor(() => expect(state.archivedEnvs).toEqual(["env_worker"]));
+    expect(pending(state, worker.threadId)).toBe(0);
+    expect(stateOf(state, reviewer)).toBe("complete");
+    await idle(state, reviewer);
+    await settle();
+    expect(state.archivedEnvs).toHaveLength(1);
+  });
+
+  test("a hidden unmanaged busy sibling defers the release until it goes idle", async () => {
+    const s = await approved();
+    s.state.addLive("thr_side", "proj_1");
+    s.state.live.set("thr_side", { ...s.state.live.get("thr_side")!, environmentId: "env_worker", visibility: "hidden", status: "pending" });
+    expect(await s.complete()).toContain("deferred until thread thr_side");
+    expect(s.state.archivedEnvs).toEqual([]);
+    await idle(s.state, "thr_side");
+    await vi.waitFor(() => expect(s.state.archivedEnvs).toEqual(["env_worker"]));
+  });
+
+  test("a deferred retry that hits another gate alerts Chief once", async () => {
+    const { state, chief, worker, reviewer } = await deferredBehindReviewer();
+    state.setEnvStatus(ws({ workingTree: { hasUncommittedChanges: true, files: [] } }));
+    await idle(state, reviewer);
+    await vi.waitFor(() => expect(state.sent.some((e: any) => e.threadId === chief.threadId
+      && e.input[0].text.includes("Deferred worktree release") && e.input[0].text.includes("uncommitted changes"))).toBe(true));
+    expect(state.archivedEnvs).toEqual([]);
+    expect(pending(state, worker.threadId)).toBe(0);
   });
 
   test("a planned worker releases only on the last wave of a valid persisted schedule", async () => {
