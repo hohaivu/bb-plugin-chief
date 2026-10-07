@@ -72,10 +72,8 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   let tabsUpdateFailures = 0;
   const archivedEnvs: string[] = [];
   const archivedThreads: string[] = [];
-  const failing = new Set<string>();
-  const failIf = (name: string) => { if (failing.has(name)) throw new Error(`${name} down`); };
-  // Default: clean, on feature/x, and pushed (origin/feature/x exists with nothing ahead).
-  let envStatus = (mergeBaseBranch?: string): any => ({
+  // Clean, on feature/x, and pushed (origin/feature/x exists with nothing ahead).
+  const envStatus = (mergeBaseBranch?: string): any => ({
     outcome: "available",
     workspace: {
       workingTree: { hasUncommittedChanges: false, files: [] },
@@ -111,12 +109,11 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         },
       },
       environments: {
-        get: async ({ environmentId }: { environmentId: string }) => (failIf("environments.get"), {
+        get: async ({ environmentId }: { environmentId: string }) => ({
           id: environmentId, hostId: "host_1", workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
         }),
         status: async ({ mergeBaseBranch }: { mergeBaseBranch?: string }) => envStatus(mergeBaseBranch),
         archiveThreads: async ({ environmentId }: { environmentId: string }) => {
-          failIf("archiveThreads");
           archivedEnvs.push(environmentId);
           return { ok: true, archivedThreadIds: [...live.values()].filter((t) => t.environmentId === environmentId).map((t) => t.id) };
         },
@@ -168,7 +165,6 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           return thread;
         },
         list: async ({ environmentId, archived, includeHidden }: { environmentId: string; archived?: boolean; includeHidden?: boolean }) => {
-          failIf("threads.list");
           return [...live.values()].filter((t) => t.environmentId === environmentId
             && (archived !== false || !t.archivedAt) && (includeHidden || t.visibility !== "hidden"));
         },
@@ -249,8 +245,6 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     catalogReads,
     archivedEnvs,
     archivedThreads,
-    failSdk(name: string) { failing.add(name); },
-    setEnvStatus(fn: (mergeBaseBranch?: string) => any) { envStatus = fn; },
     section: () => section,
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
@@ -3722,7 +3716,28 @@ describe("auto-completing absorbed supporting threads", () => {
     expect(state.archivedThreads).toEqual([]);
   });
 
-  test("completing an approved final-wave worker archives no threads", async () => {
+  test("completing an approved final-wave planned worker completes its planner and reviewer and archives nothing", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
+    const cli = async (args: string[]) => {
+      const result = await state.harness.behavior.runCli(["delegate", "--title", "Wave", "--mission", "Do it", ...args, "--json"], { threadId: chief.threadId, ...P });
+      expect(result.exitCode).toBe(0);
+      return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
+    };
+    const wave1 = await cli(["--plan-thread", planner.threadId, "--wave", "1"]);
+    const wave2 = await cli(["--replaces", wave1, "--plan-thread", planner.threadId, "--wave", "2"]);
+    const reviewer = await reviewed(state, chief.threadId, wave2, "approve");
+    const advisor = await consulted(state, chief.threadId, wave2);
+    await call(state, "chief_complete", { threadId: wave2 }, chief.threadId);
+    await settle();
+    await settle();
+    expect([wave2, planner.threadId, reviewer, advisor].map((id) => stateOf(state, id))).toEqual(["complete", "complete", "complete", "complete"]);
+    expect([state.archivedEnvs, state.archivedThreads]).toEqual([[], []]);
+  });
+
+  test("completing an approved unplanned worker archives no threads", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);

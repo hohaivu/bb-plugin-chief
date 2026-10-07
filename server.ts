@@ -958,7 +958,7 @@ export const MIGRATIONS = [
     `INSERT INTO chief_models_v5 (host_id, role, provider_id, model, reasoning_level, updated_at) SELECT host_id, CASE role WHEN 'senior' THEN 'worker' ELSE role END, provider_id, model, reasoning_level, updated_at FROM chief_models WHERE role <> 'junior'`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_v5 RENAME TO chief_models`,
-    // Worker row only: a worktree release deferred behind a busy thread, retried by sweep().
+    // Inert legacy column, kept for schema compatibility; nothing reads or writes it.
     `ALTER TABLE managed_threads ADD COLUMN release_pending INTEGER NOT NULL DEFAULT 0`,
     // chief_research's per-machine model pick for each role and stage; no row means inherit the caller's.
     `CREATE TABLE IF NOT EXISTS research_models (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','reviewer')), stage TEXT NOT NULL CHECK(stage IN ('scan','verify','combine')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role, stage))`,
