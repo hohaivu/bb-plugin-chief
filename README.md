@@ -108,6 +108,10 @@ result. It has three modes:
 - **investigate** runs one agent per sub-question, then one agent merges the answers into a brief
   with Confirmed and Unconfirmed sections.
 
+A failed scan, verify, or combine no longer loses the run: the result carries what finished, the
+missed items, a count line (`verified`, `dropped`), and the first failed worker's reason. `dropped`
+tells a clean "No confirmed findings" apart from a verify that threw everything away.
+
 Chief gets all three modes, a planner gets survey and investigate, and a reviewer gets review and
 survey. Workers and advisors never get it. Settings has one **Researcher** switch, on by default;
 while it is off, no role gets the tool or the line about it.

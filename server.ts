@@ -217,7 +217,7 @@ const researchParams = z.object({
   mode: researchModeSchema.optional().describe("survey: one row per item. review: findings on a diff, one scan per concern. investigate: one answer per sub-question, merged into a brief. Required unless resuming with runId."),
   question: z.string().trim().min(1).max(4_000).optional().describe("The overall question or goal. Required unless resuming."),
   items: z.array(z.string().trim().min(1).max(1_000)).min(1).max(100).optional().describe("survey: files, symbols, or topics; each gets a row."),
-  batchSize: z.number().int().min(1).max(100).default(1).describe("survey: items per scan agent."),
+  batchSize: z.number().int().min(1).max(100).default(1).describe("survey: items per scan agent. Scan agents = ceil(items ÷ batchSize); aim for about 10 or fewer, since each runs concurrently and spends quota."),
   concerns: textList("review: what to look for, one scan agent each (e.g. correctness, security)."),
   diffRef: z.string().trim().min(1).max(200).optional().describe("review: a git diff range. Defaults to committed work since the merge base with origin/HEAD."),
   questions: textList("investigate: sub-questions, one scan agent each."),
@@ -254,7 +254,7 @@ function agentCount(params: ResearchParams) {
 }
 
 /** Inline workflow source. It reads only `args`, so no value is ever interpolated into it. */
-const RESEARCH_SCRIPTS = {
+export const RESEARCH_SCRIPTS = {
   survey: String.raw`export const meta = {
   name: "chief-research-survey",
   description: "Read-only survey: one question answered per item",
@@ -285,19 +285,37 @@ scanned.forEach((result, i) => {
   if (result && result.rows) rows = rows.concat(result.rows);
   else missed.push(...batches[i]);
 });
-if (missed.length) log("No result for: " + missed.join(", "));
-if (args.verify && rows.length) {
-  const checked = await agent(
-    PRE + "Check each row against the code. Drop rows whose evidence does not support the finding; return the rest unchanged.\n\nQuestion: " + args.question + "\n\nRows:\n" + JSON.stringify(rows),
-    Object.assign({ phase: "Verify", schema: SCHEMA }, models.verify || {}),
-  );
-  if (checked && checked.rows) rows = checked.rows;
+const failures = [];
+const ok = scanned.filter((result) => result && result.rows).length;
+if (missed.length) {
+  log("No result for: " + missed.join(", "));
+  failures.push("Scan: " + (batches.length - ok) + " of " + batches.length + " batches failed");
 }
+const before = rows.length;
+let verified = null;
+let dropped = 0;
+if (args.verify && rows.length) {
+  let reason = "no rows returned";
+  try {
+    const checked = await agent(
+      PRE + "Check each row against the code. Drop rows whose evidence does not support the finding; return the rest unchanged.\n\nQuestion: " + args.question + "\n\nRows:\n" + JSON.stringify(rows),
+      Object.assign({ phase: "Verify", schema: SCHEMA }, models.verify || {}),
+    );
+    if (checked && checked.rows) { dropped = Math.max(0, before - checked.rows.length); rows = checked.rows; verified = true; }
+  } catch (error) { reason = String((error && error.message) || error); }
+  if (!verified) {
+    verified = false;
+    failures.push("Verify: " + reason);
+    log("Verify failed (" + reason + "); returning " + before + " unverified rows.");
+  }
+}
+const verifyNote = verified === true ? "; verify kept " + rows.length + ", dropped " + dropped + "." : verified === false ? "; verify failed, rows are UNVERIFIED." : "; not verified.";
+const line = "Scanned " + before + " rows, " + ok + "/" + batches.length + " batches answered" + verifyNote + (missed.length ? " No result for: " + missed.join(", ") + "." : "");
 const cell = (value) => String(value).replace(/\|/g, "\\|").replace(/\n/g, " ");
-const table = ["| Item | Finding | Evidence |", "| --- | --- | --- |"]
+const table = line + "\n\n" + ["| Item | Finding | Evidence |", "| --- | --- | --- |"]
   .concat(rows.map((r) => "| " + cell(r.item) + " | " + cell(r.finding) + " | " + cell(r.evidence) + " |"))
   .join("\n");
-return { rows, table, missed };
+return { rows, table, missed, verified, dropped, failures };
 `,
   review: String.raw`export const meta = {
   name: "chief-research-review",
@@ -325,21 +343,43 @@ const scanned = await parallel(args.concerns.map((concern) => () => agent(
 )));
 const seen = new Set();
 let findings = [];
-scanned.forEach((result) => ((result && result.findings) || []).forEach((f) => {
-  const key = f.file + ":" + f.line + ":" + f.summary;
-  if (!seen.has(key)) { seen.add(key); findings.push(f); }
-}));
-if (args.verify && findings.length) {
-  const checked = await agent(
-    PRE + range + "\n\nCheck each finding against the code. Drop findings you cannot confirm; return the rest unchanged.\n\nFindings:\n" + JSON.stringify(findings),
-    Object.assign({ phase: "Verify", schema: SCHEMA }, models.verify || {}),
-  );
-  if (checked && checked.findings) findings = checked.findings;
+const missed = [];
+const failures = [];
+scanned.forEach((result, i) => {
+  if (!(result && result.findings)) { missed.push(args.concerns[i]); return; }
+  result.findings.forEach((f) => {
+    const key = f.file + ":" + f.line + ":" + f.summary;
+    if (!seen.has(key)) { seen.add(key); findings.push(f); }
+  });
+});
+if (missed.length) {
+  log("Failed concerns: " + missed.join(", "));
+  failures.push("Scan: " + missed.length + " of " + args.concerns.length + " concerns failed");
 }
-const markdown = findings.length
+const before = findings.length;
+let verified = null;
+let dropped = 0;
+if (args.verify && findings.length) {
+  let reason = "no findings returned";
+  try {
+    const checked = await agent(
+      PRE + range + "\n\nCheck each finding against the code. Drop findings you cannot confirm; return the rest unchanged.\n\nFindings:\n" + JSON.stringify(findings),
+      Object.assign({ phase: "Verify", schema: SCHEMA }, models.verify || {}),
+    );
+    if (checked && checked.findings) { dropped = Math.max(0, before - checked.findings.length); findings = checked.findings; verified = true; }
+  } catch (error) { reason = String((error && error.message) || error); }
+  if (!verified) {
+    verified = false;
+    failures.push("Verify: " + reason);
+    log("Verify failed (" + reason + "); returning " + before + " unverified findings.");
+  }
+}
+const verifyNote = verified === true ? "; verify kept " + findings.length + ", dropped " + dropped + "." : verified === false ? "; verify failed, findings are UNVERIFIED." : "; not verified.";
+const line = "Scanned " + (args.concerns.length - missed.length) + "/" + args.concerns.length + " concerns, " + before + " findings" + verifyNote + (missed.length ? " Failed concerns: " + missed.join(", ") + "." : "");
+const markdown = line + "\n\n" + (findings.length
   ? findings.map((f) => "- **" + f.severity + "** " + f.file + ":" + f.line + " " + String(f.summary).replace(/\n/g, " ")).join("\n")
-  : "No confirmed findings.";
-return { findings, markdown };
+  : "No confirmed findings.");
+return { findings, markdown, missed, verified, dropped, failures };
 `,
   investigate: String.raw`export const meta = {
   name: "chief-research-investigate",
@@ -362,11 +402,24 @@ const scanned = await parallel(args.questions.map((q) => () => agent(
   Object.assign({ phase: "Scan", schema: ANSWER }, models.scan || {}),
 )));
 const answers = args.questions.map((q, i) => Object.assign({ question: q }, scanned[i] || { answer: "(no result)", evidence: "", confirmed: false }));
-const brief = await agent(
-  PRE + "Merge these answers into a short Markdown brief for: " + args.question + "\nUse two sections, ## Confirmed and ## Unconfirmed, keeping each answer's evidence.\n\nAnswers:\n" + JSON.stringify(answers),
-  Object.assign({ phase: "Combine" }, models.combine || {}),
-);
-return { answers, brief };
+const failures = [];
+const lost = scanned.filter((result) => !result).length;
+if (lost) failures.push("Scan: " + lost + " of " + args.questions.length + " questions failed");
+let brief = null;
+let reason = "no brief returned";
+try {
+  brief = await agent(
+    PRE + "Merge these answers into a short Markdown brief for: " + args.question + "\nUse two sections, ## Confirmed and ## Unconfirmed, keeping each answer's evidence.\n\nAnswers:\n" + JSON.stringify(answers),
+    Object.assign({ phase: "Combine" }, models.combine || {}),
+  );
+} catch (error) { reason = String((error && error.message) || error); }
+if (typeof brief !== "string") {
+  const list = (confirmed) => answers.filter((a) => !!a.confirmed === confirmed).map((a) => "- **" + a.question + "** " + a.answer + " (" + a.evidence + ")").join("\n");
+  brief = "Combine failed (" + reason + "); answers are unmerged.\n\n## Confirmed\n" + list(true) + "\n\n## Unconfirmed\n" + list(false);
+  failures.push("Combine: " + reason);
+  log("Combine failed (" + reason + "); returning unmerged answers.");
+}
+return { answers, brief, failures };
 `,
 } as const;
 
@@ -635,6 +688,10 @@ const BUILT_IN_RULES = `# Chief operating rules
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
   "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled — a well-specified issue included. Order: chief_plan → chief_forge_init → chief_delegate. chief_delegate rejects a call without planThreadId and wave; only bounded work whose shape and cause are already known may skip the plan, with unplannedReason saying why. Its ready alert lists the wave schedule and the exact next call — delegate wave 1 right away without waiting for user sign-off, and without reading the plan file yourself. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. A plan is never implementation: only a worker changes code.";
+
+/** Chief-only cue for when to reach for chief_research; sent while research is on. */
+const RESEARCH_CHIEF_INSTRUCTIONS =
+  "Before chief_plan on a large or unclear issue, scope it with chief_research survey or investigate. When a worker's or reviewer's claimed evidence looks doubtful, check it with chief_research review or investigate before acting.";
 
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
@@ -1555,7 +1612,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- Split the work into at most 8 sequential waves, each a self-contained plan one worker finishes on the same branch; one wave by default, more only when one worker cannot finish it. Submit `plan` as an array of `{body}`. Waves contain no phases.",
       "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
-      ...(researchLine("planner", await researchSettings()) ? ["- For a broad survey across many files, or several open questions at once, use chief_research instead of reading everything yourself."] : []),
+      ...(researchLine("planner", await researchSettings()) ? ["- When the root cause is unclear, use chief_research investigate (one sub-question per hypothesis); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings before relying on them."] : []),
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -2959,6 +3016,23 @@ export default async function plugin(bb: BbPluginApi) {
   const RUNNING_WORKFLOW = new Set(["queued", "running"]);
 
   /** Polls a run until it finishes or waitMs passes, then says what happened; the run keeps going either way. */
+  /** One line naming the failed agent calls and the first one's real reason (e.g. a quota error). Best-effort: null on any trouble. */
+  async function failureNote(runId: string, context: { threadId: string; projectId: string }) {
+    try {
+      const history: unknown = await runWorkflowCli("history", [runId, "--cursor", "0", "--limit", "100"], context);
+      const failed = (Array.isArray(history) ? history : [history])
+        .filter((record) => record?.type === "call" && record.status === "failed") as { phase?: string; childThreadId?: string }[];
+      if (!failed.length) return null;
+      const counts = new Map<string, number>();
+      for (const call of failed) counts.set(call.phase ?? "?", (counts.get(call.phase ?? "?") ?? 0) + 1);
+      const first = failed[0];
+      const output = first.childThreadId ? await lastOutput(first.childThreadId) : null;
+      return `Failed agent calls: ${[...counts].map(([phase, n]) => `${phase} ×${n}`).join(", ")}. First failure (${first.phase ?? "?"}, thread ${first.childThreadId ?? "?"}): ${output ? clip(output, 300) : "(no output)"}`;
+    } catch {
+      return null;
+    }
+  }
+
   async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, waitMs: number) {
     const deadline = Date.now() + waitMs;
     try {
@@ -2981,14 +3055,17 @@ export default async function plugin(bb: BbPluginApi) {
           // survey's table, review's markdown, or investigate's brief, shown above the raw result.
           const shown = result as { table?: unknown; markdown?: unknown; brief?: unknown } | null;
           const summary = [shown?.table, shown?.markdown, shown?.brief].find((value) => typeof value === "string");
+          const failures = (result as { failures?: unknown } | null)?.failures;
+          const note = Array.isArray(failures) && failures.length ? await failureNote(runId, context) : null;
           return researchOutput([
-            `runId: ${runId}`, `status: ${run.status}`,
+            `runId: ${runId}`, `status: ${run.status}`, ...(note ? [note] : []),
             ...(summary ? ["", summary as string] : []),
             "", "result:", JSON.stringify(result, null, 2),
           ].join("\n"));
         }
         if (!RUNNING_WORKFLOW.has(run.status)) {
-          return researchOutput(`runId: ${runId}\nstatus: ${run.status}\nerror: ${JSON.stringify(run.error)}\ncalls: ${JSON.stringify(run.calls)}`);
+          const note = await failureNote(runId, context);
+          return researchOutput(`runId: ${runId}\nstatus: ${run.status}\nerror: ${JSON.stringify(run.error)}\n${note ? `${note}\n` : ""}calls: ${JSON.stringify(run.calls)}`);
         }
         context.signal?.throwIfAborted();
         if (Date.now() >= deadline) return `Still running. Call chief_research again with runId: ${runId} to keep waiting.`;
@@ -3350,7 +3427,7 @@ export default async function plugin(bb: BbPluginApi) {
           "",
           ROSTER_CHIEF_INSTRUCTIONS,
           ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
-          ...(research ? ["", research] : []),
+          ...(research ? ["", research, RESEARCH_CHIEF_INSTRUCTIONS] : []),
           "",
           rules,
         ].join("\n"),
