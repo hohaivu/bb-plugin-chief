@@ -72,10 +72,8 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   let tabsUpdateFailures = 0;
   const archivedEnvs: string[] = [];
   const archivedThreads: string[] = [];
-  const failing = new Set<string>();
-  const failIf = (name: string) => { if (failing.has(name)) throw new Error(`${name} down`); };
-  // Default: clean, on feature/x, and pushed (origin/feature/x exists with nothing ahead).
-  let envStatus = (mergeBaseBranch?: string): any => ({
+  // Clean, on feature/x, and pushed (origin/feature/x exists with nothing ahead).
+  const envStatus = (mergeBaseBranch?: string): any => ({
     outcome: "available",
     workspace: {
       workingTree: { hasUncommittedChanges: false, files: [] },
@@ -111,12 +109,11 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         },
       },
       environments: {
-        get: async ({ environmentId }: { environmentId: string }) => (failIf("environments.get"), {
+        get: async ({ environmentId }: { environmentId: string }) => ({
           id: environmentId, hostId: "host_1", workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
         }),
         status: async ({ mergeBaseBranch }: { mergeBaseBranch?: string }) => envStatus(mergeBaseBranch),
         archiveThreads: async ({ environmentId }: { environmentId: string }) => {
-          failIf("archiveThreads");
           archivedEnvs.push(environmentId);
           return { ok: true, archivedThreadIds: [...live.values()].filter((t) => t.environmentId === environmentId).map((t) => t.id) };
         },
@@ -168,7 +165,6 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           return thread;
         },
         list: async ({ environmentId, archived, includeHidden }: { environmentId: string; archived?: boolean; includeHidden?: boolean }) => {
-          failIf("threads.list");
           return [...live.values()].filter((t) => t.environmentId === environmentId
             && (archived !== false || !t.archivedAt) && (includeHidden || t.visibility !== "hidden"));
         },
@@ -249,8 +245,6 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     catalogReads,
     archivedEnvs,
     archivedThreads,
-    failSdk(name: string) { failing.add(name); },
-    setEnvStatus(fn: (mergeBaseBranch?: string) => any) { envStatus = fn; },
     section: () => section,
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
@@ -3719,59 +3713,39 @@ describe("auto-completing absorbed supporting threads", () => {
     await call(state, "chief_complete", { threadId: fix }, chief.threadId);
     await settle();
     expect(stateOf(state, planner.threadId)).toBe("complete");
-    expect(state.archivedThreads).toEqual([planner.threadId]);
+    expect(state.archivedThreads).toEqual([]);
   });
 
-  test("completing an approved, clean, pushed worker archives its environment", async () => {
+  test("completing an approved final-wave planned worker completes its planner and reviewer and archives nothing", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
+    const cli = async (args: string[]) => {
+      const result = await state.harness.behavior.runCli(["delegate", "--title", "Wave", "--mission", "Do it", ...args, "--json"], { threadId: chief.threadId, ...P });
+      expect(result.exitCode).toBe(0);
+      return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
+    };
+    const wave1 = await cli(["--plan-thread", planner.threadId, "--wave", "1"]);
+    const wave2 = await cli(["--replaces", wave1, "--plan-thread", planner.threadId, "--wave", "2"]);
+    const reviewer = await reviewed(state, chief.threadId, wave2, "approve");
+    const advisor = await consulted(state, chief.threadId, wave2);
+    await call(state, "chief_complete", { threadId: wave2 }, chief.threadId);
+    await settle();
+    await settle();
+    expect([wave2, planner.threadId, reviewer, advisor].map((id) => stateOf(state, id))).toEqual(["complete", "complete", "complete", "complete"]);
+    expect([state.archivedEnvs, state.archivedThreads]).toEqual([[], []]);
+  });
+
+  test("completing an approved unplanned worker archives no threads", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await reviewed(state, chief.threadId, worker.threadId, "approve");
     const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
-    expect(reply).toContain("Archived");
-    expect(state.archivedEnvs).toEqual(["env_worker"]);
-  });
-
-  const kept: [string, (b?: string) => any, string][] = [
-    ["dirty", () => ({ outcome: "available", workspace: { workingTree: { hasUncommittedChanges: true, files: [] }, checkout: { kind: "branch", branchName: "feature/x" }, mergeBase: null } }), "Worktree kept: it has uncommitted changes"],
-    ["ahead", (b) => ({ outcome: "available", workspace: { workingTree: { hasUncommittedChanges: false, files: [] }, checkout: { kind: "branch", branchName: "feature/x" }, mergeBase: b ? { baseRef: "abc", aheadCount: 2, behindCount: 0 } : null } }), "not pushed"],
-    ["never pushed", (b) => ({ outcome: "available", workspace: { workingTree: { hasUncommittedChanges: false, files: [] }, checkout: { kind: "branch", branchName: "feature/x" }, mergeBase: b ? { baseRef: null, aheadCount: 0, behindCount: 0 } : null } }), "no origin/feature/x"],
-    ["status throws", () => { throw new Error("host down"); }, "could not check"],
-  ];
-  test.each(kept)("an approved worker whose worktree is %s keeps it", async (_name, envStatus, expected) => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await reviewed(state, chief.threadId, worker.threadId, "approve");
-    state.setEnvStatus(envStatus);
-    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
-    expect(reply).toContain(expected);
-    expect(state.archivedEnvs).toEqual([]);
+    expect(reply).not.toMatch(/Worktree|Archived|release/);
     expect(stateOf(state, worker.threadId)).toBe("complete");
-  });
-
-  test("a busy thread in the worker's environment defers the worktree release", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await reviewed(state, chief.threadId, worker.threadId, "approve");
-    const advisor = await consulted(state, chief.threadId, worker.threadId);
-    state.live.set(advisor, { ...state.live.get(advisor)!, status: "active" });
-    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
-    expect(reply).toContain(`deferred until thread ${advisor} in its environment goes idle`);
-    expect(state.archivedEnvs).toEqual([]);
-  });
-
-  test("a worker without an approving review keeps its worktree", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const rejected = await delegate(state, chief.threadId);
-    await reviewed(state, chief.threadId, rejected.threadId, "request_changes");
-    const unreviewed = await delegate(state, chief.threadId, "Other");
-    for (const id of [rejected.threadId, unreviewed.threadId]) {
-      expect(String(await call(state, "chief_complete", { threadId: id }, chief.threadId))).toContain("no approving review");
-    }
-    expect(state.archivedEnvs).toEqual([]);
+    expect([state.archivedEnvs, state.archivedThreads]).toEqual([[], []]);
   });
 
   test("a replaces: hand-off completes the prior worker without archiving", async () => {
@@ -3783,191 +3757,6 @@ describe("auto-completing absorbed supporting threads", () => {
     await settle();
     expect(stateOf(state, worker.threadId)).toBe("complete");
     expect([state.archivedEnvs, state.archivedThreads]).toEqual([[], []]);
-  });
-
-  // Guard-isolated: each case starts approved, idle, final, managed, clean and pushed, then breaks one gate.
-  const ws = (over: object = {}, mergeBase: object | null = { baseRef: "abc", aheadCount: 0, behindCount: 0 }) => (b?: string) => ({
-    outcome: "available",
-    workspace: { workingTree: { hasUncommittedChanges: false, files: [] }, checkout: { kind: "branch", branchName: "feature/x" }, mergeBase: b ? mergeBase : null, ...over },
-  });
-  async function approved() {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
-    const complete = async () => {
-      const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
-      expect(stateOf(state, worker.threadId)).toBe("complete");
-      return reply;
-    };
-    return { state, chief, worker, reviewer, complete };
-  }
-  const guards: [string, (s: Awaited<ReturnType<typeof approved>>) => unknown, string][] = [
-    // No new chief_report: the approval still covers the latest report, so only the prior-state gate denies.
-    ["blocked prior state", async ({ state, chief, worker }) => {
-      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
-      await call(state, "chief_stop", { threadId: worker.threadId, reason: "stuck" }, chief.threadId);
-    }, "the worker was blocked"],
-    ["failed prior state", ({ state, worker }) => state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(worker.threadId)!, error: "boom" }), "the worker was failed"],
-    ["stale reviewed_report_seq", ({ state, worker }) => call(state, "chief_report", { state: "ready", result: "More" }, worker.threadId), "no approving review"],
-    ["missing environment", ({ state, worker }) => state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, environmentId: null }), "it has no environment"],
-    ["non-worktree environment", ({ state, worker }) => state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, environmentId: "env_personal" }), "not a managed worktree"],
-    ["first status unavailable", ({ state }) => state.setEnvStatus(() => ({ outcome: "unavailable", failure: { message: "host gone" } })), "could not check it (host gone)"],
-    ["first status not_applicable", ({ state }) => state.setEnvStatus(() => ({ outcome: "not_applicable", message: "no git" })), "could not check it (no git)"],
-    ["detached checkout", ({ state }) => state.setEnvStatus(ws({ checkout: { kind: "detached" } })), "not on a branch"],
-    ["files-only dirty", ({ state }) => state.setEnvStatus(ws({ workingTree: { hasUncommittedChanges: false, files: [{ path: "a.ts" }] } })), "uncommitted changes"],
-    ["no comparison mergeBase", ({ state }) => state.setEnvStatus(ws({}, null)), "no origin/feature/x"],
-    ["comparison status unavailable", ({ state }) => state.setEnvStatus((b) => b ? { outcome: "unavailable", failure: { message: "x" } } : ws()(b)), "no origin/feature/x"],
-    ["second status throws", ({ state }) => state.setEnvStatus((b) => { if (b) throw new Error("fetch down"); return ws()(b); }), "could not check it (Error: fetch down)"],
-    ["environments.get throws", ({ state }) => state.failSdk("environments.get"), "environments.get down"],
-    ["threads.list throws", ({ state }) => state.failSdk("threads.list"), "threads.list down"],
-    ["archiveThreads throws", ({ state }) => state.failSdk("archiveThreads"), "archiveThreads down"],
-    ["missing planner", ({ state, worker }) => state.db.prepare(`UPDATE managed_threads SET plan_thread_id='thr_gone', plan_wave=1 WHERE thread_id=?`).run(worker.threadId), "not the final wave"],
-    ["successor with unknown environment", async ({ state, chief }) => {
-      const other = await delegate(state, chief.threadId, "Other");
-      state.live.set(other.threadId, { ...state.live.get(other.threadId)!, environmentId: null });
-    }, "could not check it (successor"],
-    ["wave without planner link", ({ state, worker }) => state.db.prepare(`UPDATE managed_threads SET plan_wave=1 WHERE thread_id=?`).run(worker.threadId), "not the final wave"],
-  ];
-  test.each(guards)("%s keeps the worktree but completes the worker", async (_name, breakIt, reason) => {
-    const s = await approved();
-    await breakIt(s);
-    const reply = await s.complete();
-    expect(reply).toContain(`Worktree kept: `);
-    expect(reply).toContain(reason);
-    expect(s.state.archivedEnvs).toEqual([]);
-  });
-
-  const pending = (state: any, id: string) =>
-    (state.db.prepare(`SELECT release_pending FROM managed_threads WHERE thread_id=?`).get(id) as { release_pending: number }).release_pending;
-  async function deferredBehindReviewer() {
-    const s = await approved();
-    s.state.live.set(s.reviewer, { ...s.state.live.get(s.reviewer)!, status: "active" });
-    await s.state.harness.behavior.emitThreadEvent("thread.active", { thread: s.state.live.get(s.reviewer)! });
-    const reply = await s.complete();
-    expect(reply).toContain(`Worktree release deferred until thread ${s.reviewer}`);
-    expect(reply).not.toContain("Worktree kept");
-    expect(s.state.archivedEnvs).toEqual([]);
-    expect(pending(s.state, s.worker.threadId)).toBe(1);
-    return s;
-  }
-  const idle = async (state: any, id: string) => {
-    state.live.set(id, { ...state.live.get(id)!, status: "idle" });
-    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(id)!, lastAssistantText: "done" });
-  };
-
-  test("a reviewer still active at complete time defers the release until it goes idle", async () => {
-    const { state, worker, reviewer } = await deferredBehindReviewer();
-    await idle(state, reviewer);
-    await vi.waitFor(() => expect(state.archivedEnvs).toEqual(["env_worker"]));
-    expect(pending(state, worker.threadId)).toBe(0);
-    expect(stateOf(state, reviewer)).toBe("complete");
-    await idle(state, reviewer);
-    await settle();
-    expect(state.archivedEnvs).toHaveLength(1);
-  });
-
-  test("a hidden unmanaged busy sibling defers the release until it goes idle", async () => {
-    const s = await approved();
-    s.state.addLive("thr_side", "proj_1");
-    s.state.live.set("thr_side", { ...s.state.live.get("thr_side")!, environmentId: "env_worker", visibility: "hidden", status: "pending" });
-    expect(await s.complete()).toContain("deferred until thread thr_side");
-    expect(s.state.archivedEnvs).toEqual([]);
-    await idle(s.state, "thr_side");
-    await vi.waitFor(() => expect(s.state.archivedEnvs).toEqual(["env_worker"]));
-  });
-
-  test("a deferred retry that hits another gate alerts Chief once", async () => {
-    const { state, chief, worker, reviewer } = await deferredBehindReviewer();
-    state.setEnvStatus(ws({ workingTree: { hasUncommittedChanges: true, files: [] } }));
-    await idle(state, reviewer);
-    await vi.waitFor(() => expect(state.sent.some((e: any) => e.threadId === chief.threadId
-      && e.input[0].text.includes("Deferred worktree release") && e.input[0].text.includes("uncommitted changes"))).toBe(true));
-    expect(state.archivedEnvs).toEqual([]);
-    expect(pending(state, worker.threadId)).toBe(0);
-  });
-
-  test("a planned worker releases only on the last wave of a valid persisted schedule", async () => {
-    const s = await approved();
-    await s.state.harness.behavior.setSettings({ plannerEnabled: true });
-    const { planner } = await planTwoWaves(s.state, s.chief.threadId);
-    const link = (waves: string | null, wave: number | null) => {
-      s.state.db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id=?`).run(waves, planner.threadId);
-      s.state.db.prepare(`UPDATE managed_threads SET plan_thread_id=?, plan_wave=? WHERE thread_id=?`).run(planner.threadId, wave, s.worker.threadId);
-    };
-    const valid = JSON.stringify([{ path: "a" }, { path: "b" }]);
-    for (const [waves, wave] of [[null, 2], ["[]", 0], ["{}", 2], ["nope", 2], [valid, null], [valid, 0], [valid, 1], [valid, 3]] as const) {
-      link(waves, wave);
-      expect(await s.complete(), `${waves} @ ${wave}`).toContain("not the final wave");
-    }
-    // Length-bearing non-arrays, a non-planner link and a cross-project planner are unknown, not final.
-    for (const waves of ['"ab"', '{"length":2}']) {
-      link(waves, 2);
-      expect(await s.complete(), waves).toContain("not the final wave");
-    }
-    link(valid, 2);
-    for (const [column, value, restore] of [["role", "advisor", "planner"], ["project_id", "proj_other", "proj_1"]]) {
-      s.state.db.prepare(`UPDATE managed_threads SET ${column}=? WHERE thread_id=?`).run(value, planner.threadId);
-      expect(await s.complete(), column).toContain("not the final wave");
-      s.state.db.prepare(`UPDATE managed_threads SET ${column}=? WHERE thread_id=?`).run(restore, planner.threadId);
-    }
-    expect(s.state.archivedEnvs).toEqual([]);
-    link(valid, 2);
-    expect(await s.complete()).toContain("Archived");
-    expect(s.state.archivedEnvs).toEqual(["env_worker"]);
-  });
-
-  test("an approved intermediate wave keeps the worktree its next wave reuses", async () => {
-    const state = await setup();
-    await state.harness.behavior.setSettings({ plannerEnabled: true });
-    const chief = await start(state);
-    const { planner } = await planTwoWaves(state, chief.threadId);
-    const cli = async (args: string[]) => {
-      const result = await state.harness.behavior.runCli(["delegate", "--title", "Wave", "--mission", "Do it", ...args, "--json"], { threadId: chief.threadId, ...P });
-      expect(result.exitCode).toBe(0);
-      return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
-    };
-    const wave1 = await cli(["--plan-thread", planner.threadId, "--wave", "1"]);
-    await reviewed(state, chief.threadId, wave1, "approve");
-    expect(String(await call(state, "chief_complete", { threadId: wave1 }, chief.threadId))).toContain("not the final wave");
-    expect([stateOf(state, wave1), state.archivedEnvs, state.archivedThreads]).toEqual(["complete", [], []]);
-    const wave2 = await cli(["--replaces", wave1, "--plan-thread", planner.threadId, "--wave", "2"]);
-    expect(state.live.get(wave2)!.environmentId).toBe(state.live.get(wave1)!.environmentId);
-    await reviewed(state, chief.threadId, wave2, "approve");
-    expect(String(await call(state, "chief_complete", { threadId: wave2 }, chief.threadId))).toContain("Archived");
-    expect(state.archivedEnvs).toEqual([state.live.get(wave1)!.environmentId]);
-  });
-
-  test("re-completing a superseded worker keeps the environment its successor reuses", async () => {
-    const s = await approved();
-    const { state, chief, worker, reviewer } = s;
-    await call(state, "chief_complete", { threadId: reviewer }, chief.threadId);
-    const successor = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
-    expect(state.db.prepare(`SELECT state, verdict, reviewed_report_seq = (SELECT report_seq FROM managed_threads WHERE thread_id=?) AS covers FROM managed_threads WHERE thread_id=?`).get(worker.threadId, reviewer))
-      .toEqual({ state: "complete", verdict: "approve", covers: 1 });
-    expect(state.live.get(successor.threadId)!.environmentId).toBe("env_worker");
-    const kept = await state.harness.behavior.runCli(["complete", worker.threadId]);
-    expect(kept.exitCode).toBe(0);
-    expect(kept.stdout).toContain(`Worktree kept: this worker was superseded by ${successor.threadId}; complete the current worker instead.`);
-    expect(state.archivedEnvs).toEqual([]);
-    // An unreadable successor fails closed.
-    state.failNextGet(successor.threadId);
-    expect(await s.complete()).toContain("could not check");
-    expect(state.archivedEnvs).toEqual([]);
-    await reviewed(state, chief.threadId, successor.threadId, "approve");
-    const released = await state.harness.behavior.runCli(["complete", successor.threadId]);
-    expect([released.exitCode, released.stdout?.includes("Archived"), state.archivedEnvs]).toEqual([0, true, ["env_worker"]]);
-    // A finished successor still counts.
-    expect(await s.complete()).toContain(`superseded by ${successor.threadId}`);
-    expect(state.archivedEnvs).toEqual(["env_worker"]);
-  });
-
-  test("a newer worker in a different environment does not supersede", async () => {
-    const s = await approved();
-    const other = await delegate(s.state, s.chief.threadId, "Other");
-    expect(s.state.live.get(other.threadId)!.environmentId).not.toBe("env_worker");
-    expect(await s.complete()).toContain("Archived");
-    expect(s.state.archivedEnvs).toEqual(["env_worker"]);
   });
 
   test("archiving a complete worker keeps its row complete", async () => {
