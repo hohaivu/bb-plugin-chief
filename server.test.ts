@@ -1784,7 +1784,7 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_research"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_spawn_child", "chief_plan", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_research"]);
     expect(chief.skills).toEqual(["chief"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker"]);
@@ -4367,5 +4367,163 @@ describe("chief_research", () => {
     expect((await configured()).instructions).toContain("Before chief_plan on a large or unclear issue");
     await state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
     expect((await configured()).instructions).not.toContain("Before chief_plan on a large or unclear issue");
+  });
+});
+
+describe("child Chief", () => {
+  const P = { projectId: "proj_1" };
+  type State = Awaited<ReturnType<typeof setup>>;
+  const call = (state: State, tool: string, params: object, threadId: string) =>
+    state.harness.behavior.callAgentTool(tool, params, { threadId, ...P });
+  const row = async (state: State, id: string) => (await status(state)).threads.find((thread) => thread.threadId === id)!;
+  async function spawnChild(state: State, parentId: string, title = "Fix login", brief = "Repair the login redirect") {
+    await call(state, "chief_spawn_child", { title, brief }, parentId);
+    return (await status(state)).threads.filter((thread) => thread.role === "chief" && thread.chiefThreadId === parentId).at(-1)!.threadId;
+  }
+  const work = (title = "Child task") => ({ title, mission: "Do it", unplannedReason: "Bounded test fixture" });
+
+  test("spawns a Chief under the caller without handing anything over", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const childId = await spawnChild(state, chief.threadId);
+    const spawn = state.spawned.at(-1);
+    expect(spawn.pluginMetadata).toEqual({ role: "chief", chiefThreadId: chief.threadId });
+    expect(spawn.parentThreadId).toBe(chief.threadId);
+    expect(spawn.title).toBe("Chief · Fix login");
+    expect(spawn.prompt).toContain("Repair the login redirect");
+    expect(spawn).not.toHaveProperty("lifecycleOwnerThreadId");
+    expect((await row(state, chief.threadId)).state).not.toBe("complete");
+    expect((await row(state, worker.threadId)).chiefThreadId).toBe(chief.threadId);
+    expect((await row(state, childId)).chiefThreadId).toBe(chief.threadId);
+  });
+
+  test("project Chief resolution and numbering ignore children", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    await spawnChild(state, chief.threadId);
+    expect(await start(state)).toEqual({ threadId: chief.threadId, created: false });
+    state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, archivedAt: Date.now() });
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(chief.threadId)! });
+    await state.supervisorCycle();
+    const top = (await status(state)).threads.find((thread) => thread.role === "chief" && thread.chiefThreadId === null && thread.state !== "complete")!;
+    expect(top.threadId).not.toBe(chief.threadId);
+    expect(top.title).toBe("Chief · Asha · 2");
+  });
+
+  test("a child's report reaches the parent and its workers' alerts reach the child", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    await call(state, "chief_report", { state: "ready", result: "Login fixed" }, childId);
+    expect(state.sent.at(-1).threadId).toBe(chief.threadId);
+    expect(state.sent.at(-1).input[0].text).toContain("Child Chief report");
+    expect(state.sent.at(-1).input[0].text).toMatch(/Child Chief finished its brief.*chief_complete/);
+    await call(state, "chief_delegate", work(), childId);
+    const worker = (await status(state)).threads.find((thread) => thread.role === "worker")!;
+    expect(worker.chiefThreadId).toBe(childId);
+    await call(state, "chief_report", { state: "ready", result: "Done" }, worker.threadId);
+    expect(state.sent.at(-1).threadId).toBe(childId);
+  });
+
+  test("rosters and todos are scoped to the Chief that owns them", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    await call(state, "chief_delegate", work("Grandchild work"), childId);
+    await call(state, "chief_roster", { todo: { text: "child todo" } }, childId);
+    await call(state, "chief_roster", { todo: { text: "parent todo" } }, chief.threadId);
+    const parentRoster = await call(state, "chief_roster", {}, chief.threadId) as string;
+    const childRoster = await call(state, "chief_roster", {}, childId) as string;
+    expect(parentRoster).toContain("Chief · Fix login");
+    expect(parentRoster).not.toContain("Grandchild work");
+    expect(parentRoster).toContain("parent todo");
+    expect(parentRoster).not.toContain("child todo");
+    expect(childRoster).toContain("Grandchild work");
+    expect(childRoster).toContain("child todo");
+    expect(childRoster).not.toContain("parent todo");
+    const parentItems = (await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })).items.map((item: TodoItem) => item.label);
+    expect(parentItems.some((label: string) => label.includes("child todo"))).toBe(false);
+    await expect(call(state, "chief_roster", { todo: { id: 2, state: "done" } }, childId)).rejects.toThrow("No todo");
+  });
+
+  test("permission matrix: a parent controls its child, nobody else reaches a Chief", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    const siblingId = await spawnChild(state, chief.threadId, "Other");
+    const other = await state.harness.behavior.runCli(["create", "--project", "proj_1", "--json"]);
+    const otherId = JSON.parse(other.stdout!).threadId as string;
+    await expect(call(state, "chief_inspect", { threadId: childId }, chief.threadId)).resolves.toContain("Role: chief");
+    state.live.set(childId, { ...state.live.get(childId)!, status: "active" });
+    await call(state, "chief_continue", { threadId: childId, instruction: "Focus" }, chief.threadId);
+    await call(state, "chief_stop", { threadId: childId }, chief.threadId);
+    await call(state, "chief_complete", { threadId: childId }, chief.threadId);
+    expect((await row(state, childId)).state).toBe("complete");
+    await expect(call(state, "chief_inspect", { threadId: chief.threadId }, siblingId)).rejects.toThrow("for this Chief");
+    await expect(call(state, "chief_continue", { threadId: chief.threadId, instruction: "x" }, siblingId)).rejects.toThrow();
+    await expect(call(state, "chief_continue", { threadId: siblingId, instruction: "x" }, otherId)).rejects.toThrow();
+    await expect(call(state, "chief_continue", { threadId: otherId, instruction: "x" }, chief.threadId)).rejects.toThrow();
+    for (const argv of [["continue", siblingId, "--instruction", "x"], ["stop", siblingId], ["complete", siblingId]]) {
+      expect((await state.harness.behavior.runCli(argv)).exitCode).toBe(1);
+    }
+  });
+
+  test("chief_complete refuses a child that still has open work", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    await call(state, "chief_delegate", work(), childId);
+    await expect(call(state, "chief_complete", { threadId: childId }, chief.threadId)).rejects.toThrow("Complete or hand off its open work first");
+  });
+
+  test("a child cannot nest and gets the child tool set, even before its row exists", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    await expect(call(state, "chief_spawn_child", { title: "Deeper", brief: "No" }, childId)).rejects.toThrow("cannot nest");
+    const names = async (id: string) => (await state.harness.behavior.resolveAgentConfiguration(configurationContext(id))).tools.map((tool) => tool.name);
+    const seededContext = { ...configurationContext("thr_x"), pluginMetadata: { role: "chief", chiefThreadId: chief.threadId } };
+    expect(await names(chief.threadId)).toContain("chief_spawn_child");
+    expect(await names(chief.threadId)).not.toContain("chief_report");
+    const seeded = await state.harness.behavior.resolveAgentConfiguration(seededContext);
+    for (const tools of [await names(childId), seeded.tools.map((tool) => tool.name)]) {
+      expect(tools).not.toContain("chief_spawn_child");
+      expect(tools).toContain("chief_report");
+      expect(tools).toContain("chief_delegate");
+    }
+    expect(seeded.instructions).toContain(`child Chief of ${chief.threadId}`);
+  });
+
+  test("archiving a child hands its work to the parent; archiving the parent hands both on", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    await call(state, "chief_delegate", work(), childId);
+    const worker = (await status(state)).threads.find((thread) => thread.role === "worker")!;
+    state.live.set(childId, { ...state.live.get(childId)!, archivedAt: Date.now() });
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(childId)! });
+    await state.supervisorCycle();
+    expect((await row(state, worker.threadId)).chiefThreadId).toBe(chief.threadId);
+
+    const second = await spawnChild(state, chief.threadId, "Second");
+    state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, archivedAt: Date.now() });
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(chief.threadId)! });
+    await state.supervisorCycle();
+    const top = (await status(state)).threads.find((thread) => thread.role === "chief" && thread.chiefThreadId === null && thread.state !== "complete")!;
+    expect(top.threadId).not.toBe(chief.threadId);
+    expect((await row(state, second)).chiefThreadId).toBe(top.threadId);
+    expect((await row(state, worker.threadId)).chiefThreadId).toBe(top.threadId);
+  });
+
+  test("a child's ready report survives its next idle event", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    await call(state, "chief_report", { state: "ready", result: "Done" }, childId);
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(childId)!, lastAssistantText: "done" });
+    expect((await row(state, childId)).state).toBe("ready");
+    expect(await call(state, "chief_roster", {}, chief.threadId)).toContain("Child Chief finished its brief");
   });
 });
