@@ -653,8 +653,6 @@ interface ManagedRow {
    * the tie nextAction uses to know whether it already covers the worker's latest
    * report, instead of comparing updated_at timestamps. */
   reviewed_report_seq: number | null;
-  /** Worker row only: 1 while a worktree release waits on a busy thread; sweep() retries it. */
-  release_pending: number;
   created_at: number;
   updated_at: number;
 }
@@ -682,7 +680,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 - When the user or a worker corrects a factual claim, verify it against the code before accepting the correction.
 - Start extra reviews with chief_review — a worker's worktree, or a fresh one for a pull request or branch with no worker — whenever a change deserves a second pass.
 - Keep thread titles literal and recognizable. Never invent codenames.
-- Do not delete user threads. Mark managed work complete: completing the approved current worker of a final wave or unplanned run, with a clean and pushed worktree, archives its environment's threads so BB frees the worktree, and a planner is archived after its final wave. After replaces:, review and complete the successor, not the predecessor. When chief_complete says it kept a worktree, resolve the reason it gives or tell the user.`;
+- Do not delete user threads. Mark managed work complete. After replaces:, review and complete the successor, not the predecessor.`;
 
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
@@ -1031,10 +1029,6 @@ export default async function plugin(bb: BbPluginApi) {
   const latestReviewForWorker = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
-  // Insertion order, not created_at (same-ms ties); no state filter, so a finished successor still counts.
-  const newerWorkers = db.prepare<[string, string]>(
-    `SELECT thread_id FROM managed_threads WHERE role='worker' AND project_id=? AND rowid > (SELECT rowid FROM managed_threads WHERE thread_id=?)`,
-  );
   const existingBranchReview = db.prepare<[string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
@@ -1100,11 +1094,6 @@ export default async function plugin(bb: BbPluginApi) {
       if (!row || !absorbed(row)) continue; // changed while the read was in flight
       db.prepare(`UPDATE managed_threads SET state='complete', status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(live.status, Date.now(), id);
       roles = load();
-      if (row.role === "planner") {
-        // A planner is read-only and done; archiving its thread lets BB free a planner-only worktree.
-        // Its own thread only: its project-default environment may be the shared checkout.
-        await bb.sdk.threads.archive({ threadId: id }).catch((error) => bb.log.warn(`Could not archive planner ${id}: ${String(error)}`));
-      }
       completed += 1;
     }
     return completed;
@@ -1112,14 +1101,13 @@ export default async function plugin(bb: BbPluginApi) {
   let sweeping: Promise<void> | null = null;
   let sweepAgain = false;
   /** Single-flight: a reload during a sweep queues exactly one more pass instead of a racing one.
-   * Each pass also retries worktree releases deferred behind a busy thread. */
+   */
   function sweep() {
     if (sweeping) { sweepAgain = true; return sweeping; }
     sweeping = (async () => {
       do {
         sweepAgain = false;
         if (await completeAbsorbed()) publishPending();
-        await retryDeferredReleases();
       } while (sweepAgain);
     })().catch((error) => bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`)).finally(() => { sweeping = null; });
     return sweeping;
@@ -1589,7 +1577,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates; the planner's thread is archived once its final wave completes. */
+  /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
     if (!(await plannerEnabled())) {
       throw new Error("Planning is off. Turn on “Plan before delegating” in Chief's settings, or delegate this work directly.");
@@ -2141,104 +2129,18 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** An unplanned worker, or the one whose wave is the last of its planner's persisted schedule.
-   * A missing planner or malformed schedule is unknown, never unplanned. */
-  function isFinalUnit(row: ManagedRow) {
-    if (row.plan_thread_id === null && row.plan_wave === null) return true;
-    const planner = row.plan_thread_id ? roles.get(row.plan_thread_id) : undefined;
-    if (!planner || planner.role !== "planner" || planner.project_id !== row.project_id || !planner.plan_waves) return false;
-    let waves: unknown;
-    try { waves = JSON.parse(planner.plan_waves); } catch { return false; }
-    return Array.isArray(waves) && waves.length > 0 && row.plan_wave === waves.length;
-  }
-
-  /** Archives a finished worker's environment so BB frees its worktree, only when it is the current final unit,
-   * approved, idle, clean and pushed. Returns one sentence for the completion reply; never throws. */
-  async function releaseWorktree(row: ManagedRow, priorState: ManagedRow["state"], environmentId: string | null): Promise<string> {
-    const resolve = "Resolve it, then chief_complete again to release it.";
-    try {
-      if (priorState === "blocked" || priorState === "failed") return `Worktree kept: the worker was ${priorState}.`;
-      const review = latestReviewForWorker.get(row.thread_id) as ManagedRow | undefined;
-      if (!review || review.verdict !== "approve" || review.reviewed_report_seq !== row.report_seq) {
-        return `Worktree kept: no approving review covers its latest report.`;
-      }
-      if (!isFinalUnit(row)) return `Worktree kept: it is not the final wave of its plan, or its plan schedule is unknown.`;
-      if (!environmentId) return `Worktree kept: it has no environment.`;
-      // A replaces: successor reuses this environment; releasing it here would skip the successor's review.
-      for (const { thread_id } of newerWorkers.all(row.project_id, row.thread_id) as { thread_id: string }[]) {
-        const successorEnv = (await bb.sdk.threads.get({ threadId: thread_id })).environmentId;
-        if (!successorEnv) return `Worktree kept: could not check it (successor ${thread_id} has no known environment). ${resolve}`;
-        if (successorEnv === environmentId) {
-          return `Worktree kept: this worker was superseded by ${thread_id}; complete the current worker instead.`;
-        }
-      }
-      if ((await bb.sdk.environments.get({ environmentId })).workspaceProvisionType !== "managed-worktree") {
-        return `Worktree kept: its environment is not a managed worktree.`;
-      }
-      const busy = (await bb.sdk.threads.list({ environmentId, archived: false, includeHidden: true })).find((t) => BUSY_STATUSES.has(t.status));
-      if (busy) {
-        // No reloadRoles(): it would re-enter sweep() and retry while the thread is still busy.
-        db.prepare(`UPDATE managed_threads SET release_pending=1 WHERE thread_id=?`).run(row.thread_id);
-        return `Worktree release deferred until thread ${busy.id} in its environment goes idle (it is ${busy.status}); it is released automatically then.`;
-      }
-      const first = await bb.sdk.environments.status({ environmentId });
-      if (first.outcome !== "available") {
-        const message = "message" in first ? first.message : first.failure.message;
-        return `Worktree kept: could not check it (${clip(String(message), 200)}). ${resolve}`;
-      }
-      if (first.workspace.checkout.kind !== "branch") return `Worktree kept: its checkout is not on a branch.`;
-      const wt = first.workspace.workingTree;
-      if (wt.hasUncommittedChanges || wt.files.length > 0) return `Worktree kept: it has uncommitted changes. ${resolve}`;
-      const branch = first.workspace.checkout.branchName;
-      // ponytail: compares against origin only; read the real upstream if a project pushes elsewhere.
-      const pushed = await bb.sdk.environments.status({ environmentId, mergeBaseBranch: `origin/${branch}` });
-      const mergeBase = pushed.outcome === "available" ? pushed.workspace.mergeBase : null;
-      if (!mergeBase || mergeBase.baseRef === null) {
-        return `Worktree kept: branch ${branch} has no origin/${branch} to compare with — it may not be pushed. ${resolve}`;
-      }
-      if (mergeBase.aheadCount > 0) return `Worktree kept: branch ${branch} has ${mergeBase.aheadCount} commit(s) not pushed to origin. ${resolve}`;
-      const { archivedThreadIds } = await bb.sdk.environments.archiveThreads({ environmentId });
-      return `Archived ${archivedThreadIds.length} thread(s) in its environment; BB frees the worktree about 5 minutes later and keeps branch ${branch}.`;
-    } catch (error) {
-      return `Worktree kept: could not check it (${clip(String(error), 200)}). ${resolve}`;
-    }
-  }
-
-  /** Retries releases releaseWorktree deferred behind a busy thread. Reads the DB, not roles: the flag skips reloadRoles().
-   * ponytail: retries every pending worker on any sweep (~4 SDK calls each); the pending window is seconds. */
-  async function retryDeferredReleases() {
-    for (const row of db.prepare(`SELECT * FROM managed_threads WHERE role='worker' AND state='complete' AND release_pending=1`).all() as ManagedRow[]) {
-      db.prepare(`UPDATE managed_threads SET release_pending=0 WHERE thread_id=?`).run(row.thread_id);
-      let live;
-      try {
-        live = await bb.sdk.threads.get({ threadId: row.thread_id });
-      } catch {
-        db.prepare(`UPDATE managed_threads SET release_pending=1 WHERE thread_id=?`).run(row.thread_id);
-        continue;
-      }
-      if (live.archivedAt !== null || live.deletedAt !== null) continue;
-      const note = await releaseWorktree(row, row.state, live.environmentId);
-      if (note.startsWith("Worktree release deferred")) continue;
-      if (note.startsWith("Archived")) { bb.log.info(`Deferred release for ${row.thread_id}: ${note}`); continue; }
-      await alertChief(row, `release:${row.report_seq}`, `Deferred worktree release for worker “${row.title}” (${row.thread_id}): ${note}`)
-        .catch((error) => bb.log.warn(`Deferred-release alert failed: ${String(error)}`));
-    }
-  }
-
   async function markComplete(threadId: string, result?: string) {
     const row = roles.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker or reviewer ${threadId}.`);
     const live = await bb.sdk.threads.get({ threadId });
     if (BUSY_STATUSES.has(live.status)) throw new Error(`Cannot complete ${threadId} while it is ${live.status}.`);
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Cannot complete ${threadId} because it is not a live thread.`);
-    const priorState = row.state;
     db.prepare(`UPDATE managed_threads SET state='complete', status=?, result=COALESCE(?, result),
       blocker=NULL, recommendation=NULL, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
       live.status, result ? clip(result, MAX_RESULT_LENGTH) : null, Date.now(), threadId,
     );
     reloadRoles();
-    const note = row.role === "worker" ? await releaseWorktree(roles.get(threadId)!, priorState, live.environmentId) : null;
-    return { row: roles.get(threadId)!, note };
+    return { row: roles.get(threadId)! };
   }
 
   /** Interrupts a running managed thread but keeps its worktree, branch, and history:
@@ -3356,12 +3258,12 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error(`No managed thread ${threadId} for this Chief.`);
       }
       touchCallerChief(caller);
-      const { row, note } = await markComplete(threadId, result);
+      const { row } = await markComplete(threadId, result);
       const todos = row.role === "worker" ? todosForProject.all(caller.project_id) as TodoRow[] : [];
       const todoLine = todos.length
         ? `\n${clip(`Open todos: ${todos.map((todo) => `#${todo.id} ${clip(todo.text, 80)}`).join(", ")} — close any this work finished with chief_roster todo { id, state: "done" }.`, 1_000)}`
         : "";
-      return `Marked “${row.title}” complete.${note ? ` ${note}` : ""}${todoLine}`;
+      return `Marked “${row.title}” complete.${todoLine}`;
     },
   });
   bb.agents.registerTool({
@@ -3701,8 +3603,8 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "complete") {
           const threadId = args.positional[0];
           if (!threadId) return fail("complete requires <thread-id>");
-          const { row, note } = await markComplete(threadId, args.one("result"));
-          return ok(toManaged(row), `Marked “${row.title}” complete.${note ? ` ${note}` : ""}`);
+          const { row } = await markComplete(threadId, args.one("result"));
+          return ok(toManaged(row), `Marked “${row.title}” complete.`);
         }
         return fail(`Unknown command “${command}”.`);
       } catch (error) {
