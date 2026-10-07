@@ -4478,6 +4478,20 @@ describe("child Chief", () => {
     await expect(call(state, "chief_complete", { threadId: childId }, chief.threadId)).rejects.toThrow("Complete or hand off its open work first");
   });
 
+  test("a child Chief cannot continue, stop or complete itself", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    state.live.set(childId, { ...state.live.get(childId)!, status: "active" });
+    await expect(call(state, "chief_continue", { threadId: childId, instruction: "x" }, childId)).rejects.toThrow("for this Chief");
+    await expect(call(state, "chief_stop", { threadId: childId }, childId)).rejects.toThrow("for this Chief");
+    await expect(call(state, "chief_complete", { threadId: childId }, childId)).rejects.toThrow("for this Chief");
+    expect((await row(state, childId)).chiefThreadId).toBe(chief.threadId);
+    expect((await row(state, childId)).state).not.toBe("complete");
+    await call(state, "chief_report", { state: "ready", result: "Still reports up" }, childId);
+    expect(state.sent.at(-1).threadId).toBe(chief.threadId);
+  });
+
   test("a child cannot nest and gets the child tool set, even before its row exists", async () => {
     const state = await setup();
     const chief = await start(state);

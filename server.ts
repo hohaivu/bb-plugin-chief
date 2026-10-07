@@ -2601,6 +2601,11 @@ export default async function plugin(bb: BbPluginApi) {
     return false;
   }
 
+  /** Control (continue/stop/complete) target check: a Chief row is controlled only by its owning parent, never by itself. */
+  function controlsThread(row: ManagedRow, callerChiefId: string) {
+    return row.role === "chief" ? row.chief_thread_id === callerChiefId : belongsToChief(row, callerChiefId);
+  }
+
   /** The last 3 reviewer rows with a verdict for this worker's task, so the
    * advisor sees the review history that led to the consult, across a `replaces`
    * handoff. ponytail: chains by matching branch across the whole project, so a
@@ -3235,7 +3240,7 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       const target = await resolveTarget(threadId, caller.thread_id);
-      if (!target || !belongsToChief(target, caller.thread_id)) {
+      if (!target || !controlsThread(target, caller.thread_id)) {
         throw new Error(`No managed thread ${threadId} for this Chief.`);
       }
       touchCallerChief(caller);
@@ -3252,7 +3257,7 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error("chief_stop requires an active registered Chief thread.");
       const target = await resolveTarget(threadId, caller.thread_id);
-      if (!target || !belongsToChief(target, caller.thread_id)) {
+      if (!target || !controlsThread(target, caller.thread_id)) {
         throw new Error(`No managed thread ${threadId} for this Chief.`);
       }
       touchCallerChief(caller);
@@ -3297,7 +3302,7 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       const target = await resolveTarget(threadId, caller.thread_id);
-      if (!target || !belongsToChief(target, caller.thread_id)) {
+      if (!target || !controlsThread(target, caller.thread_id)) {
         throw new Error(`No managed thread ${threadId} for this Chief.`);
       }
       touchCallerChief(caller);
