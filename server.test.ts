@@ -9,7 +9,7 @@ import {
   experimental_scanPublicSdkOnly,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import plugin, { MIGRATIONS } from "./server";
+import plugin, { MIGRATIONS, RESEARCH_SCRIPTS } from "./server";
 import type { TodoItem } from "./server";
 
 // Stands in for git/gh/glab so pull-request resolution tests never shell out for real.
@@ -4485,5 +4485,98 @@ describe("chief_research", () => {
     await state.harness.behavior.runCli(["review", "--branch", "feature/y"], { threadId: chief, projectId: "proj_1" });
     expect(prompt("planner")).not.toContain("chief_research");
     expect(prompt("reviewer")).not.toContain("chief_research");
+  });
+
+  /** Runs a research script the way the workflow runtime does: parallel() turns a thrown agent into null. */
+  async function runScript(mode: keyof typeof RESEARCH_SCRIPTS, args: Record<string, unknown>, agent: (prompt: string, opts: any) => unknown) {
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const logs: string[] = [];
+    const parallel = (thunks: (() => Promise<unknown>)[]) => Promise.all(thunks.map((thunk) => thunk().catch(() => null)));
+    const fn = new AsyncFunction("args", "agent", "parallel", "log", "budget", RESEARCH_SCRIPTS[mode].replace(/^export /, ""));
+    const result = await fn({ preamble: "P", cap: 24, verify: true, ...args }, async (prompt: string, opts: any) => agent(prompt, opts), parallel, (line: string) => logs.push(line), () => ({ maxAgentCalls: 100 }));
+    return { result, logs };
+  }
+  const row = (item: string) => ({ item, finding: "f", evidence: "e" });
+  const finding = (line: number) => ({ file: "a.ts", line, summary: "s", severity: "high" });
+
+  test("survey keeps scan rows unverified when verify throws, and lists missed batches", async () => {
+    const { result, logs } = await runScript("survey", { question: "Q", items: ["a", "b", "c"], batchSize: 1 }, (prompt, opts) => {
+      if (opts.phase === "Verify") throw new Error("Workflow worker failed");
+      if (prompt.includes("- c")) throw new Error("Workflow worker failed");
+      return { rows: [row(prompt.includes("- a") ? "a" : "b")] };
+    });
+    expect(result.rows).toHaveLength(2);
+    expect(result.verified).toBe(false);
+    expect(result.missed).toEqual(["c"]);
+    expect(result.table.split("\n")[0]).toContain("UNVERIFIED");
+    expect(result.table.split("\n")[0]).toContain("No result for: c");
+    expect(result.failures).toEqual(["Scan: 1 of 3 batches failed", "Verify: Workflow worker failed"]);
+    expect(logs.some((line) => line.includes("Verify failed"))).toBe(true);
+  });
+
+  test("survey counts rows verify dropped", async () => {
+    const { result } = await runScript("survey", { question: "Q", items: ["a", "b", "c"], batchSize: 3 }, (_prompt, opts) =>
+      opts.phase === "Verify" ? { rows: [row("a")] } : { rows: [row("a"), row("b"), row("c")] });
+    expect(result).toMatchObject({ verified: true, dropped: 2, failures: [] });
+    expect(result.table).toContain("kept 1, dropped 2");
+  });
+
+  test("review reports a failed concern and a verify that dropped everything, or keeps findings when verify throws", async () => {
+    const scan = (prompt: string) => {
+      if (prompt.includes("Concern: security")) throw new Error("boom");
+      return { findings: [finding(1), finding(2)] };
+    };
+    const args = { question: "Q", concerns: ["correctness", "security"] };
+    let { result } = await runScript("review", args, (prompt, opts) => opts.phase === "Verify" ? { findings: [] } : scan(prompt));
+    expect(result.missed).toEqual(["security"]);
+    expect(result.markdown).toContain("Scanned 1/2 concerns, 2 findings; verify kept 0, dropped 2.");
+    expect(result.markdown).toContain("Failed concerns: security");
+    expect(result.markdown).toContain("No confirmed findings.");
+    ({ result } = await runScript("review", args, (prompt, opts) => { if (opts.phase === "Verify") throw new Error("429"); return scan(prompt); }));
+    expect(result).toMatchObject({ verified: false, findings: [finding(1), finding(2)] });
+    expect(result.markdown).toContain("UNVERIFIED");
+  });
+
+  test("investigate builds the brief itself when combine throws", async () => {
+    const { result } = await runScript("investigate", { question: "Why?", questions: ["a?", "b?"] }, (prompt, opts) => {
+      if (opts.phase === "Combine") throw new Error("quota");
+      return prompt.includes("Question: a?") ? { answer: "yes", evidence: "x.ts:1", confirmed: true } : { answer: "maybe", evidence: "", confirmed: false };
+    });
+    expect(result.brief).toContain("Combine failed (quota)");
+    expect(result.brief).toContain("## Confirmed\n- **a?** yes (x.ts:1)");
+    expect(result.brief).toContain("## Unconfirmed\n- **b?** maybe");
+    expect(result.failures).toEqual(["Combine: quota"]);
+  });
+
+  test("names failed agent calls and the first worker's output, only when something failed", async () => {
+    const state = await setup();
+    const chief = await roleThread(state, "chief");
+    const history = () => [
+      { type: "run", logVersion: 1 },
+      { type: "call", status: "failed", phase: "Verify", childThreadId: "thr_w" },
+      { type: "call", status: "succeeded", phase: "Scan", childThreadId: "thr_s" },
+    ];
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => ({ status: "failed", error: "Workflow worker failed" }), history });
+    let reply = await call(state, chief, survey());
+    expect(reply).toContain("Failed agent calls: Verify ×1. First failure (Verify, thread thr_w): last output from thr_w");
+    expect(calls("history")[0]![1]).toEqual(["workflows", "history", "wfr_1", "--cursor", "0", "--limit", "100", "--json"]);
+
+    workflowsCli({ run: () => ({ runId: "wfr_2" }), status: () => ({ status: "succeeded", result: { rows: [], table: "t", failures: ["Verify: x"] } }), history });
+    reply = await call(state, chief, survey());
+    expect(reply).toContain("status: succeeded\nFailed agent calls: Verify ×1");
+
+    execFileMock.mockClear();
+    workflowsCli({ run: () => ({ runId: "wfr_3" }), status: () => ({ status: "succeeded", result: { rows: [], table: "t", failures: [] } }), history });
+    await call(state, chief, survey());
+    expect(calls("history")).toHaveLength(0);
+  });
+
+  test("configure gives Chief the research scoping cue only while on", async () => {
+    const state = await setup();
+    const threadId = await roleThread(state, "chief");
+    const configured = () => state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
+    expect((await configured()).instructions).toContain("Before chief_plan on a large or unclear issue");
+    await state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
+    expect((await configured()).instructions).not.toContain("Before chief_plan on a large or unclear issue");
   });
 });
