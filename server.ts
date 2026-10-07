@@ -3248,7 +3248,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_complete",
     presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
-    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. For the current final-wave or unplanned worker with an approving review whose worktree is clean and pushed, it then archives every thread in that worktree so BB frees it; if only a busy thread there blocks it, the release is deferred and runs automatically once that thread goes idle; otherwise it says why it kept it.",
+    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. It never archives threads or removes worktrees; that cleanup is left to the user.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional() }),
     async execute({ threadId, result }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
