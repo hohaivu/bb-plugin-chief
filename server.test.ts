@@ -4685,4 +4685,54 @@ describe("child Chief", () => {
     expect(state.sent.at(-1).threadId).toBe(chief.threadId);
     await expect(call(state, "chief_continue", { threadId: worker.threadId, instruction: "x" }, childId)).rejects.toThrow();
   });
+
+  test("an unregistered seeded child Chief is neither adoptable nor an operator", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    state.addLive("thr_seeded_child", "proj_1", "Chief · Seeded", "chief");
+    state.seedPluginMetadata("thr_seeded_child", { role: "chief", chiefThreadId: chief.threadId });
+    state.addLive("thr_ordinary", "proj_1");
+    const live = () => JSON.stringify([...state.live.entries()]);
+    for (const [argv, caller] of [
+      [["adopt", "--thread", "thr_seeded_child"], undefined],
+      [["adopt", "--thread", "thr_seeded_child"], chief.threadId],
+      [["start", "--project", "proj_1"], "thr_seeded_child"],
+      [["create", "--project", "proj_1"], "thr_seeded_child"],
+      [["adopt", "--thread", "thr_ordinary"], "thr_seeded_child"],
+    ] as [string[], string | undefined][]) {
+      const before = [snapshot(state), live()];
+      expect((await cli(state, argv, caller)).exitCode).toBe(1);
+      expect([snapshot(state), live()]).toEqual(before);
+    }
+    expect((await row(state, chief.threadId)).state).not.toBe("complete");
+  });
+
+  test("a managed Chief's CLI status and inspect see only its own roster", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const parentWorker = await delegate(state, chief.threadId);
+    const childId = await spawnChild(state, chief.threadId);
+    const siblingId = await spawnChild(state, chief.threadId, "Other");
+    await call(state, "chief_delegate", work("Grandchild work"), childId);
+    const grandchild = (await status(state)).threads.find((thread) => thread.chiefThreadId === childId)!;
+    await call(state, "chief_roster", { todo: { text: "child todo" } }, childId);
+    await call(state, "chief_roster", { todo: { text: "parent todo" } }, chief.threadId);
+    const operator = await cli(state, ["status", "--project", "proj_1", "--json"]);
+    expect(JSON.parse(operator.stdout!).threads.map((thread: { threadId: string }) => thread.threadId))
+      .toEqual(expect.arrayContaining([chief.threadId, parentWorker.threadId, childId, siblingId, grandchild.threadId]));
+    expect((await cli(state, ["status", "--project", "proj_1"])).stdout).toContain("parent todo");
+    const childStatus = await cli(state, ["status", "--json"], childId);
+    expect(JSON.parse(childStatus.stdout!).threads.map((thread: { threadId: string }) => thread.threadId).sort())
+      .toEqual([childId, grandchild.threadId].sort());
+    const childText = (await cli(state, ["status"], childId)).stdout!;
+    expect(childText).toContain("child todo");
+    expect(childText).not.toContain("parent todo");
+    for (const target of [chief.threadId, siblingId, parentWorker.threadId]) {
+      expect((await cli(state, ["inspect", target], childId)).exitCode).toBe(1);
+    }
+    expect((await cli(state, ["inspect", childId], childId)).exitCode).toBe(0);
+    expect((await cli(state, ["inspect", grandchild.threadId], childId)).exitCode).toBe(0);
+    expect((await cli(state, ["inspect", siblingId])).exitCode).toBe(0);
+  });
 });

@@ -2267,6 +2267,15 @@ export default async function plugin(bb: BbPluginApi) {
     return bodies.map((wave) => ({ path: join(root, wave.name) }));
   }
 
+  /** The parent of a thread this plugin spawned as a child Chief, read from its seed — covers the gap
+   * before insertThread runs. Read-only: never registers the thread. */
+  async function seededChildChiefParent(threadId: string) {
+    const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
+    if (live?.originPluginId !== bb.pluginId) return null;
+    const seeded = spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null));
+    return seeded.success && seeded.data.role === "chief" ? seeded.data.chiefThreadId ?? null : null;
+  }
+
   /** The caller's managed row, recovered from spawn-seeded metadata while insertThread has not run yet. */
   async function managedRow(threadId: string, callerProjectId: string) {
     let row = roles.get(threadId);
@@ -3539,18 +3548,23 @@ export default async function plugin(bb: BbPluginApi) {
         if (caller && !isActiveChief(caller) && command !== "status" && command !== "inspect") {
           return fail(`bb chief ${command} is for the active Chief only${callerRole === "chief" ? "" : `; a managed ${callerRole} reports with chief_report`}.`);
         }
+        // An unregistered thread seeded as a child Chief is a child caller, not an operator.
+        const childCaller = caller ? caller.chief_thread_id : context.threadId ? await seededChildChiefParent(context.threadId) : null;
+        // A managed Chief reads only its own roster; an operator shell keeps the project-wide view.
+        const readScope = isActiveChief(caller) ? caller.thread_id : childCaller ? context.threadId! : undefined;
+        const readProject = caller?.project_id ?? context.projectId;
         // A child Chief never creates, starts or adopts top-level Chiefs.
-        if (caller?.chief_thread_id && ["start", "create", "adopt"].includes(command)) {
+        if (childCaller && ["start", "create", "adopt"].includes(command)) {
           return fail(`bb chief ${command} is for a top-level Chief or an operator; a child Chief works only on its own brief.`);
         }
         // A managed Chief acts only on its directly owned work; an operator shell stays unscoped.
         const scoped = async (id: string) => { if (caller) await controlledTarget(id, caller); };
         if (command === "status") {
-          const projectId = args.one("project") ?? context.projectId ?? (await settings.get()).chiefProject;
+          const projectId = readScope ? readProject : args.one("project") ?? context.projectId ?? (await settings.get()).chiefProject;
           if (!projectId) return fail("status requires --project outside a project thread");
-          const managedRows = rosterFor(projectId, true);
+          const managedRows = readScope ? rosterForChief(readScope, true) : rosterFor(projectId, true);
           const text = [
-            ...pendingLines(managedRows, todoLines(projectId, null)),
+            ...pendingLines(managedRows, todoLines(projectId, readScope && childCaller ? readScope : null)),
             ...managedRows.map((row) => rosterRowLines(row).join("\n  ")),
           ].join("\n");
           return ok({ sectionId: storedSectionId(), threads: managedRows.map(toManaged) }, text);
@@ -3571,7 +3585,7 @@ export default async function plugin(bb: BbPluginApi) {
           // Adoption rewrites the row in place, so re-adopting a worker would
           // discard the branch and forge links its open PR depends on.
           const registered = roles.get(threadId);
-          if (registered?.role === "chief" && registered.chief_thread_id) {
+          if ((registered?.role === "chief" && registered.chief_thread_id) || (!registered && await seededChildChiefParent(threadId))) {
             return fail(`Thread ${threadId} is a child Chief and cannot be adopted as a top-level Chief.`);
           }
           if (registered && registered.role !== "chief") {
@@ -3623,6 +3637,9 @@ export default async function plugin(bb: BbPluginApi) {
           if (!threadId) return fail("inspect requires <thread-id>");
           const row = roles.get(threadId);
           if (!row) return fail(`No managed thread ${threadId}.`);
+          if (readScope && (row.project_id !== readProject || !belongsToChief(row, readScope))) {
+            return fail(`No managed thread ${threadId} for this Chief.`);
+          }
           return ok({ threadId }, await inspect(threadId, row.project_id));
         }
         if (command === "continue") {
