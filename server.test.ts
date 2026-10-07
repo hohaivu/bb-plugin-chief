@@ -374,31 +374,22 @@ describe("Chief backend", () => {
       .toEqual(Array(3).fill(cascadeArchive ? chief.threadId : undefined));
   });
 
-  test("allows Chief to inspect, roster, and continue child threads even if chief_thread_id was transferred", async () => {
+  test("after a transfer only the current owner sees and controls the work", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId, "Original child worker");
+    const ctx = { threadId: chief.threadId, projectId: "proj_1" };
 
-    // Simulate replacement Chief stealing worker's chief_thread_id
+    // Simulate a replacement Chief taking over the worker's chief_thread_id
     state.db.prepare(`UPDATE managed_threads SET chief_thread_id='thr_replacement' WHERE thread_id=?`).run(worker.threadId);
 
-    // Original Chief can still see it in roster because it's a child thread
-    const roster = await state.harness.behavior.callAgentTool("chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" });
-    expect(JSON.stringify(roster)).toContain(worker.threadId);
-
-    // Original Chief can inspect it
-    const inspected = await state.harness.behavior.callAgentTool("chief_inspect", { threadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" });
-    expect(String(inspected)).toContain(worker.threadId);
-
-    // Original Chief can continue it, which also re-associates chief_thread_id
-    const continued = await state.harness.behavior.callAgentTool(
-      "chief_continue",
-      { threadId: worker.threadId, instruction: "Keep working" },
-      { threadId: chief.threadId, projectId: "proj_1" },
-    );
-    expect(String(continued)).toContain(`Continued ${worker.threadId}`);
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(worker.threadId)!, lastAssistantText: "x" });
+    const roster = await state.harness.behavior.callAgentTool("chief_roster", {}, ctx);
+    expect(JSON.stringify(roster)).not.toContain(worker.threadId);
+    await expect(state.harness.behavior.callAgentTool("chief_inspect", { threadId: worker.threadId }, ctx)).rejects.toThrow("for this Chief");
+    await expect(state.harness.behavior.callAgentTool("chief_continue", { threadId: worker.threadId, instruction: "Keep working" }, ctx)).rejects.toThrow("for this Chief");
     expect(state.db.prepare(`SELECT chief_thread_id FROM managed_threads WHERE thread_id=?`).get(worker.threadId))
-      .toEqual({ chief_thread_id: chief.threadId });
+      .toEqual({ chief_thread_id: "thr_replacement" });
   });
 
   test("auto-resolves and inspects an untracked child thread this plugin spawned outside chief_delegate", async () => {
@@ -4539,5 +4530,159 @@ describe("child Chief", () => {
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(childId)!, lastAssistantText: "done" });
     expect((await row(state, childId)).state).toBe("ready");
     expect(await call(state, "chief_roster", {}, chief.threadId)).toContain("Child Chief finished its brief");
+  });
+
+  // Everything a denied call must leave untouched: owners, states, alerts and spawned threads.
+  const snapshot = (state: State) => JSON.stringify({
+    threads: state.db.prepare(`SELECT * FROM managed_threads ORDER BY thread_id`).all(),
+    alerts: state.db.prepare(`SELECT * FROM alert_outbox ORDER BY rowid`).all(),
+    spawned: state.spawned.length,
+    sent: state.sent.length,
+  });
+  const cli = (state: State, argv: string[], threadId?: string) =>
+    state.harness.behavior.runCli(argv, threadId ? { threadId, ...P } : undefined);
+
+  test("BB parentage grants no ownership", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const childId = await spawnChild(state, chief.threadId);
+    // BB reparents the parent's worker under the child; reconcile copies it as provenance only.
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, parentThreadId: childId });
+    await state.supervisorCycle();
+    expect(await call(state, "chief_roster", {}, childId)).not.toContain(worker.threadId);
+    await expect(call(state, "chief_inspect", { threadId: worker.threadId }, childId)).rejects.toThrow("for this Chief");
+    await expect(call(state, "chief_continue", { threadId: worker.threadId, instruction: "x" }, childId)).rejects.toThrow("for this Chief");
+    expect((await row(state, worker.threadId)).chiefThreadId).toBe(chief.threadId);
+    await expect(call(state, "chief_inspect", { threadId: worker.threadId }, chief.threadId)).resolves.toContain(worker.threadId);
+    // Self roster/inspect still work for the child.
+    await expect(call(state, "chief_roster", {}, childId)).resolves.toBeTruthy();
+    await expect(call(state, "chief_inspect", { threadId: childId }, childId)).resolves.toContain("Role: chief");
+
+    // Missing-row recovery with a mismatched seeded owner must not manufacture ownership.
+    const stray = "thr_stray";
+    state.live.set(stray, makeThreadResponse({
+      id: stray, projectId: "proj_1", environmentId: "env_stray", title: "Stray", sectionId: "sec_chief",
+      visibility: "visible", status: "idle", originPluginId: "chief", parentThreadId: childId,
+    }));
+    state.seedPluginMetadata(stray, { role: "worker", chiefThreadId: chief.threadId });
+    const before = snapshot(state);
+    await expect(call(state, "chief_inspect", { threadId: stray }, childId)).rejects.toThrow("for this Chief");
+    expect(snapshot(state)).toBe(before);
+  });
+
+  test("direct-owner control is the same for tools and the CLI", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const parentWorker = await delegate(state, chief.threadId, "Parent work");
+    const childId = await spawnChild(state, chief.threadId);
+    const siblingId = await spawnChild(state, chief.threadId, "Other");
+    await call(state, "chief_delegate", work("Sibling work"), siblingId);
+    const siblingWork = (await status(state)).threads.find((thread) => thread.title === "Sibling work")!;
+    const otherId = JSON.parse((await cli(state, ["create", "--project", "proj_1", "--json"])).stdout!).threadId as string;
+    await call(state, "chief_delegate", work("Unrelated work"), otherId);
+    const unrelated = (await status(state)).threads.find((thread) => thread.title === "Unrelated work")!;
+    const targets = [parentWorker.threadId, siblingWork.threadId, unrelated.threadId];
+    const setLive = (status: string) => {
+      for (const id of targets) state.live.set(id, { ...state.live.get(id)!, status });
+    };
+    const ops: { tool: string; params: (id: string) => object; argv: (id: string) => string[]; live: string }[] = [
+      { tool: "chief_continue", params: (id) => ({ threadId: id, instruction: "x" }), argv: (id) => ["continue", id, "--instruction", "x"], live: "active" },
+      { tool: "chief_stop", params: (id) => ({ threadId: id }), argv: (id) => ["stop", id], live: "active" },
+      { tool: "chief_complete", params: (id) => ({ threadId: id }), argv: (id) => ["complete", id], live: "idle" },
+      { tool: "chief_review", params: (id) => ({ workerThreadId: id }), argv: (id) => ["review", id], live: "idle" },
+    ];
+    for (const op of ops) {
+      setLive(op.live);
+      for (const id of targets) {
+        const before = snapshot(state);
+        await expect(call(state, op.tool, op.params(id), childId)).rejects.toThrow("for this Chief");
+        expect((await cli(state, op.argv(id), childId)).exitCode).toBe(1);
+        expect(snapshot(state)).toBe(before);
+      }
+    }
+    // The real owner still succeeds, and the CLI still refuses Chief targets.
+    setLive("idle");
+    await call(state, "chief_continue", { threadId: parentWorker.threadId, instruction: "x" }, chief.threadId);
+    expect((await cli(state, ["continue", childId, "--instruction", "x"], chief.threadId)).exitCode).toBe(1);
+  });
+
+  test("a managed thread cannot replace reporting with self-control or change its owner", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    for (const [tool, live] of [["chief_continue", "active"], ["chief_stop", "active"], ["chief_complete", "idle"]] as const) {
+      state.live.set(childId, { ...state.live.get(childId)!, status: live });
+      const before = snapshot(state);
+      await expect(call(state, tool, { threadId: childId, instruction: "x" }, childId)).rejects.toThrow("for this Chief");
+      const argv = tool === "chief_continue" ? ["continue", childId, "--instruction", "x"] : [tool.replace("chief_", ""), childId];
+      expect((await cli(state, argv, childId)).exitCode).toBe(1);
+      expect(snapshot(state)).toBe(before);
+    }
+    await call(state, "chief_report", { state: "ready", result: "Done" }, childId);
+    expect(state.sent.at(-1).threadId).toBe(chief.threadId);
+    expect((await row(state, childId)).chiefThreadId).toBe(chief.threadId);
+    expect((await row(state, childId)).state).toBe("ready");
+  });
+
+  test("children cannot become or create top-level Chiefs", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    state.addLive("thr_ordinary", "proj_1");
+    for (const [argv, caller] of [
+      [["start", "--project", "proj_1"], childId],
+      [["create", "--project", "proj_1"], childId],
+      [["adopt", "--thread", "thr_ordinary"], childId],
+      [["adopt", "--thread", childId], childId],
+      [["adopt", "--thread", childId], chief.threadId],
+      [["adopt", "--thread", childId], undefined],
+    ] as [string[], string | undefined][]) {
+      const before = snapshot(state);
+      expect((await cli(state, argv, caller)).exitCode).toBe(1);
+      expect(snapshot(state)).toBe(before);
+    }
+    expect((await row(state, childId)).chiefThreadId).toBe(chief.threadId);
+    expect((await row(state, chief.threadId)).state).not.toBe("complete");
+    // An operator can still adopt an ordinary thread.
+    expect((await cli(state, ["adopt", "--thread", "thr_ordinary"])).exitCode).toBe(0);
+  });
+
+  test("the same branch gets a separate reviewer per owner", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    const review = async (id: string, branch: string) => {
+      const text = String(await call(state, "chief_review", { branch }, id));
+      return text.match(/thread (thr_\S+?)\./)![1];
+    };
+    const a = await review(chief.threadId, "feature/x");
+    const b = await review(childId, "feature/x");
+    expect(b).not.toBe(a);
+    expect(await review(chief.threadId, "feature/x")).toBe(a);
+    expect(await review(childId, "feature/x")).toBe(b);
+    const [c, d] = await Promise.all([review(chief.threadId, "feature/y"), review(childId, "feature/y")]);
+    expect(d).not.toBe(c);
+    expect((await row(state, c)).chiefThreadId).toBe(chief.threadId);
+    expect((await row(state, d)).chiefThreadId).toBe(childId);
+  });
+
+  test("handover is authoritative against stale parent links", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    await call(state, "chief_delegate", work(), childId);
+    const worker = (await status(state)).threads.find((thread) => thread.role === "worker")!;
+    state.live.set(childId, { ...state.live.get(childId)!, archivedAt: Date.now() });
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(childId)! });
+    await state.supervisorCycle();
+    expect((await row(state, worker.threadId)).chiefThreadId).toBe(chief.threadId);
+    // BB still lists the archived child as the worker's parent; reconcile must not undo the transfer.
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, parentThreadId: childId });
+    await state.supervisorCycle();
+    expect((await row(state, worker.threadId)).chiefThreadId).toBe(chief.threadId);
+    await call(state, "chief_report", { state: "ready", result: "Done" }, worker.threadId);
+    expect(state.sent.at(-1).threadId).toBe(chief.threadId);
+    await expect(call(state, "chief_continue", { threadId: worker.threadId, instruction: "x" }, childId)).rejects.toThrow();
   });
 });
