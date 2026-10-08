@@ -700,6 +700,10 @@ const RESEARCH_CHIEF_INSTRUCTIONS =
 const ROSTER_CHIEF_INSTRUCTIONS =
   "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list. Track every todo — including work the user queued that nobody has delegated yet — with chief_roster's `todo` field; never use Memory files, TodoWrite, or Task tools for Chief work. When work a todo tracks is finished, close that todo in the same turn with chief_roster todo { id, state: \"done\" }.";
 
+/** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
+const WAIT_CHIEF_INSTRUCTIONS =
+  "Lifecycle alerts wake you when a managed thread reports, goes idle, fails, stalls, or is archived or deleted. After you act, end your turn and wait for the next alert: never poll managed threads with `bb thread wait`, `bb thread show`, or sleep loops. When you need a thread's state now, call chief_inspect once.";
+
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
   const flags = new Map<string, string[]>();
@@ -3479,6 +3483,7 @@ export default async function plugin(bb: BbPluginApi) {
           ...(childOf ? [`You are a child Chief of ${childOf}. You own only the brief you were spawned with; do not take unrelated work. Report with chief_report when it is done or blocked.`] : []),
           "",
           ROSTER_CHIEF_INSTRUCTIONS,
+          WAIT_CHIEF_INSTRUCTIONS,
           ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
           ...(research ? ["", research, RESEARCH_CHIEF_INSTRUCTIONS] : []),
           "",
