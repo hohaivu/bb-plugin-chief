@@ -1623,6 +1623,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       "- Split the work into at most 8 sequential waves, each a self-contained plan one worker finishes on the same branch; one wave by default, more only when one worker cannot finish it. Submit `plan` as an array of `{body}`. Waves contain no phases.",
       "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
+      "- Give every wave a `## Contracts to verify` Markdown heading: a checklist of the invariants, edge cases and existing behaviour that wave must keep — what a reviewer would otherwise catch only after the fact. The worker and the reviewer both receive this exact list.",
       ...(researchLine("planner", await researchSettings()) ? ["- When the root cause is unclear, use chief_research investigate (one sub-question per hypothesis); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings before relying on them."] : []),
       "- Name a genuine product or scope decision as an open question for Chief instead of deciding it yourself.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
@@ -1765,6 +1766,7 @@ export default async function plugin(bb: BbPluginApi) {
     const unplannedReason = params.unplannedReason ?? (planThreadId === undefined ? prior?.unplanned_reason ?? undefined : undefined);
     let planPath: string | undefined;
     let waveTotal: number | undefined;
+    let contracts: string | undefined;
     if (planThreadId !== undefined) {
       const planner = roles.get(planThreadId);
       if (!planner || planner.role !== "planner" || !controlsThread(planner, chief.thread_id)) {
@@ -1777,6 +1779,7 @@ export default async function plugin(bb: BbPluginApi) {
       const scheduled = waves[wave - 1]!;
       planPath = scheduled.path;
       waveTotal = waves.length;
+      contracts = scheduled.contracts;
     }
     // One task branch carries one active worker: a second worktree cannot check out a
     // branch another one already holds, and the spawn would fail with a raw git error.
@@ -1819,6 +1822,10 @@ export default async function plugin(bb: BbPluginApi) {
         "", "## Wave",
         `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
         wave < waveTotal ? "No review runs after this wave." : "Your ready report leads to the one review of the whole run.",
+      ] : []),
+      ...(contracts ? [
+        "", "## Contracts to verify", clip(contracts, 3_000),
+        "Keep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.",
       ] : []),
       ...(branch || issueUrl || prUrl ? [
         "", "## Git workflow",
@@ -1913,10 +1920,10 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** A worker's linked planner's persisted wave schedule, or [] when unlinked. */
-  function planWavesFor(planThreadId: string | null): { path: string }[] {
+  function planWavesFor(planThreadId: string | null): { path: string; contracts?: string }[] {
     if (!planThreadId) return [];
     const planner = roles.get(planThreadId);
-    return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as { path: string }[]) : [];
+    return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as { path: string; contracts?: string }[]) : [];
   }
 
   /** A ready worker's exact next call: the next wave (no review runs between waves), or
@@ -2046,6 +2053,9 @@ export default async function plugin(bb: BbPluginApi) {
       await readRules(worker.project_id);
       const title = `Review · ${worker.title}`;
       const waves = planWavesFor(worker.plan_thread_id);
+      const contractLines = waves.length === 1
+        ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
+        : waves.flatMap((wave, index) => wave.contracts ? [`Wave ${index + 1} of ${waves.length}:`, clip(wave.contracts, 3_000)] : []);
       const prompt = reviewerPrompt({
         research: !!researchLine("reviewer", await researchSettings()),
         subject: `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
@@ -2055,6 +2065,10 @@ export default async function plugin(bb: BbPluginApi) {
           ...(worker.brief ? [
             "", "## The brief this work was given", clipMiddle(worker.brief, 4_000),
             "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
+          ] : []),
+          ...(contractLines.length ? [
+            "", "## Contracts to verify", ...contractLines,
+            "Check every item against the worktree. An unmet item means request_changes naming it; say which items you confirmed.",
           ] : []),
           ...(worker.result ? [
             "", "## What the worker reported", clip(worker.result, 300),
@@ -2292,6 +2306,16 @@ export default async function plugin(bb: BbPluginApi) {
     return bodies.map((wave) => ({ path: join(root, wave.name) }));
   }
 
+  /** A wave body's `Contracts to verify` section, up to the next heading of the same or higher level. */
+  function contractsOf(body: string): string | undefined {
+    // ponytail: headings inside code blocks are deliberately out of scope, as for the NOT-doing check.
+    const heading = /^[ \t]*(#{1,6})[ \t]+contracts to verify\b.*$/im.exec(body);
+    if (!heading) return undefined;
+    const rest = body.slice(heading.index + heading[0].length);
+    const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(rest);
+    return (end ? rest.slice(0, end.index) : rest).trim() || undefined;
+  }
+
   /** The parent of a thread this plugin spawned as a child Chief, read from its seed — covers the gap
    * before insertThread runs. Read-only: never registers the thread. */
   async function seededChildChiefParent(threadId: string) {
@@ -2370,9 +2394,17 @@ export default async function plugin(bb: BbPluginApi) {
           : "";
         throw new Error(`A planner's ready report requires a "## What we're NOT doing" Markdown heading (any level, not bold text) in some wave.${hint}`);
       }
+      bodies.forEach((body, index) => {
+        if (!contractsOf(body)) {
+          throw new Error(`Wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text).`);
+        }
+      });
     }
     const plannerReady = row.role === "planner" && params.state === "ready";
     const planWaves = plannerReady && plan ? await writePlan(threadId, plan) : null;
+    const scheduledWaves = planWaves && plan
+      ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof plan === "string" ? plan : plan[index]!.body)! }))
+      : null;
     // Best-effort mirror into Chief's storage: inline-vis resolves paths against the rendering thread.
     let inlinePlans: string[] = [];
     if (planWaves && plan && row.chief_thread_id) {
@@ -2396,7 +2428,7 @@ export default async function plugin(bb: BbPluginApi) {
       params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
       params.recommendation ?? null, verdict,
       verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
-      planWaves ? JSON.stringify(planWaves) : null, regressionFlag ? 1 : 0,
+      scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0,
       now, threadId,
     );
     reloadRoles();

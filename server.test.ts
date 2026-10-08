@@ -27,7 +27,8 @@ afterEach(async () => {
 });
 
 // Every plan test needs a NOT-doing heading, so a single fixture keeps the wording pinned in one place.
-const PLAN_FIXTURE = "# Plan\n\n## What we're NOT doing\n- x";
+const PLAN_FIXTURE = "# Plan\n\n## Contracts to verify\n- Totals stay non-negative\n\n## What we're NOT doing\n- x";
+const wave = (n: number, text = "Do the work.") => `# Wave ${n}\n${text}\n\n## Contracts to verify\n- Wave ${n} keeps its invariant`;
 
 function configurationContext(threadId: string, projectId = "proj_1"): PluginAgentConfigurationContext {
   return {
@@ -320,7 +321,7 @@ async function planTwoWaves(state: Awaited<ReturnType<typeof setup>>, chiefThrea
     result: "Two waves: schema, then delegation.",
     plan: [
       { body: PLAN_FIXTURE },
-      { body: "# Wave 2\nWire up delegation." },
+      { body: wave(2, "Wire up delegation.") },
     ],
   }, { threadId: planner.threadId, projectId: state.live.get(chiefThreadId)!.projectId });
   return {
@@ -2246,7 +2247,7 @@ describe("Chief backend", () => {
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
-    const planBody = "# Plan\n\n## What we're NOT doing\n- x";
+    const planBody = PLAN_FIXTURE;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Change totals.ts, then cover it with a test", plan: planBody,
     }, { threadId: planner.threadId, projectId: "proj_1" });
@@ -2316,8 +2317,8 @@ describe("Chief backend", () => {
       result: "Three waves: schema, migration, then delegation.",
       plan: [
         { body: PLAN_FIXTURE },
-        { body: "# Wave 2\nMigrate the data." },
-        { body: "# Wave 3\nWire up delegation." },
+        { body: wave(2, "Migrate the data.") },
+        { body: wave(3, "Wire up delegation.") },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" });
 
@@ -2325,8 +2326,8 @@ describe("Chief backend", () => {
     const path2 = join(state.storageRoot, planner.threadId, "plan-2.md");
     const path3 = join(state.storageRoot, planner.threadId, "plan-3.md");
     expect(await readFile(path1, "utf8")).toBe(`${PLAN_FIXTURE}\n`);
-    expect(await readFile(path2, "utf8")).toBe("# Wave 2\nMigrate the data.\n");
-    expect(await readFile(path3, "utf8")).toBe("# Wave 3\nWire up delegation.\n");
+    expect(await readFile(path2, "utf8")).toBe(`${wave(2, "Migrate the data.")}\n`);
+    expect(await readFile(path3, "utf8")).toBe(`${wave(3, "Wire up delegation.")}\n`);
 
     const reported = state.sent.at(-1).input[0].text;
     expect(reported).toContain("Plan: 3 wave(s)");
@@ -2334,7 +2335,7 @@ describe("Chief backend", () => {
     expect(reported).toContain(`Wave 2 of 3: ${path2}`);
     expect(reported).toContain(`Wave 3 of 3: ${path3}`);
     // Mirrored into Chief's storage so Chief can echo inline-vis previews.
-    expect(await readFile(join(state.storageRoot, chief.threadId, "plans", planner.threadId, "plan-2.md"), "utf8")).toBe("# Wave 2\nMigrate the data.\n");
+    expect(await readFile(join(state.storageRoot, chief.threadId, "plans", planner.threadId, "plan-2.md"), "utf8")).toBe(`${wave(2, "Migrate the data.")}\n`);
     expect(reported).toContain(`::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-1.md"}`);
     expect(reported).toContain(`Delegate wave 1 now: chief_delegate (planThreadId: ${planner.threadId}, wave: 1)`);
     expect(reported).not.toContain("Read that file in full");
@@ -2342,9 +2343,9 @@ describe("Chief backend", () => {
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
-      { path: path1 },
-      { path: path2 },
-      { path: path3 },
+      { path: path1, contracts: "- Totals stay non-negative" },
+      { path: path2, contracts: "- Wave 2 keeps its invariant" },
+      { path: path3, contracts: "- Wave 3 keeps its invariant" },
     ]);
   });
 
@@ -2363,14 +2364,14 @@ describe("Chief backend", () => {
       result: "Two waves, JSON-encoded.",
       plan: JSON.stringify([
         { body: PLAN_FIXTURE },
-        { body: "# Wave 2\nMigrate the data." },
+        { body: wave(2, "Migrate the data.") },
       ]),
     }, { threadId: planner.threadId, projectId: "proj_1" });
 
     const path1 = join(state.storageRoot, planner.threadId, "plan-1.md");
     const path2 = join(state.storageRoot, planner.threadId, "plan-2.md");
     expect(await readFile(path1, "utf8")).toBe(`${PLAN_FIXTURE}\n`);
-    expect(await readFile(path2, "utf8")).toBe("# Wave 2\nMigrate the data.\n");
+    expect(await readFile(path2, "utf8")).toBe(`${wave(2, "Migrate the data.")}\n`);
     await expect(readFile(join(state.storageRoot, planner.threadId, "plan.md"), "utf8")).rejects.toThrow();
 
     const reported = state.sent.at(-1).input[0].text;
@@ -2378,8 +2379,8 @@ describe("Chief backend", () => {
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
-      { path: path1 },
-      { path: path2 },
+      { path: path1, contracts: "- Totals stay non-negative" },
+      { path: path2, contracts: "- Wave 2 keeps its invariant" },
     ]);
   });
 
@@ -2410,7 +2411,7 @@ describe("Chief backend", () => {
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     const waves = Array.from({ length: 8 }, (_, index) => ({
-      body: index === 0 ? PLAN_FIXTURE : `# Wave ${index + 1}\nDo the work.`,
+      body: index === 0 ? PLAN_FIXTURE : wave(index + 1),
     }));
 
     await state.harness.behavior.callAgentTool("chief_report", {
@@ -2439,7 +2440,7 @@ describe("Chief backend", () => {
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     const tooManyWaves = Array.from({ length: 9 }, (_, index) => ({
-      body: index === 0 ? PLAN_FIXTURE : `# Wave ${index + 1}`,
+      body: index === 0 ? PLAN_FIXTURE : wave(index + 1),
     }));
 
     const sentBefore = state.sent.length;
@@ -2451,11 +2452,11 @@ describe("Chief backend", () => {
   });
 
   test.each([
-    ["rejects", "no wave has a What we're NOT doing section", [{ body: "# Wave 1\nDo a thing." }, { body: "# Wave 2\nDo another thing." }]],
-    ["rejects", "What we're NOT doing appears only in prose", [{ body: "# Wave 1\nWe have not added a What we're NOT doing section to this plan." }]],
+    ["rejects", "no wave has a What we're NOT doing section", [{ body: wave(1, "Do a thing.") }, { body: wave(2, "Do another thing.") }]],
+    ["rejects", "What we're NOT doing appears only in prose", [{ body: wave(1, "We have not added a What we're NOT doing section to this plan.") }]],
     ["rejects", "What we are not doing follows a hash across a newline", [{ body: "# Plan\n#\nWhat we are not doing is documented elsewhere." }]],
     ["rejects", "a string plan's What we are not doing follows a hash across a newline", "# Plan\n#\nWhat we are not doing is documented elsewhere."],
-    ["accepts", "What we are not doing is a markdown heading", [{ body: "# Wave 1\n\n## What we are not doing\n- No extra scope." }]],
+    ["accepts", "What we are not doing is a markdown heading", [{ body: wave(1, "\n## What we are not doing\n- No extra scope.") }]],
   ])("%s a planner's ready report when %s", async (outcome, _name, plan) => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
@@ -2479,6 +2480,58 @@ describe("Chief backend", () => {
       expect(state.sent).toHaveLength(sentBefore + 1);
       expect(state.sent.at(-1).input[0].text).toContain("Delegate wave 1 now: chief_delegate");
     }
+  });
+
+  test.each([
+    ["rejects", "wave 2 has no Contracts to verify heading", [{ body: PLAN_FIXTURE }, { body: "# Wave 2\nDo the work." }], /Wave 2 lacks a "## Contracts to verify"/],
+    ["rejects", "Contracts to verify is bold text", "# Plan\n\n**Contracts to verify**\n- x\n\n## What we're NOT doing\n- x", /Wave 1 lacks a "## Contracts to verify"/],
+    ["rejects", "the Contracts to verify section is empty", "# Plan\n\n## Contracts to verify\n\n## What we're NOT doing\n- x", /Wave 1 lacks a "## Contracts to verify"/],
+    ["accepts", "Contracts to verify is a ### heading", "# Plan\n\n### Contracts to verify\n- x\n\n## What we're NOT doing\n- x", undefined],
+  ])("%s a planner's ready report when %s", async (outcome, _name, plan, error) => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    const sentBefore = state.sent.length;
+
+    const report = state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Scoped plan", plan,
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+    if (outcome === "rejects") {
+      await expect(report).rejects.toThrow(error!);
+      expect(state.sent).toHaveLength(sentBefore);
+    } else {
+      await report;
+      expect(state.sent).toHaveLength(sentBefore + 1);
+    }
+  });
+
+  test("a single-wave reviewer gets the Contracts to verify list even when the brief is clipped", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], opts);
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "One wave", plan: PLAN_FIXTURE,
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+    const delegated = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix checkout totals", "--mission", "M".repeat(5_000),
+      "--plan-thread", planner.threadId, "--wave", "1", "--json",
+    ], opts);
+    const worker = JSON.parse(delegated.stdout!) as { threadId: string };
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Wave 1 of 1 done",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+    const reviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!;
+    expect(reviewSpawn.prompt).toContain("## Contracts to verify\n- Totals stay non-negative\nCheck every item against the worktree.");
   });
 
   test("steers a continuation with the instruction first", async () => {
@@ -3183,6 +3236,7 @@ describe("Chief backend", () => {
     expect(state.spawned.at(-1).prompt).toContain(`Plan file (wave 1 of 2): ${path1}`);
     expect(state.spawned.at(-1).prompt).toContain('Wave 1 of 2. Implement only this wave\'s plan file. Name "Wave 1 of 2" in your ready result.');
     expect(state.spawned.at(-1).prompt).toContain("No review runs after this wave.");
+    expect(state.spawned.at(-1).prompt).toContain("## Contracts to verify\n- Totals stay non-negative\nKeep every item above.");
 
     const row = state.db.prepare(`SELECT plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
     expect(row).toEqual({ plan_thread_id: planner.threadId, plan_wave: 1 });
@@ -3218,7 +3272,7 @@ describe("Chief backend", () => {
       state: "ready", result: "One wave.", plan: [{ tier: "senior", body: PLAN_FIXTURE }],
     } as any, { threadId: planner.threadId, projectId: "proj_1" });
     const row = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as any;
-    expect(JSON.parse(row.plan_waves)).toEqual([{ path: join(state.storageRoot, planner.threadId, "plan-1.md") }]);
+    expect(JSON.parse(row.plan_waves)).toEqual([{ path: join(state.storageRoot, planner.threadId, "plan-1.md"), contracts: "- Totals stay non-negative" }]);
   });
 
   test("rejects an out-of-range wave", async () => {
@@ -3266,6 +3320,7 @@ describe("Chief backend", () => {
     const freshWorker = JSON.parse(replaceResult.stdout!) as { threadId: string };
 
     expect(state.spawned.at(-1).prompt).toContain(`Plan file (wave 1 of 2): ${path1}`);
+    expect(state.spawned.at(-1).prompt).toContain("## Contracts to verify\n- Totals stay non-negative");
     const freshRow = state.db.prepare(`SELECT plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(freshWorker.threadId) as any;
     expect(freshRow).toEqual({ plan_thread_id: planner.threadId, plan_wave: 1 });
   });
@@ -3308,8 +3363,8 @@ describe("Chief backend", () => {
       result: "Three waves: schema, migration, then delegation.",
       plan: [
         { body: PLAN_FIXTURE },
-        { body: "# Wave 2\nMigrate the data." },
-        { body: "# Wave 3\nWire up delegation." },
+        { body: wave(2, "Migrate the data.") },
+        { body: wave(3, "Wire up delegation.") },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" });
     const path1 = join(state.storageRoot, planner.threadId, "plan-1.md");
@@ -3366,6 +3421,8 @@ describe("Chief backend", () => {
     expect(reviewSpawn.prompt).toContain(`Wave 1 of 3: ${path1}`);
     expect(reviewSpawn.prompt).toContain(`Wave 2 of 3: ${path2}`);
     expect(reviewSpawn.prompt).toContain(`Wave 3 of 3: ${path3}`);
+    expect(reviewSpawn.prompt).toContain("## Contracts to verify\nWave 1 of 3:\n- Totals stay non-negative\nWave 2 of 3:\n- Wave 2 keeps its invariant\nWave 3 of 3:\n- Wave 3 keeps its invariant");
+    expect(reviewSpawn.prompt).toContain("An unmet item means request_changes");
 
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
@@ -3414,8 +3471,8 @@ describe("Chief backend", () => {
       result: "Three waves: schema, migration, then delegation.",
       plan: [
         { body: PLAN_FIXTURE },
-        { body: "# Wave 2\nMigrate the data." },
-        { body: "# Wave 3\nWire up delegation." },
+        { body: wave(2, "Migrate the data.") },
+        { body: wave(3, "Wire up delegation.") },
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" });
 
