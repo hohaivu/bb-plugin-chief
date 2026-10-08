@@ -53,7 +53,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown } = {}) {
+async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -87,7 +87,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     pluginId: options.pluginId ?? "chief",
     agentSkillIds: ["chief", "chief-worker"],
     sdk: {
-      system: { usageLimits: async (args: any) => options.usageLimits?.(args) ?? {} },
+      system: options.system ?? { usageLimits: async (args: any) => options.usageLimits?.(args) ?? {} },
       threadSections: {
         list: async () => section ? [section] : [],
         create: async ({ name }: { name: string }) => section = { id: "sec_chief", name, createdAt: 1, updatedAt: 1 },
@@ -4583,6 +4583,17 @@ describe("chief_research", () => {
     usage = () => { throw new Error("rpc down"); };
     await call(state, chief, survey());
     expect(calls("run")).toHaveLength(2);
+  });
+
+  test.each([
+    ["throws synchronously", { usageLimits: () => { throw new Error("rpc down"); } }],
+    ["is absent on an older host", {}],
+  ])("pre-flight fails open when system.usageLimits %s", async (_case, system) => {
+    const state = await setup({ system });
+    const chief = await roleThread(state, "chief");
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => ({ status: "succeeded", result: { rows: [], table: "t", failures: [] } }) });
+    await call(state, chief, survey());
+    expect(calls("run")).toHaveLength(1);
   });
 
   test("configure gives Chief the optional-research cue only while on", async () => {
