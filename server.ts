@@ -2059,9 +2059,11 @@ export default async function plugin(bb: BbPluginApi) {
   function waveWaitLine(row: ManagedRow): string | null {
     if (row.role !== "worker" || row.state !== "ready" || !row.plan_thread_id || row.plan_wave == null) return null;
     const waves = planWavesFor(row.plan_thread_id);
-    if (successorOf(waves, row.plan_wave) !== null) return null;
-    const pending = waves.flatMap((_, index) => waveWorkers(row.plan_thread_id!, index + 1)
-      .some((w) => w.state === "ready" || w.state === "complete") ? [] : [index + 1]);
+    if (successorOf(waves, row.plan_wave) !== null || tips(waves).length < 2) return null;
+    const pending = waves.flatMap((_, index) => {
+      const latest = waveWorkers(row.plan_thread_id!, index + 1).at(-1);
+      return latest?.state === "ready" || latest?.state === "complete" ? [] : [index + 1];
+    });
     return pending.length
       ? `Wave ${row.plan_wave} of ${waves.length} is ready; its review waits until wave(s) ${pending.join(", ")} are ready. Do not review yet.`
       : null;
