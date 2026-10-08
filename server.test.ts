@@ -2064,9 +2064,8 @@ describe("Chief backend", () => {
     }
 
     // The built-in rules are Chief's own; a managed thread would only be told to call tools it lacks.
-    expect((await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId))).instructions)
-      .toContain("Chief operating rules");
     const chiefInstructions = (await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId))).instructions;
+    expect(chiefInstructions).toContain("Chief operating rules");
     expect(chiefInstructions).toContain("In a managed thread's worktree, Chief only reads");
     expect(chiefInstructions).toContain("never a retry loop");
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
