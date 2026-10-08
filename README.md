@@ -150,6 +150,7 @@ Chief's own todos — including queued work nobody has delegated yet — live th
 `todo #N` lines: `chief_roster` with `todo: { text, after? }` adds one, `todo: { id, text?, after?, state? }`
 changes or closes it (`done`/`dropped`). Todos persist per project, so a new or replacement Chief
 sees them; Chief is told to use them instead of Memory files, TodoWrite, or Task tools.
+Open todos with an `after:` condition show in Pending as one count line; `chief_roster includeWaiting: true` lists them.
 
 ## CLI
 

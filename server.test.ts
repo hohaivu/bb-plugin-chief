@@ -1549,13 +1549,14 @@ describe("Chief backend", () => {
 
     const count = signals();
     const added = await roster({ todo: { text: "Rebase onto main", after: "PR #42 merges" } });
-    expect(added.startsWith("Pending:\n- todo #1: Rebase onto main (after: PR #42 merges)")).toBe(true);
+    expect(added.startsWith("Pending:\n- 1 waiting todo (#1) hidden")).toBe(true);
+    expect(await roster({ includeWaiting: true })).toContain("- todo #1: Rebase onto main (after: PR #42 merges)");
     expect(await todo()).toMatchObject({ id: "todo #1", label: "Rebase onto main (after: PR #42 merges)", status: "open", done: false });
     expect(signals()).toBe(count + 1);
     const cli = await state.harness.behavior.runCli(["status", "--project", "proj_1"]);
     expect(cli.stdout).toContain("- todo #1: Rebase onto main (after: PR #42 merges)");
 
-    await roster({ todo: { id: 1, text: "Rebase onto #43", after: "" } });
+    expect(await roster({ todo: { id: 1, text: "Rebase onto #43", after: "" } })).toContain("- todo #1: Rebase onto #43");
     expect(await todo()).toMatchObject({ label: "Rebase onto #43", done: false });
     await roster({ todo: { id: 1, state: "done" } });
     expect(await todo()).toMatchObject({ label: "Rebase onto #43", status: "done", done: true });
@@ -1563,6 +1564,24 @@ describe("Chief backend", () => {
 
     await expect(roster({ todo: { after: "later" } })).rejects.toThrow("needs text");
     await expect(roster({ todo: { id: 99, state: "done" } })).rejects.toThrow("No todo #99");
+  });
+
+  test("chief_roster collapses todos waiting on an after: condition into one line", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const roster = async (params: object) => String(await state.harness.behavior.callAgentTool("chief_roster", params, { threadId: chief.threadId, projectId: "proj_1" }));
+    await roster({ todo: { text: "Alpha" } });
+    await roster({ todo: { text: "Bravo", after: "user signs" } });
+    const collapsed = await roster({ todo: { text: "Charlie", after: "PR #42 merges" } });
+    expect(collapsed).toContain("- todo #1: Alpha");
+    expect(collapsed).not.toContain("Bravo");
+    expect(collapsed).not.toContain("Charlie");
+    expect(collapsed.split("\n").filter((line) => line.startsWith("- 2 waiting todos (#2, #3) hidden"))).toHaveLength(1);
+    const full = await roster({ includeWaiting: true });
+    for (const line of ["- todo #1: Alpha", "- todo #2: Bravo (after: user signs)", "- todo #3: Charlie (after: PR #42 merges)"]) expect(full).toContain(line);
+    expect(full).not.toContain("waiting todos");
+    const onlyWaiting = await roster({ todo: { id: 1, state: "done" } });
+    expect(onlyWaiting.startsWith("Pending:\n- 2 waiting todos")).toBe(true);
   });
 
   test("chief todos are project-scoped and survive a replacement Chief", async () => {
