@@ -3040,10 +3040,13 @@ export default async function plugin(bb: BbPluginApi) {
     ];
   }
 
-  /** Whether a worker sits on its plan's last wave (always, unplanned).
-   * ponytail: sequential waves only; make it chain-aware once waves can run in parallel. */
+  /** Whether a worker ends its plan (always, unplanned): its wave is a chain tip and every
+   * chain's tip has a ready or complete latest worker. */
   function onFinalWave(worker: ManagedRow): boolean {
-    return !worker.plan_thread_id || worker.plan_wave === planWavesFor(worker.plan_thread_id).length;
+    if (!worker.plan_thread_id) return true;
+    const waves = planWavesFor(worker.plan_thread_id);
+    if (worker.plan_wave == null || !waves.length || successorOf(waves, worker.plan_wave) !== null) return false;
+    return tips(waves).every((tip) => ["ready", "complete"].includes(waveWorkers(worker.plan_thread_id!, tip).at(-1)?.state ?? ""));
   }
 
   /** bb chief stats: a read-only summary of the given rows, their alert rows and todos. */

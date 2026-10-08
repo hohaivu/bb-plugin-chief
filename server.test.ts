@@ -1192,6 +1192,31 @@ describe("Chief backend", () => {
       expect(result.perTask[0]).toMatchObject({ waves: 2, replacements: 0 });
     });
 
+    test("chief stats: a parallel plan completes only once every chain's tip is ready", async () => {
+      const state = await setup();
+      await state.harness.behavior.setSettings({ plannerEnabled: true });
+      const chief = await start(state);
+      const ctx = { threadId: chief.threadId, projectId: "proj_1" };
+      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctx);
+      const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Two independent waves.",
+        plan: [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [] }],
+      }, { threadId: planner.threadId, projectId: "proj_1" });
+      const delegateWave = async (n: number) => JSON.parse((await state.harness.behavior.runCli([
+        "delegate", "--title", `Wave ${n}`, "--mission", "Do it", "--plan-thread", planner.threadId, "--wave", String(n), "--branch", `feature/w${n}`, "--json",
+      ], ctx)).stdout!) as { threadId: string };
+      const w1 = await delegateWave(1);
+      const w2 = await delegateWave(2);
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Wave 2 done" }, { threadId: w2.threadId, projectId: "proj_1" });
+      expect((await state.harness.behavior.runCli(["complete", w2.threadId])).exitCode).toBe(0);
+      // Wave 2 is the last wave by number but wave 1's chain is still running.
+      expect((await stats(state)).tasks.completed).toBe(0);
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Wave 1 done" }, { threadId: w1.threadId, projectId: "proj_1" });
+      expect((await state.harness.behavior.runCli(["complete", w1.threadId])).exitCode).toBe(0);
+      expect((await stats(state)).tasks).toMatchObject({ total: 1, completed: 1 });
+    });
+
     test("chief stats: counts usage-limit, connection and non-transient failures once each", async () => {
       const state = await setup();
       const chief = await start(state);
