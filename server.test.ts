@@ -1908,8 +1908,10 @@ describe("Chief backend", () => {
     const worker = await delegate(state, chief.threadId);
     const configuredChief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configuredChief.instructions).toContain("Call chief_roster at the start of every turn, and again after any compaction");
+    expect(configuredChief.instructions).toContain("never poll managed threads");
     const configuredWorker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(worker.threadId));
     expect(configuredWorker.instructions).not.toContain("Call chief_roster at the start of every turn");
+    expect(configuredWorker.instructions).not.toContain("never poll managed threads");
   });
 
   test("selects supervisor and reporting tools only for the matching roles", async () => {
