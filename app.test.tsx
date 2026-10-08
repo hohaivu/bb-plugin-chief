@@ -272,38 +272,6 @@ test("picks a scanned model per role and clears back to the BB default", async (
   expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
 });
 
-test("the Fallback row saves a pick and No fallback clears it", async () => {
-  const section = app.settingsSections.find((candidate) => candidate.id === "models")!;
-  const triple = { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const };
-  const configuration = {
-    hosts: [{
-      hostId: "host_1", hostName: "Local", connected: true, error: null,
-      fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, reviewer: null, advisor: null },
-      unusable: [], fallbackSelection: null, fallbackUnusable: false,
-    }],
-  };
-  const rendered = renderSlot<Record<string, never>, typeof rpcContract>(section, {}, {
-    rpc: { modelConfiguration: () => configuration, setFallbackModel: () => ({ ok: true as const }) } as never,
-  });
-  unmounts.push(() => rendered.lifecycle.unmount());
-  await vi.waitFor(() => expect(rendered.getByText("Fallback")).toBeTruthy());
-  expect(rendered.getByText("Not set · a cooling primary is refused")).toBeTruthy();
-  const cell = within(rendered.getAllByTestId("bb-provider-model-picker").at(-1)!);
-  fireEvent.change(cell.getByLabelText("Provider ID"), { target: { value: triple.providerId } });
-  fireEvent.change(cell.getByLabelText("Model"), { target: { value: triple.model } });
-  fireEvent.change(cell.getByLabelText("Reasoning level"), { target: { value: triple.reasoningLevel } });
-  fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
-  await vi.waitFor(() =>
-    expect(rendered.rpcCalls).toContainEqual({ method: "setFallbackModel", input: { hostId: "host_1", selection: triple } }),
-  );
-  fireEvent.click(rendered.getByRole("button", { name: "No fallback" }));
-  await vi.waitFor(() =>
-    expect(rendered.rpcCalls).toContainEqual({ method: "setFallbackModel", input: { hostId: "host_1", selection: null } }),
-  );
-  expect(rendered.getByText("Not set · a cooling primary is refused")).toBeTruthy();
-});
-
 test("a picker re-reporting a service tier saves no role model", async () => {
   hostPicker.normalizes = true;
   const section = app.settingsSections.find((candidate) => candidate.id === "models")!;

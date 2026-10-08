@@ -169,22 +169,6 @@ function ChiefModelSettings() {
     [load, rpc],
   );
 
-  const saveFallback = useCallback(
-    (hostId: string, selection: ModelSelection | null) => {
-      setError(null);
-      setConfiguration((current) => current && {
-        hosts: current.hosts.map((host) =>
-          host.hostId === hostId ? { ...host, fallbackSelection: selection, fallbackUnusable: false } : host,
-        ),
-      });
-      void rpc.call("setFallbackModel", { hostId, selection }).catch((cause) => {
-        setError(errorMessage(cause));
-        void load();
-      });
-    },
-    [load, rpc],
-  );
-
   if (!configuration && isLoading) {
     return <p className="text-sm text-muted-foreground">Scanning machines for providers and models…</p>;
   }
@@ -253,42 +237,6 @@ function ChiefModelSettings() {
               </div>
             );
           })}
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <div className="w-24 shrink-0">
-              <div className="text-sm text-foreground">Fallback</div>
-              <div className="text-xs text-muted-foreground">
-                Used for reviewers and research while the primary model is cooling down after a usage limit.
-              </div>
-            </div>
-            {host.fallbackSelection ?? host.fallback ? (
-              <HostModelPicker
-                hostId={host.hostId}
-                value={(host.fallbackSelection ?? host.fallback)!}
-                disabled={!host.connected}
-                onPick={(selection) => saveFallback(host.hostId, selection)}
-              />
-            ) : (
-              <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
-            )}
-            {host.fallbackSelection ? (
-              <>
-                {host.fallbackUnusable ? (
-                  <span className="text-xs text-destructive">
-                    This machine cannot serve that model; a cooling primary is refused instead.
-                  </span>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => saveFallback(host.hostId, null)}
-                  className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
-                >
-                  No fallback
-                </button>
-              </>
-            ) : (
-              <span className="text-xs text-muted-foreground">Not set · a cooling primary is refused</span>
-            )}
-          </div>
         </div>
       ))}
       {configuration?.hosts.length === 0 ? (
