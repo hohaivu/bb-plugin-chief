@@ -672,6 +672,86 @@ describe("Chief backend", () => {
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(1);
   });
 
+  describe("waits for a just-reported worker to go idle", () => {
+    const reviews = (state: Awaited<ReturnType<typeof setup>>) =>
+      state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals");
+    const reportWhileActive = async (state: Awaited<ReturnType<typeof setup>>) => {
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId);
+      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: "Totals fixed",
+      }, { threadId: worker.threadId, projectId: "proj_1" });
+      return { chief, worker };
+    };
+
+    test("chief_review waits, then reviews", async () => {
+      const state = await setup();
+      const { chief, worker } = await reportWhileActive(state);
+      vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+      try {
+        const call = state.harness.behavior.callAgentTool(
+          "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+        );
+        await vi.advanceTimersByTimeAsync(4_000);
+        expect(reviews(state)).toHaveLength(0);
+        state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await call;
+        expect(reviews(state)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test("chief_review gives up after the wait cap", async () => {
+      const state = await setup();
+      const { chief, worker } = await reportWhileActive(state);
+      vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+      try {
+        const call = state.harness.behavior.callAgentTool(
+          "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+        );
+        const outcome = expect(call).rejects.toThrow("is active; wait until it is idle before starting a review");
+        await vi.advanceTimersByTimeAsync(62_000);
+        await outcome;
+        expect(reviews(state)).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test("chief_review does not wait for a worker that has not reported", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId);
+      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+      vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+      try {
+        await expect(state.harness.behavior.callAgentTool(
+          "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+        )).rejects.toThrow("is active; wait until it is idle before starting a review");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test("chief_delegate replaces: waits, then hands off", async () => {
+      const state = await setup();
+      const { chief, worker } = await reportWhileActive(state);
+      vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+      try {
+        const call = delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
+        await vi.advanceTimersByTimeAsync(4_000);
+        state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect((await call).threadId).not.toBe(worker.threadId);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   test("keeps blocked while the live status is still stopping", async () => {
     const state = await setup();
     const chief = await start(state);

@@ -19,6 +19,8 @@ const MAX_RESULT_LENGTH = 8_000;
 const MAX_PLAN_LENGTH = 64_000;
 // ponytail: a nudge is 1–3 sentences; anything longer is new work for a fresh thread.
 const MAX_NUDGE_LENGTH = 500;
+const REVIEW_IDLE_WAIT_MS = 60_000;
+const REVIEW_IDLE_POLL_MS = 2_000;
 // ponytail: arbitrary cap so a runaway plan can't schedule an unbounded worker chain.
 const MAX_WAVES = 8;
 // ponytail: done capped at 50, newest first
@@ -1724,7 +1726,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     let priorLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
     if (prior) {
-      priorLive = await bb.sdk.threads.get({ threadId: prior.thread_id });
+      priorLive = await waitIdleAfterReport(prior);
       if (BUSY_STATUSES.has(priorLive.status)) throw new Error(`Worker ${prior.thread_id} is ${priorLive.status}; wait until it is idle before replacing it.`);
       if (priorLive.deletedAt !== null || priorLive.archivedAt !== null) throw new Error(`Worker ${prior.thread_id} is not replaceable.`);
       if (!priorLive.environmentId) throw new Error(`Worker ${prior.thread_id} has no reusable environment.`);
@@ -1997,6 +1999,19 @@ export default async function plugin(bb: BbPluginApi) {
     ].join("\n");
   }
 
+  /** Live status of a worker. When its row is already ready, waits up to REVIEW_IDLE_WAIT_MS
+   * for its turn to end: the ready alert is sent from inside the worker's chief_report call,
+   * so that turn is still ending when Chief acts on it. A worker that has not reported is not waited on. */
+  async function waitIdleAfterReport(worker: ManagedRow) {
+    let live = await bb.sdk.threads.get({ threadId: worker.thread_id });
+    // ponytail: polls; defer the alert to thread.idle if a minute is not enough.
+    for (const deadline = Date.now() + REVIEW_IDLE_WAIT_MS; worker.state === "ready" && BUSY_STATUSES.has(live.status) && Date.now() < deadline;) {
+      await researchSleep(REVIEW_IDLE_POLL_MS);
+      live = await bb.sdk.threads.get({ threadId: worker.thread_id });
+    }
+    return live;
+  }
+
   /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
    * by a fresh one rather than resumed; its verdict and reject_streak carry over onto
    * the new row, so deadlock detection still sees consecutive rejections across the
@@ -2011,7 +2026,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (previous && BUSY_STATUSES.has(previous.state)) {
         return { threadId: previous.thread_id, title: previous.title, workerThreadId, created: false };
       }
-      const live = await bb.sdk.threads.get({ threadId: workerThreadId });
+      const live = await waitIdleAfterReport(worker);
       if (BUSY_STATUSES.has(live.status)) throw new Error(`Worker ${workerThreadId} is ${live.status}; wait until it is idle before starting a review.`);
       if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
       if (!live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
