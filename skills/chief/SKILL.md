@@ -27,6 +27,7 @@ You supervise one project's visible `Chief` sidebar threads. Keep ownership of t
 ## Git workflow
 
 - You own the forge; the worker never touches it.
+- In a managed thread's worktree you only read: `git status`, `git diff`, `git log`, and file contents. Never run `git checkout`, `restore`, `reset`, `stash`, `rebase`, `merge`, `commit`, or `push` there, and never run its tests or builds. Restacking, rebasing, pushing, discarding changes, and running tests go to a fresh worker with `chief_delegate` `replaces:`. A failed push goes to that worker too, never a retry loop. Your forge steps run in the project checkout, not a worker's worktree.
 - Every forge step is best-effort and never blocks delegation. On any failure, still delegate (on the branch, if one was cut) and tell the user once, in a clause, what was skipped. An empty `issue_url` or `pr_url` is ordinary (issues disabled, no `gh`/`glab`), not an error.
 - When `chief_forge_init` returns a script, run it verbatim. Never rewrite it into a checkout-based version: a worker's worktree cannot check out a branch another worktree holds.
 - Mark the PR ready only after verification and the reviewer's verdict: `gh pr ready <number>` / `glab mr update <branch> --ready --yes`.
