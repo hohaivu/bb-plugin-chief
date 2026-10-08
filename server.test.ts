@@ -1129,6 +1129,117 @@ describe("Chief backend", () => {
     expect((await state.harness.behavior.callRpc("modelConfiguration", null)).hosts[0]).toMatchObject({ fallbackSelection: null, fallbackUnusable: false });
   });
 
+  describe("bb chief stats", () => {
+    type State = Awaited<ReturnType<typeof setup>>;
+    const stats = async (state: State, context: { threadId?: string; projectId?: string } = {}) => {
+      const result = await state.harness.behavior.runCli(["stats", "--project", "proj_1", "--json"], context);
+      expect(result.exitCode).toBe(0);
+      return JSON.parse(result.stdout!);
+    };
+    const reviewThenVerdict = async (state: State, chiefId: string, workerId: string, verdict: "approve" | "request_changes") => {
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: workerId, projectId: "proj_1" });
+      const review = JSON.parse((await state.harness.behavior.runCli(["review", workerId, "--json"], { threadId: chiefId, projectId: "proj_1" })).stdout!);
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Reviewed", verdict }, { threadId: review.threadId, projectId: "proj_1" });
+    };
+
+    test("chief stats: an unplanned chain completes once; open and archived tasks count separately", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const first = await delegate(state, chief.threadId, "Fix checkout totals", { branch: "feature/x" });
+      await reviewThenVerdict(state, chief.threadId, first.threadId, "request_changes");
+      const fix = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: first.threadId });
+      await reviewThenVerdict(state, chief.threadId, fix.threadId, "approve");
+      expect((await state.harness.behavior.runCli(["complete", fix.threadId])).exitCode).toBe(0);
+      await delegate(state, chief.threadId, "Open task", { branch: "feature/open" });
+      const archived = await delegate(state, chief.threadId, "Archived task", { branch: "feature/gone" });
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(archived.threadId)! });
+
+      const result = await stats(state);
+      expect(result.tasks).toEqual({ total: 3, completed: 1, open: 1, dropped: 1 });
+      const chain = result.perTask.find((task: any) => task.key === "branch:proj_1:feature/x");
+      expect(chain).toMatchObject({ status: "completed", workers: 2, replacements: 1, requestChanges: 1 });
+      expect(result.wallTimeMs.completed).toBe(1);
+      expect(result.repairs.replacements).toBe(1);
+    });
+
+    test("chief stats: a branchless replaces chain is one task", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const first = await delegate(state, chief.threadId);
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: first.threadId, projectId: "proj_1" });
+      await delegate(state, chief.threadId, "Fix checkout totals", { replaces: first.threadId });
+      const result = await stats(state);
+      expect(result.tasks.total).toBe(1);
+      expect(result.perTask[0]).toMatchObject({ workers: 2, replacements: 1 });
+    });
+
+    test("chief stats: wave hand-offs are not repairs, and a plan stopped before its final wave is dropped", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const { planner, path1, path2 } = await planTwoWaves(state, chief.threadId);
+      const ctx = { threadId: chief.threadId, projectId: "proj_1" };
+      const wave1 = JSON.parse((await state.harness.behavior.runCli(["delegate", "--title", "Wave 1", "--mission", `Implement ${path1}`, "--plan-thread", planner.threadId, "--wave", "1", "--json"], ctx)).stdout!);
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Wave 1 done" }, { threadId: wave1.threadId, projectId: "proj_1" });
+      expect((await stats(state)).tasks).toEqual({ total: 1, completed: 0, open: 1, dropped: 0 });
+      expect((await state.harness.behavior.runCli(["complete", wave1.threadId])).exitCode).toBe(0);
+      expect((await stats(state)).tasks.dropped).toBe(1);
+
+      const wave2 = JSON.parse((await state.harness.behavior.runCli(["delegate", "--title", "Wave 2", "--mission", `Implement ${path2}`, "--plan-thread", planner.threadId, "--wave", "2", "--replaces", wave1.threadId, "--json"], ctx)).stdout!);
+      await reviewThenVerdict(state, chief.threadId, wave2.threadId, "approve");
+      expect((await state.harness.behavior.runCli(["complete", wave2.threadId])).exitCode).toBe(0);
+      const result = await stats(state);
+      expect(result.tasks).toEqual({ total: 1, completed: 1, open: 0, dropped: 0 });
+      expect(result.perTask[0]).toMatchObject({ waves: 2, replacements: 0 });
+    });
+
+    test("chief stats: counts usage-limit, connection and non-transient failures once each", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const a = await delegate(state, chief.threadId, "A");
+      const b = await delegate(state, chief.threadId, "B");
+      const c = await delegate(state, chief.threadId, "C");
+      await failWith(state, a.threadId, "cpa API error (429): usage_limit_reached");
+      await failWith(state, b.threadId, "Connection error.");
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(c.threadId)! });
+      await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(c.threadId)!, error: null });
+      await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(c.threadId)!, error: null });
+      expect((await stats(state)).failures).toMatchObject({ usageLimit: 1, connection: 1, threadErrors: 1 });
+    });
+
+    test("chief stats: a busy rejection keeps its message and is counted", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId);
+      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
+      await expect(state.harness.behavior.callAgentTool(
+        "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+      )).rejects.toThrow(`Worker ${worker.threadId} is active; wait until it is idle before starting a review.`);
+      expect((await stats(state)).failures.busyRejections).toBe(1);
+    });
+
+    test("chief stats: scoped like status, with text notes", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId);
+      const other = JSON.parse((await state.harness.behavior.runCli(["create", "--project", "proj_1", "--json"])).stdout!);
+      await delegate(state, other.threadId, "Other task");
+
+      expect((await stats(state)).tasks.total).toBe(2);
+      const own = await stats(state, { threadId: chief.threadId, projectId: "proj_1" });
+      expect(own.tasks.total).toBe(1);
+      expect(own.scope.chiefThreadId).toBe(chief.threadId);
+      expect(typeof own.statsSince).toBe("number");
+      expect((await stats(state, {})).scope.chiefThreadId).toBeNull();
+      const byChief = JSON.parse((await state.harness.behavior.runCli(["stats", "--chief", other.threadId, "--json"])).stdout!);
+      expect(byChief.perTask.map((task: any) => task.title)).toEqual(["Other task"]);
+
+      expect((await state.harness.behavior.runCli(["stats"], { threadId: worker.threadId, projectId: "proj_1" })).exitCode).toBe(1);
+      const text = (await state.harness.behavior.runCli(["stats", "--project", "proj_1"])).stdout!;
+      expect(text).toContain("Tasks:");
+      expect(text).toContain("Not measured:");
+    });
+  });
+
   test("supersedes an undelivered alert instead of re-delivering it after a newer report", async () => {
     const state = await setup();
     const chief = await start(state);

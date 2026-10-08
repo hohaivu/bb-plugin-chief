@@ -159,6 +159,7 @@ Open todos with an `after:` condition show in Pending as one count line; `chief_
 
 ```sh
 bb chief status [--project proj_...] [--json]   # Pending block includes open todos
+bb chief stats [--project proj_...] [--chief thr_...] [--json]   # tasks, repair rounds, failures, wall time
 bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
