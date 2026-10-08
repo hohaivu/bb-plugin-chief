@@ -293,6 +293,7 @@ if (missed.length) {
   log("No result for: " + missed.join(", "));
   failures.push("Scan: " + (batches.length - ok) + " of " + batches.length + " batches failed");
 }
+if (!ok) throw new Error("All " + batches.length + " scan batches failed; nothing to verify. See the failed calls for the provider error.");
 const before = rows.length;
 let verified = null;
 let dropped = 0;
@@ -358,6 +359,7 @@ if (missed.length) {
   log("Failed concerns: " + missed.join(", "));
   failures.push("Scan: " + missed.length + " of " + args.concerns.length + " concerns failed");
 }
+if (missed.length === args.concerns.length) throw new Error("All " + args.concerns.length + " concern scans failed; nothing to verify. See the failed calls for the provider error.");
 const before = findings.length;
 let verified = null;
 let dropped = 0;
@@ -407,6 +409,7 @@ const answers = args.questions.map((q, i) => Object.assign({ question: q }, scan
 const failures = [];
 const lost = scanned.filter((result) => !result).length;
 if (lost) failures.push("Scan: " + lost + " of " + args.questions.length + " questions failed");
+if (lost === args.questions.length) throw new Error("All " + lost + " question scans failed; skipped Combine. See the failed calls for the provider error.");
 let brief = null;
 let reason = "no brief returned";
 try {
@@ -3042,7 +3045,20 @@ export default async function plugin(bb: BbPluginApi) {
       if (chosen) models[stage] = chosen;
     }
     for (const note of notes) bb.log.warn(note);
-    return { models, notes };
+    return { models, notes, hostId, callerProvider: live?.providerId ?? null };
+  }
+
+  /** Why the run cannot start (a provider signed out or at 100% of a usage window), or null. */
+  async function researchPreflight(hostId: string, providerIds: string[]) {
+    // ponytail: fails open (missing key, error, throw, timeout) because not every provider reports usage.
+    for (const providerId of new Set(providerIds)) {
+      const res = await discover((signal) => bb.sdk.system.usageLimits({ hostId, providerId, signal }), "Usage check").catch(() => null);
+      const usage = (res as Record<string, any> | null)?.[providerId];
+      if (usage?.status === "not_installed" || usage?.status === "unauthenticated" || usage?.status === "expired") return `${providerId} is ${usage.status}`;
+      const full = usage?.status === "ok" ? usage.windows?.find((w: { usedPercent: number }) => w.usedPercent >= 100) : null;
+      if (full) return `${providerId} is out of quota (${full.label} window at ${full.usedPercent}%${full.resetsAt ? `, resets ${full.resetsAt}` : ""})`;
+    }
+    return null;
   }
 
   /** Waits for abortable sleeps; an abort rejects with the signal's reason. */
@@ -3105,9 +3121,10 @@ export default async function plugin(bb: BbPluginApi) {
           const shown = result as { table?: unknown; markdown?: unknown; brief?: unknown } | null;
           const summary = [shown?.table, shown?.markdown, shown?.brief].find((value) => typeof value === "string");
           const failures = (result as { failures?: unknown } | null)?.failures;
-          const note = Array.isArray(failures) && failures.length ? await failureNote(runId, context) : null;
+          const partial = Array.isArray(failures) && failures.length > 0;
+          const note = partial ? await failureNote(runId, context) : null;
           return researchOutput([
-            `runId: ${runId}`, `status: ${run.status}`, ...(note ? [note] : []),
+            `runId: ${runId}`, `status: ${partial ? "partial" : run.status}`, ...(note ? [note] : []),
             ...(summary ? ["", summary as string] : []),
             "", "result:", JSON.stringify(result, null, 2),
           ].join("\n"));
@@ -3139,7 +3156,11 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`This ${mode} needs ${calls} agent calls; the limit is ${cap}. ${fix}`);
     }
     const script = RESEARCH_SCRIPTS[mode];
-    const { models, notes } = await researchModels(context.threadId, mode, params.models);
+    const { models, notes, hostId, callerProvider } = await researchModels(context.threadId, mode, params.models);
+    const stages: Stage[] = ["scan", ...(mode !== "investigate" && params.verify ? ["verify" as const] : []), ...(mode === "investigate" ? ["combine" as const] : [])];
+    const providerIds = stages.map((stage) => models[stage]?.provider ?? callerProvider).filter((id): id is string => !!id);
+    const blocked = hostId ? await researchPreflight(hostId, providerIds) : null;
+    if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher model in Chief settings or retry after the reset.`);
     const prefix = notes.length ? notes.join("\n") + "\n\n" : "";
     const args = {
       preamble: RESEARCH_PREAMBLE, question: params.question, verify: params.verify, cap,
