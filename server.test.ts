@@ -53,7 +53,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string } = {}) {
+async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -87,6 +87,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     pluginId: options.pluginId ?? "chief",
     agentSkillIds: ["chief", "chief-worker"],
     sdk: {
+      system: options.system ?? { usageLimits: async (args: any) => options.usageLimits?.(args) ?? {} },
       threadSections: {
         list: async () => section ? [section] : [],
         create: async ({ name }: { name: string }) => section = { id: "sec_chief", name, createdAt: 1, updatedAt: 1 },
@@ -4548,12 +4549,51 @@ describe("chief_research", () => {
 
     workflowsCli({ run: () => ({ runId: "wfr_2" }), status: () => ({ status: "succeeded", result: { rows: [], table: "t", failures: ["Verify: x"] } }), history });
     reply = await call(state, chief, survey());
-    expect(reply).toContain("status: succeeded\nFailed agent calls: Verify ×1");
+    expect(reply).toContain("status: partial\nFailed agent calls: Verify ×1");
 
     execFileMock.mockClear();
     workflowsCli({ run: () => ({ runId: "wfr_3" }), status: () => ({ status: "succeeded", result: { rows: [], table: "t", failures: [] } }), history });
-    await call(state, chief, survey());
+    expect(await call(state, chief, survey())).toContain("status: succeeded");
     expect(calls("history")).toHaveLength(0);
+  });
+
+  test.each([
+    ["survey", { question: "Q", items: ["a", "b"], batchSize: 1 }, "Verify"],
+    ["review", { question: "Q", concerns: ["x", "y"] }, "Verify"],
+    ["investigate", { question: "Q", questions: ["a?", "b?"] }, "Combine"],
+  ] as const)("%s fails without %s when every scan failed", async (mode, args, later) => {
+    const phases: string[] = [];
+    await expect(runScript(mode, args, (_prompt, opts) => { phases.push(opts.phase); throw new Error("usage limit"); })).rejects.toThrow(/All .* failed/);
+    expect(phases).not.toContain(later);
+  });
+
+  test("pre-flight refuses a provider that is out of quota or signed out, and fails open otherwise", async () => {
+    let usage: (args: any) => unknown = () => ({});
+    const state = await setup({ usageLimits: (args) => usage(args) });
+    const chief = await roleThread(state, "chief");
+    const provider = state.live.get(chief)!.providerId;
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => ({ status: "succeeded", result: { rows: [], table: "t", failures: [] } }) });
+    usage = () => ({ [provider]: { status: "ok", windows: [{ label: "5h", usedPercent: 100, resetsAt: "2026-10-08T12:00:00Z" }] } });
+    await expect(call(state, chief, survey())).rejects.toThrow(/out of quota \(5h window at 100%, resets 2026-10-08T12:00:00Z\)/);
+    usage = () => ({ [provider]: { status: "unauthenticated" } });
+    await expect(call(state, chief, survey())).rejects.toThrow(/unauthenticated/);
+    expect(calls("run")).toHaveLength(0);
+    usage = () => ({ [provider]: { status: "error", message: "x" } });
+    await call(state, chief, survey());
+    usage = () => { throw new Error("rpc down"); };
+    await call(state, chief, survey());
+    expect(calls("run")).toHaveLength(2);
+  });
+
+  test.each([
+    ["throws synchronously", { usageLimits: () => { throw new Error("rpc down"); } }],
+    ["is absent on an older host", {}],
+  ])("pre-flight fails open when system.usageLimits %s", async (_case, system) => {
+    const state = await setup({ system });
+    const chief = await roleThread(state, "chief");
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => ({ status: "succeeded", result: { rows: [], table: "t", failures: [] } }) });
+    await call(state, chief, survey());
+    expect(calls("run")).toHaveLength(1);
   });
 
   test("configure gives Chief the optional-research cue only while on", async () => {
