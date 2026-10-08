@@ -3052,7 +3052,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function researchPreflight(hostId: string, providerIds: string[]) {
     // ponytail: fails open (missing key, error, throw, timeout) because not every provider reports usage.
     for (const providerId of new Set(providerIds)) {
-      const res = await discover((signal) => bb.sdk.system.usageLimits({ hostId, providerId, signal }), "Usage check").catch(() => null);
+      const res = await discover(async (signal) => bb.sdk.system.usageLimits({ hostId, providerId, signal }), "Usage check").catch(() => null);
       const usage = (res as Record<string, any> | null)?.[providerId];
       if (usage?.status === "not_installed" || usage?.status === "unauthenticated" || usage?.status === "expired") return `${providerId} is ${usage.status}`;
       const full = usage?.status === "ok" ? usage.windows?.find((w: { usedPercent: number }) => w.usedPercent >= 100) : null;
