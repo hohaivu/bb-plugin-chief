@@ -677,6 +677,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Inspect the worker's evidence before choosing the next action.
 - Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark verified work complete.
 - Never reuse a worker for more work. Finishing skipped acceptance criteria, rebasing or restacking, or any new task goes to a fresh worker with chief_delegate replaces: — same worktree, branch, and pull request. chief_continue is only a short nudge to a thread that is still working.
+- In a managed thread's worktree, Chief only reads: git status, git diff, git log, and file contents. Never run git checkout, restore, reset, stash, rebase, merge, commit, or push there, and never run its tests or builds. Restacking, rebasing, pushing, discarding changes, and running tests go to a fresh worker with chief_delegate replaces:. A failed push goes to that worker too, never a retry loop.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
 - A worker report is evidence, not proof. Start one independent review per run with chief_review when a worker's ready alert says to — after the final wave, or for a worker with no plan link — and read that reviewer's verdict before completing the work.
