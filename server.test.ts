@@ -59,7 +59,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   let spawnIndex = 0;
   let sendFailures = 0;
   let callerPermissionMode = "auto";
-  let threadExecution: { model?: string } | null = null;
+  let threadExecution: { model?: string } | null | undefined = null;
   let projectDefaults: { providerId: string; model: string } | null = null;
   let projectDefaultsReads = 0;
   let getFailures = new Map<string, number>();
@@ -148,7 +148,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
       },
       threads: {
         events: { list: async ({ threadId }: { threadId: string }) => eventsStore.get(threadId) ?? [] },
-        defaultExecutionOptions: async () => ({ permissionMode: callerPermissionMode, ...(threadExecution ?? {}) }),
+        defaultExecutionOptions: async () => threadExecution === undefined ? null : ({ permissionMode: callerPermissionMode, ...(threadExecution ?? {}) }),
         spawn: async (args: any) => {
           spawned.push(args);
           spawnIndex += 1;
@@ -259,7 +259,8 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
     setCallerPermissionMode(mode: string) { callerPermissionMode = mode; },
-    setThreadExecution(next: { model?: string } | null) { threadExecution = next; },
+    /** undefined makes defaultExecutionOptions resolve null. */
+    setThreadExecution(next: { model?: string } | null | undefined) { threadExecution = next; },
     setProjectDefaults(next: { providerId: string; model: string } | null) { projectDefaults = next; },
     projectDefaultsReads: () => projectDefaultsReads,
     tabs: (threadId: string) => tabsStore.get(threadId)?.tabs ?? [],
@@ -991,8 +992,12 @@ describe("Chief backend", () => {
       ["chief_consult", { title: "Diagnose", mission: "Explore" }],
       ["chief_review", { branch: "feature/x" }],
     ];
+    const sectionRow = () => state.db.prepare("SELECT value FROM plugin_meta WHERE key='section_id'").get();
     for (const [tool, params] of tools) {
+      // The gate runs before ensureSection: a refused call writes no section row.
+      state.db.prepare("DELETE FROM plugin_meta WHERE key='section_id'").run();
       await expect(state.harness.behavior.callAgentTool(tool, params, opts)).rejects.toThrow(/Provider codex hit its usage limit/);
+      expect(sectionRow()).toBeUndefined();
     }
     expect(state.spawned).toHaveLength(spawnedBefore);
     state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
@@ -1010,6 +1015,23 @@ describe("Chief backend", () => {
     await coolDown(state, worker.threadId, MODEL_COOLDOWN);
     await delegate(state, chief.threadId, "Second");
     expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
+  });
+
+  test("cooldown: a model_cooldown with no known model records nothing and blocks no other model", async () => {
+    for (const execution of [undefined, {}]) {
+      const state = await setup();
+      await state.harness.behavior.callRpc("setRoleModel", {
+        hostId: "host_1", role: "worker", selection: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" },
+      });
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId);
+      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, providerId: "codex" });
+      state.setThreadExecution(execution);
+      await failWith(state, worker.threadId, MODEL_COOLDOWN);
+      expect(state.db.prepare("SELECT * FROM provider_cooldowns").all()).toEqual([]);
+      await delegate(state, chief.threadId, "Second");
+      expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
+    }
   });
 
   test("cooldown: a connection error records nothing, and no live cooldown costs no SDK read", async () => {

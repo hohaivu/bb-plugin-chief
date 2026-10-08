@@ -1693,6 +1693,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error("Planning is off. Turn on “Plan before delegating” in Chief's settings, or delegate this work directly.");
     }
     const { chief, projectId } = await owningChief(callerThreadId);
+    const execution = await spawnExecution("planner", await projectHostId(projectId), projectId);
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every planner turn, so the spawn prompt does not repeat them.
@@ -1723,7 +1724,7 @@ export default async function plugin(bb: BbPluginApi) {
       parentThreadId: chief.thread_id,
       visibility: "visible",
       title,
-      ...(await spawnExecution("planner", await projectHostId(projectId), projectId)).selection,
+      ...execution.selection,
       ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
@@ -1748,6 +1749,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (workerLive.deletedAt !== null || workerLive.archivedAt !== null) throw new Error(`Worker ${worker.thread_id} is not consultable.`);
       if (!workerLive.environmentId) throw new Error(`Worker ${worker.thread_id} has no reusable environment.`);
     }
+    const hostId = worker ? await environmentHostId(workerLive!.environmentId!) : await projectHostId(projectId);
+    const execution = await spawnExecution("advisor", hostId, projectId);
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every advisor turn, so the spawn prompt does not repeat them.
@@ -1784,7 +1787,6 @@ export default async function plugin(bb: BbPluginApi) {
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
-    const hostId = worker ? await environmentHostId(workerLive!.environmentId!) : await projectHostId(projectId);
     const thread = await bb.sdk.threads.spawn({
       projectId,
       environment: worker
@@ -1794,7 +1796,7 @@ export default async function plugin(bb: BbPluginApi) {
       parentThreadId: chief.thread_id,
       visibility: "visible",
       title,
-      ...(await spawnExecution("advisor", hostId, projectId)).selection,
+      ...execution.selection,
       ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "advisor", chiefThreadId: chief.thread_id },
@@ -1877,6 +1879,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
+    const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
+    const execution = await spawnExecution("worker", hostId, projectId);
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every worker turn, so the spawn prompt does not repeat them.
@@ -1930,7 +1934,6 @@ export default async function plugin(bb: BbPluginApi) {
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
-    const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
     const thread = await bb.sdk.threads.spawn({
       projectId,
       environment: prior
@@ -1947,7 +1950,7 @@ export default async function plugin(bb: BbPluginApi) {
       parentThreadId: chief.thread_id,
       visibility: "visible",
       title: params.title,
-      ...(await spawnExecution("worker", hostId, projectId)).selection,
+      ...execution.selection,
       ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id },
@@ -2134,6 +2137,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (BUSY_STATUSES.has(live.status)) throw new Error(`Worker ${workerThreadId} is ${live.status}; wait until it is idle before starting a review.`);
       if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
       if (!live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
+      const execution = await spawnExecution("reviewer", await environmentHostId(live.environmentId), worker.project_id);
       const sectionId = await ensureSection();
       // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
       // the rules into every reviewer turn, so the spawn prompt does not repeat them.
@@ -2174,7 +2178,6 @@ export default async function plugin(bb: BbPluginApi) {
           ] : []),
         ],
       });
-      const execution = await spawnExecution("reviewer", await environmentHostId(live.environmentId), worker.project_id);
       const thread = await bb.sdk.threads.spawn({
         projectId: worker.project_id,
         environment: { type: "reuse", environmentId: live.environmentId },
@@ -2222,6 +2225,8 @@ export default async function plugin(bb: BbPluginApi) {
     const start = (async () => {
       const duplicate = existingBranchReview.get(chiefThreadId, projectId, branch) as ManagedRow | undefined;
       if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId: null, created: false };
+      const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
+      const execution = await spawnExecution("reviewer", hostId, projectId);
       const sectionId = await ensureSection();
       // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
       // the rules into every reviewer turn, so the spawn prompt does not repeat them.
@@ -2237,8 +2242,6 @@ export default async function plugin(bb: BbPluginApi) {
         focus,
         provenance: [],
       });
-      const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
-      const execution = await spawnExecution("reviewer", hostId, projectId);
       const thread = await bb.sdk.threads.spawn({
         projectId,
         environment: {
@@ -3045,7 +3048,12 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`No provider known for ${threadId}; its usage limit is not recorded as a cooldown.`);
       return null;
     }
-    const model = /model_cooldown/i.test(failure.text) ? options.model ?? "" : "";
+    const modelCooldown = /model_cooldown/i.test(failure.text);
+    if (modelCooldown && !options.model) {
+      bb.log.warn(`No model known for ${threadId}; its model cooldown is not recorded, so other models on ${options.providerId} stay usable.`);
+      return null;
+    }
+    const model = modelCooldown ? options.model! : "";
     const until = failure.at + (transient.resetSeconds ?? 15 * 60) * 1000;
     upsertCooldown.run(options.providerId, model, until, clip(failure.text, 400), Date.now());
     return { providerId: options.providerId, model, until };
