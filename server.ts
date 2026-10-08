@@ -730,6 +730,16 @@ function clip(value: string, limit = MAX_ALERT_LENGTH) {
  * (the mission) and its trailing sections (Context, where a plan file path now
  * lives) both survive the cut, instead of the tail-only clip() dropping whichever
  * section comes last. */
+/** A provider failure worth retrying on the same thread, or null. Text-matched: pi reports
+ * 429s and connection drops only as provider/error detail, with no errorInfo. */
+// ponytail: heuristic regexes; switch to errorInfo.category once providers populate it.
+function transientFailure(text: string): { usageLimit: boolean; resetSeconds: number | null } | null {
+  const usageLimit = /\b429\b|usage[_ ]limit|rate[_ -]?limit|model_cooldown|quota/i.test(text);
+  if (!usageLimit && !/connection error|connection-failed|stream-disconnected|overloaded|ECONNRESET|ETIMEDOUT|socket hang up|\b50[234]\b/i.test(text)) return null;
+  const reset = /"?reset_seconds"?\s*[:=]\s*(\d+)/.exec(text);
+  return { usageLimit, resetSeconds: reset ? Number(reset[1]) : null };
+}
+
 function clipMiddle(value: string, limit: number) {
   const marker = "\n…\n";
   if (value.length <= limit || limit <= marker.length) return clip(value, limit);
@@ -2522,6 +2532,23 @@ export default async function plugin(bb: BbPluginApi) {
       state, thread.status ?? observed, now, thread.id,
     );
     reloadRoles();
+    if (kind !== "failed" || !row.chief_thread_id) return;
+    const failure = await lastProviderError(thread.id);
+    const transient = failure && transientFailure(failure.text);
+    if (!failure || !transient) return;
+    const { usageLimit, resetSeconds } = transient;
+    const resetAt = resetSeconds === null ? null : failure.at + resetSeconds * 1000;
+    const minutes = resetAt === null ? null : Math.max(1, Math.ceil((resetAt - Date.now()) / 60_000) + 1);
+    const backoff = minutes !== null ? `${minutes}m` : usageLimit ? "15m" : "2m";
+    await alertChief(row, `failed:${row.active_cycle}`, [
+      `${row.role} “${row.title}” (${row.thread_id}) failed on a transient provider error: ${usageLimit ? "provider usage limit (HTTP 429)" : "connection/provider error"}.`,
+      `Provider error: ${clip(failure.text, 400)}`,
+      ...(!usageLimit ? [] : resetAt !== null
+        ? [`Usage limit resets at ${new Date(resetAt).toISOString()} (about ${minutes} min from now).`]
+        : ["The error does not say when the usage limit resets."]),
+      `Do not spawn a replacement: a fresh thread on the same provider and model hits the same error. Retry this same thread with: bb thread retry ${row.thread_id} --send-at ${backoff} --reason "${usageLimit ? "usage limit reset" : "transient provider error"}"`,
+      "If the retry fails the same way again, escalate to the user (wait for the limit or switch provider/model) instead of retrying again.",
+    ].join("\n"));
   }
 
   bb.events.on("thread.active", ({ thread }) => lifecycle("active", thread));
@@ -2861,6 +2888,19 @@ export default async function plugin(bb: BbPluginApi) {
       return (await bb.sdk.threads.output({ threadId })).output;
     } catch (error) {
       bb.log.warn(`Could not inspect output for ${threadId}: ${String(error)}`);
+      return null;
+    }
+  }
+
+  async function lastProviderError(threadId: string) {
+    try {
+      const [event] = await bb.sdk.threads.events.list({ threadId, types: ["provider/error", "system/error"], order: "desc", limit: "1" });
+      if (event?.type !== "provider/error" && event?.type !== "system/error") return null;
+      const info = event.type === "provider/error" ? event.data.errorInfo : undefined;
+      const text = [info?.category, info?.httpStatusCode, event.data.message, event.data.detail].filter(Boolean).join(" ");
+      return { text, at: event.createdAt };
+    } catch (error) {
+      bb.log.warn(`Could not read the last provider error for ${threadId}: ${String(error)}`);
       return null;
     }
   }
