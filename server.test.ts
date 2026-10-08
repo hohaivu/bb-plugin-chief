@@ -65,6 +65,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   const pluginMetadataStore = new Map<string, any>();
   const queuedMessagesStore = new Map<string, any[]>();
   const sent: any[] = [];
+  const eventsStore = new Map<string, any[]>();
   const spawned: any[] = [];
   const stopped: string[] = [];
   const catalogReads: (string | undefined)[] = [];
@@ -140,6 +141,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
         },
       },
       threads: {
+        events: { list: async ({ threadId }: { threadId: string }) => eventsStore.get(threadId) ?? [] },
         defaultExecutionOptions: async () => ({ permissionMode: callerPermissionMode }),
         spawn: async (args: any) => {
           spawned.push(args);
@@ -240,6 +242,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     storageRoot,
     spawned,
     sent,
+    seedEvents: (threadId: string, events: any[]) => eventsStore.set(threadId, events),
     stopped,
     live,
     catalogReads,
@@ -885,6 +888,47 @@ describe("Chief backend", () => {
       thread: state.live.get(worker.threadId)!,
       error: "boom",
     });
+    expect(state.sent).toHaveLength(0);
+  });
+
+  async function failWith(state: Awaited<ReturnType<typeof setup>>, threadId: string, detail: string) {
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(threadId)! });
+    state.seedEvents(threadId, [{ type: "provider/error", createdAt: Date.now(), data: { message: "Provider error", detail } }]);
+    await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(threadId)!, error: null });
+  }
+
+  test("transient provider: usage limit alerts Chief once with a retry at the reset", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await failWith(state, worker.threadId, `cpa API error (429): {"code":"model_cooldown","last_upstream_error":"usage_limit_reached: The usage limit has been reached","model":"gpt-6.1-sol","reset_seconds":2194,"reset_time":"36m34s"}`);
+    expect(state.sent).toHaveLength(1);
+    const text = state.sent[0].input[0].text;
+    expect(state.sent[0].threadId).toBe(chief.threadId);
+    expect(text).toContain("usage limit");
+    expect(text).toContain("Usage limit resets at");
+    expect(text).toContain(`bb thread retry ${worker.threadId} --send-at 38m`);
+    expect(text).toContain("Do not spawn a replacement");
+    await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(worker.threadId)!, error: null });
+    expect(state.sent).toHaveLength(1);
+  });
+
+  test("transient provider: connection error alerts Chief with a short retry", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await failWith(state, worker.threadId, "Connection error.");
+    expect(state.sent).toHaveLength(1);
+    const text = state.sent[0].input[0].text;
+    expect(text).toContain(`bb thread retry ${worker.threadId} --send-at 2m`);
+    expect(text).not.toContain("usage limit");
+  });
+
+  test("transient provider: a non-transient error stays silent", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await failWith(state, worker.threadId, "context window exceeded");
     expect(state.sent).toHaveLength(0);
   });
 
