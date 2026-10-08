@@ -2283,7 +2283,7 @@ describe("Chief backend", () => {
     expect(prompt.indexOf("chief_plan")).toBeLessThan(prompt.indexOf("chief_forge_init"));
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configured.instructions).toContain("chief_plan first");
-    expect(configured.instructions).toContain("delegate wave 1 right away without waiting for user sign-off");
+    expect(configured.instructions).toContain("delegate every wave the ready alert lists right away, one chief_delegate per wave in the same turn, without waiting for user sign-off");
   });
 
   test("refuses chief_delegate with no plan or unplannedReason when planning is on", async () => {
@@ -3657,6 +3657,99 @@ describe("Chief backend", () => {
       "chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" },
     ));
     expect(roster).toContain(`(${fixWorker.threadId}): Start its review now: chief_review (workerThreadId: ${fixWorker.threadId})`);
+  });
+
+  test("persists dependsOn and lists every independent head wave for parallel delegation", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Two parallel chains.",
+      plan: [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [] }, { body: wave(3), dependsOn: [1] }],
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+    const row = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
+    expect(JSON.parse(row.plan_waves).map((w: any) => w.dependsOn)).toEqual([undefined, [], [1]]);
+    const alert = state.sent.at(-1).input[0].text as string;
+    expect(alert).toContain("Delegate waves 1, 2 now, in parallel");
+    expect(alert).toContain(`(planThreadId: ${planner.threadId}, wave: N)`);
+  });
+
+  test.each([
+    ["forward", [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [3] }, { body: wave(3) }], /earlier wave/],
+    ["self", [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [2] }], /earlier wave/],
+    ["on wave 1", [{ body: PLAN_FIXTURE, dependsOn: [1] }, { body: wave(2) }], /wave 1 depends on nothing/],
+    ["two items", [{ body: PLAN_FIXTURE }, { body: wave(2) }, { body: wave(3), dependsOn: [1, 2] }], /./],
+    ["a fork", [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [1] }, { body: wave(3), dependsOn: [1] }], /both build on wave 1/],
+  ])("rejects dependsOn that is %s before writing or sending anything", async (_label, plan, error) => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    const sentBefore = state.sent.length;
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Bad graph.", plan,
+    }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(error);
+    expect(state.sent).toHaveLength(sentBefore);
+    await expect(readFile(join(state.storageRoot, planner.threadId, "plan-1.md"), "utf8")).rejects.toThrow();
+  });
+
+  test("parallel independent waves review once per branch only after every wave is ready", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], opts);
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Two independent waves.",
+      plan: [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [] }],
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+    const path1 = join(state.storageRoot, planner.threadId, "plan-1.md");
+    const path2 = join(state.storageRoot, planner.threadId, "plan-2.md");
+    const delegateWave = async (n: number, branch: string) => JSON.parse((await state.harness.behavior.runCli([
+      "delegate", "--title", `Wave ${n} work`, "--mission", "Do it",
+      "--plan-thread", planner.threadId, "--wave", String(n), "--branch", branch, "--json",
+    ], opts)).stdout!) as { threadId: string };
+    const w1 = await delegateWave(1, "feature/a");
+    const w2 = await delegateWave(2, "feature/b");
+    let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain("waves: 0/2 done, wave 1 starting, wave 2 starting");
+    expect(roster).toContain(`wave 2 of 2: ${path2} (independent)`);
+    expect(state.spawned.at(-1).prompt).toContain("This wave is independent");
+
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Wave 1 done" }, { threadId: w1.threadId, projectId: "proj_1" });
+    let alert = state.sent.at(-1).input[0].text as string;
+    expect(alert).toContain("its review waits until wave(s) 2 are ready");
+    expect(alert).not.toContain("chief_review");
+    expect(alert).not.toContain("chief_delegate");
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).not.toContain(`(${w1.threadId}):`);
+
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Wave 2 done" }, { threadId: w2.threadId, projectId: "proj_1" });
+    alert = state.sent.at(-1).input[0].text as string;
+    expect(alert).toContain(`chief_review (workerThreadId: ${w1.threadId})`);
+    expect(alert).toContain(`chief_review (workerThreadId: ${w2.threadId})`);
+
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: w1.threadId }, opts);
+    const reviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Wave 1 work").at(-1)!;
+    expect(reviewSpawn.prompt).toContain(`This is the final wave (1 of 2).`);
+    expect(reviewSpawn.prompt).toContain(`Wave 1 of 2: ${path1}`);
+    expect(reviewSpawn.prompt).not.toContain(path2);
+    expect(reviewSpawn.prompt).not.toContain("Wave 2 keeps its invariant");
+
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: w1.threadId, result: "Landed" }, opts);
+    expect(state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(planner.threadId)).toEqual({ state: "ready" });
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: w2.threadId, result: "Landed" }, opts);
+    await vi.waitFor(() => expect(state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(planner.threadId)).toEqual({ state: "complete" }));
   });
 
   test("walks a 3-wave run through final review, updating the wave line at each stage", async () => {
