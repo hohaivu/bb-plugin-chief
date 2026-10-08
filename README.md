@@ -114,7 +114,10 @@ tells a clean "No confirmed findings" apart from a verify that threw everything 
 
 Chief gets all three modes, a planner gets survey and investigate, and a reviewer gets review and
 survey. Workers and advisors never get it. Settings has one **Researcher** switch, on by default;
-while it is off, no role gets the tool or the line about it.
+while it is off, no role gets the tool or the line about it. Chief is told the tool is optional: it
+reads code directly when a few known files answer the question, uses research only for broad
+multi-file scans or parallel independent questions, and reads directly after a failed or partial run
+instead of rerunning it.
 
 The agents share the caller's checkout and permissions. They are read-only only because the prompt
 tells them to be. Each call waits up to its mode's timeout (10 minutes by default). If the run is still going, the call returns its

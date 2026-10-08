@@ -693,7 +693,7 @@ const PLANNER_CHIEF_INSTRUCTIONS =
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 const RESEARCH_CHIEF_INSTRUCTIONS =
-  "Before chief_plan on a large or unclear issue, scope it with chief_research survey or investigate. When a worker's or reviewer's claimed evidence looks doubtful, check it with chief_research review or investigate before acting.";
+  "chief_research is optional, and each call can wait up to its mode's timeout. When a few known files answer the question, read them directly instead. Use it only for a broad multi-file scan or several independent questions at once — for example, scoping a large issue that spans many files before chief_plan, or checking doubtful worker or reviewer evidence across many files. When a run fails or comes back partial, read the code directly; do not rerun the same fan-out.";
 
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */

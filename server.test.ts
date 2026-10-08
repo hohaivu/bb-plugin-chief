@@ -4556,13 +4556,18 @@ describe("chief_research", () => {
     expect(calls("history")).toHaveLength(0);
   });
 
-  test("configure gives Chief the research scoping cue only while on", async () => {
+  test("configure gives Chief the optional-research cue only while on", async () => {
     const state = await setup();
     const threadId = await roleThread(state, "chief");
     const configured = () => state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
-    expect((await configured()).instructions).toContain("Before chief_plan on a large or unclear issue");
+    const on = (await configured()).instructions;
+    expect(on).toContain("When a few known files answer the question, read them directly");
+    expect(on).toContain("do not rerun the same fan-out");
+    expect(on).not.toContain("Before chief_plan on a large or unclear issue");
     await state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
-    expect((await configured()).instructions).not.toContain("Before chief_plan on a large or unclear issue");
+    const off = (await configured()).instructions;
+    expect(off).not.toContain("When a few known files answer the question, read them directly");
+    expect(off).not.toContain("do not rerun the same fan-out");
   });
 });
 
