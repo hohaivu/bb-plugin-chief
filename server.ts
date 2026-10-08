@@ -696,6 +696,12 @@ interface ManagedRow {
    * the tie nextAction uses to know whether it already covers the worker's latest
    * report, instead of comparing updated_at timestamps. */
   reviewed_report_seq: number | null;
+  /** Worker row only: the worker it replaced through replaces:, or null. */
+  replaces_thread_id: string | null;
+  /** Non-transient failed events counted for bb chief stats (since stats_since). */
+  thread_errors: number;
+  /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
+  busy_rejections: number;
   created_at: number;
   updated_at: number;
 }
@@ -1034,6 +1040,12 @@ export const MIGRATIONS = [
     `CREATE TABLE IF NOT EXISTS provider_cooldowns (provider_id TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', until_at INTEGER NOT NULL, reason TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (provider_id, model))`,
     // One per machine: reviewers and research switch to it while their primary cools down.
     `CREATE TABLE IF NOT EXISTS chief_fallback_model (host_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
+    // A worker's replaces: predecessor, so a branchless fix chain still groups into one task for bb chief stats.
+    `ALTER TABLE managed_threads ADD COLUMN replaces_thread_id TEXT`,
+    // bb chief stats counters; neither was recorded before this migration (see stats_since).
+    `ALTER TABLE managed_threads ADD COLUMN thread_errors INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE managed_threads ADD COLUMN busy_rejections INTEGER NOT NULL DEFAULT 0`,
+    `INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('stats_since', CAST(strftime('%s','now') AS INTEGER) * 1000)`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1240,12 +1252,13 @@ export default async function plugin(bb: BbPluginApi) {
     planWave?: number | null;
     reviewedReportSeq?: number | null;
     unplannedReason?: string | null;
+    replacesThreadId?: string | null;
   }) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, replaces_thread_id, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -1253,12 +1266,13 @@ export default async function plugin(bb: BbPluginApi) {
       brief=excluded.brief, branch=excluded.branch, issue_url=excluded.issue_url, pr_url=excluded.pr_url,
       plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
       reviewed_report_seq=excluded.reviewed_report_seq, unplanned_reason=excluded.unplanned_reason,
+      replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.parentThreadId ?? null, input.title, input.state ?? "starting",
       input.status ?? "starting", input.brief ?? null, input.branch ?? null,
       input.issueUrl ?? null, input.prUrl ?? null, input.planThreadId ?? null, input.planWave ?? null,
-      input.reviewedReportSeq ?? null, input.unplannedReason ?? null,
+      input.reviewedReportSeq ?? null, input.unplannedReason ?? null, input.replacesThreadId ?? null,
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
@@ -1772,7 +1786,7 @@ export default async function plugin(bb: BbPluginApi) {
     let workerLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
     if (worker) {
       workerLive = await bb.sdk.threads.get({ threadId: worker.thread_id });
-      if (BUSY_STATUSES.has(workerLive.status)) throw new Error(`Worker ${worker.thread_id} is ${workerLive.status}; wait until it is idle before starting a consult.`);
+      if (BUSY_STATUSES.has(workerLive.status)) busyRejection(worker, workerLive.status, "starting a consult");
       if (workerLive.deletedAt !== null || workerLive.archivedAt !== null) throw new Error(`Worker ${worker.thread_id} is not consultable.`);
       if (!workerLive.environmentId) throw new Error(`Worker ${worker.thread_id} has no reusable environment.`);
     }
@@ -1854,7 +1868,7 @@ export default async function plugin(bb: BbPluginApi) {
     let priorLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
     if (prior) {
       priorLive = await waitIdleAfterReport(prior);
-      if (BUSY_STATUSES.has(priorLive.status)) throw new Error(`Worker ${prior.thread_id} is ${priorLive.status}; wait until it is idle before replacing it.`);
+      if (BUSY_STATUSES.has(priorLive.status)) busyRejection(prior, priorLive.status, "replacing it");
       if (priorLive.deletedAt !== null || priorLive.archivedAt !== null) throw new Error(`Worker ${prior.thread_id} is not replaceable.`);
       if (!priorLive.environmentId) throw new Error(`Worker ${prior.thread_id} has no reusable environment.`);
       if (params.branch && params.branch !== prior.branch) throw new Error(`replaces: ${prior.thread_id} carries branch ${prior.branch}; pass no --branch or the same one.`);
@@ -1990,7 +2004,7 @@ export default async function plugin(bb: BbPluginApi) {
     insertThread({
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
       state: "starting", status: thread.status, brief: reviewerBrief,
-      branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason,
+      branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
     });
     if (prior) {
       const now = Date.now();
@@ -2191,6 +2205,13 @@ export default async function plugin(bb: BbPluginApi) {
     return live;
   }
 
+  /** Throws the busy-worker refusal, counting it as a timing race for bb chief stats. */
+  function busyRejection(worker: ManagedRow, status: string, before: string): never {
+    db.prepare(`UPDATE managed_threads SET busy_rejections=busy_rejections+1 WHERE thread_id=?`).run(worker.thread_id);
+    reloadRoles();
+    throw new Error(`Worker ${worker.thread_id} is ${status}; wait until it is idle before ${before}.`);
+  }
+
   /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
    * by a fresh one rather than resumed; its verdict and reject_streak carry over onto
    * the new row, so deadlock detection still sees consecutive rejections across the
@@ -2206,7 +2227,7 @@ export default async function plugin(bb: BbPluginApi) {
         return { threadId: previous.thread_id, title: previous.title, workerThreadId, created: false };
       }
       const live = await waitIdleAfterReport(worker);
-      if (BUSY_STATUSES.has(live.status)) throw new Error(`Worker ${workerThreadId} is ${live.status}; wait until it is idle before starting a review.`);
+      if (BUSY_STATUSES.has(live.status)) busyRejection(worker, live.status, "starting a review");
       if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
       if (!live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
       const execution = await spawnExecution("reviewer", await environmentHostId(live.environmentId), worker.project_id);
@@ -2749,7 +2770,14 @@ export default async function plugin(bb: BbPluginApi) {
     if (kind !== "failed" || !row.chief_thread_id) return;
     const failure = await lastProviderError(thread.id);
     const transient = failure && transientFailure(failure.text);
-    if (!failure || !transient) return;
+    if (!failure || !transient) {
+      // ponytail: a repeated failed event while already failed is the same failure, not a second one.
+      if (row.state !== "failed") {
+        db.prepare(`UPDATE managed_threads SET thread_errors=thread_errors+1 WHERE thread_id=?`).run(thread.id);
+        reloadRoles();
+      }
+      return;
+    }
     const { usageLimit, resetSeconds } = transient;
     const cooling = usageLimit ? await noteCooldown(thread.id, failure) : null;
     const resetAt = resetSeconds === null ? null : failure.at + resetSeconds * 1000;
@@ -3010,6 +3038,145 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 200)}`] : []),
       ...(row.verdict ? [`verdict: ${row.verdict}`] : []),
     ];
+  }
+
+  /** Whether a worker ends its plan (always, unplanned): its wave is a chain tip and every
+   * chain's tip has a ready or complete latest worker. */
+  function onFinalWave(worker: ManagedRow): boolean {
+    if (!worker.plan_thread_id) return true;
+    const waves = planWavesFor(worker.plan_thread_id);
+    if (worker.plan_wave == null || !waves.length || successorOf(waves, worker.plan_wave) !== null) return false;
+    return tips(waves).every((tip) => ["ready", "complete"].includes(waveWorkers(worker.plan_thread_id!, tip).at(-1)?.state ?? ""));
+  }
+
+  /** bb chief stats: a read-only summary of the given rows, their alert rows and todos. */
+  function chiefStats(scope: { projectId: string; chiefThreadId: string | null }, rows: ManagedRow[], todos: TodoRow[]) {
+    const ids = new Set(rows.map((row) => row.thread_id));
+    const alerts = new Map<string, { usageLimit: number; connection: number; stalls: number; hardStalls: number }>();
+    const alertRows = db.prepare(`SELECT source_thread_id, dedupe_key, message FROM alert_outbox WHERE dedupe_key LIKE '%:failed:%' OR dedupe_key LIKE '%:stall:%'`).all() as Pick<AlertRow, "source_thread_id" | "dedupe_key" | "message">[];
+    for (const alert of alertRows) {
+      if (!ids.has(alert.source_thread_id)) continue;
+      const counts = alerts.get(alert.source_thread_id) ?? { usageLimit: 0, connection: 0, stalls: 0, hardStalls: 0 };
+      // "usage limit" matches the lifecycle failed alert's "provider usage limit (HTTP 429)" wording.
+      if (alert.dedupe_key.includes(":failed:")) counts[alert.message.includes("usage limit") ? "usageLimit" : "connection"] += 1;
+      else counts[alert.dedupe_key.endsWith(":hard") ? "hardStalls" : "stalls"] += 1;
+      alerts.set(alert.source_thread_id, counts);
+    }
+    // ponytail: the branch fallback is taskReviews' heuristic, so a branch reused by a later unplanned
+    // task merges into one task; replaces_thread_id makes this precise from stats_since on.
+    const keys = new Map<string, string | null>();
+    const keyOf = (row: ManagedRow | undefined): string | null => {
+      if (!row) return null;
+      if (keys.has(row.thread_id)) return keys.get(row.thread_id)!;
+      keys.set(row.thread_id, null);
+      const branch = row.branch ? `branch:${row.project_id}:${row.branch}` : null;
+      const viaLink = (id: string | null | undefined) => (id ? keyOf(roles.get(id)) : null);
+      const key = row.role === "planner" ? `plan:${row.thread_id}`
+        : row.role === "worker" ? (row.plan_thread_id ? `plan:${row.plan_thread_id}` : viaLink(row.replaces_thread_id) ?? branch ?? `worker:${row.thread_id}`)
+        : row.role === "reviewer" ? viaLink(row.worker_thread_id) ?? branch
+        : row.role === "advisor" ? viaLink(row.worker_thread_id)
+        : null;
+      keys.set(row.thread_id, key);
+      return key;
+    };
+    const groups = new Map<string, ManagedRow[]>();
+    for (const row of rows) {
+      const key = keyOf(row);
+      if (key) groups.set(key, [...(groups.get(key) ?? []), row]);
+    }
+    const sum = (list: number[]) => list.reduce((a, b) => a + b, 0);
+    const failuresOf = (list: ManagedRow[]) => {
+      const counts = list.map((row) => alerts.get(row.thread_id));
+      return {
+        usageLimit: sum(counts.map((c) => c?.usageLimit ?? 0)),
+        connection: sum(counts.map((c) => c?.connection ?? 0)),
+        threadErrors: sum(list.map((row) => row.thread_errors)),
+        busyRejections: sum(list.map((row) => row.busy_rejections)),
+        stalls: sum(counts.map((c) => c?.stalls ?? 0)),
+        hardStalls: sum(counts.map((c) => c?.hardStalls ?? 0)),
+      };
+    };
+    const terminal = ["complete", "archived", "deleted"];
+    const perTask = [...groups].filter(([, list]) => list.some((row) => row.role === "planner" || row.role === "worker")).map(([key, list]) => {
+      const planner = list.find((row) => row.role === "planner");
+      const workers = list.filter((row) => row.role === "worker").sort((a, b) => a.created_at - b.created_at);
+      const latest = workers.at(-1);
+      // A worker completed before its plan's final wave means the plan stopped mid-way: dropped.
+      const status = !latest ? (planner && terminal.includes(planner.state) ? "dropped" : "open")
+        : latest.state === "complete" && onFinalWave(latest) ? "completed"
+        : terminal.includes(latest.state) ? "dropped"
+        : "open";
+      const waves = key.startsWith("plan:") ? new Set(workers.map((row) => row.plan_wave)).size : 1;
+      const reviewers = list.filter((row) => row.role === "reviewer");
+      // ponytail: a complete row's updated_at is its completion time; nothing rewrites a complete row except a delete.
+      const start = Math.min(...[planner, ...workers].map((row) => row?.created_at ?? Infinity));
+      return {
+        key, title: planner?.title ?? workers[0]?.title ?? key, status, workers: workers.length, waves,
+        replacements: Math.max(0, workers.length - waves),
+        requestChanges: reviewers.filter((row) => row.verdict === "request_changes").length,
+        consults: list.filter((row) => row.role === "advisor").length,
+        ...failuresOf(list),
+        wallTimeMs: status === "completed" ? latest!.updated_at - start : null,
+      };
+    });
+    const times = perTask.map((task) => task.wallTimeMs).filter((ms): ms is number => ms !== null).sort((a, b) => a - b);
+    const mid = times.length >> 1;
+    const statsSince = (db.prepare(`SELECT value FROM plugin_meta WHERE key='stats_since'`).get() as { value: string } | undefined)?.value;
+    const since = statsSince === undefined ? null : Number(statsSince);
+    const count = (status: string) => perTask.filter((task) => task.status === status).length;
+    const todoCount = (state: TodoRow["state"]) => todos.filter((todo) => todo.state === state).length;
+    const reviewers = rows.filter((row) => row.role === "reviewer");
+    const requestChanges = reviewers.filter((row) => row.verdict === "request_changes").length;
+    return {
+      scope, statsSince: since,
+      tasks: { total: perTask.length, completed: count("completed"), open: count("open"), dropped: count("dropped") },
+      todos: { open: todoCount("open"), done: todoCount("done"), dropped: todoCount("dropped") },
+      repairs: {
+        replacements: sum(perTask.map((task) => task.replacements)), requestChanges,
+        regressions: reviewers.filter((row) => row.regression === 1).length,
+        consults: rows.filter((row) => row.role === "advisor").length,
+      },
+      failures: { ...failuresOf(rows), rejectedReviews: requestChanges },
+      wallTimeMs: {
+        completed: times.length,
+        median: !times.length ? null : times.length % 2 ? times[mid]! : (times[mid - 1]! + times[mid]!) / 2,
+        total: times.length ? sum(times) : null,
+      },
+      perTask,
+      notes: [
+        `Thread errors, busy rejections and branchless replaces chains are recorded from ${since === null ? "an unknown date" : new Date(since).toISOString()}; threads before that show 0 and may split into separate tasks.`,
+        "Provider failures come from transient-retry alerts, sent only since that alert shipped; failures before it are not counted, and a failure the classifier does not recognise is counted as a thread error.",
+        "A deleted thread loses its completed state, so its task counts as dropped.",
+        "A reviewer continued after its verdict loses that verdict until it reports again.",
+        "Wall time runs from the first planner or worker spawn to the final worker's completion.",
+      ],
+    };
+  }
+
+  /** `42m`, or `1h 5m` from an hour up; `—` for null. */
+  function duration(ms: number | null) {
+    if (ms === null) return "—";
+    const minutes = Math.round(ms / 60_000);
+    return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  }
+
+  function statsText(stats: ReturnType<typeof chiefStats>) {
+    const { tasks, todos, repairs, failures, wallTimeMs } = stats;
+    const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    return [
+      `Chief stats · ${stats.scope.chiefThreadId ? `Chief run ${stats.scope.chiefThreadId}` : `project ${stats.scope.projectId} (all Chief runs)`}`,
+      `Tasks: ${tasks.total} — ${tasks.completed} completed, ${tasks.open} open, ${tasks.dropped} dropped · todos: ${todos.open} open, ${todos.done} done, ${todos.dropped} dropped`,
+      `Repairs: ${plural(repairs.replacements, "replacement round")}, ${repairs.requestChanges} request_changes (${plural(repairs.regressions, "regression")}), ${plural(repairs.consults, "consult")}`,
+      `Failures: provider ${failures.usageLimit + failures.connection} (usage limit ${failures.usageLimit}, connection ${failures.connection}) · timing ${failures.busyRejections + failures.stalls + failures.hardStalls} (busy rejections ${failures.busyRejections}, stalls ${failures.stalls}, hard stalls ${failures.hardStalls}) · rejected reviews ${failures.rejectedReviews} · thread errors ${failures.threadErrors}`,
+      `Wall time (${wallTimeMs.completed} completed): median ${duration(wallTimeMs.median)}, total ${duration(wallTimeMs.total)}`,
+      "Per task:",
+      ...(stats.perTask.length ? stats.perTask.map((task) => {
+        const failed = task.usageLimit + task.connection + task.threadErrors + task.busyRejections + task.stalls + task.hardStalls;
+        return `- ${task.status} · ${task.title} · ${plural(task.workers, "worker")}, ${plural(task.replacements, "replacement")}, ${task.requestChanges} request_changes, ${plural(task.consults, "consult")}, ${plural(failed, "failure")} · ${duration(task.wallTimeMs)}`;
+      }) : ["- none"]),
+      "Not measured:",
+      ...stats.notes.map((note) => `- ${note}`),
+    ].join("\n");
   }
 
   /** The Pending block, in the same wording as the lifecycle alert — "Pending: none."
@@ -3866,6 +4033,7 @@ export default async function plugin(bb: BbPluginApi) {
   const usage = [
     "Usage:",
     "  bb chief status [--project proj_id] [--json]",
+    "  bb chief stats [--project proj_id] [--chief thr_id] [--json]",
     "  bb chief start [--project proj_id] [--json]",
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
@@ -3886,6 +4054,7 @@ export default async function plugin(bb: BbPluginApi) {
     summary: "Supervise visible BB worker and review threads through completion",
     commands: [
       { name: "status", summary: "Show a project's Chief-managed roster", usage: "bb chief status [--project proj_id] [--json]" },
+      { name: "stats", summary: "Summarise a project's or Chief run's reliability: tasks, repairs, failures, wall time", usage: "bb chief stats [--project proj_id] [--chief thr_id] [--json]" },
       { name: "start", summary: "Start or return the latest Chief for a project", usage: "bb chief start [--project proj_id] [--json]" },
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
@@ -3933,6 +4102,17 @@ export default async function plugin(bb: BbPluginApi) {
             ...managedRows.map((row) => rosterRowLines(row).join("\n  ")),
           ].join("\n");
           return ok({ sectionId: storedSectionId(), threads: managedRows.map(toManaged) }, text);
+        }
+        if (command === "stats") {
+          const chiefId = readScope ?? args.one("chief");
+          const chief = chiefId ? roles.get(chiefId) : undefined;
+          if (chiefId && chief?.role !== "chief") return fail(`No Chief thread ${chiefId}.`);
+          const projectId = chief?.project_id ?? args.one("project") ?? context.projectId ?? (await settings.get()).chiefProject;
+          if (!projectId) return fail("stats requires --project outside a project thread");
+          const scope = chief ? todoScope(chief) : null;
+          const todos = [...todosForProject.all(projectId, scope), ...closedTodosForProject.all(projectId, scope)] as TodoRow[];
+          const stats = chiefStats({ projectId, chiefThreadId: chiefId ?? null }, chiefId ? rosterForChief(chiefId, true) : rosterFor(projectId, true), todos);
+          return ok(stats, statsText(stats));
         }
         if (command === "start") {
           const result = await ensureChief(args.one("project") ?? context.projectId ?? undefined);
