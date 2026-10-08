@@ -2767,9 +2767,16 @@ export default async function plugin(bb: BbPluginApi) {
     return `- todo #${todo.id}${state}: ${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`;
   }
 
-  /** A project's open todos as Pending lines — after thread lines, so clipping drops them first. */
-  function todoLines(projectId: string | undefined, scope: string | null) {
-    return projectId ? (todosForProject.all(projectId, scope) as TodoRow[]).map(todoLine) : [];
+  /** A project's open todos as Pending lines — after thread lines, so clipping drops them first.
+   * With `collapseWaiting`, todos that wait on an `after:` condition fold into one count line. */
+  function todoLines(projectId: string | undefined, scope: string | null, collapseWaiting = false) {
+    const todos = projectId ? (todosForProject.all(projectId, scope) as TodoRow[]) : [];
+    if (!collapseWaiting) return todos.map(todoLine);
+    const waiting = todos.filter((todo) => todo.after);
+    const lines = todos.filter((todo) => !todo.after).map(todoLine);
+    const n = waiting.length;
+    if (n) lines.push(`- ${n} waiting todo${n === 1 ? "" : "s"} (#${waiting.map((todo) => todo.id).join(", #")}) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.`);
+    return lines;
   }
 
   /** Clips a rendered Pending block to `limit` by whole lines — never mid-action —
@@ -2796,8 +2803,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** The Pending block exactly as chief_roster prints it. */
-  function pendingBlock(chiefThreadId: string) {
-    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].reverse(), todoLines(roles.get(chiefThreadId)?.project_id, todoScope(roles.get(chiefThreadId)))), 6_000);
+  function pendingBlock(chiefThreadId: string, includeWaiting = false) {
+    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].reverse(), todoLines(roles.get(chiefThreadId)?.project_id, todoScope(roles.get(chiefThreadId)), !includeWaiting)), 6_000);
   }
 
   /** The panel's checklist: action threads, in-progress threads (newest first), open
@@ -3187,9 +3194,10 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_roster",
     presentation: { label: { pending: "Reading roster…", completed: "Read roster" } },
-    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert. Add a todo with `todo.text` (and optional `after`, e.g. 'PR #42 merges'); change one by `todo.id`; close it with `state: done|dropped`. Track all Chief work here — including queued work nobody has delegated yet.",
+    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert. Add a todo with `todo.text` (and optional `after`, e.g. 'PR #42 merges'); change one by `todo.id`; close it with `state: done|dropped`. Track all Chief work here — including queued work nobody has delegated yet. Todos with an after: condition are summarised as one line; pass includeWaiting: true to list them.",
     parameters: z.object({
       includeComplete: z.boolean().optional(),
+      includeWaiting: z.boolean().optional().describe("List todos that wait on an after: condition in full; by default the Pending block shows them as one count line."),
       todo: z.object({
         id: z.number().int().optional(),
         text: z.string().trim().min(1).max(500).optional(),
@@ -3197,7 +3205,7 @@ export default async function plugin(bb: BbPluginApi) {
         state: z.enum(["open", "done", "dropped"]).optional(),
       }).optional(),
     }),
-    async execute({ includeComplete, todo }, context) {
+    async execute({ includeComplete, includeWaiting, todo }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error("chief_roster requires an active registered Chief thread.");
       touchCallerChief(caller);
@@ -3219,7 +3227,7 @@ export default async function plugin(bb: BbPluginApi) {
       // The Pending block is clipped on its own so it always survives whole (or
       // ends with "…and N more pending"), then the rest gets whatever budget is
       // left — otherwise one clip() across both could cut a pending action off mid-line.
-      const pending = pendingBlock(caller.thread_id);
+      const pending = pendingBlock(caller.thread_id, includeWaiting);
       const rest = clip([
         ...reversed.map((row) => rosterRowLines(row).join("\n  ")),
         ...(includeComplete ? (closedTodosForProject.all(caller.project_id, todoScope(caller)) as TodoRow[]).map(todoLine) : []),
