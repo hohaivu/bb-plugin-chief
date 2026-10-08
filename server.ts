@@ -445,6 +445,9 @@ const modelConfigurationSchema = z.object({
     }),
     /** Roles whose stored pick this machine can no longer serve, so spawns use BB's default. */
     unusable: z.array(modelRoleSchema),
+    /** Used by reviewers and research while their primary model cools down. */
+    fallbackSelection: modelSelectionSchema.nullable(),
+    fallbackUnusable: z.boolean(),
   })),
 });
 export type ModelConfiguration = z.infer<typeof modelConfigurationSchema>;
@@ -589,6 +592,13 @@ export const rpcContract = defineRpcContract({
   setResearchSettings: {
     input: researchSettingsPatchSchema,
     output: researchSettingsSchema,
+  },
+  setFallbackModel: {
+    input: z.object({
+      hostId: z.string().trim().min(1),
+      selection: modelSelectionSchema.nullable(),
+    }).strict(),
+    output: z.object({ ok: z.literal(true) }).strict(),
   },
   setRoleModel: {
     input: z.object({
@@ -993,6 +1003,10 @@ export const MIGRATIONS = [
     `DROP TABLE IF EXISTS research_model`,
     // A child Chief's todos are its own: NULL keeps the project-wide scope top-level Chiefs share.
     `ALTER TABLE chief_todos ADD COLUMN chief_thread_id TEXT`,
+    // A provider (model '') or one of its models hit its usage limit; new spawns on it are refused until until_at.
+    `CREATE TABLE IF NOT EXISTS provider_cooldowns (provider_id TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', until_at INTEGER NOT NULL, reason TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (provider_id, model))`,
+    // One per machine: reviewers and research switch to it while their primary cools down.
+    `CREATE TABLE IF NOT EXISTS chief_fallback_model (host_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1082,6 +1096,16 @@ export default async function plugin(bb: BbPluginApi) {
   );
   const updateTodo = db.prepare<[string, string | null, string, number, number, string, string | null]>(
     `UPDATE chief_todos SET text=?, after=?, state=?, updated_at=? WHERE id=? AND project_id=? AND chief_thread_id IS ?`,
+  );
+  // ponytail: global, not per host: usage limits are account-level; key by host if a provider id ever maps to different accounts per machine.
+  // ponytail: expired rows are ignored, never cleaned; they are bounded by the provider/model pairs.
+  const anyCooldown = db.prepare<[number]>(`SELECT 1 FROM provider_cooldowns WHERE until_at > ? LIMIT 1`);
+  const cooldownFor = db.prepare<[string, string, number]>(
+    `SELECT provider_id, model, until_at, reason FROM provider_cooldowns WHERE provider_id=? AND model IN ('', ?) AND until_at > ? ORDER BY until_at DESC LIMIT 1`,
+  );
+  const upsertCooldown = db.prepare<[string, string, number, string, number]>(
+    `INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(provider_id, model) DO UPDATE SET until_at=MAX(until_at, excluded.until_at), reason=excluded.reason, updated_at=excluded.updated_at`,
   );
   let roles = new Map<string, ManagedRow>();
   let plannerActive = false;
@@ -1273,6 +1297,30 @@ export default async function plugin(bb: BbPluginApi) {
     return parseSelectionRow(roleModelRow.get(hostId, role));
   }
 
+  function readFallbackModel(hostId: string): ModelSelection | null {
+    return parseSelectionRow(db.prepare(`SELECT provider_id, model, reasoning_level FROM chief_fallback_model WHERE host_id=?`).get(hostId));
+  }
+
+  function writeFallbackModel(hostId: string, selection: ModelSelection | null) {
+    if (!selection) {
+      db.prepare(`DELETE FROM chief_fallback_model WHERE host_id=?`).run(hostId);
+      return;
+    }
+    db.prepare(`INSERT INTO chief_fallback_model (host_id, provider_id, model, reasoning_level, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(host_id) DO UPDATE SET provider_id=excluded.provider_id, model=excluded.model,
+        reasoning_level=excluded.reasoning_level, updated_at=excluded.updated_at`).run(
+      hostId, selection.providerId, selection.model, selection.reasoningLevel, Date.now(),
+    );
+  }
+
+  /** The machine's fallback when it is set, servable, and not cooling down itself; else null. */
+  async function usableFallback(hostId: string | null) {
+    const stored = hostId ? readFallbackModel(hostId) : null;
+    const usable = stored && hostId ? await usableSelection(hostId, stored) : null;
+    return usable && !cooldownError(usable.providerId, usable.model) ? usable : null;
+  }
+
   type ResearchMode = z.infer<typeof researchModeSchema>;
 
   function readResearchModel(hostId: string, mode: ResearchMode): ModelSelection | null {
@@ -1417,6 +1465,37 @@ export default async function plugin(bb: BbPluginApi) {
     const selection = hostId === null ? null : readRoleModel(hostId, role);
     if (!hostId || !selection) return {};
     return (await usableSelection(hostId, selection)) ?? {};
+  }
+
+  /** The project's default execution options, or null; the fake host lacks the method, so a sync throw must be caught too. */
+  async function projectDefaults(projectId: string) {
+    try {
+      const options = await bb.sdk.projects.defaultExecutionOptions({ projectId });
+      return options?.providerId ? { providerId: options.providerId, model: options.model ?? "" } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** execution(), refused while the provider/model it would run on cools down; a reviewer switches to the
+   * machine's usable fallback instead. Fails open when the target is unknown. */
+  async function spawnExecution(role: ModelRole, hostId: string | null, projectId: string) {
+    const selection = await execution(role, hostId);
+    if (!anyCooldown.get(Date.now())) return { selection, fallbackNote: "" };
+    const target = "providerId" in selection ? selection as { providerId: string; model: string } : await projectDefaults(projectId);
+    const cooling = target ? cooldownFor.get(target.providerId, target.model, Date.now()) as { until_at: number } | undefined : undefined;
+    if (!target || !cooling) return { selection, fallbackNote: "" };
+    const fallback = role === "reviewer" ? await usableFallback(hostId) : null;
+    if (!fallback) throw cooldownError(target.providerId, target.model)!;
+    bb.log.info(`Reviewer on ${hostId} uses fallback ${fallback.providerId}/${fallback.model}: ${target.providerId}/${target.model} is cooling down.`);
+    return { selection: fallback, fallbackNote: ` on fallback ${fallback.providerId}/${fallback.model} (primary cooling down until ${new Date(cooling.until_at).toISOString()})` };
+  }
+
+  function cooldownError(providerId: string, model: string) {
+    const row = cooldownFor.get(providerId, model, Date.now()) as { model: string; until_at: number } | undefined;
+    if (!row) return null;
+    const minutes = Math.max(1, Math.ceil((row.until_at - Date.now()) / 60_000));
+    return new Error(`Provider ${providerId}${row.model ? ` model ${row.model}` : ""} hit its usage limit and is cooling down until ${new Date(row.until_at).toISOString()} (about ${minutes} min). Starting new work on it now would fail the same way. Wait for the reset, retry the failed thread with bb thread retry <id> --send-at ${minutes + 1}m, or pick another model for this role in Chief settings.`);
   }
 
   async function defaultHostId() {
@@ -1614,6 +1693,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error("Planning is off. Turn on “Plan before delegating” in Chief's settings, or delegate this work directly.");
     }
     const { chief, projectId } = await owningChief(callerThreadId);
+    const execution = await spawnExecution("planner", await projectHostId(projectId), projectId);
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every planner turn, so the spawn prompt does not repeat them.
@@ -1644,7 +1724,7 @@ export default async function plugin(bb: BbPluginApi) {
       parentThreadId: chief.thread_id,
       visibility: "visible",
       title,
-      ...(await execution("planner", await projectHostId(projectId))),
+      ...execution.selection,
       ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
@@ -1669,6 +1749,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (workerLive.deletedAt !== null || workerLive.archivedAt !== null) throw new Error(`Worker ${worker.thread_id} is not consultable.`);
       if (!workerLive.environmentId) throw new Error(`Worker ${worker.thread_id} has no reusable environment.`);
     }
+    const hostId = worker ? await environmentHostId(workerLive!.environmentId!) : await projectHostId(projectId);
+    const execution = await spawnExecution("advisor", hostId, projectId);
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every advisor turn, so the spawn prompt does not repeat them.
@@ -1705,7 +1787,6 @@ export default async function plugin(bb: BbPluginApi) {
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
-    const hostId = worker ? await environmentHostId(workerLive!.environmentId!) : await projectHostId(projectId);
     const thread = await bb.sdk.threads.spawn({
       projectId,
       environment: worker
@@ -1715,7 +1796,7 @@ export default async function plugin(bb: BbPluginApi) {
       parentThreadId: chief.thread_id,
       visibility: "visible",
       title,
-      ...(await execution("advisor", hostId)),
+      ...execution.selection,
       ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "advisor", chiefThreadId: chief.thread_id },
@@ -1798,6 +1879,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
+    const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
+    const execution = await spawnExecution("worker", hostId, projectId);
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every worker turn, so the spawn prompt does not repeat them.
@@ -1851,7 +1934,6 @@ export default async function plugin(bb: BbPluginApi) {
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
-    const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
     const thread = await bb.sdk.threads.spawn({
       projectId,
       environment: prior
@@ -1868,7 +1950,7 @@ export default async function plugin(bb: BbPluginApi) {
       parentThreadId: chief.thread_id,
       visibility: "visible",
       title: params.title,
-      ...(await execution("worker", hostId)),
+      ...execution.selection,
       ...(await lifecycleOwner(chief.thread_id)),
       prompt,
       pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id },
@@ -2055,6 +2137,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (BUSY_STATUSES.has(live.status)) throw new Error(`Worker ${workerThreadId} is ${live.status}; wait until it is idle before starting a review.`);
       if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
       if (!live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
+      const execution = await spawnExecution("reviewer", await environmentHostId(live.environmentId), worker.project_id);
       const sectionId = await ensureSection();
       // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
       // the rules into every reviewer turn, so the spawn prompt does not repeat them.
@@ -2102,7 +2185,7 @@ export default async function plugin(bb: BbPluginApi) {
         parentThreadId: worker.chief_thread_id ?? undefined,
         visibility: "visible",
         title,
-        ...(await execution("reviewer", await environmentHostId(live.environmentId))),
+        ...execution.selection,
         ...(await lifecycleOwner(worker.chief_thread_id)),
         prompt,
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
@@ -2116,7 +2199,7 @@ export default async function plugin(bb: BbPluginApi) {
         })();
         reloadRoles();
       }
-      return { threadId: thread.id, title, workerThreadId, created: true };
+      return { threadId: thread.id, title, workerThreadId, created: true, fallbackNote: execution.fallbackNote };
     })();
     reviewStarts.set(workerThreadId, start);
     try {
@@ -2142,6 +2225,8 @@ export default async function plugin(bb: BbPluginApi) {
     const start = (async () => {
       const duplicate = existingBranchReview.get(chiefThreadId, projectId, branch) as ManagedRow | undefined;
       if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId: null, created: false };
+      const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
+      const execution = await spawnExecution("reviewer", hostId, projectId);
       const sectionId = await ensureSection();
       // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
       // the rules into every reviewer turn, so the spawn prompt does not repeat them.
@@ -2157,7 +2242,6 @@ export default async function plugin(bb: BbPluginApi) {
         focus,
         provenance: [],
       });
-      const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
       const thread = await bb.sdk.threads.spawn({
         projectId,
         environment: {
@@ -2169,7 +2253,7 @@ export default async function plugin(bb: BbPluginApi) {
         parentThreadId: chiefThreadId,
         visibility: "visible",
         title,
-        ...(await execution("reviewer", hostId)),
+        ...execution.selection,
         ...(await lifecycleOwner(chiefThreadId)),
         prompt,
         pluginMetadata: { role: "reviewer", chiefThreadId },
@@ -2178,7 +2262,7 @@ export default async function plugin(bb: BbPluginApi) {
         threadId: thread.id, role: "reviewer", projectId, chiefThreadId, parentThreadId: chiefThreadId, title,
         state: "starting", status: thread.status, branch, prUrl: pullRequestRef,
       });
-      return { threadId: thread.id, title, workerThreadId: null, created: true };
+      return { threadId: thread.id, title, workerThreadId: null, created: true, fallbackNote: execution.fallbackNote };
     })();
     reviewStarts.set(key, start);
     try {
@@ -2577,6 +2661,7 @@ export default async function plugin(bb: BbPluginApi) {
     const transient = failure && transientFailure(failure.text);
     if (!failure || !transient) return;
     const { usageLimit, resetSeconds } = transient;
+    const cooling = usageLimit ? await noteCooldown(thread.id, failure) : null;
     const resetAt = resetSeconds === null ? null : failure.at + resetSeconds * 1000;
     const minutes = resetAt === null ? null : Math.max(1, Math.ceil((resetAt - Date.now()) / 60_000) + 1);
     const backoff = minutes !== null ? `${minutes}m` : usageLimit ? "15m" : "2m";
@@ -2586,6 +2671,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...(!usageLimit ? [] : resetAt !== null
         ? [`Usage limit resets at ${new Date(resetAt).toISOString()} (about ${minutes} min from now).`]
         : ["The error does not say when the usage limit resets."]),
+      ...(cooling ? [`New chief_delegate/chief_review/chief_plan/chief_consult/chief_research work on ${cooling.providerId}${cooling.model ? `/${cooling.model}` : ""} is refused until ${new Date(cooling.until).toISOString()}.`] : []),
       `Do not spawn a replacement: a fresh thread on the same provider and model hits the same error. Retry this same thread with: bb thread retry ${row.thread_id} --send-at ${backoff} --reason "${usageLimit ? "usage limit reset" : "transient provider error"}"`,
       "If the retry fails the same way again, escalate to the user (wait for the limit or switch provider/model) instead of retrying again.",
     ].join("\n"));
@@ -2945,6 +3031,34 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** Records a usage-limit failure as a cooldown on the thread's provider (or model, for model_cooldown). Never throws. */
+  // ponytail: model_cooldown is text-matched like transientFailure; switch to errorInfo.category once providers populate it.
+  async function noteCooldown(threadId: string, failure: { text: string; at: number }) {
+    const transient = transientFailure(failure.text);
+    if (!transient?.usageLimit) return null;
+    // The thread carries its provider; its execution options carry the model.
+    let options: { providerId?: string; model?: string } | null = null;
+    try {
+      const [live, execution] = await Promise.all([bb.sdk.threads.get({ threadId }), bb.sdk.threads.defaultExecutionOptions({ threadId })]);
+      options = { providerId: live?.providerId, model: execution?.model };
+    } catch (error) {
+      bb.log.warn(`Could not read the provider of ${threadId}: ${String(error)}`);
+    }
+    if (!options?.providerId) {
+      bb.log.warn(`No provider known for ${threadId}; its usage limit is not recorded as a cooldown.`);
+      return null;
+    }
+    const modelCooldown = /model_cooldown/i.test(failure.text);
+    if (modelCooldown && !options.model) {
+      bb.log.warn(`No model known for ${threadId}; its model cooldown is not recorded, so other models on ${options.providerId} stay usable.`);
+      return null;
+    }
+    const model = modelCooldown ? options.model! : "";
+    const until = failure.at + (transient.resetSeconds ?? 15 * 60) * 1000;
+    upsertCooldown.run(options.providerId, model, until, clip(failure.text, 400), Date.now());
+    return { providerId: options.providerId, model, until };
+  }
+
   async function inspect(threadId: string, projectId: string) {
     const row = roles.get(threadId);
     if (!row || row.project_id !== projectId) throw new Error(`No managed thread ${threadId} for this Chief project.`);
@@ -3025,7 +3139,9 @@ export default async function plugin(bb: BbPluginApi) {
     const stored = hostId ? readResearchModel(hostId, mode) : null;
     const usable = stored && hostId ? await usableSelection(hostId, stored, catalogReader(hostId)) : null;
     let pick: WorkflowSelection | null = usable ? { provider: usable.providerId, model: usable.model, reasoningLevel: usable.reasoningLevel } : null;
-    const callerMode = (await bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null))?.permissionMode ?? null;
+    const callerOptions = await bb.sdk.threads.defaultExecutionOptions({ threadId }).catch(() => null);
+    const callerMode = callerOptions?.permissionMode ?? null;
+    const caller = live?.providerId ? { providerId: live.providerId, model: callerOptions?.model ?? "" } : null;
     const providers = hostId && callerMode
       ? await discover((signal) => bb.sdk.providers.list({ hostId, signal }), "Provider discovery").catch(() => null)
       : null;
@@ -3044,8 +3160,14 @@ export default async function plugin(bb: BbPluginApi) {
       const chosen = override && !misfit(override, `${stage} override`) ? override : pick;
       if (chosen) models[stage] = chosen;
     }
+    // Only reached when something cools down: the gate in research() asks for it lazily.
+    const fallbackFor = async () => {
+      const fallback = await usableFallback(hostId);
+      const selection = fallback && { provider: fallback.providerId, model: fallback.model, reasoningLevel: fallback.reasoningLevel };
+      return selection && !misfit(selection, "fallback") ? selection : null;
+    };
     for (const note of notes) bb.log.warn(note);
-    return { models, notes, hostId, callerProvider: live?.providerId ?? null };
+    return { models, notes, hostId, caller, fallbackFor };
   }
 
   /** Why the run cannot start (a provider signed out or at 100% of a usage window), or null. */
@@ -3091,6 +3213,10 @@ export default async function plugin(bb: BbPluginApi) {
       const counts = new Map<string, number>();
       for (const call of failed) counts.set(call.phase ?? "?", (counts.get(call.phase ?? "?") ?? 0) + 1);
       const first = failed[0];
+      if (first.childThreadId) {
+        const failure = await lastProviderError(first.childThreadId);
+        if (failure) await noteCooldown(first.childThreadId, failure);
+      }
       const output = first.childThreadId ? await lastOutput(first.childThreadId) : null;
       return `Failed agent calls: ${[...counts].map(([phase, n]) => `${phase} ×${n}`).join(", ")}. First failure (${first.phase ?? "?"}, thread ${first.childThreadId ?? "?"}): ${output ? clip(output, 300) : "(no output)"}`;
     } catch {
@@ -3156,9 +3282,22 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`This ${mode} needs ${calls} agent calls; the limit is ${cap}. ${fix}`);
     }
     const script = RESEARCH_SCRIPTS[mode];
-    const { models, notes, hostId, callerProvider } = await researchModels(context.threadId, mode, params.models);
+    const { models, notes, hostId, caller, fallbackFor } = await researchModels(context.threadId, mode, params.models);
+    if (anyCooldown.get(Date.now())) {
+      let fallback: WorkflowSelection | null | undefined;
+      for (const stage of stageSchema.options) {
+        const chosen = models[stage];
+        const target = chosen ? { providerId: chosen.provider, model: chosen.model } : caller;
+        const cooling = target ? cooldownError(target.providerId, target.model) : null;
+        if (!cooling) continue;
+        fallback ??= await fallbackFor();
+        if (!fallback) throw cooling;
+        models[stage] = fallback;
+        notes.push(`Research ${stage} stage uses fallback ${fallback.provider}/${fallback.model}: ${target!.providerId}${target!.model ? `/${target!.model}` : ""} is cooling down.`);
+      }
+    }
     const stages: Stage[] = ["scan", ...(mode !== "investigate" && params.verify ? ["verify" as const] : []), ...(mode === "investigate" ? ["combine" as const] : [])];
-    const providerIds = stages.map((stage) => models[stage]?.provider ?? callerProvider).filter((id): id is string => !!id);
+    const providerIds = stages.map((stage) => models[stage]?.provider ?? caller?.providerId).filter((id): id is string => !!id);
     const blocked = hostId ? await researchPreflight(hostId, providerIds) : null;
     if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher model in Chief settings or retry after the reset.`);
     const prefix = notes.length ? notes.join("\n") + "\n\n" : "";
@@ -3407,7 +3546,7 @@ export default async function plugin(bb: BbPluginApi) {
         await controlledTarget(params.workerThreadId, caller);
         touchCallerChief(caller);
         const review = await startReview(params.workerThreadId, params.focus);
-        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}.`;
+        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}${"fallbackNote" in review ? review.fallbackNote : ""}.`;
       }
       if (!isActiveChief(caller)) {
         throw new Error("chief_review requires a registered Chief thread.");
@@ -3417,7 +3556,7 @@ export default async function plugin(bb: BbPluginApi) {
         ?? (await resolvePullRequestBranch(params.pullRequest!, await projectPath(caller.project_id)))
         ?? params.pullRequest!;
       const review = await startBranchReview(caller.thread_id, caller.project_id, branch, params.pullRequest ?? null, params.focus);
-      return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}.`;
+      return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}${"fallbackNote" in review ? review.fallbackNote : ""}.`;
     },
   });
   bb.agents.registerTool({
@@ -3544,6 +3683,7 @@ export default async function plugin(bb: BbPluginApi) {
           reviewer: readRoleModel(host.id, "reviewer"),
           advisor: readRoleModel(host.id, "advisor"),
         };
+        const fallbackSelection = readFallbackModel(host.id);
         // A connected machine can answer for its own picks, so say which ones it
         // would refuse instead of showing a model the next spawn will ignore.
         // One reader for the whole host: roles sharing a provider scan it once.
@@ -3565,6 +3705,8 @@ export default async function plugin(bb: BbPluginApi) {
           ...scan,
           selections,
           unusable: flagged.filter((role): role is ModelRole => role !== null),
+          fallbackSelection,
+          fallbackUnusable: connected && !!fallbackSelection && !(await usableSelection(host.id, fallbackSelection, read)),
         };
       })),
     }),
@@ -3613,6 +3755,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (timeouts.investigate !== undefined) values.researchInvestigateTimeoutMinutes = timeouts.investigate;
       researchActive = researchFrom(await settings.experimental_set(values));
       return researchActive;
+    },
+    setFallbackModel: ({ hostId, selection }) => {
+      writeFallbackModel(hostId, selection);
+      return { ok: true as const };
     },
     setRoleModel: ({ hostId, role, selection }) => {
       writeRoleModel(hostId, role, selection);
@@ -3792,14 +3938,14 @@ export default async function plugin(bb: BbPluginApi) {
           if (parsed.data.workerThreadId) {
             await scoped(parsed.data.workerThreadId);
             const result = await startReview(parsed.data.workerThreadId, parsed.data.focus);
-            return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}.`);
+            return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}${"fallbackNote" in result ? result.fallbackNote : ""}.`);
           }
           const { chief, projectId } = await owningChief(context.threadId);
           const branch = parsed.data.branch
             ?? (await resolvePullRequestBranch(parsed.data.pullRequest!, await projectPath(projectId)))
             ?? parsed.data.pullRequest!;
           const result = await startBranchReview(chief.thread_id, projectId, branch, parsed.data.pullRequest ?? null, parsed.data.focus);
-          return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}.`);
+          return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}${"fallbackNote" in result ? result.fallbackNote : ""}.`);
         }
         if (command === "complete") {
           const threadId = args.positional[0];

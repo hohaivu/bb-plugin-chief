@@ -59,6 +59,9 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
   let spawnIndex = 0;
   let sendFailures = 0;
   let callerPermissionMode = "auto";
+  let threadExecution: { model?: string } | null | undefined = null;
+  let projectDefaults: { providerId: string; model: string } | null = null;
+  let projectDefaultsReads = 0;
   let getFailures = new Map<string, number>();
   let patch = "diff --git a/totals.ts b/totals.ts\n+const total = subtotal - discount;";
   let updateFailures = new Map<string, number>();
@@ -100,6 +103,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           ...(options.projectPath ? { sources: [{ path: options.projectPath, hostId: "host_1", isDefault: true }] } : {}),
         }),
         fileContent: async () => { throw new Error("missing"); },
+        defaultExecutionOptions: async () => { projectDefaultsReads += 1; return projectDefaults; },
       },
       hosts: { list: async () => [{ id: "host_1", name: "Local", status: options.hostStatus ?? "connected" }] },
       // Thread storage sits on host_storage, not this machine: a plan must be written through it.
@@ -144,7 +148,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
       },
       threads: {
         events: { list: async ({ threadId }: { threadId: string }) => eventsStore.get(threadId) ?? [] },
-        defaultExecutionOptions: async () => ({ permissionMode: callerPermissionMode }),
+        defaultExecutionOptions: async () => threadExecution === undefined ? null : ({ permissionMode: callerPermissionMode, ...(threadExecution ?? {}) }),
         spawn: async (args: any) => {
           spawned.push(args);
           spawnIndex += 1;
@@ -255,6 +259,10 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
     setCallerPermissionMode(mode: string) { callerPermissionMode = mode; },
+    /** undefined makes defaultExecutionOptions resolve null. */
+    setThreadExecution(next: { model?: string } | null | undefined) { threadExecution = next; },
+    setProjectDefaults(next: { providerId: string; model: string } | null) { projectDefaults = next; },
+    projectDefaultsReads: () => projectDefaultsReads,
     tabs: (threadId: string) => tabsStore.get(threadId)?.tabs ?? [],
     seedTabs(threadId: string, tabs: any[]) { tabsStore.set(threadId, { revision: 7, tabs }); },
     failTabsUpdates(count: number) { tabsUpdateFailures = count; },
@@ -932,6 +940,193 @@ describe("Chief backend", () => {
     const worker = await delegate(state, chief.threadId);
     await failWith(state, worker.threadId, "context window exceeded");
     expect(state.sent).toHaveLength(0);
+  });
+
+  const MODEL_COOLDOWN = `cpa API error (429): {"code":"model_cooldown","model":"gpt-6-astra","reset_seconds":2194}`;
+  /** Fails the thread on codex (model gpt-6-astra) with the given provider error. */
+  async function coolDown(state: Awaited<ReturnType<typeof setup>>, threadId: string, detail: string) {
+    state.live.set(threadId, { ...state.live.get(threadId)!, providerId: "codex" });
+    state.setThreadExecution({ model: "gpt-6-astra" });
+    await failWith(state, threadId, detail);
+  }
+  const ISO = /cooling down until \d{4}-\d\d-\d\dT[\d:.]+Z/;
+
+  test("cooldown: a per-model usage limit refuses chief_review on that model", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "reviewer", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+    });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: worker.threadId, projectId: "proj_1" });
+    const sentBefore = state.sent.length;
+    await coolDown(state, worker.threadId, MODEL_COOLDOWN);
+    expect(state.sent.at(-1).input[0].text).toMatch(/work on codex\/gpt-6-astra is refused until \d{4}-/);
+    expect(state.sent.length).toBe(sentBefore + 1);
+    const spawnedBefore = state.spawned.length;
+    await expect(state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts))
+      .rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
+    await expect(state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts)).rejects.toThrow(ISO);
+    expect(state.spawned).toHaveLength(spawnedBefore);
+    // The refused call left nothing behind: once the cooldown expires, the review starts.
+    state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+  });
+
+  test("cooldown: a provider-wide limit blocks delegate, plan, consult and branch review until it expires", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await coolDown(state, worker.threadId, "429 usage_limit_reached");
+    expect(state.db.prepare("SELECT provider_id, model FROM provider_cooldowns").all()).toEqual([{ provider_id: "codex", model: "" }]);
+    // No role pick: the spawn would run on the project default.
+    state.setProjectDefaults({ providerId: "codex", model: "gpt-6-mini" });
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const spawnedBefore = state.spawned.length;
+    const tools: [string, Record<string, unknown>][] = [
+      ["chief_delegate", { title: "Next", mission: "Do it", unplannedReason: "Bounded test fixture" }],
+      ["chief_plan", { title: "Rework", mission: "Propose" }],
+      ["chief_consult", { title: "Diagnose", mission: "Explore" }],
+      ["chief_review", { branch: "feature/x" }],
+    ];
+    const sectionRow = () => state.db.prepare("SELECT value FROM plugin_meta WHERE key='section_id'").get();
+    for (const [tool, params] of tools) {
+      // The gate runs before ensureSection: a refused call writes no section row.
+      state.db.prepare("DELETE FROM plugin_meta WHERE key='section_id'").run();
+      await expect(state.harness.behavior.callAgentTool(tool, params, opts)).rejects.toThrow(/Provider codex hit its usage limit/);
+      expect(sectionRow()).toBeUndefined();
+    }
+    expect(state.spawned).toHaveLength(spawnedBefore);
+    state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
+    await state.harness.behavior.callAgentTool(...tools[0]!, opts);
+    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+  });
+
+  test("cooldown: a per-model cooldown leaves another model of the same provider alone", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "worker", selection: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" },
+    });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await coolDown(state, worker.threadId, MODEL_COOLDOWN);
+    await delegate(state, chief.threadId, "Second");
+    expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
+  });
+
+  test("cooldown: a model_cooldown with no known model records nothing and blocks no other model", async () => {
+    for (const execution of [undefined, {}]) {
+      const state = await setup();
+      await state.harness.behavior.callRpc("setRoleModel", {
+        hostId: "host_1", role: "worker", selection: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" },
+      });
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId);
+      state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, providerId: "codex" });
+      state.setThreadExecution(execution);
+      await failWith(state, worker.threadId, MODEL_COOLDOWN);
+      expect(state.db.prepare("SELECT * FROM provider_cooldowns").all()).toEqual([]);
+      await delegate(state, chief.threadId, "Second");
+      expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
+    }
+  });
+
+  test("cooldown: a connection error records nothing, and no live cooldown costs no SDK read", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await coolDown(state, worker.threadId, "Connection error.");
+    expect(state.db.prepare("SELECT * FROM provider_cooldowns").all()).toEqual([]);
+    await delegate(state, chief.threadId, "Second");
+    expect(state.projectDefaultsReads()).toBe(0);
+  });
+
+  test("cooldown: an unknown provider records nothing and the alert still lands", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, providerId: "" });
+    await failWith(state, worker.threadId, "429 usage_limit_reached");
+    expect(state.db.prepare("SELECT * FROM provider_cooldowns").all()).toEqual([]);
+    expect(state.sent.at(-1).input[0].text).not.toContain("is refused until");
+  });
+
+  const FALLBACK = { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" };
+  /** A ready worker whose reviewer pick (codex/gpt-6-astra) is cooling down. */
+  async function coolingReviewer(fallback: unknown) {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "reviewer", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+    });
+    await state.harness.behavior.callRpc("setFallbackModel", { hostId: "host_1", selection: fallback });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: worker.threadId, projectId: "proj_1" });
+    await coolDown(state, worker.threadId, MODEL_COOLDOWN);
+    const review = () => state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" });
+    return { state, chief, worker, review };
+  }
+
+  test("fallback: a cooling reviewer spawns on the machine's fallback and the reply names it", async () => {
+    const { state, review } = await coolingReviewer(FALLBACK);
+    const reply = await review();
+    expect(state.spawned.at(-1)).toMatchObject({ providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" });
+    expect(reply).toMatch(/on fallback claude-code\/claude-opus-5 \(primary cooling down until \d{4}-[\d\-T:.]+Z\)\.$/);
+  });
+
+  test("fallback: a cooling, unusable or unset fallback keeps wave 1's refusal", async () => {
+    for (const fallback of [{ ...FALLBACK, providerId: "codex", model: "gpt-6-astra" }, { ...FALLBACK, model: "claude-retired" }, null]) {
+      const { state, review } = await coolingReviewer(fallback);
+      const spawnedBefore = state.spawned.length;
+      await expect(review()).rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
+      expect(state.spawned).toHaveLength(spawnedBefore);
+    }
+  });
+
+  test("fallback: a refused review leaves the previous reviewer not complete", async () => {
+    const { state, worker, review } = await coolingReviewer(null);
+    state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
+    await review();
+    const first = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Changes", verdict: "request_changes" }, { threadId: first.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Fixed" }, { threadId: worker.threadId, projectId: "proj_1" });
+    state.db.prepare("UPDATE provider_cooldowns SET until_at=?").run(Date.now() + 600_000);
+    await expect(review()).rejects.toThrow(/hit its usage limit/);
+    expect((state.db.prepare("SELECT state FROM managed_threads WHERE thread_id=?").get(first.threadId) as { state: string }).state).not.toBe("complete");
+  });
+
+  test("fallback: worker, planner and advisor never use it", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    await state.harness.behavior.callRpc("setFallbackModel", { hostId: "host_1", selection: FALLBACK });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await coolDown(state, worker.threadId, "429 usage_limit_reached");
+    state.setProjectDefaults({ providerId: "codex", model: "gpt-6-mini" });
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    for (const [tool, params] of [
+      ["chief_delegate", { title: "Next", mission: "Do it", unplannedReason: "Bounded test fixture" }],
+      ["chief_plan", { title: "Rework", mission: "Propose" }],
+      ["chief_consult", { title: "Diagnose", mission: "Explore" }],
+    ] as const) {
+      await expect(state.harness.behavior.callAgentTool(tool, params, opts)).rejects.toThrow(/Provider codex hit its usage limit/);
+    }
+    // The branch review on the same project default does switch.
+    expect(await state.harness.behavior.callAgentTool("chief_review", { branch: "feature/x" }, opts)).toContain("on fallback claude-code/claude-opus-5");
+  });
+
+  test("fallback: modelConfiguration reports it and setFallbackModel(null) clears it", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setFallbackModel", { hostId: "host_1", selection: { ...FALLBACK, model: "claude-retired" } });
+    const stale = (await state.harness.behavior.callRpc("modelConfiguration", null)).hosts[0]!;
+    expect(stale).toMatchObject({ fallbackSelection: { ...FALLBACK, model: "claude-retired" }, fallbackUnusable: true });
+    await state.harness.behavior.callRpc("setFallbackModel", { hostId: "host_1", selection: FALLBACK });
+    expect((await state.harness.behavior.callRpc("modelConfiguration", null)).hosts[0]).toMatchObject({ fallbackSelection: FALLBACK, fallbackUnusable: false });
+    await state.harness.behavior.callRpc("setFallbackModel", { hostId: "host_1", selection: null });
+    expect((await state.harness.behavior.callRpc("modelConfiguration", null)).hosts[0]).toMatchObject({ fallbackSelection: null, fallbackUnusable: false });
   });
 
   test("supersedes an undelivered alert instead of re-delivering it after a newer report", async () => {
@@ -3003,6 +3198,8 @@ describe("Chief backend", () => {
         advisor: null,
       },
       unusable: [],
+      fallbackSelection: null,
+      fallbackUnusable: false,
     }]);
 
     await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "worker", selection: null });
@@ -4113,6 +4310,36 @@ describe("chief_research", () => {
   }
   const call = (state: Awaited<ReturnType<typeof setup>>, threadId: string, params: unknown, signal?: AbortSignal) =>
     state.harness.behavior.callAgentTool("chief_research", params, { threadId, projectId: "proj_1", ...(signal ? { signal } : {}) });
+
+  test("cooldown: refuses a fresh run on the caller's cooling model, but never a runId resume", async () => {
+    const state = await setup();
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => done });
+    const chief = await roleThread(state, "chief");
+    state.live.set(chief, { ...state.live.get(chief)!, providerId: "codex" });
+    state.setThreadExecution({ model: "gpt-6-astra" });
+    state.db.prepare("INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES ('codex', 'gpt-6-astra', ?, 'x', 0)").run(Date.now() + 600_000);
+    await expect(call(state, chief, survey())).rejects.toThrow(/cooling down until \d{4}-/);
+    expect(calls("run")).toHaveLength(0);
+    expect(await call(state, chief, { mode: "survey", runId: "wfr_1" })).toContain("status: succeeded");
+  });
+
+  test("fallback: a cooling stage runs on the machine's fallback; a misfit fallback refuses", async () => {
+    const state = await setup();
+    workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => done });
+    const chief = await roleThread(state, "chief");
+    state.live.set(chief, { ...state.live.get(chief)!, providerId: "codex" });
+    state.setThreadExecution({ model: "gpt-6-astra" });
+    state.db.prepare("INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES ('codex', 'gpt-6-astra', ?, 'x', 0)").run(Date.now() + 600_000);
+    await state.harness.behavior.callRpc("setFallbackModel", { hostId: "host_1", selection: { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" } });
+    expect(await call(state, chief, survey())).toMatch(/^Research \w+ stage uses fallback claude-code\/claude-opus-5: codex\/gpt-6-astra is cooling down\./);
+    const fallback = { provider: "claude-code", model: "claude-opus-5", reasoningLevel: "high" };
+    expect(Object.values(sentArgs().models)).toEqual([fallback, fallback, fallback]);
+    // Antigravity cannot run the caller's "auto" mode.
+    await state.harness.behavior.callRpc("setFallbackModel", { hostId: "host_1", selection: { providerId: "acp-antigravity", model: "gemini-3-pro", reasoningLevel: "high" } });
+    const runs = calls("run").length;
+    await expect(call(state, chief, survey())).rejects.toThrow(/cooling down until \d{4}-/);
+    expect(calls("run")).toHaveLength(runs);
+  });
 
   test.each(["worker", "advisor"])("rejects a %s caller", async (role) => {
     const state = await setup();
