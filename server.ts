@@ -730,6 +730,15 @@ function clip(value: string, limit = MAX_ALERT_LENGTH) {
  * (the mission) and its trailing sections (Context, where a plan file path now
  * lives) both survive the cut, instead of the tail-only clip() dropping whichever
  * section comes last. */
+function clipMiddle(value: string, limit: number) {
+  const marker = "\n…\n";
+  if (value.length <= limit || limit <= marker.length) return clip(value, limit);
+  const room = limit - marker.length;
+  const head = Math.ceil(room / 2);
+  const tail = room - head;
+  return `${value.slice(0, head)}${marker}${value.slice(value.length - tail)}`;
+}
+
 /** A provider failure worth retrying on the same thread, or null. Text-matched: pi reports
  * 429s and connection drops only as provider/error detail, with no errorInfo. */
 // ponytail: heuristic regexes; switch to errorInfo.category once providers populate it.
@@ -738,15 +747,6 @@ function transientFailure(text: string): { usageLimit: boolean; resetSeconds: nu
   if (!usageLimit && !/connection error|connection-failed|stream-disconnected|overloaded|ECONNRESET|ETIMEDOUT|socket hang up|\b50[234]\b/i.test(text)) return null;
   const reset = /"?reset_seconds"?\s*[:=]\s*(\d+)/.exec(text);
   return { usageLimit, resetSeconds: reset ? Number(reset[1]) : null };
-}
-
-function clipMiddle(value: string, limit: number) {
-  const marker = "\n…\n";
-  if (value.length <= limit || limit <= marker.length) return clip(value, limit);
-  const room = limit - marker.length;
-  const head = Math.ceil(room / 2);
-  const tail = room - head;
-  return `${value.slice(0, head)}${marker}${value.slice(value.length - tail)}`;
 }
 
 function bullets(values?: string[]) {
