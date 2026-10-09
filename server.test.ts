@@ -2981,7 +2981,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Tax is off", verdict: "request_changes",
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
-    const before = state.db.prepare("SELECT state, verdict, regression, reject_streak FROM managed_threads WHERE thread_id=?").get(reviewer.threadId);
+    const before = state.db.prepare("SELECT state, verdict, regression, reject_streak, verdict_path FROM managed_threads WHERE thread_id=?").get(reviewer.threadId);
     const sentBefore = state.sent.filter((entry: any) => entry.threadId === reviewer.threadId).length;
 
     await expect(state.harness.behavior.callAgentTool(
@@ -2991,8 +2991,8 @@ describe("Chief backend", () => {
     expect(cliResult.exitCode).toBe(1);
     expect(cliResult.stderr).toContain("chief_review");
     expect(state.sent.filter((entry: any) => entry.threadId === reviewer.threadId)).toHaveLength(sentBefore);
-    expect(state.db.prepare("SELECT state, verdict, regression, reject_streak FROM managed_threads WHERE thread_id=?").get(reviewer.threadId)).toEqual(before);
-    expect(before).toMatchObject({ state: "ready", verdict: "request_changes" });
+    expect(state.db.prepare("SELECT state, verdict, regression, reject_streak, verdict_path FROM managed_threads WHERE thread_id=?").get(reviewer.threadId)).toEqual(before);
+    expect(before).toMatchObject({ state: "ready", verdict: "request_changes", verdict_path: expect.any(String) });
   });
 
   test("refuses chief_continue on a worker that already reported complete", async () => {
