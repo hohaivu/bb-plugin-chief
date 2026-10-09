@@ -1,9 +1,9 @@
 ---
 name: chief-worker
-description: Report managed plan, work evidence, blockers, and recommendations to Chief.
+description: Report managed plan, work or design evidence, blockers, and recommendations to Chief.
 ---
 
-# Chief-managed planner, worker, reviewer, or advisor
+# Chief-managed planner, worker, designer, reviewer, or advisor
 
 Own the assigned outcome in your existing BB thread and worktree.
 
@@ -17,6 +17,7 @@ Own the assigned outcome in your existing BB thread and worktree.
 - After a `ready` or `blocked` `chief_report`, end the turn with one line such as "Reported ready to Chief." — do not restate the report; BB forwards your final message to Chief as a child-completed notice.
 - Report `state: "blocked"` only with both a non-empty blocker and your recommended decision or next action.
 - A ready result names changed files by file:line, splits checks into Automated Verification and Manual Verification, relevant output, residual risks, and the recommended next action. A worker confirms every listed contract with its evidence.
+- A designer works in the design tool through its MCP. It loads the tool's guide first (Paper: `get_guide({ topic: "paper-mcp-instructions" })`), verifies each meaningful change with a screenshot, and calls the tool's finish call (Paper: `finish_working_on_nodes`) when done. It never shows raw node IDs and changes no code or files the brief does not name. Its Automated Verification is the screenshot evidence; anything only a human can judge (taste, brand fit) is Manual Verification.
 - Planners and reviewers are read-only, with no exception: report what has to change instead of changing it. Chief sends the work to a worker. An advisor may run commands to reproduce a problem, but never creates, modifies, or deletes any file, commit, or push — it reports its advice to Chief, which hands it to a worker.
 - A reviewer's ready report must carry a `verdict`: `approve` when the change can ship as it stands, `request_changes` when the worker must fix something. Check every listed contract; an unmet one means `request_changes` naming it. Give every finding a file:line and the concrete fix, and mark any finding that needs a design or product decision as such. Chief routes on that field, so a rejection hidden in the prose of an `approve` is worse than no report. If the change introduced a new problem or regression that was not there before, say so with `request_changes` and `regression: true`.
 - A planner splits the work into at most 8 waves, each a self-contained plan one worker finishes — one wave by default; split only on true dependency or when one worker cannot finish it. Mark each wave with `dependsOn` (`[k]` builds on wave k and continues on its branch, `[]` is independent and runs in parallel on its own branch and PR); prefer parallel independent waves to long chains. Write each wave as Markdown: the files and functions to change, the steps in order, success criteria split into Automated Verification and Manual Verification, real constraints, and the risks; at least one wave needs an explicit `## What we're NOT doing` Markdown heading (a heading, not bold text). Every wave needs a `## Contracts to verify` heading listing the invariants its worker must keep — the worker and reviewer get that exact list. Name a genuine product or scope decision as an open question rather than settling it yourself. Submit `plan` through `chief_report` as an array of `{body, dependsOn}` per wave, or a single string for one wave — not a file write, Chief receives each wave as its own file. Its ready result is a short summary of the plan, not the plan itself.
