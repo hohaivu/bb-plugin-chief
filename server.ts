@@ -525,11 +525,28 @@ const stopParams = z.object({
   reason: z.string().trim().max(1_000).optional().describe("Why it is being stopped: what the evidence shows it stuck on."),
 });
 
+const failEntry = z.object({
+  text: z.string().trim().min(1).max(400),
+  scope: z.string().trim().min(1).max(120),
+  basis: z.string().trim().min(1).max(200).describe("the command, test or input that reproduces it"),
+});
+type FailEntry = z.infer<typeof failEntry>;
+const MAX_CARRIED_FAILS = 12;
+const failsParam = z.array(failEntry).max(5).optional().describe(
+  "Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most 5 per report.",
+);
+const MAX_LOG_READ = 30;
+const logParams = z.object({
+  entries: z.array(failEntry.extend({ kind: z.enum(["FACT", "FAIL"]) })).max(5).optional().describe(
+    "Notes for peer waves: FACT for a finding that could change their next step, FAIL for a dead end. Omit to only read.",
+  ),
+});
 const optionalReport = z.object({
   state: z.enum(["active", "idle", "failed"]),
   result: z.string().trim().max(MAX_RESULT_LENGTH).optional(),
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
+  fails: failsParam,
 });
 const planWavesSchema = z.array(z.object({
   body: z.string().trim().min(1).max(MAX_PLAN_LENGTH),
@@ -578,12 +595,14 @@ const readyReport = z.object({
   ),
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
+  fails: failsParam,
 });
 const blockedReport = z.object({
   state: z.literal("blocked"),
   result: z.string().trim().max(MAX_RESULT_LENGTH).optional(),
   blocker: z.string().trim().min(1).max(4_000),
   recommendation: z.string().trim().min(1).max(4_000),
+  fails: failsParam,
 });
 const reportParams = z.discriminatedUnion("state", [optionalReport, readyReport, blockedReport]);
 
@@ -695,6 +714,10 @@ interface ManagedRow {
   verdict_path: string | null;
   /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. */
   kind: string | null;
+  /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
+  fails: string | null;
+  /** Worker row on a plan: the highest plan_log id chief_log has shown it, or null. */
+  log_read_id: number | null;
   /** Non-transient failed events counted for bb chief stats (since stats_since). */
   thread_errors: number;
   /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
@@ -1057,6 +1080,12 @@ export const MIGRATIONS = [
     // Nested Chiefs were removed: existing ones become ordinary top-level Chiefs, and their todos join the project-wide list.
     `UPDATE managed_threads SET chief_thread_id=NULL, state=CASE WHEN state IN ('ready','blocked') THEN 'idle' ELSE state END, blocker=CASE WHEN state='blocked' THEN NULL ELSE blocker END WHERE role='chief' AND chief_thread_id IS NOT NULL`,
     `UPDATE chief_todos SET chief_thread_id=NULL WHERE chief_thread_id IS NOT NULL`,
+    // Approaches a worker or reviewer ruled out, carried down a replaces: chain into the successor's brief.
+    `ALTER TABLE managed_threads ADD COLUMN fails TEXT`,
+    // Shared plan-run log: FACT/FAIL notes workers on one plan read with chief_log, each from its own cursor.
+    `CREATE TABLE plan_log (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_thread_id TEXT NOT NULL, author_thread_id TEXT NOT NULL, wave INTEGER, kind TEXT NOT NULL CHECK (kind IN ('FACT','FAIL')), text TEXT NOT NULL, scope TEXT NOT NULL, basis TEXT NOT NULL, created_at TEXT NOT NULL)`,
+    `CREATE INDEX plan_log_plan ON plan_log(plan_thread_id, id)`,
+    `ALTER TABLE managed_threads ADD COLUMN log_read_id INTEGER`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1115,6 +1144,10 @@ export default async function plugin(bb: BbPluginApi) {
   // chief_review recommendation.
   const latestReviewForWorker = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  );
+  // Every reviewer of a worker, whatever its state: chainFails reads completed reviewers too.
+  const reviewerFails = db.prepare<[string]>(
+    `SELECT fails FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? AND fails IS NOT NULL ORDER BY created_at DESC, rowid DESC`,
   );
   const existingBranchReview = db.prepare<[string, string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND chief_thread_id=? AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
@@ -1842,6 +1875,33 @@ export default async function plugin(bb: BbPluginApi) {
     return run;
   }
 
+  /** Fails ruled out along a replaces: chain, newest first, from worker threadId back to the chain head. */
+  function chainFails(threadId: string): FailEntry[] {
+    // Stored oldest-first; `at` is the report time (absent on older rows, which sort as oldest).
+    type Stored = FailEntry & { at?: number };
+    const parse = (json: string | null) => (json ? JSON.parse(json) as Stored[] : []).reverse();
+    const all: Stored[] = [];
+    const visited = new Set<string>();
+    for (let worker = roles.get(threadId); worker && !visited.has(worker.thread_id);
+      worker = worker.replaces_thread_id ? roles.get(worker.replaces_thread_id) : undefined) {
+      visited.add(worker.thread_id);
+      const reviewers = (reviewerFails.all(worker.thread_id) as { fails: string }[]).flatMap((row) => parse(row.fails));
+      all.push(...parse(worker.fails), ...reviewers);
+    }
+    // Newest first across workers and reviewers, before dedup and the cap, so the latest basis wins.
+    all.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+    const seen = new Set<string>();
+    const out: FailEntry[] = [];
+    for (const entry of all) {
+      const key = `${entry.scope}\u0000${entry.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ text: clip(entry.text, 400), scope: clip(entry.scope, 120), basis: clip(entry.basis, 200) });
+      if (out.length >= MAX_CARRIED_FAILS) break;
+    }
+    return out;
+  }
+
   async function startWorker(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
     const prior = params.replaces ? roles.get(params.replaces) : undefined;
@@ -1930,6 +1990,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
     // hands the fresh worker the review that prompted the handoff.
     const findings = prior ? existingReview.get(prior.thread_id) as ManagedRow | undefined : undefined;
+    const ruledOut = prior ? chainFails(prior.thread_id) : [];
     const prompt = [
       `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
       "", brief,
@@ -1937,6 +1998,11 @@ export default async function plugin(bb: BbPluginApi) {
         "", `## Review findings to fix (${findings.thread_id})`,
         ...verdictPreview(findings),
         ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
+      ] : []),
+      ...(ruledOut.length ? [
+        "", "## Already ruled out",
+        ...ruledOut.map((entry) => `- [${entry.scope}] ${entry.text} (basis: ${entry.basis})`),
+        "Do not retry these unless you have new evidence; say why if you do.",
       ] : []),
       ...(wave !== undefined && waveTotal !== undefined ? [
         "", "## Wave",
@@ -2064,6 +2130,52 @@ export default async function plugin(bb: BbPluginApi) {
     return [...roles.values()]
       .filter((other) => other.role === "worker" && other.plan_thread_id === planThreadId && (wave === undefined || other.plan_wave === wave))
       .sort((a, b) => a.created_at - b.created_at);
+  }
+
+  const insertPlanLog = db.prepare<[string, string, number | null, string, string, string, string, string]>(
+    `INSERT INTO plan_log (plan_thread_id, author_thread_id, wave, kind, text, scope, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  function appendPlanLog(row: ManagedRow, entries: z.infer<typeof logParams>["entries"] & {}) {
+    const at = new Date().toISOString();
+    for (const entry of entries) {
+      insertPlanLog.run(row.plan_thread_id!, row.thread_id, row.plan_wave, entry.kind, entry.text, entry.scope, entry.basis, at);
+    }
+  }
+
+  /** chief_log: append the caller's entries, then return unread peer entries and every wave's current owner and state. */
+  function planLog(row: ManagedRow, entries: z.infer<typeof logParams>["entries"]): string {
+    const planThreadId = row.plan_thread_id!;
+    const unread = db.prepare(`SELECT * FROM plan_log WHERE plan_thread_id=? AND id>? AND author_thread_id<>? ORDER BY id LIMIT ?`)
+      .all(planThreadId, row.log_read_id ?? 0, row.thread_id, MAX_LOG_READ + 1) as {
+        id: number; author_thread_id: string; wave: number | null; kind: string; text: string; scope: string; basis: string;
+      }[];
+    const shown = unread.slice(0, MAX_LOG_READ);
+    db.transaction(() => {
+      if (entries?.length) appendPlanLog(row, entries);
+      // Only the cursor moves: never state, report_seq or the alert outbox.
+      if (shown.length) db.prepare(`UPDATE managed_threads SET log_read_id=? WHERE thread_id=?`).run(shown.at(-1)!.id, row.thread_id);
+    })();
+    if (shown.length) reloadRoles();
+    const more = unread.length > MAX_LOG_READ
+      ? (db.prepare(`SELECT COUNT(*) AS n FROM plan_log WHERE plan_thread_id=? AND id>? AND author_thread_id<>?`)
+        .get(planThreadId, shown.at(-1)!.id, row.thread_id) as { n: number }).n
+      : 0;
+    const waves = planWavesFor(planThreadId);
+    return [
+      entries?.length ? `Appended ${entries.length} entr${entries.length === 1 ? "y" : "ies"}.` : null,
+      "## Unread peer entries",
+      ...(shown.length
+        ? shown.map((entry) => `- #${entry.id} ${entry.kind} wave ${entry.wave ?? "?"} @thread:${entry.author_thread_id} [${entry.scope}] ${entry.text} (basis: ${entry.basis})`)
+        : ["- none"]),
+      ...(more ? [`${more} more unread: call chief_log again.`] : []),
+      "", "## Waves",
+      ...waves.map((_, index) => {
+        const current = waveWorkers(planThreadId, index + 1).at(-1);
+        if (!current) return `- wave ${index + 1}: not delegated`;
+        const last = (current.result ?? current.status ?? "").split("\n").find((line) => line.trim()) ?? "";
+        return `- wave ${index + 1}: @thread:${current.thread_id} ${current.state}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
+      }),
+    ].filter((line) => line !== null).join("\n");
   }
 
   /** A ready chain-tip worker's waiting line while other waves of its plan are not ready yet, else null. */
@@ -2619,6 +2731,19 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Could not mirror ${threadId}'s plan into Chief's storage: ${String(error)}`);
       }
     }
+    if (params.fails?.length && row.role !== "worker" && row.role !== "reviewer") {
+      throw new Error("Only a worker's or reviewer's report carries fails.");
+    }
+    let fails: string | null = null;
+    if (params.fails?.length) {
+      const key = (entry: FailEntry) => `${entry.scope}\u0000${entry.text}`;
+      const fresh = new Set(params.fails.map(key));
+      const kept = (row.fails ? JSON.parse(row.fails) as FailEntry[] : []).filter((entry) => !fresh.has(key(entry)));
+      const at = Date.now();
+      const incoming = params.fails.filter((entry, index) => params.fails!.findIndex((other) => key(other) === key(entry)) === index)
+        .map((entry) => ({ ...entry, at }));
+      fails = JSON.stringify([...kept, ...incoming].slice(-MAX_CARRIED_FAILS));
+    }
     const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
     // Best-effort: the verdict is in the DB either way, so a failed write only loses the file.
     let verdictPath: string | null = null;
@@ -2640,22 +2765,29 @@ export default async function plugin(bb: BbPluginApi) {
     // reviewer resumed for an unrelated reason must not read as a deadlock.
     // reject_streak counts only consecutive request_changes verdicts, and
     // resets the moment either side breaks the streak with an approve.
-    db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
-      reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
-      plan_waves = COALESCE(?, plan_waves), regression=?, verdict_path=?, report_seq = report_seq + 1,
-      active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-      params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
-      params.recommendation ?? null, verdict,
-      verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
-      scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, verdictPath,
-      now, threadId,
-    );
+    db.transaction(() => {
+      db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
+        reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
+        plan_waves = COALESCE(?, plan_waves), regression=?, verdict_path=?, fails = COALESCE(?, fails), report_seq = report_seq + 1,
+        active_since=NULL, updated_at=? WHERE thread_id=?`).run(
+        params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
+        params.recommendation ?? null, verdict,
+        verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
+        scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, verdictPath, fails,
+        now, threadId,
+      );
+      // A plan worker's fails also reach its peer waves through chief_log, so it need not post them twice.
+      if (row.role === "worker" && row.plan_thread_id && params.fails?.length) {
+        appendPlanLog(row, params.fails.map((entry) => ({ ...entry, kind: "FAIL" as const })));
+      }
+    })();
     reloadRoles();
     const current = roles.get(threadId)!;
     const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
     const summary = [
       `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
+      ...(params.fails?.length ? [`Fails: ${params.fails.length} ruled out (carried to any replaces: successor)`] : []),
       ...(plannerReady && planWaves
         ? [
             `Plan: ${planWaves.length} wave(s)`,
@@ -3834,6 +3966,18 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.agents.registerTool({
+    name: "chief_log",
+    presentation: { label: { pending: "Reading plan log…", completed: "Read plan log" } },
+    description: "Plan workers only: append FACT/FAIL notes for peer waves, and read unread peer notes plus every wave's current worker and state. Never alerts Chief or changes your state.",
+    parameters: logParams,
+    async execute({ entries }, context) {
+      const row = context.threadId ? roles.get(context.threadId) : undefined;
+      if (!row || row.role !== "worker" || !row.plan_thread_id) return "Not part of a plan run.";
+      return planLog(row, entries);
+    },
+  });
+
+  bb.agents.registerTool({
     name: "chief_research",
     presentation: { label: { pending: "Researching…", completed: "Researched" } },
     description: [
@@ -3895,7 +4039,7 @@ export default async function plugin(bb: BbPluginApi) {
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skill cover the rest.
     return {
-      tools: ["chief_report", ...(research ? ["chief_research"] : [])],
+      tools: ["chief_report", ...(role === "worker" && row?.plan_thread_id ? ["chief_log"] : []), ...(research ? ["chief_research"] : [])],
       skills: ["chief-worker"],
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}.`,
