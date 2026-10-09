@@ -17,7 +17,7 @@ const ROLES = [
   { role: "chief", label: "Chief", hint: "Supervises and decides." },
   { role: "planner", label: "Planner", hint: "Plans work before it starts." },
   { role: "worker", label: "Worker", hint: "Implements the work Chief delegates." },
-  { role: "designer", label: "Designer", hint: "Works in design tools (Paper, Figma, …)." },
+  { role: "designer", label: "Designer", hint: "Decides or implements how UI looks (design tools, design-to-code)." },
   { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
   { role: "advisor", label: "Advisor", hint: "Diagnoses work that keeps failing review." },
 ] as const;

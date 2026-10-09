@@ -14,10 +14,10 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 2. Talk to `Chief · <project name>` in the normal thread UI.
 3. Planning is on by default: Chief plans first, then forges, then delegates wave 1. For planned work, Chief sends it to a read-only planner first, which splits it into waves; the plugin persists the schedule and its ready alert names the exact next delegation, so Chief relays it without reading any plan file. `chief_delegate` refuses an unplanned call unless it carries `unplannedReason`.
 4. Chief owns the forge: `chief_forge_init` builds one script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. The server runs it in the project checkout and hands Chief the `CHIEF_FORGE branch=… issue_url=… pr_url=…` values; when that cannot finish (no local checkout, no `gh`/`glab` on the server's PATH, an error), the tool returns the script and Chief runs it instead. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
-5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. For work in a design tool (Paper, Figma, …) it passes `kind: "designer"`: a Designer is a worker whose brief adds design rules (load the tool's guide, verify with screenshots, call its finish call), and its reviewer checks the screenshots. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
+5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. When the agent has to decide or implement how the UI looks — editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code, or UI with no spec — it passes `kind: "designer"`. A plain UI bug whose look is already settled stays a worker. A Designer's brief adds design rules for its mode: load the tool's guide; verify with tool screenshots and call its finish call (design tool), or compare a golden/simulator PNG with the artboard (design in code). Its reviewer checks the screenshots against the artboard. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed, or, for `#simple` work, at Chief's judgment without a review.
 6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled — with its last output and the next steps; at twice `stallMinutes` the alert tells Chief to stop it with `chief_stop`. Alerts use a durable SQLite outbox and retry after transient delivery failures.
-8. A worker that reports `ready` names its own next call: an intermediate wave tells Chief to delegate the next wave (`chief_delegate` with `replaces:`), with no review in between; the final wave, or any worker with no plan link, tells Chief to start the one review of the whole run with `chief_review`. The reviewer reads the worker's brief (a long mission or context is clipped), plus every wave's plan file on a multi-wave run, and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Both the worker's ready alert and the reviewer brief list the shell commands BB recorded in the worker's event log with their exit codes ("none recorded" for a provider that logs none), so a claimed check can be told apart from one that ran. Reviewers never edit; a repair goes to a fresh worker in the same worktree.
+8. A worker that reports `ready` names its own next call: an intermediate wave tells Chief to delegate the next wave (`chief_delegate` with `replaces:`), with no review in between; the final wave, or any worker with no plan link, tells Chief to start the one review of the whole run with `chief_review`; a `#simple` worker's alert says review is optional and Chief may complete it and mark the PR ready without one. The reviewer reads the worker's brief (a long mission or context is clipped), plus every wave's plan file on a multi-wave run, and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Both the worker's ready alert and the reviewer brief list the shell commands BB recorded in the worker's event log with their exit codes ("none recorded" for a provider that logs none), so a claimed check can be told apart from one that ran. Reviewers never edit; a repair goes to a fresh worker in the same worktree.
 9. Chief inspects live status and bounded output, nudges threads that are still working (a finished worker's follow-up always goes to a fresh worker with `chief_delegate` `replaces:`), marks verified non-running work complete, and escalates only genuine decisions. Completing a worker also completes its reviewers and advisors, and its planner once the final wave is done. Completing work never archives threads or removes worktrees or branches; that cleanup is left to you. Handing it off with `replaces:` completes its advisors but moves its open reviewer to the fresh worker, so the next review keeps the rejection count. Workers and reviewers may report `fails` (approaches they ruled out, with the reproducing basis); every `replaces:` successor gets the chain's newest 12 under "## Already ruled out" in its brief.
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
@@ -94,8 +94,10 @@ With planning on, `chief_delegate` refuses any call that is not tied to a plan w
 and `wave`). A `replaces:` handoff is exempt — the original delegation already passed the gate — and
 inherits the prior worker's reason when it gave one. The one escape hatch is `unplannedReason`
 (`--unplanned-reason` on the CLI): a short reason why, meant only for bounded work whose
-shape and cause are already known. It is persisted and shown as `unplanned: <reason>` in `chief_roster`
+shape and cause are already known — stated by the user, an issue, or a worker report, never by Chief's own code reading. It is persisted and shown as `unplanned: <reason>` in `chief_roster`
 and `bb chief status`, and `Unplanned: <reason>` in `chief_inspect`. With planning off, nothing changes.
+
+**#simple.** When the user's message contains `#simple`, Chief may pass `simple: true` (`--simple`) instead of planning. The server cannot see the user's message, so the tool tells Chief to set it only then. It cannot be combined with `planThreadId`. It is persisted, shown as `simple: yes` in `chief_roster` / `bb chief status` and in `chief_inspect`, and inherited by a `replaces:` successor that has no plan link. The worker gets the user's request as its mission and finds the cause itself, and its ready alert leaves the review to Chief's judgment.
 
 **Shared plan log.** Workers delegated from the same planner get `chief_log`. One call appends up to 5
 `FACT`/`FAIL` notes and returns the peer notes it has not seen yet (30 at most per call), then each wave's
@@ -131,10 +133,10 @@ tells a clean "No confirmed findings" apart from a verify that threw everything 
 
 Chief gets all three modes, a planner gets survey and investigate, and a reviewer gets review and
 survey. Workers and advisors never get it. Settings has one **Researcher** switch, on by default;
-while it is off, no role gets the tool or the line about it. Chief is told the tool is optional: it
-reads code directly when a few known files answer the question, uses research only for broad
-multi-file scans or parallel independent questions, and reads directly after a failed or partial run
-instead of rerunning it.
+while it is off, no role gets the tool or the line about it. Chief is told the tool is optional
+and that it reads no project code itself: it uses research for broad multi-file scans, parallel
+independent questions, or checking doubtful evidence, sends finding a cause to `chief_plan`, and after
+a failed or partial run sends the open question to `chief_plan` or `chief_review` instead of rerunning it.
 
 The agents share the caller's checkout and permissions. They are read-only only because the prompt
 tells them to be. Each call waits up to its mode's timeout (10 minutes by default). If the run is still going, the call returns its
@@ -182,7 +184,7 @@ bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
 bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--json]
 bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_...] [--context "..."] [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--kind worker|designer] [--json]
+bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--simple] [--kind worker|designer] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief stop thr_... [--reason "..."] [--json]

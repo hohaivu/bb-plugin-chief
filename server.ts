@@ -491,13 +491,17 @@ const delegateShape = z.object({
   replaces: z.string().trim().min(1).optional().describe("A finished worker's thread id to hand off from: the new worker starts in that worker's worktree and branch, gets its latest review findings and the path to the reviewer's full verdict file, and the old worker is marked complete."),
   planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
-  unplannedReason: z.string().trim().min(1).max(300).optional().describe("Planning is on and this work skips chief_plan: a short reason why. Only for bounded work whose shape and cause are already known. Not needed with planThreadId/wave or replaces."),
-  kind: z.enum(["worker", "designer"]).optional().describe("designer for design-tool work (Paper, Figma, …); default worker. A replaces: successor keeps the prior worker's kind."),
+  unplannedReason: z.string().trim().min(1).max(300).optional().describe("Planning is on and this work skips chief_plan: a short reason why. Only for bounded work whose shape and cause are already known. The cause must already be stated by the user, an issue, or a worker report — never by your own code reading. Not needed with planThreadId/wave or replaces."),
+  kind: z.enum(["worker", "designer"]).optional().describe("designer when the agent must decide or implement how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or UI with no spec. A plain UI code bug whose target look is already settled (approved design exists, or the fix is obvious) stays worker (the default). A replaces: successor keeps the prior worker's kind."),
+  simple: z.boolean().optional().describe("Set only when the user's message contains #simple: skips chief_plan (instead of unplannedReason), and review becomes optional at your judgment. The worker gets the user's request as its mission and finds the cause itself. Cannot be combined with planThreadId. A replaces: successor keeps it."),
 });
 
 const delegateParams = delegateShape.superRefine((value, ctx) => {
   if (value.unplannedReason && value.planThreadId) {
     ctx.addIssue({ code: "custom", path: ["unplannedReason"], message: "unplannedReason cannot be combined with planThreadId." });
+  }
+  if (value.simple && value.planThreadId) {
+    ctx.addIssue({ code: "custom", path: ["simple"], message: "simple cannot be combined with planThreadId." });
   }
 });
 
@@ -714,6 +718,8 @@ interface ManagedRow {
   verdict_path: string | null;
   /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. */
   kind: string | null;
+  /** Worker row only: 1 when delegated with simple (#simple); null/0 means a normal worker. */
+  simple: number | null;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
   fails: string | null;
   /** Worker row on a plan: the highest plan_log id chief_log has shown it, or null. */
@@ -743,11 +749,11 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Inspect the worker's evidence before choosing the next action.
 - Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark verified work complete.
 - Never reuse a worker for more work. Finishing skipped acceptance criteria, rebasing or restacking, or any new task goes to a fresh worker with chief_delegate replaces: — same worktree, branch, and pull request. chief_continue is only a short nudge to a thread that is still working, never to a worker or reviewer that has reported.
-- In a managed thread's worktree, Chief only reads: git status, git diff, git log, and file contents. Never run git checkout, restore, reset, stash, rebase, merge, commit, or push there, and never run its tests or builds. Restacking, rebasing, pushing, discarding changes, and running tests go to a fresh worker with chief_delegate replaces:. A failed push goes to that worker too, never a retry loop.
+- Chief runs nothing in a managed thread's worktree — not git status, git diff, git log, file reads, tests, or builds, and never git checkout, restore, reset, stash, rebase, merge, commit, or push. Chief's evidence is worker and reviewer reports, lifecycle alerts, the recorded commands in ready alerts, chief_inspect output, and reviewer verdicts. Doubtful evidence goes to a child thread (chief_review, or chief_research when offered), not to Chief reading the diff. Restacking, rebasing, pushing, discarding changes, and running tests go to a fresh worker with chief_delegate replaces:. A failed push goes to that worker too, never a retry loop.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
-- A worker report is evidence, not proof. Start one independent review per run with chief_review when a worker's ready alert says to — once per branch after every wave is ready, or for a worker with no plan link — and read that reviewer's verdict before completing the work.
-- When the user or a worker corrects a factual claim, verify it against the code before accepting the correction.
+- A worker report is evidence, not proof. Start one independent review per run with chief_review when a worker's ready alert says to — once per branch after every wave is ready, or for a worker with no plan link — and read that reviewer's verdict before completing the work. A #simple worker's ready alert leaves the review to your judgment: you may complete it and mark its pull request ready without one.
+- When the user or a worker corrects a factual claim, have it checked by a child thread (chief_research, chief_review, or chief_plan) before accepting the correction; do not read the code yourself.
 - Start extra reviews with chief_review — a worker's worktree, or a fresh one for a pull request or branch with no worker — whenever a change deserves a second pass.
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete. After replaces:, review and complete the successor, not the predecessor.`;
@@ -755,11 +761,11 @@ const BUILT_IN_RULES = `# Chief operating rules
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled — a well-specified issue included. Order: chief_plan → chief_forge_init → chief_delegate. chief_delegate rejects a call without planThreadId and wave; only bounded work whose shape and cause are already known may skip the plan, with unplannedReason saying why. Its ready alert lists the wave schedule and the exact next call — delegate every wave the ready alert lists right away, one chief_delegate per wave in the same turn, without waiting for user sign-off, and without reading the plan file yourself. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. A plan is never implementation: only a worker changes code.";
+  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled — a well-specified issue included. Order: chief_plan → chief_forge_init → chief_delegate. chief_delegate rejects a call without planThreadId and wave; only bounded work whose shape and cause are already known may skip the plan, with unplannedReason saying why. You do not read project code to find a cause: unless the user, an issue, or a worker report already states it, the work goes to chief_plan — the planner is the child thread that diagnoses. unplannedReason may never cite your own code reading. When the user's message contains #simple, you may pass simple: true instead of planning; set it only then. Its ready alert lists the wave schedule and the exact next call — delegate every wave the ready alert lists right away, one chief_delegate per wave in the same turn, without waiting for user sign-off, and without reading the plan file yourself. Escalate to the user only for a genuine product or scope open question that cannot be resolved from the code. A plan is never implementation: only a worker changes code.";
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 const RESEARCH_CHIEF_INSTRUCTIONS =
-  "chief_research is optional, and each call can wait up to its mode's timeout. When a few known files answer the question, read them directly instead. Use it only for a broad multi-file scan or several independent questions at once — for example, scoping a large issue that spans many files before chief_plan, or checking doubtful worker or reviewer evidence across many files. When a run fails or comes back partial, read the code directly; do not rerun the same fan-out.";
+  "chief_research is optional, and each call can wait up to its mode's timeout. You read no project code yourself. Use it for a broad multi-file scan or several independent questions at once — for example, scoping a large issue before chief_plan, or checking doubtful worker or reviewer evidence. Finding a cause is the planner's job: send that to chief_plan. When a run fails or comes back partial, do not rerun the same fan-out and do not read the code yourself; send the open question to chief_plan, or the doubtful evidence to chief_review.";
 
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
@@ -782,7 +788,7 @@ function parseArgs(argv: string[]) {
     const [name, inline] = token.slice(2).split(/=(.*)/s);
     const next = argv[index + 1];
     // A boolean flag never takes a value: `--json thr_x` keeps thr_x positional.
-    const value = inline ?? (name !== "json" && next && !next.startsWith("--") ? (index++, next) : "true");
+    const value = inline ?? (name !== "json" && name !== "simple" && next && !next.startsWith("--") ? (index++, next) : "true");
     flags.set(name!, [...(flags.get(name!) ?? []), value]);
   }
   return {
@@ -1086,6 +1092,8 @@ export const MIGRATIONS = [
     `CREATE TABLE plan_log (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_thread_id TEXT NOT NULL, author_thread_id TEXT NOT NULL, wave INTEGER, kind TEXT NOT NULL CHECK (kind IN ('FACT','FAIL')), text TEXT NOT NULL, scope TEXT NOT NULL, basis TEXT NOT NULL, created_at TEXT NOT NULL)`,
     `CREATE INDEX plan_log_plan ON plan_log(plan_thread_id, id)`,
     `ALTER TABLE managed_threads ADD COLUMN log_read_id INTEGER`,
+    // A worker delegated on the user's #simple tag: planning skipped, review optional at Chief's judgment.
+    `ALTER TABLE managed_threads ADD COLUMN simple INTEGER`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1297,12 +1305,13 @@ export default async function plugin(bb: BbPluginApi) {
     unplannedReason?: string | null;
     replacesThreadId?: string | null;
     kind?: string | null;
+    simple?: boolean | null;
   }) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, replaces_thread_id, kind, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, replaces_thread_id, kind, simple, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -1311,14 +1320,14 @@ export default async function plugin(bb: BbPluginApi) {
       plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
       reviewed_report_seq=excluded.reviewed_report_seq, unplanned_reason=excluded.unplanned_reason,
       replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
-      kind=excluded.kind,
+      kind=excluded.kind, simple=excluded.simple,
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.parentThreadId ?? null, input.title, input.state ?? "starting",
       input.status ?? "starting", input.brief ?? null, input.branch ?? null,
       input.issueUrl ?? null, input.prUrl ?? null, input.planThreadId ?? null, input.planWave ?? null,
       input.reviewedReportSeq ?? null, input.unplannedReason ?? null, input.replacesThreadId ?? null,
-      input.kind ?? null,
+      input.kind ?? null, input.simple ? 1 : null,
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
@@ -1651,9 +1660,9 @@ export default async function plugin(bb: BbPluginApi) {
     const prompt = [
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
-      "When chief_plan is available, implementation work goes plan → forge → delegate: chief_plan, then chief_forge_init, then chief_delegate with the planThreadId and wave its ready alert names; chief_delegate refuses anything else unless it is bounded work of known shape and cause that you pass unplannedReason for. Without chief_plan, use chief_delegate directly. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
-      "You own the forge for every delegation: run chief_forge_init, and pass the branch, issueUrl and prUrl it returns to chief_delegate — if it returns a script instead, run it from the project checkout and use the CHIEF_FORGE line it prints. Mark the pull request ready only after the work is verified and reviewed. The chief skill's Git workflow section has the rest.",
-      "A worker's ready alert names the next call: an intermediate wave hands off to the wave that depends on it with no review in between; once every wave is ready, each branch's final wave, or a worker with no plan link, tells you to start that branch's one review with chief_review, whose reviewer reports back here. Wait for that verdict before completing the work, and use chief_review yourself for any further pass you want — including a pull request or branch with no managed worker.",
+      "When chief_plan is available, implementation work goes plan → forge → delegate: chief_plan, then chief_forge_init, then chief_delegate with the planThreadId and wave its ready alert names; chief_delegate refuses anything else unless it is bounded work of known shape and cause — the cause stated by the user, an issue, or a worker report, never by your own code reading — that you pass unplannedReason for, or the user's message contains #simple and you pass simple: true. You do not read project code or run anything in a managed worktree; your evidence is reports, alerts, recorded commands, chief_inspect, and reviewer verdicts. Without chief_plan, use chief_delegate directly. Inspect reports and live thread evidence with chief_inspect, continue safe work, and mark work complete only after verification.",
+      "You own the forge for every delegation: run chief_forge_init, and pass the branch, issueUrl and prUrl it returns to chief_delegate — if it returns a script instead, run it from the project checkout and use the CHIEF_FORGE line it prints. Mark the pull request ready only after the work is verified and reviewed — except #simple work, which you may complete and mark ready without review at your judgment. The chief skill's Git workflow section has the rest.",
+      "A worker's ready alert names the next call: an intermediate wave hands off to the wave that depends on it with no review in between; once every wave is ready, each branch's final wave, or a worker with no plan link, tells you to start that branch's one review with chief_review, whose reviewer reports back here. Wait for that verdict before completing the work (a #simple worker's ready alert leaves review to your judgment), and use chief_review yourself for any further pass you want — including a pull request or branch with no managed worker.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "",
       "Acknowledge the operating rules you were given briefly, call chief_roster for the current work list, and wait for work.",
@@ -1929,14 +1938,19 @@ export default async function plugin(bb: BbPluginApi) {
     }
     // Same rule for the kind: a fix successor stays a designer, an explicit next wave uses its own.
     const kind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
+    // A fix successor of a #simple worker stays simple; a plan-linked successor never is, and an explicit false clears it.
+    const simple = params.simple ?? (!!prior && planThreadId === undefined && prior.simple === 1);
     // The schema only sees params.planThreadId; a replaces: inherited one must be checked here too.
     if (planThreadId !== undefined && params.unplannedReason) {
       throw new Error("unplannedReason cannot be combined with planThreadId.");
     }
+    if (planThreadId !== undefined && params.simple) {
+      throw new Error("simple cannot be combined with planThreadId.");
+    }
     // Planning on means every new delegation starts from a plan wave. replaces: hands off
     // an already-gated delegation, so it passes; the escape hatch must say why.
-    if (planThreadId === undefined && !prior && !params.unplannedReason && await plannerEnabled()) {
-      throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. Only bounded work whose shape and cause are already known may skip the plan — pass unplannedReason (CLI: --unplanned-reason) with a short reason why.");
+    if (planThreadId === undefined && !prior && !params.unplannedReason && !simple && await plannerEnabled()) {
+      throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. Only bounded work whose shape and cause are already known may skip the plan — pass unplannedReason (CLI: --unplanned-reason) with a short reason why — the cause must come from the user, an issue, or a worker report, not your own code reading — or, only when the user's message contains #simple, pass simple: true (CLI: --simple).");
     }
     const unplannedReason = params.unplannedReason ?? (planThreadId === undefined ? prior?.unplanned_reason ?? undefined : undefined);
     let planPath: string | undefined;
@@ -2030,14 +2044,19 @@ export default async function plugin(bb: BbPluginApi) {
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
+      ...(simple ? [
+        "", "## Simple work (#simple)",
+        "- The user tagged this #simple: no planner ran, and Chief may complete it without a review. Your mission is the user's request; find the cause yourself before changing anything.",
+        "- Your Automated Verification (the command and its exit status) may be the only evidence Chief checks, so run the closest real check.",
+      ] : []),
       ...(kind === "designer" ? [
         "", "## Design work",
-        "- This is design work in a design tool (Paper, Figma, or similar) through its MCP tools. If that tool is not connected here, report blocked naming the missing tool.",
-        "- Before any other call to the tool, load its guide (Paper: `get_guide({ topic: \"paper-mcp-instructions\" })`) and follow it.",
-        "- After each meaningful change, verify it with the tool's screenshot (Paper: `get_screenshot`). Screenshots are your verification evidence; name them in your report.",
-        "- When done creating or editing, call the tool's finish call (Paper: `finish_working_on_nodes`).",
-        "- Never show raw node IDs in your report.",
-        "- Do not change code or files the brief does not name; design work does not touch the codebase unless the brief says so.",
+        "- Pick the mode the brief describes. Design tool: create or edit in a design tool (Paper, Figma, or similar). Design in code: implement a design-tool artboard in the UI files the brief names. No spec: decide and implement the look in the UI files the brief names, within the project's existing design system.",
+        "- Design tool and design in code use the tool's MCP. If that tool is not connected here, report blocked naming the missing tool. Before any other call to it, load its guide (Paper: `get_guide({ topic: \"paper-mcp-instructions\" })`) and follow it.",
+        "- Design tool: after each meaningful change, verify it with the tool's screenshot (Paper: `get_screenshot`), and when done creating or editing call its finish call (Paper: `finish_working_on_nodes`). Design tool work changes no code or files unless the brief names them.",
+        "- Design in code: read the artboard through the tool's MCP (read-only; do not edit the design), edit only the UI files the brief names, then prove the result by comparing a golden or simulator screenshot of the implemented UI with the artboard's screenshot. Name both PNGs and the differences that remain in your report.",
+        "- No spec: prove the result with a golden or simulator screenshot of the UI and name the PNG; taste and brand fit go under Manual Verification.",
+        "- Screenshots are your verification evidence. Never show raw node IDs in your report.",
       ] : []),
     ].join("\n");
     const thread = await bb.sdk.threads.spawn({
@@ -2065,7 +2084,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
       state: "starting", status: thread.status, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
-      kind: kind === "designer" ? kind : null,
+      kind: kind === "designer" ? kind : null, simple: simple || null,
     });
     if (prior) {
       const now = Date.now();
@@ -2197,6 +2216,7 @@ export default async function plugin(bb: BbPluginApi) {
    * waves), nothing while other waves are still unready (waveWaitLine), or one review per
    * branch once every wave is ready — or, with no plan link at all, the same review call. */
   function workerReadyNextStep(row: ManagedRow): string | null {
+    if (row.simple) return `#simple work: review is optional, at your judgment. If the report and recorded commands satisfy you, complete it with chief_complete (threadId: ${row.thread_id}) and mark its pull request ready without a review; otherwise start one: chief_review (workerThreadId: ${row.thread_id}).`;
     const waves = planWavesFor(row.plan_thread_id);
     const next = row.plan_thread_id && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
     if (next !== null) {
@@ -2369,7 +2389,7 @@ export default async function plugin(bb: BbPluginApi) {
           ...(recorded?.length ? recorded.map((c) => `exit ${c.exitCode ?? c.status} · ${c.command}`) : ["none recorded"]),
           "Recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
           ...(worker.kind === "designer" ? [
-            "", "This is design work: check the result with the design tool's screenshots (read-only) and confirm the worker called its finish call (e.g. `finish_working_on_nodes`); do not edit the design.",
+            "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
           ] : []),
           ...(worker.result ? [
             "", "## What the worker reported", clip(worker.result, 300),
@@ -3184,6 +3204,7 @@ export default async function plugin(bb: BbPluginApi) {
     return [
       `${row.role} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
       ...(row.kind === "designer" ? ["kind: designer"] : []),
+      ...(row.simple ? ["simple: yes (#simple)"] : []),
       ...(row.branch ? [`branch: ${row.branch}`] : []),
       ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
@@ -3512,6 +3533,7 @@ export default async function plugin(bb: BbPluginApi) {
       `Thread: ${row.title} (${threadId})`,
       `Role: ${row.role}`,
       ...(row.kind === "designer" ? ["Kind: designer"] : []),
+      ...(row.simple ? ["Simple: yes (#simple, review optional)"] : []),
       ...(row.branch ? [`Branch: ${row.branch}`] : []),
       ...(row.issue_url ? [`Issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
@@ -3804,7 +3826,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. Pass kind: \"designer\" for work in a design tool (Paper, Figma, …).",
+    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. Pass kind: \"designer\" when the agent must decide or implement how the UI looks (design tool, design-to-code, UI with no spec); a UI fix whose look is already settled stays a worker. Pass simple: true only when the user's message contains #simple.",
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -4188,7 +4210,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
     "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id] [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--kind worker|designer] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--kind worker|designer] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
@@ -4208,7 +4230,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
       { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id] [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--kind worker|designer] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--kind worker|designer] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
@@ -4313,6 +4335,8 @@ export default async function plugin(bb: BbPluginApi) {
             wave: args.one("wave") !== undefined ? Number(args.one("wave")) : undefined,
             unplannedReason: args.one("unplanned-reason"),
             kind: args.one("kind"),
+            // undefined, not false: an absent flag must not override replaces: inheritance.
+            simple: args.bool("simple") || undefined,
           });
           if (!parsed.success) return fail(`Invalid delegate brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await delegate(parsed.data, context.threadId);
