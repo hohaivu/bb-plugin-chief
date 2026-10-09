@@ -14,7 +14,7 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 2. Talk to `Chief · <project name>` in the normal thread UI.
 3. Planning is on by default: Chief plans first, then forges, then delegates wave 1. For planned work, Chief sends it to a read-only planner first, which splits it into waves; the plugin persists the schedule and its ready alert names the exact next delegation, so Chief relays it without reading any plan file. `chief_delegate` refuses an unplanned call unless it carries `unplannedReason`.
 4. Chief owns the forge: `chief_forge_init` builds one script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. The server runs it in the project checkout and hands Chief the `CHIEF_FORGE branch=… issue_url=… pr_url=…` values; when that cannot finish (no local checkout, no `gh`/`glab` on the server's PATH, an error), the tool returns the script and Chief runs it instead. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
-5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
+5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. For work in a design tool (Paper, Figma, …) it passes `kind: "designer"`: a Designer is a worker whose brief adds design rules (load the tool's guide, verify with screenshots, call its finish call), and its reviewer checks the screenshots. The worker commits and pushes there and never touches the pull request; Chief marks it ready for review once the work is verified and reviewed.
 6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 7. Lifecycle events alert the correct project Chief when a managed thread becomes idle, fails, is archived/deleted, or appears stalled — with its last output and the next steps; at twice `stallMinutes` the alert tells Chief to stop it with `chief_stop`. Alerts use a durable SQLite outbox and retry after transient delivery failures.
 8. A worker that reports `ready` names its own next call: an intermediate wave tells Chief to delegate the next wave (`chief_delegate` with `replaces:`), with no review in between; the final wave, or any worker with no plan link, tells Chief to start the one review of the whole run with `chief_review`. The reviewer reads the worker's brief (a long mission or context is clipped), plus every wave's plan file on a multi-wave run, and reports a structured `verdict` of `approve` or `request_changes` rather than a ship-or-fix opinion buried in prose. Reviewers never edit; a repair goes to a fresh worker in the same worktree.
@@ -49,7 +49,7 @@ Settings → **Chief models by machine** scans every enrolled machine for its si
 and their live model catalogs, and lets you pick a provider, model, and reasoning level per role:
 Chief, planner, worker, reviewer, and advisor. A role without a selection spawns on BB's own
 default for the project, and a selection the machine can no longer serve (signed out, model
-retired) falls back to that default rather than failing the spawn.
+retired) falls back to that default rather than failing the spawn. Designers use the Worker model pick.
 
 ### Git workflow
 
@@ -165,7 +165,7 @@ bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
 bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--json]
 bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_...] [--context "..."] [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--json]
+bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--kind worker|designer] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief stop thr_... [--reason "..."] [--json]

@@ -299,7 +299,7 @@ async function delegate(
   state: Awaited<ReturnType<typeof setup>>,
   chiefThreadId: string,
   title = "Fix checkout totals",
-  forge?: { branch?: string; issueUrl?: string; prUrl?: string; replaces?: string },
+  forge?: { branch?: string; issueUrl?: string; prUrl?: string; replaces?: string; kind?: string },
 ) {
   const result = await state.harness.behavior.runCli([
     "delegate", "--title", title, "--mission", "Correct and verify totals", "--criteria", "Regression passes",
@@ -307,6 +307,7 @@ async function delegate(
     ...(forge?.issueUrl ? ["--issue-url", forge.issueUrl] : []),
     ...(forge?.prUrl ? ["--pr-url", forge.prUrl] : []),
     ...(forge?.replaces ? ["--replaces", forge.replaces] : ["--unplanned-reason", "Bounded test fixture"]),
+    ...(forge?.kind ? ["--kind", forge.kind] : []),
     "--json",
   ], { threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
   expect(result.exitCode).toBe(0);
@@ -1688,6 +1689,56 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).input[0].text).toContain(`Call chief_consult (workerThreadId: ${worker.threadId}) only when a finding is disputed`);
     expect(state.sent.at(-1).input[0].text).toContain(`hand it straight to a fresh worker with chief_delegate (replaces: ${worker.threadId})`);
     expect(state.sent.at(-1).input[0].text).not.toContain("Before starting another worker round");
+  });
+
+  describe("designer kind", () => {
+    const opts = (chiefThreadId: string) => ({ threadId: chiefThreadId, projectId: "proj_1" });
+    const rowOf = (state: any, threadId: string) => state.db.prepare("SELECT role, kind FROM managed_threads WHERE thread_id=?").get(threadId);
+
+    test("chief_delegate kind designer adds the design-work section; the role stays worker", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId, "Draw the checkout screen", { kind: "designer" });
+      const prompt: string = state.spawned.at(-1).prompt;
+      expect(prompt).toContain("## Design work");
+      expect(prompt).toContain("paper-mcp-instructions");
+      expect(prompt).toContain("finish_working_on_nodes");
+      expect(rowOf(state, worker.threadId)).toEqual({ role: "worker", kind: "designer" });
+      expect(state.spawned.at(-1).pluginMetadata.role).toBe("worker");
+      const roster = JSON.stringify(await state.harness.behavior.callAgentTool("chief_inspect", { threadId: worker.threadId }, opts(chief.threadId)));
+      expect(roster).toContain("Kind: designer");
+    });
+
+    test("plain chief_delegate has no design-work section and no kind", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId);
+      expect(state.spawned.at(-1).prompt).not.toContain("## Design work");
+      expect(rowOf(state, worker.threadId)).toEqual({ role: "worker", kind: null });
+      expect(JSON.stringify(await state.harness.behavior.callAgentTool("chief_roster", {}, opts(chief.threadId)))).not.toContain("kind:");
+    });
+
+    test("replaces: keeps the designer kind; an explicit kind wins", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const first = await delegate(state, chief.threadId, "Draw the checkout screen", { kind: "designer" });
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Drawn" }, { threadId: first.threadId, projectId: "proj_1" });
+      const second = await delegate(state, chief.threadId, "Draw the checkout screen", { replaces: first.threadId });
+      expect(state.spawned.at(-1).prompt).toContain("## Design work");
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Drawn" }, { threadId: second.threadId, projectId: "proj_1" });
+      const third = await delegate(state, chief.threadId, "Wire the checkout screen", { replaces: second.threadId, kind: "worker" });
+      expect(state.spawned.at(-1).prompt).not.toContain("## Design work");
+      expect(rowOf(state, third.threadId).kind).toBeNull();
+    });
+
+    test("reviewer of a designer gets the design check", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId, "Draw the checkout screen", { kind: "designer" });
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Drawn" }, { threadId: worker.threadId, projectId: "proj_1" });
+      await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts(chief.threadId));
+      expect(state.spawned.at(-1).prompt).toContain("This is design work: check the result with the design tool's screenshots (read-only)");
+    });
   });
 
   describe("verdict file", () => {

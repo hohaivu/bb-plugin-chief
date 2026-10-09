@@ -490,6 +490,7 @@ const delegateShape = z.object({
   planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
   unplannedReason: z.string().trim().min(1).max(300).optional().describe("Planning is on and this work skips chief_plan: a short reason why. Only for bounded work whose shape and cause are already known. Not needed with planThreadId/wave or replaces."),
+  kind: z.enum(["worker", "designer"]).optional().describe("designer for design-tool work (Paper, Figma, …); default worker. A replaces: successor keeps the prior worker's kind."),
 });
 
 const delegateParams = delegateShape.superRefine((value, ctx) => {
@@ -690,6 +691,8 @@ interface ManagedRow {
   replaces_thread_id: string | null;
   /** Reviewer row only: the verdict.md its last ready report was written to, or null. */
   verdict_path: string | null;
+  /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. */
+  kind: string | null;
   /** Non-transient failed events counted for bb chief stats (since stats_since). */
   thread_errors: number;
   /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
@@ -1042,6 +1045,8 @@ export const MIGRATIONS = [
     `DROP TABLE IF EXISTS chief_fallback_model`,
     // A reviewer's full verdict file, handed to the replacement worker, the next reviewer and the advisor.
     `ALTER TABLE managed_threads ADD COLUMN verdict_path TEXT`,
+    // A worker's kind ("designer" for design-tool work); NULL reads as a plain worker.
+    `ALTER TABLE managed_threads ADD COLUMN kind TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1249,12 +1254,13 @@ export default async function plugin(bb: BbPluginApi) {
     reviewedReportSeq?: number | null;
     unplannedReason?: string | null;
     replacesThreadId?: string | null;
+    kind?: string | null;
   }) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, replaces_thread_id, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, replaces_thread_id, kind, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -1263,12 +1269,14 @@ export default async function plugin(bb: BbPluginApi) {
       plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
       reviewed_report_seq=excluded.reviewed_report_seq, unplanned_reason=excluded.unplanned_reason,
       replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
+      kind=excluded.kind,
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.parentThreadId ?? null, input.title, input.state ?? "starting",
       input.status ?? "starting", input.brief ?? null, input.branch ?? null,
       input.issueUrl ?? null, input.prUrl ?? null, input.planThreadId ?? null, input.planWave ?? null,
       input.reviewedReportSeq ?? null, input.unplannedReason ?? null, input.replacesThreadId ?? null,
+      input.kind ?? null,
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
@@ -1853,6 +1861,8 @@ export default async function plugin(bb: BbPluginApi) {
       planThreadId = prior.plan_thread_id;
       wave = prior.plan_wave;
     }
+    // Same rule for the kind: a fix successor stays a designer, an explicit next wave uses its own.
+    const kind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
     // The schema only sees params.planThreadId; a replaces: inherited one must be checked here too.
     if (planThreadId !== undefined && params.unplannedReason) {
       throw new Error("unplannedReason cannot be combined with planThreadId.");
@@ -1947,6 +1957,15 @@ export default async function plugin(bb: BbPluginApi) {
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
+      ...(kind === "designer" ? [
+        "", "## Design work",
+        "- This is design work in a design tool (Paper, Figma, or similar) through its MCP tools. If that tool is not connected here, report blocked naming the missing tool.",
+        "- Before any other call to the tool, load its guide (Paper: `get_guide({ topic: \"paper-mcp-instructions\" })`) and follow it.",
+        "- After each meaningful change, verify it with the tool's screenshot (Paper: `get_screenshot`). Screenshots are your verification evidence; name them in your report.",
+        "- When done creating or editing, call the tool's finish call (Paper: `finish_working_on_nodes`).",
+        "- Never show raw node IDs in your report.",
+        "- Do not change code or files the brief does not name; design work does not touch the codebase unless the brief says so.",
+      ] : []),
     ].join("\n");
     const thread = await bb.sdk.threads.spawn({
       projectId,
@@ -1973,6 +1992,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
       state: "starting", status: thread.status, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
+      kind: kind === "designer" ? kind : null,
     });
     if (prior) {
       const now = Date.now();
@@ -2225,6 +2245,9 @@ export default async function plugin(bb: BbPluginApi) {
           ...(contractLines.length ? [
             "", "## Contracts to verify", ...contractLines,
             "Check every item against the worktree. An unmet item means request_changes naming it; say which items you confirmed.",
+          ] : []),
+          ...(worker.kind === "designer" ? [
+            "", "This is design work: check the result with the design tool's screenshots (read-only) and confirm the worker called its finish call (e.g. `finish_working_on_nodes`); do not edit the design.",
           ] : []),
           ...(worker.result ? [
             "", "## What the worker reported", clip(worker.result, 300),
@@ -3029,6 +3052,7 @@ export default async function plugin(bb: BbPluginApi) {
   function rosterRowLines(row: ManagedRow): string[] {
     return [
       `${row.role} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
+      ...(row.kind === "designer" ? ["kind: designer"] : []),
       ...(row.branch ? [`branch: ${row.branch}`] : []),
       ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
@@ -3337,6 +3361,7 @@ export default async function plugin(bb: BbPluginApi) {
     return [
       `Thread: ${row.title} (${threadId})`,
       `Role: ${row.role}`,
+      ...(row.kind === "designer" ? ["Kind: designer"] : []),
       ...(row.branch ? [`Branch: ${row.branch}`] : []),
       ...(row.issue_url ? [`Issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
@@ -3629,7 +3654,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree.",
+    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. Pass kind: \"designer\" for work in a design tool (Paper, Figma, …).",
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -4022,7 +4047,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
     "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id] [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--kind worker|designer] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
@@ -4043,7 +4068,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
       { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id] [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--kind worker|designer] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
@@ -4158,6 +4183,7 @@ export default async function plugin(bb: BbPluginApi) {
             planThreadId: args.one("plan-thread"),
             wave: args.one("wave") !== undefined ? Number(args.one("wave")) : undefined,
             unplannedReason: args.one("unplanned-reason"),
+            kind: args.one("kind"),
           });
           if (!parsed.success) return fail(`Invalid delegate brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await delegate(parsed.data, context.threadId);
