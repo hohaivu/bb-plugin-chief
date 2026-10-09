@@ -1685,7 +1685,9 @@ describe("Chief backend", () => {
     await reject(secondReviewer.threadId);
     expect(state.sent.at(-1).input[0].text).toContain("not converging");
     expect(state.sent.at(-1).input[0].text).toContain("escalate to the user");
-    expect(state.sent.at(-1).input[0].text).toContain(`Before starting another worker round, call chief_consult (workerThreadId: ${worker.threadId})`);
+    expect(state.sent.at(-1).input[0].text).toContain(`Call chief_consult (workerThreadId: ${worker.threadId}) only when a finding is disputed`);
+    expect(state.sent.at(-1).input[0].text).toContain(`hand it straight to a fresh worker with chief_delegate (replaces: ${worker.threadId})`);
+    expect(state.sent.at(-1).input[0].text).not.toContain("Before starting another worker round");
   });
 
   describe("verdict file", () => {
@@ -1781,7 +1783,7 @@ describe("Chief backend", () => {
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(3);
   });
 
-  test("sends Chief to the advisor on a first rejection that reports a regression", async () => {
+  test("routes a first rejection that reports a regression straight to a fresh worker", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
@@ -1798,9 +1800,10 @@ describe("Chief backend", () => {
 
     const text = state.sent.at(-1).input[0].text as string;
     expect(text).toContain("introduced a new problem");
-    expect(text).toContain(`chief_consult (workerThreadId: ${worker.threadId})`);
+    expect(text).toContain(`chief_delegate (replaces: ${worker.threadId})`);
+    expect(text).not.toContain("chief_consult (workerThreadId");
     expect(text).not.toContain("not converging");
-    const consultAction = `The reviewer reports this change introduced a new problem. Before starting another worker round, call chief_consult (workerThreadId: ${worker.threadId}) — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`;
+    const consultAction = `The reviewer requires changes. The reviewer reports this change introduced a new problem; make the fix's brief name it. Hand the fix to a fresh worker with chief_delegate (replaces: ${worker.threadId}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`;
     expect(text).toContain(consultAction);
 
     // The roster must recommend the exact same next step, not a second inline wording.
@@ -2964,6 +2967,34 @@ describe("Chief backend", () => {
     expect(state.sent.filter((entry: any) => entry.threadId === worker.threadId)).toHaveLength(sentBefore);
   });
 
+  test("refuses chief_continue on a reviewer that already reported", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Ready for review",
+    }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+    expect(state.spawned.at(-1).prompt).toContain("file:line");
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Tax is off", verdict: "request_changes",
+    }, { threadId: reviewer.threadId, projectId: "proj_1" });
+    const before = state.db.prepare("SELECT state, verdict, regression, reject_streak FROM managed_threads WHERE thread_id=?").get(reviewer.threadId);
+    const sentBefore = state.sent.filter((entry: any) => entry.threadId === reviewer.threadId).length;
+
+    await expect(state.harness.behavior.callAgentTool(
+      "chief_continue", { threadId: reviewer.threadId, instruction: "Look again" }, opts,
+    )).rejects.toThrow("chief_review");
+    const cliResult = await state.harness.behavior.runCli(["continue", reviewer.threadId, "--instruction", "Look again"]);
+    expect(cliResult.exitCode).toBe(1);
+    expect(cliResult.stderr).toContain("chief_review");
+    expect(state.sent.filter((entry: any) => entry.threadId === reviewer.threadId)).toHaveLength(sentBefore);
+    expect(state.db.prepare("SELECT state, verdict, regression, reject_streak FROM managed_threads WHERE thread_id=?").get(reviewer.threadId)).toEqual(before);
+    expect(before).toMatchObject({ state: "ready", verdict: "request_changes" });
+  });
+
   test("refuses chief_continue on a worker that already reported complete", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -3492,7 +3523,9 @@ describe("Chief backend", () => {
       state: "ready", result: "Still off by a cent", verdict: "request_changes",
     }, { threadId: reviewer2.threadId, projectId: "proj_1" });
     expect(state.sent.at(-1).input[0].text).toContain("not converging");
-    expect(state.sent.at(-1).input[0].text).toContain(`chief_consult (workerThreadId: ${freshWorker.threadId})`);
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_consult (workerThreadId: ${freshWorker.threadId}) only when`);
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_delegate (replaces: ${freshWorker.threadId})`);
+    expect(state.sent.at(-1).input[0].text).toContain("escalate to the user");
   });
 
   test("refuses to replace a busy worker or another Chief's worker", async () => {
