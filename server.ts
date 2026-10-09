@@ -1767,7 +1767,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
       "- Report with chief_report state ready, passing the plan through chief_report's `plan` field: an array of `{body}` per wave, or a single string for one wave. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file.",
       "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
-      "- Split the work into at most 8 waves, each a self-contained plan one worker finishes. One wave by default; split only where one worker cannot finish the work. Give each wave `dependsOn`: `[k]` only when it truly builds on wave k's changes, `[]` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. Submit `plan` as an array of `{body, dependsOn}`. Waves contain no phases.",
+      "- Split the work into at most 8 waves, each a self-contained plan one worker finishes. One wave by default; split only where one worker cannot finish the work. Give each wave `dependsOn`: `[k]` only when it truly builds on wave k's changes, `[]` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), write that exact interface into both waves' `## Contracts to verify` and give the later wave `dependsOn: []` so they run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. Keep `dependsOn` only when it needs the earlier wave's implementation or branch. Submit `plan` as an array of `{body, dependsOn}`. Waves contain no phases.",
       "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
       "- Give every wave a `## Contracts to verify` Markdown heading: a checklist of the invariants, edge cases and existing behaviour that wave must keep — what a reviewer would otherwise catch only after the fact. The worker and the reviewer both receive this exact list.",
       ...(researchLine("planner", await researchSettings()) ? ["- When the root cause is unclear, use chief_research investigate (one sub-question per hypothesis); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings before relying on them."] : []),
@@ -1957,7 +1957,7 @@ export default async function plugin(bb: BbPluginApi) {
       planPath = scheduled.path;
       waveTotal = waves.length;
       waveNext = successorOf(waves, wave);
-      waveIndependent = wave > 1 && parentOf(waves, wave) === null;
+      waveIndependent = wave > 1 && parentOf(waves, wave) === null && !prior;
       contracts = scheduled.contracts;
     }
     // One task branch carries one active worker: a second worktree cannot check out a
@@ -2028,6 +2028,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
+      "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
       ...(kind === "designer" ? [
         "", "## Design work",

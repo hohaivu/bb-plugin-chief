@@ -76,6 +76,18 @@ the schedule. Chief never opens or reads a plan file, and delegates wave 1 right
 for user sign-off. It escalates to you only for a genuine product or scope open question the planner
 named. Nothing is implemented until it delegates.
 
+When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), the planner
+writes that interface into both waves' `## Contracts to verify` and marks the later wave
+`dependsOn: []`, so both run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. `dependsOn` stays only for waves that need the earlier
+implementation or branch.
+
+A worker that cannot finish its wave commits what is done and reports `blocked` with the remaining
+scope and a proposed split. Chief re-plans the remaining scope with `chief_plan`, delegates the new
+plan's wave 1 with `replaces:` the blocked worker (same worktree and branch), chains the rest off it,
+drops the old plan's undelegated waves, and completes the old planner. A re-plan wave delegated with
+`replaces:` continues the prior branch; any re-plan wave left `dependsOn: []` and delegated without
+`replaces:` starts a new branch from the default base, without the done work.
+
 The toggle reaches Chief threads that are already running. Turn it off to delegate directly.
 
 With planning on, `chief_delegate` refuses any call that is not tied to a plan wave (`planThreadId`
