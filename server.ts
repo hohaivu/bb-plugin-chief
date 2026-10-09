@@ -2810,7 +2810,7 @@ export default async function plugin(bb: BbPluginApi) {
       // Before the result for every role: clip() cuts the tail, and a long result must not take the next call with it.
       ...(plannerReady ? [] : [action]),
       ...(recorded === undefined ? [] : recorded?.length
-        ? [`Recorded: ${recorded.length} commands, ${failed.length} non-zero exit`, ...failed.slice(-3).map((c) => `  exit ${c.exitCode} · ${clip(c.command, 120)}`)]
+        ? [`Recorded (last ${recorded.length} commands): ${failed.length} non-zero exit`, ...failed.slice(-3).map((c) => `  exit ${c.exitCode} · ${clip(c.command, 120)}`)]
         : ["Recorded: none recorded"]),
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
@@ -3436,19 +3436,20 @@ export default async function plugin(bb: BbPluginApi) {
   async function recordedCommands(threadId: string): Promise<Array<{ command: string; exitCode: number | null; status: string }> | null> {
     try {
       const commands: Array<{ command: string; exitCode: number | null; status: string }> = [];
-      let afterSeq: string | undefined;
-      // ponytail: 5 pages of 200 events; a longer thread shows only its earliest commands' tail cut.
-      for (let page = 0; page < 5; page++) {
-        const events = await bb.sdk.threads.events.list({ threadId, types: ["item/completed"], order: "asc", limit: "200", ...(afterSeq ? { afterSeq } : {}) });
+      let beforeSeq: string | undefined;
+      // ponytail: newest first, 5 pages of 200 events; commands older than that budget are not shown.
+      for (let page = 0; page < 5 && commands.length < 20; page++) {
+        const events = await bb.sdk.threads.events.list({ threadId, types: ["item/completed"], order: "desc", limit: "200", ...(beforeSeq ? { beforeSeq } : {}) });
         for (const event of events) {
           if (event.type !== "item/completed" || event.data.item.type !== "commandExecution") continue;
           const item = event.data.item;
           commands.push({ command: clip(item.command, 200), exitCode: item.exitCode ?? null, status: item.status });
+          if (commands.length === 20) break;
         }
         if (events.length < 200) break;
-        afterSeq = String(events.at(-1)!.seq);
+        beforeSeq = String(events.at(-1)!.seq);
       }
-      return commands.slice(-20);
+      return commands.reverse();
     } catch (error) {
       bb.log.warn(`Could not read recorded commands for ${threadId}: ${String(error)}`);
       return null;
