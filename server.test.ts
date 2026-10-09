@@ -5493,9 +5493,9 @@ describe("child Chief", () => {
     const childId = await spawnChild(state, chief.threadId);
     const before = state.spawned.length;
     await call(state, "chief_plan", { title: "Rework", mission: "Propose" }, childId);
-    await call(state, "chief_consult", { title: "Diagnose", mission: "Explore" }, childId);
     await call(state, "chief_delegate", work(), childId);
     const worker = (await status(state)).threads.find((thread) => thread.role === "worker")!;
+    await call(state, "chief_consult", { title: "Diagnose", mission: "Explore", workerThreadId: worker.threadId }, childId);
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
     await call(state, "chief_review", { workerThreadId: worker.threadId }, childId);
     await call(state, "chief_review", { branch: "feature/x" }, childId);
@@ -5514,6 +5514,15 @@ describe("child Chief", () => {
       await call(state, "chief_report", { state: "ready", result: "Done", ...(agent.role === "planner" ? { plan: PLAN_FIXTURE } : { verdict: "approve" }) }, agent.threadId);
       expect(state.sent.slice(sent).map((entry: any) => entry.threadId)).toEqual([childId]);
     }
+    const advisor = agents.find((thread) => thread.role === "advisor")!;
+    expect(advisor.workerThreadId).toBe(worker.threadId);
+    const sent = state.sent.length;
+    await call(state, "chief_report", { state: "ready", result: "Try X" }, advisor.threadId);
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(advisor.threadId)!, lastAssistantText: "advice given" });
+    const targets = state.sent.slice(sent).map((entry: any) => entry.threadId);
+    expect(targets.length).toBeGreaterThan(0);
+    expect(new Set(targets)).toEqual(new Set([childId]));
+    expect(state.sent.slice(sent).some((entry: any) => entry.input[0].text.includes("Advisor report"))).toBe(true);
     const parentRoster = await call(state, "chief_roster", {}, chief.threadId) as string;
     for (const agent of agents) expect(parentRoster).not.toContain(agent.threadId);
     expect(parentRoster.split(childId).length).toBeGreaterThan(1);
