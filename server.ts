@@ -535,6 +535,12 @@ const MAX_CARRIED_FAILS = 12;
 const failsParam = z.array(failEntry).max(5).optional().describe(
   "Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most 5 per report.",
 );
+const MAX_LOG_READ = 30;
+const logParams = z.object({
+  entries: z.array(failEntry.extend({ kind: z.enum(["FACT", "FAIL"]) })).max(5).optional().describe(
+    "Notes for peer waves: FACT for a finding that could change their next step, FAIL for a dead end. Omit to only read.",
+  ),
+});
 const optionalReport = z.object({
   state: z.enum(["active", "idle", "failed"]),
   result: z.string().trim().max(MAX_RESULT_LENGTH).optional(),
@@ -710,6 +716,8 @@ interface ManagedRow {
   kind: string | null;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
   fails: string | null;
+  /** Worker row on a plan: the highest plan_log id chief_log has shown it, or null. */
+  log_read_id: number | null;
   /** Non-transient failed events counted for bb chief stats (since stats_since). */
   thread_errors: number;
   /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
@@ -1074,6 +1082,10 @@ export const MIGRATIONS = [
     `UPDATE chief_todos SET chief_thread_id=NULL WHERE chief_thread_id IS NOT NULL`,
     // Approaches a worker or reviewer ruled out, carried down a replaces: chain into the successor's brief.
     `ALTER TABLE managed_threads ADD COLUMN fails TEXT`,
+    // Shared plan-run log: FACT/FAIL notes workers on one plan read with chief_log, each from its own cursor.
+    `CREATE TABLE plan_log (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_thread_id TEXT NOT NULL, author_thread_id TEXT NOT NULL, wave INTEGER, kind TEXT NOT NULL CHECK (kind IN ('FACT','FAIL')), text TEXT NOT NULL, scope TEXT NOT NULL, basis TEXT NOT NULL, created_at TEXT NOT NULL)`,
+    `CREATE INDEX plan_log_plan ON plan_log(plan_thread_id, id)`,
+    `ALTER TABLE managed_threads ADD COLUMN log_read_id INTEGER`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2114,6 +2126,52 @@ export default async function plugin(bb: BbPluginApi) {
       .sort((a, b) => a.created_at - b.created_at);
   }
 
+  const insertPlanLog = db.prepare<[string, string, number | null, string, string, string, string, string]>(
+    `INSERT INTO plan_log (plan_thread_id, author_thread_id, wave, kind, text, scope, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  function appendPlanLog(row: ManagedRow, entries: z.infer<typeof logParams>["entries"] & {}) {
+    const at = new Date().toISOString();
+    for (const entry of entries) {
+      insertPlanLog.run(row.plan_thread_id!, row.thread_id, row.plan_wave, entry.kind, entry.text, entry.scope, entry.basis, at);
+    }
+  }
+
+  /** chief_log: append the caller's entries, then return unread peer entries and every wave's current owner and state. */
+  function planLog(row: ManagedRow, entries: z.infer<typeof logParams>["entries"]): string {
+    const planThreadId = row.plan_thread_id!;
+    const unread = db.prepare(`SELECT * FROM plan_log WHERE plan_thread_id=? AND id>? AND author_thread_id<>? ORDER BY id LIMIT ?`)
+      .all(planThreadId, row.log_read_id ?? 0, row.thread_id, MAX_LOG_READ + 1) as {
+        id: number; author_thread_id: string; wave: number | null; kind: string; text: string; scope: string; basis: string;
+      }[];
+    const shown = unread.slice(0, MAX_LOG_READ);
+    db.transaction(() => {
+      if (entries?.length) appendPlanLog(row, entries);
+      // Only the cursor moves: never state, report_seq or the alert outbox.
+      if (shown.length) db.prepare(`UPDATE managed_threads SET log_read_id=? WHERE thread_id=?`).run(shown.at(-1)!.id, row.thread_id);
+    })();
+    if (shown.length) reloadRoles();
+    const more = unread.length > MAX_LOG_READ
+      ? (db.prepare(`SELECT COUNT(*) AS n FROM plan_log WHERE plan_thread_id=? AND id>? AND author_thread_id<>?`)
+        .get(planThreadId, shown.at(-1)!.id, row.thread_id) as { n: number }).n
+      : 0;
+    const waves = planWavesFor(planThreadId);
+    return [
+      entries?.length ? `Appended ${entries.length} entr${entries.length === 1 ? "y" : "ies"}.` : null,
+      "## Unread peer entries",
+      ...(shown.length
+        ? shown.map((entry) => `- #${entry.id} ${entry.kind} wave ${entry.wave ?? "?"} @thread:${entry.author_thread_id} [${entry.scope}] ${entry.text} (basis: ${entry.basis})`)
+        : ["- none"]),
+      ...(more ? [`${more} more unread: call chief_log again.`] : []),
+      "", "## Waves",
+      ...waves.map((_, index) => {
+        const current = waveWorkers(planThreadId, index + 1).at(-1);
+        if (!current) return `- wave ${index + 1}: not delegated`;
+        const last = (current.result ?? current.status ?? "").split("\n").find((line) => line.trim()) ?? "";
+        return `- wave ${index + 1}: @thread:${current.thread_id} ${current.state}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
+      }),
+    ].filter((line) => line !== null).join("\n");
+  }
+
   /** A ready chain-tip worker's waiting line while other waves of its plan are not ready yet, else null. */
   function waveWaitLine(row: ManagedRow): string | null {
     if (row.role !== "worker" || row.state !== "ready" || !row.plan_thread_id || row.plan_wave == null) return null;
@@ -2699,16 +2757,22 @@ export default async function plugin(bb: BbPluginApi) {
     // reviewer resumed for an unrelated reason must not read as a deadlock.
     // reject_streak counts only consecutive request_changes verdicts, and
     // resets the moment either side breaks the streak with an approve.
-    db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
-      reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
-      plan_waves = COALESCE(?, plan_waves), regression=?, verdict_path=?, fails = COALESCE(?, fails), report_seq = report_seq + 1,
-      active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-      params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
-      params.recommendation ?? null, verdict,
-      verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
-      scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, verdictPath, fails,
-      now, threadId,
-    );
+    db.transaction(() => {
+      db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
+        reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
+        plan_waves = COALESCE(?, plan_waves), regression=?, verdict_path=?, fails = COALESCE(?, fails), report_seq = report_seq + 1,
+        active_since=NULL, updated_at=? WHERE thread_id=?`).run(
+        params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
+        params.recommendation ?? null, verdict,
+        verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
+        scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, verdictPath, fails,
+        now, threadId,
+      );
+      // A plan worker's fails also reach its peer waves through chief_log, so it need not post them twice.
+      if (row.role === "worker" && row.plan_thread_id && params.fails?.length) {
+        appendPlanLog(row, params.fails.map((entry) => ({ ...entry, kind: "FAIL" as const })));
+      }
+    })();
     reloadRoles();
     const current = roles.get(threadId)!;
     const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
@@ -3894,6 +3958,18 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.agents.registerTool({
+    name: "chief_log",
+    presentation: { label: { pending: "Reading plan log…", completed: "Read plan log" } },
+    description: "Plan workers only: append FACT/FAIL notes for peer waves, and read unread peer notes plus every wave's current worker and state. Never alerts Chief or changes your state.",
+    parameters: logParams,
+    async execute({ entries }, context) {
+      const row = context.threadId ? roles.get(context.threadId) : undefined;
+      if (!row || row.role !== "worker" || !row.plan_thread_id) return "Not part of a plan run.";
+      return planLog(row, entries);
+    },
+  });
+
+  bb.agents.registerTool({
     name: "chief_research",
     presentation: { label: { pending: "Researching…", completed: "Researched" } },
     description: [
@@ -3955,7 +4031,7 @@ export default async function plugin(bb: BbPluginApi) {
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skill cover the rest.
     return {
-      tools: ["chief_report", ...(research ? ["chief_research"] : [])],
+      tools: ["chief_report", ...(role === "worker" && row?.plan_thread_id ? ["chief_log"] : []), ...(research ? ["chief_research"] : [])],
       skills: ["chief-worker"],
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}.`,

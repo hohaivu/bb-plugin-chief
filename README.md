@@ -85,6 +85,11 @@ inherits the prior worker's reason when it gave one. The one escape hatch is `un
 shape and cause are already known. It is persisted and shown as `unplanned: <reason>` in `chief_roster`
 and `bb chief status`, and `Unplanned: <reason>` in `chief_inspect`. With planning off, nothing changes.
 
+**Shared plan log.** Workers delegated from the same planner get `chief_log`. One call appends up to 5
+`FACT`/`FAIL` notes and returns the peer notes it has not seen yet (30 at most per call), then each wave's
+current worker, state and last status line. A plan worker's `chief_report` fails are mirrored in as `FAIL`.
+It is pull-only: it never alerts Chief or changes any thread's state, and no worker can claim another wave.
+
 ### Advisor
 
 When a reviewer and worker stop converging (two straight `request_changes` verdicts, or one that
