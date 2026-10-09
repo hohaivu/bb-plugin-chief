@@ -1877,21 +1877,27 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Fails ruled out along a replaces: chain, newest first, from worker threadId back to the chain head. */
   function chainFails(threadId: string): FailEntry[] {
-    const parse = (json: string | null) => (json ? JSON.parse(json) as FailEntry[] : []).reverse();
-    const seen = new Set<string>();
-    const out: FailEntry[] = [];
+    // Stored oldest-first; `at` is the report time (absent on older rows, which sort as oldest).
+    type Stored = FailEntry & { at?: number };
+    const parse = (json: string | null) => (json ? JSON.parse(json) as Stored[] : []).reverse();
+    const all: Stored[] = [];
     const visited = new Set<string>();
     for (let worker = roles.get(threadId); worker && !visited.has(worker.thread_id);
       worker = worker.replaces_thread_id ? roles.get(worker.replaces_thread_id) : undefined) {
       visited.add(worker.thread_id);
       const reviewers = (reviewerFails.all(worker.thread_id) as { fails: string }[]).flatMap((row) => parse(row.fails));
-      for (const entry of [...parse(worker.fails), ...reviewers]) {
-        const key = `${entry.scope}\u0000${entry.text}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push({ text: clip(entry.text, 400), scope: clip(entry.scope, 120), basis: clip(entry.basis, 200) });
-        if (out.length >= MAX_CARRIED_FAILS) return out;
-      }
+      all.push(...parse(worker.fails), ...reviewers);
+    }
+    // Newest first across workers and reviewers, before dedup and the cap, so the latest basis wins.
+    all.sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+    const seen = new Set<string>();
+    const out: FailEntry[] = [];
+    for (const entry of all) {
+      const key = `${entry.scope}\u0000${entry.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ text: clip(entry.text, 400), scope: clip(entry.scope, 120), basis: clip(entry.basis, 200) });
+      if (out.length >= MAX_CARRIED_FAILS) break;
     }
     return out;
   }
@@ -2733,7 +2739,9 @@ export default async function plugin(bb: BbPluginApi) {
       const key = (entry: FailEntry) => `${entry.scope}\u0000${entry.text}`;
       const fresh = new Set(params.fails.map(key));
       const kept = (row.fails ? JSON.parse(row.fails) as FailEntry[] : []).filter((entry) => !fresh.has(key(entry)));
-      const incoming = params.fails.filter((entry, index) => params.fails!.findIndex((other) => key(other) === key(entry)) === index);
+      const at = Date.now();
+      const incoming = params.fails.filter((entry, index) => params.fails!.findIndex((other) => key(other) === key(entry)) === index)
+        .map((entry) => ({ ...entry, at }));
       fails = JSON.stringify([...kept, ...incoming].slice(-MAX_CARRIED_FAILS));
     }
     const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
