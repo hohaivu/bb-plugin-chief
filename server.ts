@@ -2350,6 +2350,7 @@ export default async function plugin(bb: BbPluginApi) {
       const contractLines = waves.length === 1
         ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
         : chain.flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
+      const recorded = await recordedCommands(workerThreadId);
       const prompt = reviewerPrompt({
         research: !!researchLine("reviewer", await researchSettings()),
         subject: `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
@@ -2364,6 +2365,9 @@ export default async function plugin(bb: BbPluginApi) {
             "", "## Contracts to verify", ...contractLines,
             "Check every item against the worktree. An unmet item means request_changes naming it; say which items you confirmed.",
           ] : []),
+          "", "## Recorded commands (from the worker's event log)",
+          ...(recorded?.length ? recorded.map((c) => `exit ${c.exitCode ?? c.status} · ${c.command}`) : ["none recorded"]),
+          "Recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
           ...(worker.kind === "designer" ? [
             "", "This is design work: check the result with the design tool's screenshots (read-only) and confirm the worker called its finish call (e.g. `finish_working_on_nodes`); do not edit the design.",
           ] : []),
@@ -2785,6 +2789,8 @@ export default async function plugin(bb: BbPluginApi) {
     reloadRoles();
     const current = roles.get(threadId)!;
     const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
+    const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
+    const failed = recorded?.filter((c) => c.exitCode !== null && c.exitCode !== 0) ?? [];
     const summary = [
       `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
@@ -2803,6 +2809,9 @@ export default async function plugin(bb: BbPluginApi) {
       ...(verdictPath ? [`Verdict file: ${verdictPath}`] : []),
       // Before the result for every role: clip() cuts the tail, and a long result must not take the next call with it.
       ...(plannerReady ? [] : [action]),
+      ...(recorded === undefined ? [] : recorded?.length
+        ? [`Recorded (last ${recorded.length} commands): ${failed.length} non-zero exit`, ...failed.slice(-3).map((c) => `  exit ${c.exitCode} · ${clip(c.command, 120)}`)]
+        : ["Recorded: none recorded"]),
       ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
@@ -3418,6 +3427,31 @@ export default async function plugin(bb: BbPluginApi) {
       return (await bb.sdk.threads.output({ threadId })).output;
     } catch (error) {
       bb.log.warn(`Could not inspect output for ${threadId}: ${String(error)}`);
+      return null;
+    }
+  }
+
+  /** The worker's completed shell commands as BB recorded them (item/completed commandExecution),
+   * last 20. null when the log cannot be read; [] when the provider records none. Never throws. */
+  async function recordedCommands(threadId: string): Promise<Array<{ command: string; exitCode: number | null; status: string }> | null> {
+    try {
+      const commands: Array<{ command: string; exitCode: number | null; status: string }> = [];
+      let beforeSeq: string | undefined;
+      // ponytail: newest first, 5 pages of 200 events; commands older than that budget are not shown.
+      for (let page = 0; page < 5 && commands.length < 20; page++) {
+        const events = await bb.sdk.threads.events.list({ threadId, types: ["item/completed"], order: "desc", limit: "200", ...(beforeSeq ? { beforeSeq } : {}) });
+        for (const event of events) {
+          if (event.type !== "item/completed" || event.data.item.type !== "commandExecution") continue;
+          const item = event.data.item;
+          commands.push({ command: clip(item.command, 200), exitCode: item.exitCode ?? null, status: item.status });
+          if (commands.length === 20) break;
+        }
+        if (events.length < 200) break;
+        beforeSeq = String(events.at(-1)!.seq);
+      }
+      return commands.reverse();
+    } catch (error) {
+      bb.log.warn(`Could not read recorded commands for ${threadId}: ${String(error)}`);
       return null;
     }
   }
