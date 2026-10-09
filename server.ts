@@ -1555,6 +1555,8 @@ export default async function plugin(bb: BbPluginApi) {
    * one for the caller's project. Planning and delegation resolve it the same way. */
   async function owningChief(callerThreadId?: string | null) {
     const caller = callerThreadId ? roles.get(callerThreadId) : undefined;
+    // A seeded child Chief without its row yet must not fall through to the project Chief.
+    if (callerThreadId && !caller && await seededChildChiefParent(callerThreadId)) throw new Error("This child Chief is not registered yet; retry shortly.");
     const projectId = caller?.project_id ?? (await settings.get()).chiefProject;
     if (!projectId) throw new Error("No Chief project is configured.");
     const chief = caller?.role === "chief" ? caller : chiefForProject(projectId);
@@ -3234,7 +3236,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The Pending block exactly as chief_roster prints it. */
   function pendingBlock(chiefThreadId: string, includeWaiting = false) {
-    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].reverse(), todoLines(roles.get(chiefThreadId)?.project_id, todoScope(roles.get(chiefThreadId)), !includeWaiting)), 6_000);
+    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(roles.get(chiefThreadId)?.project_id, todoScope(roles.get(chiefThreadId)), !includeWaiting)), 6_000);
   }
 
   /** The panel's checklist: action threads, in-progress threads (newest first), open
@@ -4073,13 +4075,16 @@ export default async function plugin(bb: BbPluginApi) {
           return fail(`bb chief ${command} is for a top-level Chief or an operator; a child Chief works only on its own brief.`);
         }
         // A managed Chief acts only on its directly owned work; an operator shell stays unscoped.
-        const scoped = async (id: string) => { if (caller) await controlledTarget(id, caller); };
+        const scoped = async (id: string) => {
+          if (caller) await controlledTarget(id, caller);
+          else if (childCaller) throw new Error("This child Chief is not registered yet; retry shortly.");
+        };
         if (command === "status") {
           const projectId = readScope ? readProject : args.one("project") ?? context.projectId ?? (await settings.get()).chiefProject;
           if (!projectId) return fail("status requires --project outside a project thread");
           const managedRows = readScope ? rosterForChief(readScope, true) : rosterFor(projectId, true);
           const text = [
-            ...pendingLines(managedRows, todoLines(projectId, readScope && childCaller ? readScope : null)),
+            ...pendingLines(readScope ? managedRows.filter((row) => row.thread_id !== readScope) : managedRows, todoLines(projectId, readScope && childCaller ? readScope : null)),
             ...managedRows.map((row) => rosterRowLines(row).join("\n  ")),
           ].join("\n");
           return ok({ sectionId: storedSectionId(), threads: managedRows.map(toManaged) }, text);

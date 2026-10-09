@@ -5486,6 +5486,78 @@ describe("child Chief", () => {
     await expect(call(state, "chief_continue", { threadId: worker.threadId, instruction: "x" }, childId)).rejects.toThrow();
   });
 
+  test("a child Chief's agents are its own child threads and report to it", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true, cascadeArchive: true });
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    const before = state.spawned.length;
+    await call(state, "chief_plan", { title: "Rework", mission: "Propose" }, childId);
+    await call(state, "chief_delegate", work(), childId);
+    const worker = (await status(state)).threads.find((thread) => thread.role === "worker")!;
+    await call(state, "chief_consult", { title: "Diagnose", mission: "Explore", workerThreadId: worker.threadId }, childId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+    await call(state, "chief_review", { workerThreadId: worker.threadId }, childId);
+    await call(state, "chief_review", { branch: "feature/x" }, childId);
+    const spawns = state.spawned.slice(before);
+    expect(spawns).toHaveLength(5);
+    for (const spawn of spawns) {
+      expect([spawn.parentThreadId, spawn.lifecycleOwnerThreadId, spawn.pluginMetadata.chiefThreadId]).toEqual([childId, childId, childId]);
+    }
+    const agents = (await status(state)).threads.filter((thread) => thread.chiefThreadId === childId);
+    expect(agents).toHaveLength(5);
+    for (const agent of agents) {
+      expect(state.db.prepare("SELECT parent_thread_id FROM managed_threads WHERE thread_id=?").get(agent.threadId)).toEqual({ parent_thread_id: childId });
+    }
+    for (const agent of agents.filter((thread) => thread.role === "planner" || thread.role === "reviewer")) {
+      const sent = state.sent.length;
+      await call(state, "chief_report", { state: "ready", result: "Done", ...(agent.role === "planner" ? { plan: PLAN_FIXTURE } : { verdict: "approve" }) }, agent.threadId);
+      expect(state.sent.slice(sent).map((entry: any) => entry.threadId)).toEqual([childId]);
+    }
+    const advisor = agents.find((thread) => thread.role === "advisor")!;
+    expect(advisor.workerThreadId).toBe(worker.threadId);
+    const sent = state.sent.length;
+    await call(state, "chief_report", { state: "ready", result: "Try X" }, advisor.threadId);
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(advisor.threadId)!, lastAssistantText: "advice given" });
+    const targets = state.sent.slice(sent).map((entry: any) => entry.threadId);
+    expect(targets.length).toBeGreaterThan(0);
+    expect(new Set(targets)).toEqual(new Set([childId]));
+    expect(state.sent.slice(sent).some((entry: any) => entry.input[0].text.includes("Advisor report"))).toBe(true);
+    const parentRoster = await call(state, "chief_roster", {}, chief.threadId) as string;
+    for (const agent of agents) expect(parentRoster).not.toContain(agent.threadId);
+    expect(parentRoster.split(childId).length).toBeGreaterThan(1);
+  });
+
+  test("an unregistered seeded child Chief cannot spawn or act through the CLI", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    state.addLive("thr_seeded_child", "proj_1", "Chief · Seeded", "chief");
+    state.seedPluginMetadata("thr_seeded_child", { role: "chief", chiefThreadId: chief.threadId });
+    for (const argv of [
+      ["plan", "--title", "Plan", "--mission", "Plan the checkout fix"],
+      ["delegate", "--title", "Work", "--mission", "Do it", "--unplanned-reason", "Bounded test fixture"],
+      ["stop", worker.threadId],
+    ]) {
+      const before = snapshot(state);
+      const result = await cli(state, argv, "thr_seeded_child");
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr ?? result.stdout).toMatch(/not registered/);
+      expect(snapshot(state)).toEqual(before);
+    }
+  });
+
+  test("a child Chief's Pending omits itself while its parent still sees it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const childId = await spawnChild(state, chief.threadId);
+    await call(state, "chief_report", { state: "ready", result: "Login fixed" }, childId);
+    expect(await call(state, "chief_roster", {}, childId) as string).not.toMatch(/Child Chief finished its brief/);
+    expect((await cli(state, ["status"], childId)).stdout).not.toMatch(/Child Chief finished its brief/);
+    expect(await call(state, "chief_roster", {}, chief.threadId) as string).toMatch(/Child Chief finished its brief/);
+  });
+
   test("an unregistered seeded child Chief is neither adoptable nor an operator", async () => {
     const state = await setup();
     const chief = await start(state);
