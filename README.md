@@ -78,7 +78,7 @@ named. Nothing is implemented until it delegates.
 
 When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), the planner
 writes that interface into both waves' `## Contracts to verify` and marks the later wave
-`dependsOn: []`, so both run in parallel; `dependsOn` stays only for waves that need the earlier
+`dependsOn: []`, so both run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. `dependsOn` stays only for waves that need the earlier
 implementation or branch.
 
 A worker that cannot finish its wave commits what is done and reports `blocked` with the remaining
