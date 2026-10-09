@@ -1688,6 +1688,62 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).input[0].text).toContain(`Before starting another worker round, call chief_consult (workerThreadId: ${worker.threadId})`);
   });
 
+  describe("verdict file", () => {
+    const reviewed = async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId);
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready for review" }, { threadId: worker.threadId, projectId: "proj_1" });
+      await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" });
+      const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+      return { state, chief, worker, reviewer, path: join(state.storageRoot, reviewer.threadId, "verdict.md") };
+    };
+    const findings = `${"The discount is applied twice. ".repeat(80)}END-OF-FINDINGS`;
+
+    test("persists a reviewer's full verdict to a file and names it in the alert and inspect", async () => {
+      const { state, chief, worker, reviewer, path } = await reviewed();
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: findings, verdict: "request_changes", regression: true, recommendation: "Apply it once",
+      }, { threadId: reviewer.threadId, projectId: "proj_1" });
+      const file = await readFile(path, "utf8");
+      expect(file).toContain(findings);
+      expect(file).toContain("Verdict: request_changes\nRegression: yes");
+      expect(file).toContain(`Reviewed worker: ${worker.threadId}`);
+      expect(file).toContain("## Recommendation\n\nApply it once");
+      const alert: string = state.sent.at(-1).input[0].text;
+      expect(alert).toContain(`Verdict: request_changes\nVerdict file: ${path}`);
+      expect(alert.indexOf("Verdict file:")).toBeLessThan(alert.indexOf("Result:"));
+      expect(JSON.stringify(await state.harness.behavior.callAgentTool(
+        "chief_inspect", { threadId: reviewer.threadId }, { threadId: chief.threadId },
+      ))).toContain(`Verdict file: ${path}`);
+    });
+
+    test("hands a replacement worker the reviewer's verdict file", async () => {
+      const { state, chief, worker, reviewer, path } = await reviewed();
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: findings, verdict: "request_changes",
+      }, { threadId: reviewer.threadId, projectId: "proj_1" });
+      await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
+      const prompt: string = state.spawned.at(-1).prompt;
+      expect(prompt).toContain(`Verdict file (read it in full): ${path}`);
+      expect(prompt).toContain("names a plan file or verdict file, read that file in full");
+    });
+
+    test("a failed verdict-file write does not fail the report", async () => {
+      const { state, chief, reviewer } = await reviewed();
+      // A plain file where the reviewer's storage directory should be makes the write fail.
+      await writeFile(join(state.storageRoot, reviewer.threadId), "not a directory");
+      await state.harness.behavior.callAgentTool("chief_report", {
+        state: "ready", result: findings, verdict: "approve",
+      }, { threadId: reviewer.threadId, projectId: "proj_1" });
+      expect(state.sent.at(-1).input[0].text).toContain("Verdict: approve");
+      expect(state.sent.at(-1).input[0].text).not.toContain("Verdict file:");
+      expect(JSON.stringify(await state.harness.behavior.callAgentTool(
+        "chief_inspect", { threadId: reviewer.threadId }, { threadId: chief.threadId },
+      ))).not.toContain("Verdict file:");
+    });
+  });
+
   test("does not misfire the not-converging escalation on a phase's first rejection", async () => {
     const state = await setup();
     const chief = await start(state);

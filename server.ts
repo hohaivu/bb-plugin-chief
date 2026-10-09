@@ -486,7 +486,7 @@ const delegateShape = z.object({
   ),
   issueUrl: z.string().trim().min(1).max(500).optional().describe("URL of the tracking issue Chief opened for this task, when the forge has issues."),
   prUrl: z.string().trim().min(1).max(500).optional().describe("URL of the draft pull request Chief opened from the task branch. The worker never marks it ready."),
-  replaces: z.string().trim().min(1).optional().describe("A finished worker's thread id to hand off from: the new worker starts in that worker's worktree and branch, gets its latest review findings, and the old worker is marked complete."),
+  replaces: z.string().trim().min(1).optional().describe("A finished worker's thread id to hand off from: the new worker starts in that worker's worktree and branch, gets its latest review findings and the path to the reviewer's full verdict file, and the old worker is marked complete."),
   planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
   unplannedReason: z.string().trim().min(1).max(300).optional().describe("Planning is on and this work skips chief_plan: a short reason why. Only for bounded work whose shape and cause are already known. Not needed with planThreadId/wave or replaces."),
@@ -688,6 +688,8 @@ interface ManagedRow {
   reviewed_report_seq: number | null;
   /** Worker row only: the worker it replaced through replaces:, or null. */
   replaces_thread_id: string | null;
+  /** Reviewer row only: the verdict.md its last ready report was written to, or null. */
+  verdict_path: string | null;
   /** Non-transient failed events counted for bb chief stats (since stats_since). */
   thread_errors: number;
   /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
@@ -1038,6 +1040,8 @@ export const MIGRATIONS = [
     `INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('stats_since', CAST(strftime('%s','now') AS INTEGER) * 1000)`,
     // The per-machine fallback model was removed; a cooling provider is refused outright.
     `DROP TABLE IF EXISTS chief_fallback_model`,
+    // A reviewer's full verdict file, handed to the replacement worker, the next reviewer and the advisor.
+    `ALTER TABLE managed_threads ADD COLUMN verdict_path TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1774,8 +1778,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(reviews.length ? [
           "", "## Reviewer verdicts",
           ...reviews.flatMap((review) => [
-            `Verdict: ${review.verdict} (${review.thread_id})`, clip(review.result ?? "", 300),
-            `Full report and last output: bb chief inspect ${review.thread_id}`,
+            ...verdictPreview(review, ` (${review.thread_id})`),
           ]),
         ] : []),
         "", "## Branch and diff",
@@ -1914,8 +1917,7 @@ export default async function plugin(bb: BbPluginApi) {
       "", brief,
       ...(findings?.result ? [
         "", `## Review findings to fix (${findings.thread_id})`,
-        `Verdict: ${findings.verdict ?? "none"}`, clip(findings.result, 300),
-        `Full report and last output: bb chief inspect ${findings.thread_id}`,
+        ...verdictPreview(findings),
         ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
       ] : []),
       ...(wave !== undefined && waveTotal !== undefined ? [
@@ -1937,7 +1939,7 @@ export default async function plugin(bb: BbPluginApi) {
         "Do not create, merge, or mark ready any pull request — Chief owns the forge. Commit and push your work, then report ready.",
       ] : []),
       "", "## Working contract",
-      "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file, read that file in full too before starting.",
+      "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file or verdict file, read that file in full too before starting.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
@@ -2226,8 +2228,7 @@ export default async function plugin(bb: BbPluginApi) {
           ] : []),
           ...(previous?.result ? [
             "", `## The previous review (${previous.thread_id})`,
-            `Verdict: ${previous.verdict ?? "none"}`, clip(previous.result, 300),
-            `Full report and last output: bb chief inspect ${previous.thread_id}`,
+            ...verdictPreview(previous),
             ...(previous.recommendation ? [`Recommendation: ${clip(previous.recommendation, 600)}`] : []),
             "", "Check each finding above against the current worktree: say which were fixed and which remain. Do not re-open points it approved.",
           ] : []),
@@ -2450,13 +2451,29 @@ export default async function plugin(bb: BbPluginApi) {
     const bodies = typeof plan === "string" ? [{ name: "plan.md", body: plan }]
       : plan.map((wave, index) => ({ name: `plan-${index + 1}.md`, body: wave.body }));
     // mirrorFor writes a copy under that thread's storage, in plans/<threadId>/.
-    const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId: mirrorFor ?? threadId });
-    const root = mirrorFor ? join(storageRootPath, "plans", threadId) : storageRootPath;
+    const dir = mirrorFor ? join("plans", threadId) : "";
+    const paths = [];
+    for (const wave of bodies) paths.push({ path: await writeStorageFile(mirrorFor ?? threadId, join(dir, wave.name), `${wave.body}\n`) });
+    return paths;
+  }
+
+  /** Writes a file under a thread's own storage root and returns its absolute path. */
+  async function writeStorageFile(threadId: string, relPath: string, content: string) {
+    const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
     // Thread storage lives on the thread's host, which need not be this plugin server's machine.
-    for (const wave of bodies) {
-      await bb.sdk.files.write({ hostId, path: join(root, wave.name), content: `${wave.body}\n`, createParents: true });
-    }
-    return bodies.map((wave) => ({ path: join(root, wave.name) }));
+    const path = join(storageRootPath, relPath);
+    await bb.sdk.files.write({ hostId, path, content, createParents: true });
+    return path;
+  }
+
+  /** A reviewer's verdict for another thread's prompt: the clipped findings plus where to read them in full. */
+  function verdictPreview(review: ManagedRow, suffix = "") {
+    return [
+      `Verdict: ${review.verdict ?? "none"}${suffix}`,
+      ...(review.verdict_path ? [`Verdict file (read it in full): ${review.verdict_path}`] : []),
+      clip(review.result ?? "", 300),
+      `Full report and last output: bb chief inspect ${review.thread_id}`,
+    ];
   }
 
   /** A wave body's `Contracts to verify` section, up to the next heading of the same or higher level. */
@@ -2582,20 +2599,35 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Could not mirror ${threadId}'s plan into Chief's storage: ${String(error)}`);
       }
     }
+    const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
+    // Best-effort: the verdict is in the DB either way, so a failed write only loses the file.
+    let verdictPath: string | null = null;
+    if (row.role === "reviewer" && verdict) {
+      try {
+        verdictPath = await writeStorageFile(threadId, "verdict.md", [
+          `# Review verdict (${threadId})`, "",
+          `Verdict: ${verdict}`, ...(regressionFlag ? ["Regression: yes"] : []),
+          `Reviewed worker: ${row.worker_thread_id ?? "none"}`,
+          "", "## Findings", "", params.result ?? "",
+          ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
+        ].join("\n") + "\n");
+      } catch (error) {
+        bb.log.warn(`Could not write ${threadId}'s verdict file: ${String(error)}`);
+      }
+    }
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, not rejection rounds — a
     // reviewer resumed for an unrelated reason must not read as a deadlock.
     // reject_streak counts only consecutive request_changes verdicts, and
     // resets the moment either side breaks the streak with an approve.
-    const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
     db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
       reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
-      plan_waves = COALESCE(?, plan_waves), regression=?, report_seq = report_seq + 1,
+      plan_waves = COALESCE(?, plan_waves), regression=?, verdict_path=?, report_seq = report_seq + 1,
       active_since=NULL, updated_at=? WHERE thread_id=?`).run(
       params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
       params.recommendation ?? null, verdict,
       verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
-      scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0,
+      scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, verdictPath,
       now, threadId,
     );
     reloadRoles();
@@ -2615,6 +2647,7 @@ export default async function plugin(bb: BbPluginApi) {
           ]
         : []),
       ...(verdict ? [`Verdict: ${verdict}`] : []),
+      ...(verdictPath ? [`Verdict file: ${verdictPath}`] : []),
       // Before the result for every role: clip() cuts the tail, and a long result must not take the next call with it.
       ...(plannerReady ? [] : [action]),
       ...(params.result ? [`Result: ${params.result}`] : []),
@@ -3311,6 +3344,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.blocker ? [`Blocker: ${clip(row.blocker, 600)}`] : []),
       ...(row.recommendation ? [`Recommendation: ${clip(row.recommendation, 600)}`] : []),
       ...(row.verdict ? [`Verdict: ${row.verdict}`] : []),
+      ...(row.verdict_path ? [`Verdict file: ${row.verdict_path}`] : []),
       `Last assistant output:\n${output ? clip(output, 2_000) : "(none available)"}`,
     ].join("\n");
   }
