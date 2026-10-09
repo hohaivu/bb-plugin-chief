@@ -714,7 +714,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Own work through completion; do not merely dispatch it.
 - Inspect the worker's evidence before choosing the next action.
 - Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark verified work complete.
-- Never reuse a worker for more work. Finishing skipped acceptance criteria, rebasing or restacking, or any new task goes to a fresh worker with chief_delegate replaces: — same worktree, branch, and pull request. chief_continue is only a short nudge to a thread that is still working.
+- Never reuse a worker for more work. Finishing skipped acceptance criteria, rebasing or restacking, or any new task goes to a fresh worker with chief_delegate replaces: — same worktree, branch, and pull request. chief_continue is only a short nudge to a thread that is still working, never to a worker or reviewer that has reported.
 - In a managed thread's worktree, Chief only reads: git status, git diff, git log, and file contents. Never run git checkout, restore, reset, stash, rebase, merge, commit, or push there, and never run its tests or builds. Restacking, rebasing, pushing, discarding changes, and running tests go to a fresh worker with chief_delegate replaces:. A failed push goes to that worker too, never a retry loop.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
@@ -1997,6 +1997,9 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "worker" && (row.state === "ready" || row.state === "complete")) {
       throw new Error(`Worker ${threadId} already reported ${row.state}. chief_continue never reuses a finished worker for more work — deferred acceptance criteria, a rebase or restack, or a new task. ${handoff}`);
     }
+    if (row.role === "reviewer" && (row.state === "ready" || row.state === "complete")) {
+      throw new Error(`${threadId} already reported; chief_continue is only a nudge to a thread still working. ${rerouteSteps(row)}`);
+    }
     if (instruction.trim().length > MAX_NUDGE_LENGTH) {
       throw new Error(`chief_continue is a short nudge of at most ${MAX_NUDGE_LENGTH} characters to a thread that is still working. ${row.role === "worker" ? handoff : rerouteSteps(row)}`);
     }
@@ -2115,14 +2118,12 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete") return null;
     if (row.verdict === "approve") return "The reviewer approves. Complete this work, then mark the pull request ready.";
     if (row.reject_streak >= CONSULT_AFTER_REJECTIONS) {
-      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. This pair is not converging. Before starting another worker round, call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`;
+      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. This pair is not converging. If every finding names file:line and a concrete fix, hand it straight to a fresh worker with ${row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : `chief_delegate (branch: ${row.branch})`}. Call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} only when a finding is disputed, ambiguous, or needs a design or product decision. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`;
     }
-    if (row.regression) {
-      return `The reviewer reports this change introduced a new problem. Before starting another worker round, call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} — it attaches the brief, the reviewer verdicts, and the branch — and act on its advice. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`;
-    }
+    const flagged = row.regression ? " The reviewer reports this change introduced a new problem; make the fix's brief name it." : "";
     return row.worker_thread_id
-      ? `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`
-      : `The reviewer requires changes, and no managed worker owns branch ${row.branch}. Hand the fix to a fresh worker with chief_delegate (branch: ${row.branch}${row.pr_url ? `, prUrl: ${row.pr_url}` : ""}; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.`;
+      ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`
+      : `The reviewer requires changes, and no managed worker owns branch ${row.branch}.${flagged} Hand the fix to a fresh worker with chief_delegate (branch: ${row.branch}${row.pr_url ? `, prUrl: ${row.pr_url}` : ""}; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.`;
   }
 
   /** The one open/done test: the panel's unchecked items are exactly Pending's actions plus work
@@ -2152,6 +2153,7 @@ export default async function plugin(bb: BbPluginApi) {
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
       ...(opts.research ? ["For a large diff or several concerns at once, chief_research review gives you verified findings to check; the verdict stays yours."] : []),
       `Report your findings to Chief thread ${opts.chiefThreadId} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
+      "Give every finding a file:line and the concrete fix; mark any finding that needs a design or product decision as such.",
       "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
       "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
       ...opts.provenance,
@@ -3144,7 +3146,6 @@ export default async function plugin(bb: BbPluginApi) {
         `Thread errors, busy rejections and branchless replaces chains are recorded from ${since === null ? "an unknown date" : new Date(since).toISOString()}; threads before that show 0 and may split into separate tasks.`,
         "Provider failures come from transient-retry alerts, sent only since that alert shipped; failures before it are not counted, and a failure the classifier does not recognise is counted as a thread error.",
         "A deleted thread loses its completed state, so its task counts as dropped.",
-        "A reviewer continued after its verdict loses that verdict until it reports again.",
         "Wall time runs from the first planner or worker spawn to the final worker's completion.",
       ],
     };
@@ -3757,7 +3758,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_continue",
     presentation: { label: { pending: "Nudging thread…", completed: "Nudged thread" } },
-    description: "Send a short nudge (at most 500 characters) to a managed thread that is still working. Never reuse a worker for more work: once it has reported ready, finishing skipped acceptance criteria, a rebase or restack, or any new task goes to a fresh worker with chief_delegate replaces: (same worktree, branch, and PR). Reviewers stay read-only; a repair goes to a fresh worker.",
+    description: "Send a short nudge (at most 500 characters) to a managed thread that is still working. Never reuse a worker for more work: once it has reported ready, finishing skipped acceptance criteria, a rebase or restack, or any new task goes to a fresh worker with chief_delegate replaces: (same worktree, branch, and PR). Reviewers stay read-only; a repair goes to a fresh worker. Refused for a worker or reviewer that has already reported.",
     parameters: z.object({
       threadId: z.string(),
       instruction: z.string().trim().min(1).max(MAX_RESULT_LENGTH).describe(`A short nudge, at most ${MAX_NUDGE_LENGTH} characters.`),
@@ -4042,7 +4043,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id] [--json]" },
       { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
-      { name: "continue", summary: "Continue a managed worker or reviewer", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
+      { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
       { name: "review", summary: "Start or return a read-only review for a worker, pull request, or branch", usage: "bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]" },
       { name: "complete", summary: "Mark verified, non-running managed work complete", usage: "bb chief complete <thread-id> [--result \"…\"] [--json]" },
