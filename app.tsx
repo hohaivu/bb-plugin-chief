@@ -17,6 +17,7 @@ const ROLES = [
   { role: "chief", label: "Chief", hint: "Supervises and decides." },
   { role: "planner", label: "Planner", hint: "Plans work before it starts." },
   { role: "worker", label: "Worker", hint: "Implements the work Chief delegates." },
+  { role: "designer", label: "Designer", hint: "Works in design tools (Paper, Figma, …)." },
   { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
   { role: "advisor", label: "Advisor", hint: "Diagnoses work that keeps failing review." },
 ] as const;
@@ -178,7 +179,7 @@ function ChiefModelSettings() {
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          Chief, its planners, workers, reviewers, and advisors can each run on their own model. A role
+          Chief, its planners, workers, designers, reviewers, and advisors can each run on their own model. A role
           without a selection uses BB&apos;s own default for the project.
         </p>
         <button
@@ -199,7 +200,8 @@ function ChiefModelSettings() {
           {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
           {ROLES.map(({ role, label, hint }) => {
             const selection = host.selections[role];
-            const value = selection ?? host.fallback;
+            const inheritsWorker = role === "designer";
+            const value = selection ?? (inheritsWorker ? host.selections.worker : null) ?? host.fallback;
             return (
               <div key={role} className="mt-3 flex flex-wrap items-center gap-3">
                 <div className="w-24 shrink-0">
@@ -228,11 +230,13 @@ function ChiefModelSettings() {
                       onClick={() => save(host.hostId, role, null)}
                       className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
                     >
-                      Use BB default
+                      {inheritsWorker ? "Use Worker model" : "Use BB default"}
                     </button>
                   </>
                 ) : (
-                  <span className="text-xs text-muted-foreground">Not set · BB picks the model</span>
+                  <span className="text-xs text-muted-foreground">
+                    {inheritsWorker ? "Not set · uses the Worker model" : "Not set · BB picks the model"}
+                  </span>
                 )}
               </div>
             );

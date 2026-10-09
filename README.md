@@ -47,9 +47,9 @@ one project. `autoSpawn` (default `false`) controls whether Chief should automat
 
 Settings → **Chief models by machine** scans every enrolled machine for its signed-in providers
 and their live model catalogs, and lets you pick a provider, model, and reasoning level per role:
-Chief, planner, worker, reviewer, and advisor. A role without a selection spawns on BB's own
+Chief, planner, worker, designer, reviewer, and advisor. A role without a selection spawns on BB's own
 default for the project, and a selection the machine can no longer serve (signed out, model
-retired) falls back to that default rather than failing the spawn. Designers use the Worker model pick.
+retired) falls back to that default rather than failing the spawn. A Designer without its own pick uses the Worker pick.
 
 ### Git workflow
 

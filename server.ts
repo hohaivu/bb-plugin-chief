@@ -125,8 +125,9 @@ const spawnMetadataSchema = z.object({
 /** A reviewer's structured judgement. Chief routes on this field instead of
  * parsing a ship-or-fix opinion out of the report prose. */
 const verdictSchema = z.enum(["approve", "request_changes"]);
-/** The role key chief_models stores a per-machine model pick under: the lifecycle roles. */
-const modelRoleSchema = roleSchema;
+/** The role key chief_models stores a per-machine model pick under: the lifecycle roles plus
+ * `designer` (a worker kind, not a thread role). */
+const modelRoleSchema = z.enum([...roleSchema.options, "designer"]);
 const stateSchema = z.enum([
   "starting",
   "pending",
@@ -440,6 +441,7 @@ const modelConfigurationSchema = z.object({
       chief: modelSelectionSchema.nullable(),
       planner: modelSelectionSchema.nullable(),
       worker: modelSelectionSchema.nullable(),
+      designer: modelSelectionSchema.nullable(),
       reviewer: modelSelectionSchema.nullable(),
       advisor: modelSelectionSchema.nullable(),
     }),
@@ -1047,6 +1049,11 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN verdict_path TEXT`,
     // A worker's kind ("designer" for design-tool work); NULL reads as a plain worker.
     `ALTER TABLE managed_threads ADD COLUMN kind TEXT`,
+    // A Designer model pick; no row inherits the Worker pick.
+    `CREATE TABLE chief_models_v6 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','designer')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
+    `INSERT INTO chief_models_v6 SELECT * FROM chief_models`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_v6 RENAME TO chief_models`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1483,7 +1490,10 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function execution(role: ModelRole, hostId: string | null) {
-    const selection = hostId === null ? null : readRoleModel(hostId, role);
+    const selection = hostId === null
+      ? null
+      // No Designer row inherits the Worker pick; a stored but unservable one goes to BB default.
+      : readRoleModel(hostId, role) ?? (role === "designer" ? readRoleModel(hostId, "worker") : null);
     if (!hostId || !selection) return {};
     return (await usableSelection(hostId, selection)) ?? {};
   }
@@ -1904,7 +1914,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
     const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
-    const execution = await spawnExecution("worker", hostId, projectId);
+    const execution = await spawnExecution(kind, hostId, projectId);
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every worker turn, so the spawn prompt does not repeat them.
@@ -3959,6 +3969,7 @@ export default async function plugin(bb: BbPluginApi) {
           chief: readRoleModel(host.id, "chief"),
           planner: readRoleModel(host.id, "planner"),
           worker: readRoleModel(host.id, "worker"),
+          designer: readRoleModel(host.id, "designer"),
           reviewer: readRoleModel(host.id, "reviewer"),
           advisor: readRoleModel(host.id, "advisor"),
         };
