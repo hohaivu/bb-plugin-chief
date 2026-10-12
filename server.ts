@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -16,6 +16,8 @@ const RULES_FILE = "chief.md";
 const RECONCILE_INTERVAL_MS = 30_000;
 const MAX_ALERT_LENGTH = 3_000;
 const MAX_RESULT_LENGTH = 8_000;
+/** A report whose result fits is short: no file, and no summary needed. */
+const SUMMARY_MAX = 800;
 const MAX_PLAN_LENGTH = 64_000;
 // ponytail: a nudge is 1–3 sentences; anything longer is new work for a fresh thread.
 const MAX_NUDGE_LENGTH = 500;
@@ -554,9 +556,13 @@ const logParams = z.object({
     "Notes for peer waves: FACT for a finding that could change their next step, FAIL for a dead end. Omit to only read.",
   ),
 });
+const summaryParam = z.string().trim().min(1).max(SUMMARY_MAX).optional().describe(
+  `Short summary Chief reads in the alert, at most ${SUMMARY_MAX} characters: outcome, changed files or verdict, verification commands with exit status, and next action. Put the full report in \`result\`; the plugin saves it to a file Chief can open. Leave this unset when \`result\` is already this short.`,
+);
 const optionalReport = z.object({
   state: z.enum(["active", "idle", "failed"]),
   result: z.string().trim().max(MAX_RESULT_LENGTH).optional(),
+  summary: summaryParam,
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
   fails: failsParam,
@@ -594,6 +600,7 @@ function tips(waves: WaveLink[]): number[] {
 const readyReport = z.object({
   state: z.literal("ready"),
   result: z.string().trim().min(1).max(MAX_RESULT_LENGTH),
+  summary: summaryParam,
   verdict: verdictSchema.optional().describe(
     "Required in a review thread: approve when the change can ship as it stands, request_changes when the worker must fix something. Workers leave this unset.",
   ),
@@ -613,6 +620,7 @@ const readyReport = z.object({
 const blockedReport = z.object({
   state: z.literal("blocked"),
   result: z.string().trim().max(MAX_RESULT_LENGTH).optional(),
+  summary: summaryParam,
   blocker: z.string().trim().min(1).max(4_000),
   recommendation: z.string().trim().min(1).max(4_000),
   fails: failsParam,
@@ -725,8 +733,12 @@ interface ManagedRow {
   reviewed_report_seq: number | null;
   /** Worker row only: the worker it replaced through replaces:, or null. */
   replaces_thread_id: string | null;
-  /** Reviewer row only: the verdict.md its last ready report was written to, or null. */
+  /** Reviewer row only: the verdict-<seq>.md its last ready report was written to, or null. */
   verdict_path: string | null;
+  /** The last chief_report's short summary, or null (none sent, or chief_complete replaced the result). */
+  summary: string | null;
+  /** The report-<seq>.md holding that report in full, or null (short report, reviewer verdict, or write failed). */
+  report_path: string | null;
   /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. */
   kind: string | null;
   /** Worker row only: 1 when delegated with simple (#simple); null/0 means a normal worker. */
@@ -1135,6 +1147,9 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN planner_on INTEGER`,
     // One row per reviewer verdict report; survives chief_continue (which clears the row's verdict) and replacement reviewers.
     `CREATE TABLE reviewer_verdicts (id INTEGER PRIMARY KEY, reviewer_thread_id TEXT, worker_thread_id TEXT, verdict TEXT, report_seq INTEGER, at INTEGER)`,
+    // The last chief_report's short summary and the per-report file holding its full text; both follow `result`.
+    `ALTER TABLE managed_threads ADD COLUMN summary TEXT`,
+    `ALTER TABLE managed_threads ADD COLUMN report_path TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1815,7 +1830,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. That rule covers the files the brief names, not every file a wider scan would touch. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
       `- ${PLAN_ONLY}`,
       "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
-      "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file.",
+      "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file. Keep that result under 800 characters and leave `summary` unset; the plan files are the full plan.",
       "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       `- Split the work into at most ${MAX_WAVES} waves, each a self-contained plan one worker finishes. One wave by default; split only where one worker cannot finish the work. Give each wave \`dependsOn\`: \`[k]\` only when it truly builds on wave k's changes, \`[]\` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), write that exact interface into both waves' \`## Contracts to verify\` and give the later wave \`dependsOn: []\` so they run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. Keep \`dependsOn\` only when it needs the earlier wave's implementation or branch. Waves contain no phases.`,
       "- Submit the plan through chief_report's `plan` field: one Markdown string for a single wave, or an array of `{body, dependsOn}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
@@ -1884,13 +1899,17 @@ export default async function plugin(bb: BbPluginApi) {
         `Branch: ${worker.branch ?? "the project default base"}`,
         ...(worker.pr_url ? [`Pull request: ${worker.pr_url}`] : []),
         "This worktree holds the change: read it with git diff against its base.",
-        ...(worker.result ? [clip(worker.result, 300), `Full report and last output: bb chief inspect ${worker.thread_id}`] : []),
+        ...(worker.result ? [
+          worker.summary ?? clip(worker.result, 300),
+          ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
+          `Full report and last output: bb chief inspect ${worker.thread_id}`,
+        ] : []),
       ] : []),
       "", "## Working contract",
       `- ${ADVISE_ONLY}`,
       "- Read every file this brief names in full before concluding anything: no partial reads, no limit or offset.",
       "- Reproduce before concluding: run the failing test or command, and quote the command and its exit status.",
-      "- A ready report gives the root cause, the evidence, what earlier rounds missed, and the recommended next step for a fresh worker.",
+      "- A ready report gives the root cause, the evidence, what earlier rounds missed, and the recommended next step for a fresh worker. Put the full advice in `result` and a short `summary` (at most 800 characters: root cause, recommended fix, evidence command).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
@@ -2082,7 +2101,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file or verdict file, read that file in full too before starting.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
-      "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm).",
+      "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -2369,6 +2388,7 @@ export default async function plugin(bb: BbPluginApi) {
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
       ...(opts.research ? ["For a large diff or several concerns at once, chief_research review gives you verified findings to check; the verdict stays yours."] : []),
       `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
+      "Send a `summary` with the report: verdict, count of findings, the most important one with file:line.",
       "Give every finding a file:line and the concrete fix; mark any finding that needs a design or product decision as such.",
       "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
       "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
@@ -2448,7 +2468,8 @@ export default async function plugin(bb: BbPluginApi) {
             "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
           ] : []),
           ...(worker.result ? [
-            "", "## What the worker reported", clip(worker.result, 300),
+            "", "## What the worker reported", worker.summary ?? clip(worker.result, 300),
+            ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
             `Full report and last output: bb chief inspect ${workerThreadId}`,
           ] : []),
           ...(previous?.result ? [
@@ -2563,9 +2584,12 @@ export default async function plugin(bb: BbPluginApi) {
     const live = await bb.sdk.threads.get({ threadId });
     if (BUSY_STATUSES.has(live.status)) throw new Error(`Cannot complete ${threadId} while it is ${live.status}.`);
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Cannot complete ${threadId} because it is not a live thread.`);
-    db.prepare(`UPDATE managed_threads SET state='complete', status=?, result=COALESCE(?, result),
-      blocker=NULL, recommendation=NULL, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-      live.status, result ? clip(result, MAX_RESULT_LENGTH) : null, Date.now(), threadId,
+    const replacement = result ? clip(result, MAX_RESULT_LENGTH) : null;
+    // A replaced result drops the summary and report file that described the old one.
+    db.prepare(`UPDATE managed_threads SET state='complete', status=?1, result=COALESCE(?2, result),
+      summary=CASE WHEN ?2 IS NULL THEN summary END, report_path=CASE WHEN ?2 IS NULL THEN report_path END,
+      blocker=NULL, recommendation=NULL, active_since=NULL, updated_at=?3 WHERE thread_id=?4`).run(
+      live.status, replacement, Date.now(), threadId,
     );
     reloadRoles();
     return { row: roles.get(threadId)! };
@@ -2677,12 +2701,21 @@ export default async function plugin(bb: BbPluginApi) {
     return paths;
   }
 
-  /** Writes a file under a thread's own storage root and returns its absolute path. */
+  /** Writes a file under a thread's own storage root and returns its absolute path.
+   * Atomic: the content lands under a temp name and is moved into place, so a failed
+   * write never leaves a partial file under the final name. */
   async function writeStorageFile(threadId: string, relPath: string, content: string) {
     const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
     // Thread storage lives on the thread's host, which need not be this plugin server's machine.
     const path = join(storageRootPath, relPath);
-    await bb.sdk.files.write({ hostId, path, content, createParents: true });
+    const tmp = `${path}.tmp-${randomUUID()}`;
+    await bb.sdk.files.write({ hostId, path: tmp, content, createParents: true });
+    try {
+      await bb.sdk.files.move({ hostId, sourcePath: tmp, destinationPath: path });
+    } catch (error) {
+      await bb.sdk.files.remove({ hostId, path: tmp }).catch(() => undefined);
+      throw error;
+    }
     return path;
   }
 
@@ -2691,7 +2724,7 @@ export default async function plugin(bb: BbPluginApi) {
     return [
       `Verdict: ${review.verdict ?? "none"}${suffix}`,
       ...(review.verdict_path ? [`Verdict file (read it in full): ${review.verdict_path}`] : []),
-      clip(review.result ?? "", 300),
+      review.summary ?? clip(review.result ?? "", 300),
       `Full report and last output: bb chief inspect ${review.thread_id}`,
     ];
   }
@@ -2824,11 +2857,41 @@ export default async function plugin(bb: BbPluginApi) {
       fails = JSON.stringify([...kept, ...incoming].slice(-MAX_CARRIED_FAILS));
     }
     const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
+    const now = Date.now();
+    // A reviewer's active_cycle counts every resume, not rejection rounds — a
+    // reviewer resumed for an unrelated reason must not read as a deadlock.
+    // reject_streak counts only consecutive request_changes verdicts, and
+    // resets the moment either side breaks the streak with an approve.
+    // report_seq is reserved here, so the per-report file names below never collide.
+    const seq = db.transaction(() => {
+      const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
+        reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
+        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets=0,
+        active_since=NULL, updated_at=? WHERE thread_id=? RETURNING report_seq`).get(
+        params.state, params.result ?? null, params.summary ?? null, params.state === "blocked" ? params.blocker : null,
+        params.recommendation ?? null, verdict,
+        verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
+        scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, fails,
+        now, threadId,
+      ) as { report_seq: number };
+      if (row.role === "reviewer" && verdict) {
+        db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at) SELECT thread_id, worker_thread_id, ?, report_seq, ? FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
+      }
+      // A plan worker's fails also reach its peer waves through chief_log, so it need not post them twice.
+      if (row.role === "worker" && row.plan_thread_id && params.fails?.length) {
+        appendPlanLog(row, params.fails.map((entry) => ({ ...entry, kind: "FAIL" as const })));
+      }
+      return reserved.report_seq;
+    })();
+    reloadRoles();
+    const current = roles.get(threadId)!;
+    const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
+    const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
     // Best-effort: the verdict is in the DB either way, so a failed write only loses the file.
     let verdictPath: string | null = null;
     if (row.role === "reviewer" && verdict) {
       try {
-        verdictPath = await writeStorageFile(threadId, "verdict.md", [
+        verdictPath = await writeStorageFile(threadId, `verdict-${seq}.md`, [
           `# Review verdict (${threadId})`, "",
           `Verdict: ${verdict}`, ...(regressionFlag ? ["Regression: yes"] : []),
           `Reviewed worker: ${row.worker_thread_id ?? "none"}`,
@@ -2839,44 +2902,22 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Could not write ${threadId}'s verdict file: ${String(error)}`);
       }
     }
-    const now = Date.now();
-    // A reviewer's active_cycle counts every resume, not rejection rounds — a
-    // reviewer resumed for an unrelated reason must not read as a deadlock.
-    // reject_streak counts only consecutive request_changes verdicts, and
-    // resets the moment either side breaks the streak with an approve.
-    db.transaction(() => {
-      db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
-        reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
-        plan_waves = COALESCE(?, plan_waves), regression=?, verdict_path=?, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets=0,
-        active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-        params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
-        params.recommendation ?? null, verdict,
-        verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
-        scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, verdictPath, fails,
-        now, threadId,
-      );
-      if (row.role === "reviewer" && verdict) {
-        db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at) SELECT thread_id, worker_thread_id, ?, report_seq, ? FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
-      }
-      // A plan worker's fails also reach its peer waves through chief_log, so it need not post them twice.
-      if (row.role === "worker" && row.plan_thread_id && params.fails?.length) {
-        appendPlanLog(row, params.fails.map((entry) => ({ ...entry, kind: "FAIL" as const })));
-      }
-    })();
-    reloadRoles();
-    const current = roles.get(threadId)!;
-    const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
-    const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
     // Blocker and Recommendation each get their own budget, with a pointer when clipped, so neither
-    // can crowd out the other, Recorded or Result. A reviewer's verdict.md already holds its result and
-    // recommendation; any other clipped report gets its full text in report.md (overwritten each report).
+    // can crowd out the other, Recorded or Result. A reviewer's verdict-<seq>.md already holds its result and
+    // recommendation; any other long or clipped report gets its full text in report-<seq>.md. Both names
+    // carry the report number, so no file an earlier alert pointed at is ever overwritten.
     const FIELD_ROOM = 600;
-    const fullName = verdictPath ? "verdict.md" : "report.md";
+    const reportName = `report-${seq}.md`;
+    const fullName = verdictPath ? `verdict-${seq}.md` : reportName;
     const clipField = (value: string, room: number) => value.length <= room ? value : `${clip(value, room - 1)} (clipped; full text in ${fullName})`;
     // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
     const preview = row.role === "reviewer" && !!verdictPath && !!params.result;
     const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
     const MIN_RESULT_ROOM = 200;
+    // A result over SUMMARY_MAX is long: its full text goes to a file and the alert carries the agent's summary instead.
+    const longResult = (params.result?.length ?? 0) > SUMMARY_MAX;
+    const showSummary = !!params.summary && (preview || longResult);
+    const longLabel = "Result (clipped, full text in the report file): ";
     // Everything but Result comes first and Result alone is clipped to what is left of the alert budget,
     // so a long Result cannot take the verdict, next action, blocker or recorded evidence with it.
     // fullLine sits right after State so the whole-alert clip never reaches it; clipped says whether any field was cut.
@@ -2903,41 +2944,52 @@ export default async function plugin(bb: BbPluginApi) {
         ...(params.recommendation ? [`Recommendation: ${clipField(params.recommendation, FIELD_ROOM)}`] : []),
         ...(preview ? [`Full report and last output: bb chief inspect ${threadId}`] : []),
       ];
-      const recordedRoom = alertRoom - lead.join("\n").length - 1 - "Result: ".length - MIN_RESULT_ROOM;
+      // The room is sized for the longest label this report could use, so the line never overruns the alert.
+      const reserved = showSummary ? "Summary: " : longResult && !preview ? longLabel : "Result: ";
+      const recordedRoom = alertRoom - lead.join("\n").length - 1 - reserved.length - MIN_RESULT_ROOM;
       const recordedBlock = recorded === undefined ? [] : recordedLines(recorded, recordedRoom);
       const withRecorded = [...lead, ...recordedBlock];
-      const resultRoom = Math.max(MIN_RESULT_ROOM, alertRoom - withRecorded.join("\n").length - 1 - "Result: ".length);
+      const resultRoom = Math.max(MIN_RESULT_ROOM, alertRoom - withRecorded.join("\n").length - 1 - reserved.length);
       const resultLimit = preview ? Math.min(resultRoom, 300) : resultRoom;
-      const summary = [...withRecorded, ...(params.result ? [`Result: ${clip(params.result, resultLimit)}`] : [])].join("\n");
-      const clipped = summary.length > alertRoom
+      const resultCut = (params.result?.length ?? 0) > resultLimit;
+      const resultLine = showSummary ? `Summary: ${clip(params.summary!, resultLimit)}`
+        : params.result ? `${resultCut && longResult && !preview ? longLabel : "Result: "}${clip(params.result, resultLimit)}` : null;
+      const text = [...withRecorded, ...(resultLine ? [resultLine] : [])].join("\n");
+      const clipped = text.length > alertRoom
         || (params.state === "blocked" && params.blocker!.length > FIELD_ROOM)
         || (params.recommendation?.length ?? 0) > FIELD_ROOM
-        || (params.result?.length ?? 0) > resultLimit
+        || resultCut
         || recordedBlock.some((line) => line.startsWith("  …and "));
-      return { summary, clipped };
+      return { text, clipped };
     };
     const first = layout(null);
-    let summary = first.summary;
-    if (first.clipped && !verdictPath) {
+    let alert = first.text;
+    let reportPath: string | null = null;
+    if ((longResult || first.clipped) && !verdictPath) {
       let fullLine: string;
       try {
-        const path = await writeStorageFile(threadId, "report.md", [
+        reportPath = await writeStorageFile(threadId, reportName, [
           `# ${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, "",
           `State: ${params.state}`, ...(verdict ? [`Verdict: ${verdict}`] : []), `Next: ${action}`,
           ...(params.state === "blocked" ? ["", "## Blocker", "", params.blocker!] : []),
           ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
           ...(recorded === undefined ? [] : ["", "## Recorded", "", ...recordedLines(recorded)]),
+          ...(params.summary ? ["", "## Summary", "", params.summary] : []),
           ...(params.result ? ["", "## Result", "", params.result] : []),
         ].join("\n") + "\n");
-        fullLine = `Full report: ${path}`;
+        fullLine = `Full report: ${reportPath}`;
       } catch (error) {
         bb.log.warn(`Could not write ${threadId}'s report file: ${String(error)}`);
-        fullLine = "Full report: could not write report.md (see the plugin log)";
+        fullLine = `Full report: could not write ${reportName} (see the plugin log)`;
       }
-      summary = layout(fullLine).summary;
+      alert = layout(fullLine).text;
     }
-    const contentKey = createHash("sha1").update(summary).digest("hex").slice(0, 16);
-    return alertChief(current, `report:${current.active_cycle}:${contentKey}`, summary);
+    // Guarded by report_seq: a slow write never attaches its path to a newer report. Always runs, so a
+    // report without a verdict still clears the previous verdict_path as the main UPDATE used to.
+    db.prepare(`UPDATE managed_threads SET verdict_path=?, report_path=? WHERE thread_id=? AND report_seq=?`).run(verdictPath, reportPath, threadId, seq);
+    reloadRoles();
+    const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
+    return alertChief(roles.get(threadId) ?? current, `report:${current.active_cycle}:${contentKey}`, alert);
   }
 
   function stateFromLive(row: ManagedRow, status: string) {
@@ -3310,7 +3362,8 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
       ...waveLines(row),
       ...(row.unplanned_reason ? [`unplanned: ${clip(row.unplanned_reason, 200)}`] : []),
-      ...(row.result ? [`result: ${clip(row.result, 300)}`] : []),
+      ...(row.summary || row.result ? [`result: ${row.summary ?? clip(row.result!, 300)}`] : []),
+      ...(row.report_path ? [`report: ${row.report_path}`] : []),
       ...(row.blocker ? [`blocker: ${clip(row.blocker, 200)}`] : []),
       ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 200)}`] : []),
       ...(row.verdict ? [`verdict: ${row.verdict}`] : []),
@@ -3673,11 +3726,13 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.unplanned_reason ? [`Unplanned: ${clip(row.unplanned_reason, 300)}`] : []),
       `Persisted state: ${row.state}`,
       `Live status: ${liveStatus ?? "unknown"}`,
+      ...(row.summary ? [`Summary: ${row.summary}`] : []),
       ...(row.result ? [`Result: ${clip(row.result, 1_500)}`] : []),
       ...(row.blocker ? [`Blocker: ${clip(row.blocker, 600)}`] : []),
       ...(row.recommendation ? [`Recommendation: ${clip(row.recommendation, 600)}`] : []),
       ...(row.verdict ? [`Verdict: ${row.verdict}`] : []),
       ...(row.verdict_path ? [`Verdict file: ${row.verdict_path}`] : []),
+      ...(row.report_path ? [`Full report (last chief_report): ${row.report_path}`] : []),
       `Last assistant output:\n${output ? clip(output, 2_000) : "(none available)"}`,
     ].join("\n");
   }
@@ -4094,7 +4149,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_inspect",
     presentation: { label: { pending: "Inspecting thread…", completed: "Inspected thread" } },
-    description: "Inspect one managed thread's live status, persisted report, and bounded last assistant output before deciding what to do.",
+    description: "Inspect one managed thread's live status, persisted report summary, full-report file path, and bounded last assistant output before deciding what to do.",
     parameters: z.object({ threadId: z.string() }),
     async execute({ threadId }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -4184,7 +4239,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_report",
     presentation: { label: { pending: "Reporting to Chief…", completed: "Reported to Chief" } },
-    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file.",
+    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file. Send a short `summary` with a long `result`; the full result is saved to a per-report file.",
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
@@ -4272,7 +4327,7 @@ export default async function plugin(bb: BbPluginApi) {
       tools: ["chief_report", ...(role === "worker" && row?.plan_thread_id ? ["chief_log"] : []), ...(research ? ["chief_research"] : [])],
       skills: ["chief-worker"],
       instructions: [
-        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}.`,
+        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: short \`summary\`, full \`result\`; after reporting, end with one line.`,
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
       ].join("\n"),
