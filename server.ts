@@ -832,19 +832,37 @@ function clip(value: string, limit = MAX_ALERT_LENGTH) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 }
 
+/** The longest prefix of lines that fits budget characters (newlines included), then an "…and N more"
+ * line when some were left out and the marker itself fits. cut says whether anything was left out. */
+function fitLines(lines: string[], budget: number, marker = true) {
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 > budget) break;
+    used += line.length + 1;
+    kept.push(line);
+  }
+  const cut = kept.length < lines.length;
+  const more = () => `  …and ${lines.length - kept.length} more`;
+  if (cut && marker) while (kept.length && used + more().length + 1 > budget) used -= kept.pop()!.length + 1;
+  return { lines: cut && marker && used + more().length + 1 <= budget ? [...kept, more()] : kept, cut };
+}
+
 type RecordedCommand = { command: string; exitCode: number | null; status: string };
 
-/** Lines for the commands BB recorded, failures first. recorded null means the read failed, [] means none ran;
- * command lines stop at `budget` characters (the header always stays) with an "…and N more" line. */
-function recordedLines(recorded: RecordedCommand[] | null, budget = Infinity) {
+/** Longest command text an alert or prompt shows; the full report file keeps the whole command. */
+const COMMAND_EXCERPT = 120;
+
+/** Lines for the commands BB recorded, failures first. recorded null means the read failed, [] means none ran.
+ * The header always stays; command lines stop at `budget` characters with an "…and N more" line, and each
+ * command shows at most COMMAND_EXCERPT characters unless full is set. */
+function recordedLines(recorded: RecordedCommand[] | null, budget = Infinity, full = false) {
   if (recorded === null) return ["Recorded: could not read the event log (see the plugin log)"];
   if (!recorded.length) return ["Recorded: none recorded"];
   const failed = (c: RecordedCommand) => c.exitCode !== null && c.exitCode !== 0;
-  const lines = [...recorded.filter(failed), ...recorded.filter((c) => !failed(c))].map((c) => `  ${clip(c.command, 120)} → exit ${c.exitCode ?? c.status}`);
-  const header = `Recorded (last ${recorded.length} commands): ${recorded.filter(failed).length} non-zero exit`;
-  let used = header.length;
-  const kept = lines.filter((line) => (used += line.length + 1) <= budget);
-  return [header, ...kept, ...(kept.length < lines.length ? [`  …and ${lines.length - kept.length} more`] : [])];
+  const lines = [...recorded.filter(failed), ...recorded.filter((c) => !failed(c))]
+    .map((c) => `  ${full ? c.command : clip(c.command, COMMAND_EXCERPT)} → exit ${c.exitCode ?? c.status}`);
+  return [`Recorded (last ${recorded.length} commands): ${recorded.filter(failed).length} non-zero exit`, ...fitLines(lines, budget).lines];
 }
 
 /** Like clip(), but elides the middle instead of the tail: a long brief's opening
@@ -2709,8 +2727,8 @@ export default async function plugin(bb: BbPluginApi) {
     // Thread storage lives on the thread's host, which need not be this plugin server's machine.
     const path = join(storageRootPath, relPath);
     const tmp = `${path}.tmp-${randomUUID()}`;
-    await bb.sdk.files.write({ hostId, path: tmp, content, createParents: true });
     try {
+      await bb.sdk.files.write({ hostId, path: tmp, content, createParents: true });
       await bb.sdk.files.move({ hostId, sourcePath: tmp, destinationPath: path });
     } catch (error) {
       await bb.sdk.files.remove({ hostId, path: tmp }).catch(() => undefined);
@@ -2887,11 +2905,14 @@ export default async function plugin(bb: BbPluginApi) {
     const current = roles.get(threadId)!;
     const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
     const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
+    const verdictName = `verdict-${seq}.md`;
+    const reportName = `report-${seq}.md`;
+    const reviewerVerdict = row.role === "reviewer" && !!verdict;
     // Best-effort: the verdict is in the DB either way, so a failed write only loses the file.
     let verdictPath: string | null = null;
-    if (row.role === "reviewer" && verdict) {
+    if (reviewerVerdict) {
       try {
-        verdictPath = await writeStorageFile(threadId, `verdict-${seq}.md`, [
+        verdictPath = await writeStorageFile(threadId, verdictName, [
           `# Review verdict (${threadId})`, "",
           `Verdict: ${verdict}`, ...(regressionFlag ? ["Regression: yes"] : []),
           `Reviewed worker: ${row.worker_thread_id ?? "none"}`,
@@ -2902,91 +2923,111 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Could not write ${threadId}'s verdict file: ${String(error)}`);
       }
     }
-    // Blocker and Recommendation each get their own budget, with a pointer when clipped, so neither
-    // can crowd out the other, Recorded or Result. A reviewer's verdict-<seq>.md already holds its result and
-    // recommendation; any other long or clipped report gets its full text in report-<seq>.md. Both names
-    // carry the report number, so no file an earlier alert pointed at is ever overwritten.
+    // The alert is built in two tiers. The required lines come first, each with its own hard budget (header,
+    // State, the Full report pointer, Verdict and Verdict file, action, Blocker, Recommendation); their total is
+    // reserved out of the alert. Only what is left goes to optional detail: planner wave paths and inline-vis
+    // lines, Recorded commands, then Result or Summary. Whatever is cut lives unabridged in the full file:
+    // report-<seq>.md, or for a reviewer's verdict its verdict-<seq>.md. Both names carry the report number,
+    // so no file an earlier alert pointed at is ever overwritten.
     const FIELD_ROOM = 600;
-    const reportName = `report-${seq}.md`;
-    const fullName = verdictPath ? `verdict-${seq}.md` : reportName;
-    const clipField = (value: string, room: number) => value.length <= room ? value : `${clip(value, room - 1)} (clipped; full text in ${fullName})`;
-    // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
-    const preview = row.role === "reviewer" && !!verdictPath && !!params.result;
-    const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
+    const ACTION_ROOM = 400;
     const MIN_RESULT_ROOM = 200;
-    // A result over SUMMARY_MAX is long: its full text goes to a file and the alert carries the agent's summary instead.
+    const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
     const longResult = (params.result?.length ?? 0) > SUMMARY_MAX;
-    const showSummary = !!params.summary && (preview || longResult);
+    // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
+    const preview = reviewerVerdict && !!verdictPath && !!params.result;
     const longLabel = "Result (clipped, full text in the report file): ";
-    // Everything but Result comes first and Result alone is clipped to what is left of the alert budget,
-    // so a long Result cannot take the verdict, next action, blocker or recorded evidence with it.
-    // fullLine sits right after State so the whole-alert clip never reaches it; clipped says whether any field was cut.
-    const layout = (fullLine: string | null) => {
-      const lead = [
-        `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
+    const inlineIntro = "To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):";
+    const waveLines = plannerReady && planWaves ? planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`) : [];
+    const cost = (lines: string[]) => lines.reduce((total, line) => total + line.length + 1, 0);
+    type Pointer = { line: string; name: string | null };
+    // pointer is the Full report line, right after State so the whole-alert clip never reaches it; name is the
+    // file holding the full text, or null when it could not be written. clipped says whether anything was cut.
+    const layout = (pointer: Pointer | null) => {
+      const stored = !!pointer?.name;
+      const summaryLine = !!params.summary && (preview || stored || !params.result);
+      const resultText = summaryLine ? params.summary! : params.result ?? null;
+      const label = summaryLine ? "Summary: " : stored && longResult && !preview ? longLabel : "Result: ";
+      // A reviewer's fallback preview keeps the legacy 300; a supplied summary is budgeted like any Result.
+      const cap = preview && !summaryLine ? 300 : Infinity;
+      const top = [
+        clip(`${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, 200),
         `State: ${params.state}`,
-        ...(fullLine ? [fullLine] : []),
+        ...(pointer ? [pointer.line] : []),
         ...(params.fails?.length ? [`Fails: ${params.fails.length} ruled out (carried to any replaces: successor)`] : []),
-        ...(plannerReady && planWaves
-          ? [
-              `Plan: ${planWaves.length} wave(s)`,
-              ...planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`),
-              ...(inlinePlans.length
-                ? ["To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):", ...inlinePlans]
-                : []),
-              action,
-            ]
-          : []),
-        ...(verdict ? [`Verdict: ${verdict}`] : []),
-        ...(verdictPath ? [`Verdict file: ${verdictPath}`] : []),
-        ...(plannerReady ? [] : [action]),
-        ...(params.state === "blocked" ? [`Blocker: ${clipField(params.blocker!, FIELD_ROOM)}`] : []),
-        ...(params.recommendation ? [`Recommendation: ${clipField(params.recommendation, FIELD_ROOM)}`] : []),
-        ...(preview ? [`Full report and last output: bb chief inspect ${threadId}`] : []),
       ];
-      // The room is sized for the longest label this report could use, so the line never overruns the alert.
-      const reserved = showSummary ? "Summary: " : longResult && !preview ? longLabel : "Result: ";
-      const recordedRoom = alertRoom - lead.join("\n").length - 1 - reserved.length - MIN_RESULT_ROOM;
-      const recordedBlock = recorded === undefined ? [] : recordedLines(recorded, recordedRoom);
-      const withRecorded = [...lead, ...recordedBlock];
-      const resultRoom = Math.max(MIN_RESULT_ROOM, alertRoom - withRecorded.join("\n").length - 1 - reserved.length);
-      const resultLimit = preview ? Math.min(resultRoom, 300) : resultRoom;
-      const resultCut = (params.result?.length ?? 0) > resultLimit;
-      const resultLine = showSummary ? `Summary: ${clip(params.summary!, resultLimit)}`
-        : params.result ? `${resultCut && longResult && !preview ? longLabel : "Result: "}${clip(params.result, resultLimit)}` : null;
-      const text = [...withRecorded, ...(resultLine ? [resultLine] : [])].join("\n");
+      const planHead = waveLines.length ? [`Plan: ${waveLines.length} wave(s)`] : [];
+      const verdictLines = [...(verdict ? [`Verdict: ${verdict}`] : []), ...(verdictPath ? [`Verdict file: ${verdictPath}`] : [])];
+      const actionLine = clip(action, ACTION_ROOM);
+      const inspectLine = preview ? [`Full report and last output: bb chief inspect ${threadId}`] : [];
+      const recordedHead = recorded === undefined ? [] : recordedLines(recorded, 0);
+      const blocker = params.state === "blocked" ? params.blocker! : null;
+      const fieldCount = (blocker === null ? 0 : 1) + (params.recommendation ? 1 : 0);
+      const fixedCost = cost([...top, ...planHead, ...verdictLines, actionLine, ...inspectLine, ...recordedHead]);
+      const fieldRoom = Math.min(FIELD_ROOM, Math.max(100, Math.floor((alertRoom - fixedCost) / Math.max(fieldCount, 1)) - 20));
+      const suffix = pointer?.name ? ` (clipped; full text in ${pointer.name})` : " (clipped)";
+      const field = (name: string, value: string) => `${name}: ${value.length <= fieldRoom ? value : `${clip(value, fieldRoom - suffix.length)}${suffix}`}`;
+      const fields = [...(blocker === null ? [] : [field("Blocker", blocker)]), ...(params.recommendation ? [field("Recommendation", params.recommendation)] : [])];
+      const remaining = alertRoom - fixedCost - cost(fields);
+      // Optional detail gets what the required lines leave, minus a floor for Result.
+      let room = remaining - (resultText ? label.length + Math.min(resultText.length, cap, MIN_RESULT_ROOM) + 1 : 0);
+      const waveFit = fitLines(waveLines, room);
+      room -= cost(waveFit.lines);
+      const inlineFit = fitLines(inlinePlans, room - inlineIntro.length - 1, false);
+      const inlineBlock = inlineFit.lines.length ? [inlineIntro, ...inlineFit.lines] : [];
+      room -= cost(inlineBlock);
+      const commands = recorded === undefined ? [] : recordedLines(recorded, room).slice(1);
+      const resultRoom = Math.min(cap, remaining - cost(waveFit.lines) - cost(inlineBlock) - cost(commands) - label.length - 1);
+      const resultCut = !!resultText && resultText.length > resultRoom;
+      const text = [
+        ...top, ...planHead, ...waveFit.lines, ...inlineBlock, ...verdictLines, actionLine, ...fields, ...inspectLine,
+        ...recordedHead, ...commands,
+        ...(resultText && resultRoom > 0 ? [`${label}${clip(resultText, resultRoom)}`] : []),
+      ].join("\n");
       const clipped = text.length > alertRoom
-        || (params.state === "blocked" && params.blocker!.length > FIELD_ROOM)
-        || (params.recommendation?.length ?? 0) > FIELD_ROOM
-        || resultCut
-        || recordedBlock.some((line) => line.startsWith("  …and "));
+        || action.length > ACTION_ROOM
+        || (blocker !== null && blocker.length > fieldRoom)
+        || (params.recommendation?.length ?? 0) > fieldRoom
+        || waveFit.cut || inlineFit.cut
+        || (!!recorded && (commands.filter((line) => !line.startsWith("  …and ")).length < recorded.length
+          || recorded.some((entry) => entry.command.length > COMMAND_EXCERPT)))
+        || resultCut;
       return { text, clipped };
     };
+    // Long-or-clipped is decided from this first pass; the pass that follows only adds the pointer.
     const first = layout(null);
     let alert = first.text;
     let reportPath: string | null = null;
-    if ((longResult || first.clipped) && !verdictPath) {
-      let fullLine: string;
+    if (reviewerVerdict) {
+      // A reviewer with a verdict never gets a report file: its verdict file is the full report.
+      if (!verdictPath) alert = layout({ line: `Full report: could not write ${verdictName} (see the plugin log)`, name: null }).text;
+      else if (first.clipped) alert = layout({ line: `Full report: ${verdictPath}`, name: verdictName }).text;
+    } else if (longResult || first.clipped) {
+      let pointer: Pointer;
       try {
         reportPath = await writeStorageFile(threadId, reportName, [
           `# ${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, "",
           `State: ${params.state}`, ...(verdict ? [`Verdict: ${verdict}`] : []), `Next: ${action}`,
+          ...(waveLines.length ? ["", "## Plan files", "", ...waveLines, ...inlinePlans] : []),
           ...(params.state === "blocked" ? ["", "## Blocker", "", params.blocker!] : []),
           ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
-          ...(recorded === undefined ? [] : ["", "## Recorded", "", ...recordedLines(recorded)]),
+          ...(recorded === undefined ? [] : ["", "## Recorded", "", ...recordedLines(recorded, Infinity, true)]),
           ...(params.summary ? ["", "## Summary", "", params.summary] : []),
           ...(params.result ? ["", "## Result", "", params.result] : []),
         ].join("\n") + "\n");
-        fullLine = `Full report: ${reportPath}`;
+        pointer = { line: `Full report: ${reportPath}`, name: reportName };
       } catch (error) {
         bb.log.warn(`Could not write ${threadId}'s report file: ${String(error)}`);
-        fullLine = `Full report: could not write ${reportName} (see the plugin log)`;
+        pointer = { line: `Full report: could not write ${reportName} (see the plugin log)`, name: null };
       }
-      alert = layout(fullLine).text;
+      alert = layout(pointer).text;
     }
-    // Guarded by report_seq: a slow write never attaches its path to a newer report. Always runs, so a
-    // report without a verdict still clears the previous verdict_path as the main UPDATE used to.
-    db.prepare(`UPDATE managed_threads SET verdict_path=?, report_path=? WHERE thread_id=? AND report_seq=?`).run(verdictPath, reportPath, threadId, seq);
+    // Guarded by report_seq and the stored result: a slow write never attaches its path to a newer report, nor
+    // to a result chief_complete replaced meanwhile. Always runs, so a report without a verdict still clears
+    // the previous verdict_path as the main UPDATE used to.
+    db.prepare(`UPDATE managed_threads SET verdict_path=?, report_path=? WHERE thread_id=? AND report_seq=? AND result IS ?`).run(
+      verdictPath, reportPath, threadId, seq, params.result ?? null,
+    );
     reloadRoles();
     const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
     return alertChief(roles.get(threadId) ?? current, `report:${current.active_cycle}:${contentKey}`, alert);
@@ -3650,7 +3691,7 @@ export default async function plugin(bb: BbPluginApi) {
         for (const event of events) {
           if (event.type !== "item/completed" || event.data.item.type !== "commandExecution") continue;
           const item = event.data.item;
-          commands.push({ command: clip(item.command, 200), exitCode: item.exitCode ?? null, status: item.status });
+          commands.push({ command: item.command, exitCode: item.exitCode ?? null, status: item.status });
           if (commands.length === 20) break;
         }
         if (events.length < 100) break;
