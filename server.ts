@@ -2608,11 +2608,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Cannot complete ${threadId} because it is not a live thread.`);
     const replacement = result ? clip(result, MAX_RESULT_LENGTH) : null;
     // A replaced result drops the summary and report file that described the old one.
-    db.prepare(`UPDATE managed_threads SET state='complete', status=?1, result=COALESCE(?2, result),
-      summary=CASE WHEN ?2 IS NULL THEN summary END, report_path=CASE WHEN ?2 IS NULL THEN report_path END,
-      result_rev=result_rev + (?2 IS NOT NULL),
-      blocker=NULL, recommendation=NULL, active_since=NULL, updated_at=?3 WHERE thread_id=?4`).run(
-      live.status, replacement, Date.now(), threadId,
+    db.prepare(`UPDATE managed_threads SET state='complete', status=@status, result=COALESCE(@result, result),
+      summary=CASE WHEN @result IS NULL THEN summary END, report_path=CASE WHEN @result IS NULL THEN report_path END,
+      result_rev=result_rev + (@result IS NOT NULL),
+      blocker=NULL, recommendation=NULL, active_since=NULL, updated_at=@now WHERE thread_id=@threadId`).run(
+      { status: live.status, result: replacement, now: Date.now(), threadId },
     );
     reloadRoles();
     return { row: roles.get(threadId)! };
