@@ -2947,7 +2947,9 @@ export default async function plugin(bb: BbPluginApi) {
       const stored = !!pointer?.name;
       const summaryLine = !!params.summary && (preview || stored || !params.result);
       const resultText = summaryLine ? params.summary! : params.result ?? null;
-      const label = summaryLine ? "Summary: " : stored && longResult && !preview ? longLabel : "Result: ";
+      // A Result the file backs up is sized for the longer label, so it can say it was clipped.
+      const filed = stored && !summaryLine && !preview;
+      const sizeLabel = summaryLine ? "Summary: " : filed ? longLabel : "Result: ";
       // A reviewer's fallback preview keeps the legacy 300; a supplied summary is budgeted like any Result.
       const cap = preview && !summaryLine ? 300 : Infinity;
       const top = [
@@ -2970,15 +2972,16 @@ export default async function plugin(bb: BbPluginApi) {
       const fields = [...(blocker === null ? [] : [field("Blocker", blocker)]), ...(params.recommendation ? [field("Recommendation", params.recommendation)] : [])];
       const remaining = alertRoom - fixedCost - cost(fields);
       // Optional detail gets what the required lines leave, minus a floor for Result.
-      let room = remaining - (resultText ? label.length + Math.min(resultText.length, cap, MIN_RESULT_ROOM) + 1 : 0);
+      let room = remaining - (resultText ? sizeLabel.length + Math.min(resultText.length, cap, MIN_RESULT_ROOM) + 1 : 0);
       const waveFit = fitLines(waveLines, room);
       room -= cost(waveFit.lines);
       const inlineFit = fitLines(inlinePlans, room - inlineIntro.length - 1, false);
       const inlineBlock = inlineFit.lines.length ? [inlineIntro, ...inlineFit.lines] : [];
       room -= cost(inlineBlock);
       const commands = recorded === undefined ? [] : recordedLines(recorded, room).slice(1);
-      const resultRoom = Math.min(cap, remaining - cost(waveFit.lines) - cost(inlineBlock) - cost(commands) - label.length - 1);
+      const resultRoom = Math.min(cap, remaining - cost(waveFit.lines) - cost(inlineBlock) - cost(commands) - sizeLabel.length - 1);
       const resultCut = !!resultText && resultText.length > resultRoom;
+      const label = filed && (longResult || resultCut) ? longLabel : summaryLine ? "Summary: " : "Result: ";
       const text = [
         ...top, ...planHead, ...waveFit.lines, ...inlineBlock, ...verdictLines, actionLine, ...fields, ...inspectLine,
         ...recordedHead, ...commands,
@@ -3001,7 +3004,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (reviewerVerdict) {
       // A reviewer with a verdict never gets a report file: its verdict file is the full report.
       if (!verdictPath) alert = layout({ line: `Full report: could not write ${verdictName} (see the plugin log)`, name: null }).text;
-      else if (first.clipped) alert = layout({ line: `Full report: ${verdictPath}`, name: verdictName }).text;
+      else if (longResult || first.clipped) alert = layout({ line: `Full report: ${verdictPath}`, name: verdictName }).text;
     } else if (longResult || first.clipped) {
       let pointer: Pointer;
       try {
@@ -3022,11 +3025,11 @@ export default async function plugin(bb: BbPluginApi) {
       }
       alert = layout(pointer).text;
     }
-    // Guarded by report_seq and the stored result: a slow write never attaches its path to a newer report, nor
-    // to a result chief_complete replaced meanwhile. Always runs, so a report without a verdict still clears
+    // Guarded by report_seq, and report_path also by the stored result: a slow write never attaches its path to a
+    // newer report, nor to a result chief_complete replaced meanwhile. Always runs, so a report without a verdict still clears
     // the previous verdict_path as the main UPDATE used to.
-    db.prepare(`UPDATE managed_threads SET verdict_path=?, report_path=? WHERE thread_id=? AND report_seq=? AND result IS ?`).run(
-      verdictPath, reportPath, threadId, seq, params.result ?? null,
+    db.prepare(`UPDATE managed_threads SET verdict_path=?, report_path=CASE WHEN result IS ? THEN ? END WHERE thread_id=? AND report_seq=?`).run(
+      verdictPath, params.result ?? null, reportPath, threadId, seq,
     );
     reloadRoles();
     const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
