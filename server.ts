@@ -43,6 +43,11 @@ const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 const execFileAsync = promisify(execFile);
 /** How long one chief_research call waits before handing back a runId to resume with. */
 const RESEARCH_DEFAULT_TIMEOUT_MINUTES = 10;
+/** Hard ceiling on one chief_research call's wait, whatever the configured timeout.
+ * ponytail: BB's daemon-to-server tool-call fetch dies at undici's 300 s body timeout and then stops the run; the 1-minute margin
+ * covers the final status, history and failureNote CLI calls (up to 30 s each) that can run after the deadline.
+ * Drop the cap once BB streams keepalive bytes or the daemon disables the body timeout. */
+const RESEARCH_CALL_WAIT_CAP_MS = 4 * 60_000;
 const RESEARCH_POLL_MS = 3_000;
 const MAX_RESEARCH_OUTPUT = 32_000;
 const RESEARCH_PREAMBLE = `READ-ONLY: ${READ_ONLY}, and run no command that changes tracked files or git state; you share the caller's checkout.`;
@@ -3685,8 +3690,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, waitMs: number) {
-    const deadline = Date.now() + waitMs;
+  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, deadline: number) {
     try {
       for (;;) {
         let run: { status: string; result?: unknown; resultOmitted?: boolean; error?: unknown; calls?: unknown };
@@ -3733,9 +3737,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function research(params: ResearchParams, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
+    const startedAt = Date.now();
     const { cap, settings } = await researchCaller(context.threadId, context.projectId, params.mode);
     const waitMs = (params.mode ? settings.timeoutMinutes[params.mode] : RESEARCH_DEFAULT_TIMEOUT_MINUTES) * 60_000;
-    if (params.runId) return awaitResearch(params.runId, context, waitMs);
+    const deadline = startedAt + Math.min(waitMs, RESEARCH_CALL_WAIT_CAP_MS);
+    if (params.runId) return awaitResearch(params.runId, context, deadline);
     const mode = params.mode!;
     const calls = agentCount(params);
     if (calls > cap) {
@@ -3778,7 +3784,7 @@ export default async function plugin(bb: BbPluginApi) {
         "", "script:", "```js", script, "```", "", "args:", "```json", JSON.stringify(args), "```",
       ].join("\n");
     }
-    return prefix + await awaitResearch(runId, context, waitMs);
+    return prefix + await awaitResearch(runId, context, deadline);
   }
 
   bb.agents.registerTool({
@@ -4048,7 +4054,7 @@ export default async function plugin(bb: BbPluginApi) {
       "investigate: one agent per `questions` entry, then one merges the answers into a brief with Confirmed and Unconfirmed sections.",
       "Chief may use survey, review, investigate; a planner survey, investigate; a reviewer review, survey.",
       "Read-only by prompt only: the agents share your checkout and permissions, and are told not to edit, commit, or push.",
-      "Waits up to the mode's timeout (10 minutes unless set in Chief researcher settings). If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting.",
+      "Each call waits up to the mode's timeout (10 minutes unless set in Chief researcher settings), and never more than 4 minutes, because BB ends tool calls at about 5 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting; the run keeps going in between.",
     ].join(" "),
     parameters: researchParams,
     async execute(params, context) {
