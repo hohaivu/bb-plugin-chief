@@ -785,7 +785,7 @@ const ROSTER_CHIEF_INSTRUCTIONS =
 
 /** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
 const WAIT_CHIEF_INSTRUCTIONS =
-  "Lifecycle alerts wake you when a managed thread reports, goes idle, fails, stalls, or is archived or deleted. After you act, end your turn and wait for the next alert: never poll managed threads with `bb thread wait`, `bb thread show`, or sleep loops. When you need a thread's state now, call chief_inspect once.";
+  "Lifecycle alerts wake you when a managed thread reports, hits a transient provider failure, or stalls; going idle, being archived or being deleted only updates the roster. After you act, end your turn and wait for the next alert: never poll managed threads with `bb thread wait`, `bb thread show`, or sleep loops. When you need a thread's state now, call chief_inspect once.";
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -812,6 +812,21 @@ function parseArgs(argv: string[]) {
 
 function clip(value: string, limit = MAX_ALERT_LENGTH) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
+}
+
+type RecordedCommand = { command: string; exitCode: number | null; status: string };
+
+/** Lines for the commands BB recorded, failures first. recorded null means the read failed, [] means none ran;
+ * command lines stop at `budget` characters (the header always stays) with an "…and N more" line. */
+function recordedLines(recorded: RecordedCommand[] | null, budget = Infinity) {
+  if (recorded === null) return ["Recorded: could not read the event log (see the plugin log)"];
+  if (!recorded.length) return ["Recorded: none recorded"];
+  const failed = (c: RecordedCommand) => c.exitCode !== null && c.exitCode !== 0;
+  const lines = [...recorded.filter(failed), ...recorded.filter((c) => !failed(c))].map((c) => `  ${clip(c.command, 120)} → exit ${c.exitCode ?? c.status}`);
+  const header = `Recorded (last ${recorded.length} commands): ${recorded.filter(failed).length} non-zero exit`;
+  let used = header.length;
+  const kept = lines.filter((line) => (used += line.length + 1) <= budget);
+  return [header, ...kept, ...(kept.length < lines.length ? [`  …and ${lines.length - kept.length} more`] : [])];
 }
 
 /** Like clip(), but elides the middle instead of the tail: a long brief's opening
@@ -2398,7 +2413,7 @@ export default async function plugin(bb: BbPluginApi) {
             "Check every item against the worktree. An unmet item means request_changes naming it; say which items you confirmed.",
           ] : []),
           "", "## Recorded commands (from the worker's event log)",
-          ...(recorded?.length ? recorded.map((c) => `exit ${c.exitCode ?? c.status} · ${c.command}`) : ["none recorded"]),
+          ...recordedLines(recorded),
           "Recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
           ...(worker.kind === "designer" ? [
             "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
@@ -2820,8 +2835,9 @@ export default async function plugin(bb: BbPluginApi) {
     const current = roles.get(threadId)!;
     const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
     const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
-    const failed = recorded?.filter((c) => c.exitCode !== null && c.exitCode !== 0) ?? [];
-    const summary = [
+    // Everything but Result comes first and Result alone is clipped to what is left of the alert budget,
+    // so a long Result cannot take the verdict, next action, blocker or recorded evidence with it.
+    const lead = [
       `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
       `State: ${params.state}`,
       ...(params.fails?.length ? [`Fails: ${params.fails.length} ruled out (carried to any replaces: successor)`] : []),
@@ -2837,14 +2853,23 @@ export default async function plugin(bb: BbPluginApi) {
         : []),
       ...(verdict ? [`Verdict: ${verdict}`] : []),
       ...(verdictPath ? [`Verdict file: ${verdictPath}`] : []),
-      // Before the result for every role: clip() cuts the tail, and a long result must not take the next call with it.
       ...(plannerReady ? [] : [action]),
-      ...(recorded === undefined ? [] : recorded?.length
-        ? [`Recorded (last ${recorded.length} commands): ${failed.length} non-zero exit`, ...failed.slice(-3).map((c) => `  exit ${c.exitCode} · ${clip(c.command, 120)}`)]
-        : ["Recorded: none recorded"]),
-      ...(params.result ? [`Result: ${params.result}`] : []),
       ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
       ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
+    ];
+    // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
+    const preview = row.role === "reviewer" && !!verdictPath && !!params.result;
+    if (preview) lead.push(`Full report and last output: bb chief inspect ${threadId}`);
+    const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
+    const MIN_RESULT_ROOM = 200;
+    const resultLine = (room: number) => `Result: ${clip(params.result!, preview ? Math.min(room, 300) : room)}`;
+    const recordedRoom = alertRoom - lead.join("\n").length - 1 - "Result: ".length - MIN_RESULT_ROOM;
+    const withRecorded = [...lead, ...(recorded === undefined ? [] : recordedLines(recorded, recordedRoom))];
+    const summary = [
+      ...withRecorded,
+      ...(params.result
+        ? [resultLine(Math.max(MIN_RESULT_ROOM, alertRoom - withRecorded.join("\n").length - 1 - "Result: ".length))]
+        : []),
     ].join("\n");
     const contentKey = createHash("sha1").update(summary).digest("hex").slice(0, 16);
     return alertChief(current, `report:${current.active_cycle}:${contentKey}`, summary);
@@ -3464,20 +3489,21 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The worker's completed shell commands as BB recorded them (item/completed commandExecution),
    * last 20. null when the log cannot be read; [] when the provider records none. Never throws. */
-  async function recordedCommands(threadId: string): Promise<Array<{ command: string; exitCode: number | null; status: string }> | null> {
+  async function recordedCommands(threadId: string): Promise<RecordedCommand[] | null> {
     try {
-      const commands: Array<{ command: string; exitCode: number | null; status: string }> = [];
+      const commands: RecordedCommand[] = [];
       let beforeSeq: string | undefined;
-      // ponytail: newest first, 5 pages of 200 events; commands older than that budget are not shown.
+      // The server rejects a page over 100 events (HTTP 400), which used to read as "none recorded".
+      // ponytail: newest first, 5 pages of 100 events; commands older than that budget are not shown.
       for (let page = 0; page < 5 && commands.length < 20; page++) {
-        const events = await bb.sdk.threads.events.list({ threadId, types: ["item/completed"], order: "desc", limit: "200", ...(beforeSeq ? { beforeSeq } : {}) });
+        const events = await bb.sdk.threads.events.list({ threadId, types: ["item/completed"], order: "desc", limit: "100", ...(beforeSeq ? { beforeSeq } : {}) });
         for (const event of events) {
           if (event.type !== "item/completed" || event.data.item.type !== "commandExecution") continue;
           const item = event.data.item;
           commands.push({ command: clip(item.command, 200), exitCode: item.exitCode ?? null, status: item.status });
           if (commands.length === 20) break;
         }
-        if (events.length < 200) break;
+        if (events.length < 100) break;
         beforeSeq = String(events.at(-1)!.seq);
       }
       return commands.reverse();
@@ -3924,10 +3950,13 @@ export default async function plugin(bb: BbPluginApi) {
       // ends with "…and N more pending"), then the rest gets whatever budget is
       // left — otherwise one clip() across both could cut a pending action off mid-line.
       const pending = pendingBlock(caller.thread_id, includeWaiting);
+      const room = 6_000 - pending.length - 1;
+      // clip() with a limit of 0 or less returns the whole string, so a full Pending block drops the rest.
+      if (room <= 0) return pending;
       const rest = clip([
         ...reversed.map((row) => rosterRowLines(row).join("\n  ")),
         ...(includeComplete ? (closedTodosForProject.all(caller.project_id) as TodoRow[]).map(todoLine) : []),
-      ].join("\n"), Math.max(0, 6_000 - pending.length - 1));
+      ].join("\n"), room);
       return `${pending}\n${rest}`;
     },
   });
