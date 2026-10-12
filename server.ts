@@ -26,6 +26,8 @@ const MAX_WAVES = 8;
 // ponytail: done capped at 50, newest first
 const MAX_DONE_ITEMS = 50;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
+/** chief_continue calls per stall episode that re-arm the stall clock; later ones still deliver the nudge but leave the alert schedule alone. A report resets the count. */
+const MAX_STALL_RESETS = 2;
 const FORGE_CLI_TIMEOUT_MS = 10_000;
 /** The one read-only rule every non-implementing role shares. Untracked build/test output is not a change. */
 const READ_ONLY = "do not create, modify, or delete any file the repository tracks, and do not commit or push";
@@ -705,6 +707,8 @@ interface ManagedRow {
   reject_streak: number;
   stall_alerted_cycle: number | null;
   stop_alerted_cycle: number | null;
+  /** chief_continue calls since the last report that re-armed the stall clock, capped at MAX_STALL_RESETS. */
+  stall_resets: number;
   lifecycle_alert_key: string | null;
   /** Planner row only: JSON `[{path}]`, the schedule a planner-ready report persisted. */
   plan_waves: string | null;
@@ -1120,6 +1124,8 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN log_read_id INTEGER`,
     // A worker delegated on the user's #simple tag: planning skipped, review optional at Chief's judgment.
     `ALTER TABLE managed_threads ADD COLUMN simple INTEGER`,
+    // chief_continue stall-clock resets since the last report, so repeated nudges cannot postpone the hard stall alert forever.
+    `ALTER TABLE managed_threads ADD COLUMN stall_resets INTEGER NOT NULL DEFAULT 0`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2126,6 +2132,8 @@ export default async function plugin(bb: BbPluginApi) {
     return { threadId: thread.id, title: params.title, projectId };
   }
 
+  const stallCapNote = ` Stall clock not reset: ${MAX_STALL_RESETS} nudges since the last report; the hard stall alert keeps its schedule.`;
+
   async function continueThread(threadId: string, instruction: string, callerChiefThreadId?: string | null) {
     const row = roles.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker, planner, reviewer, or advisor ${threadId}.`);
@@ -2156,12 +2164,15 @@ export default async function plugin(bb: BbPluginApi) {
       senderThreadId: effectiveChiefId,
     });
     const now = Date.now();
+    const capped = row.stall_resets >= MAX_STALL_RESETS;
+    // Past the cap the nudge still lands, but active_since, active_cycle and the alerted cycles keep their schedule.
     db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
-      active_since=?, active_cycle=active_cycle+1, stall_alerted_cycle=NULL, updated_at=? WHERE thread_id=?`).run(
-      now, now, threadId,
+      active_since=CASE WHEN ? THEN active_since ELSE ? END, active_cycle=active_cycle+?,
+      stall_alerted_cycle=CASE WHEN ? THEN stall_alerted_cycle ELSE NULL END, stall_resets=stall_resets+?, updated_at=? WHERE thread_id=?`).run(
+      capped ? 1 : 0, now, capped ? 0 : 1, capped ? 1 : 0, capped ? 0 : 1, now, threadId,
     );
     reloadRoles();
-    return roles.get(threadId)!;
+    return capped;
   }
 
   /** A worker's linked planner's persisted wave schedule, or [] when unlinked. */
@@ -2818,7 +2829,7 @@ export default async function plugin(bb: BbPluginApi) {
     db.transaction(() => {
       db.prepare(`UPDATE managed_threads SET state=?, result=?, blocker=?, recommendation=?, verdict=?,
         reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
-        plan_waves = COALESCE(?, plan_waves), regression=?, verdict_path=?, fails = COALESCE(?, fails), report_seq = report_seq + 1,
+        plan_waves = COALESCE(?, plan_waves), regression=?, verdict_path=?, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets=0,
         active_since=NULL, updated_at=? WHERE thread_id=?`).run(
         params.state, params.result ?? null, params.state === "blocked" ? params.blocker : null,
         params.recommendation ?? null, verdict,
@@ -3989,8 +4000,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       await controlledTarget(threadId, caller);
       touchCallerChief(caller);
-      await continueThread(threadId, instruction, caller.thread_id);
-      return `Continued ${threadId}.`;
+      const capped = await continueThread(threadId, instruction, caller.thread_id);
+      return `Continued ${threadId}.${capped ? stallCapNote : ""}`;
     },
   });
   bb.agents.registerTool({
@@ -4399,8 +4410,8 @@ export default async function plugin(bb: BbPluginApi) {
           const instruction = args.one("instruction");
           if (!threadId || !instruction) return fail("continue requires <thread-id> and --instruction");
           await scoped(threadId);
-          await continueThread(threadId, instruction);
-          return ok({ threadId }, `Continued ${threadId}.`);
+          const capped = await continueThread(threadId, instruction);
+          return ok({ threadId }, `Continued ${threadId}.${capped ? stallCapNote : ""}`);
         }
         if (command === "stop") {
           const parsed = stopParams.safeParse({ threadId: args.positional[0], reason: args.one("reason") });
