@@ -739,6 +739,8 @@ interface ManagedRow {
   summary: string | null;
   /** The report-<seq>.md holding that report in full, or null (short report, reviewer verdict, or write failed). */
   report_path: string | null;
+  /** Incremented when chief_complete replaces the result; guards the report_path publication in report(). */
+  result_rev: number;
   /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. */
   kind: string | null;
   /** Worker row only: 1 when delegated with simple (#simple); null/0 means a normal worker. */
@@ -1168,6 +1170,8 @@ export const MIGRATIONS = [
     // The last chief_report's short summary and the per-report file holding its full text; both follow `result`.
     `ALTER TABLE managed_threads ADD COLUMN summary TEXT`,
     `ALTER TABLE managed_threads ADD COLUMN report_path TEXT`,
+    // Bumped each time chief_complete replaces the result, so a pending report-path publication can tell its result was replaced.
+    `ALTER TABLE managed_threads ADD COLUMN result_rev INTEGER NOT NULL DEFAULT 0`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2606,6 +2610,7 @@ export default async function plugin(bb: BbPluginApi) {
     // A replaced result drops the summary and report file that described the old one.
     db.prepare(`UPDATE managed_threads SET state='complete', status=?1, result=COALESCE(?2, result),
       summary=CASE WHEN ?2 IS NULL THEN summary END, report_path=CASE WHEN ?2 IS NULL THEN report_path END,
+      result_rev=result_rev + (?2 IS NOT NULL),
       blocker=NULL, recommendation=NULL, active_since=NULL, updated_at=?3 WHERE thread_id=?4`).run(
       live.status, replacement, Date.now(), threadId,
     );
@@ -2881,17 +2886,17 @@ export default async function plugin(bb: BbPluginApi) {
     // reject_streak counts only consecutive request_changes verdicts, and
     // resets the moment either side breaks the streak with an approve.
     // report_seq is reserved here, so the per-report file names below never collide.
-    const seq = db.transaction(() => {
+    const { report_seq: seq, result_rev: resultRev } = db.transaction(() => {
       const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
         reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
         plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets=0,
-        active_since=NULL, updated_at=? WHERE thread_id=? RETURNING report_seq`).get(
+        active_since=NULL, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
         params.state, params.result ?? null, params.summary ?? null, params.state === "blocked" ? params.blocker : null,
         params.recommendation ?? null, verdict,
         verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
         scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, fails,
         now, threadId,
-      ) as { report_seq: number };
+      ) as { report_seq: number; result_rev: number };
       if (row.role === "reviewer" && verdict) {
         db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at) SELECT thread_id, worker_thread_id, ?, report_seq, ? FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
       }
@@ -2899,7 +2904,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (row.role === "worker" && row.plan_thread_id && params.fails?.length) {
         appendPlanLog(row, params.fails.map((entry) => ({ ...entry, kind: "FAIL" as const })));
       }
-      return reserved.report_seq;
+      return reserved;
     })();
     reloadRoles();
     const current = roles.get(threadId)!;
@@ -2952,6 +2957,8 @@ export default async function plugin(bb: BbPluginApi) {
       const sizeLabel = summaryLine ? "Summary: " : filed ? longLabel : "Result: ";
       // A reviewer's fallback preview keeps the legacy 300; a supplied summary is budgeted like any Result.
       const cap = preview && !summaryLine ? 300 : Infinity;
+      // ponytail: the pointer and Verdict file lines carry absolute storage paths unclipped; BB keeps the root short
+      // (~/.bb/thread-storage/<thread>/), so the budget assumes roots well under ~1600 characters. Bound them if that changes.
       const top = [
         clip(`${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, 200),
         `State: ${params.state}`,
@@ -2981,7 +2988,8 @@ export default async function plugin(bb: BbPluginApi) {
       const commands = recorded === undefined ? [] : recordedLines(recorded, room).slice(1);
       const resultRoom = Math.min(cap, remaining - cost(waveFit.lines) - cost(inlineBlock) - cost(commands) - sizeLabel.length - 1);
       const resultCut = !!resultText && resultText.length > resultRoom;
-      const label = filed && (longResult || resultCut) ? longLabel : summaryLine ? "Summary: " : "Result: ";
+      // A file-bearing report (first pass long or clipped) labels its Result as clipped; only a short, unclipped one stays plain.
+      const label = filed ? longLabel : summaryLine ? "Summary: " : "Result: ";
       const text = [
         ...top, ...planHead, ...waveFit.lines, ...inlineBlock, ...verdictLines, actionLine, ...fields, ...inspectLine,
         ...recordedHead, ...commands,
@@ -3025,11 +3033,11 @@ export default async function plugin(bb: BbPluginApi) {
       }
       alert = layout(pointer).text;
     }
-    // Guarded by report_seq, and report_path also by the stored result: a slow write never attaches its path to a
-    // newer report, nor to a result chief_complete replaced meanwhile. Always runs, so a report without a verdict still clears
-    // the previous verdict_path as the main UPDATE used to.
-    db.prepare(`UPDATE managed_threads SET verdict_path=?, report_path=CASE WHEN result IS ? THEN ? END WHERE thread_id=? AND report_seq=?`).run(
-      verdictPath, params.result ?? null, reportPath, threadId, seq,
+    // Guarded by report_seq, and report_path also by result_rev: a slow write never attaches its path to a
+    // newer report, nor to a result chief_complete replaced meanwhile (even with identical text). Always runs, so a
+    // report without a verdict still clears the previous verdict_path as the main UPDATE used to.
+    db.prepare(`UPDATE managed_threads SET verdict_path=?, report_path=CASE WHEN result_rev=? THEN ? END WHERE thread_id=? AND report_seq=?`).run(
+      verdictPath, resultRev, reportPath, threadId, seq,
     );
     reloadRoles();
     const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
