@@ -2176,13 +2176,19 @@ export default async function plugin(bb: BbPluginApi) {
       senderThreadId: effectiveChiefId,
     });
     const now = Date.now();
-    const capped = row.stall_resets >= MAX_STALL_RESETS;
-    // Past the cap the nudge still lands, but active_since, active_cycle and the alerted cycles keep their schedule.
-    db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
-      active_since=CASE WHEN ? THEN active_since ELSE ? END, active_cycle=active_cycle+?,
-      stall_alerted_cycle=CASE WHEN ? THEN stall_alerted_cycle ELSE NULL END, stall_resets=stall_resets+?, updated_at=? WHERE thread_id=?`).run(
-      capped ? 1 : 0, now, capped ? 0 : 1, capped ? 1 : 0, capped ? 0 : 1, now, threadId,
-    );
+    // Decide from the stored counter inside one synchronous transaction, not the pre-send snapshot:
+    // overlapping continues and an interleaved report (which zeroes it) must each see the current value.
+    const capped = db.transaction(() => {
+      const stored = db.prepare(`SELECT stall_resets FROM managed_threads WHERE thread_id=?`).get(threadId) as { stall_resets: number } | undefined;
+      const atCap = (stored?.stall_resets ?? 0) >= MAX_STALL_RESETS;
+      // Past the cap the nudge still lands, but active_since, active_cycle and the alerted cycles keep their schedule.
+      db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
+        active_since=CASE WHEN ? THEN active_since ELSE ? END, active_cycle=active_cycle+?,
+        stall_alerted_cycle=CASE WHEN ? THEN stall_alerted_cycle ELSE NULL END, stall_resets=stall_resets+?, updated_at=? WHERE thread_id=?`).run(
+        atCap ? 1 : 0, now, atCap ? 0 : 1, atCap ? 1 : 0, atCap ? 0 : 1, now, threadId,
+      );
+      return atCap;
+    })();
     reloadRoles();
     return capped;
   }
@@ -2861,6 +2867,10 @@ export default async function plugin(bb: BbPluginApi) {
     const current = roles.get(threadId)!;
     const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
     const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
+    // Blocker and Recommendation each get their own budget, with a pointer when clipped, so neither
+    // can crowd out the other, Recorded or Result. The full text stays in the thread's report.
+    const FIELD_ROOM = 600;
+    const clipField = (value: string, room: number) => value.length <= room ? value : `${clip(value, room - 1)} (clipped; full text in the thread's report)`;
     // Everything but Result comes first and Result alone is clipped to what is left of the alert budget,
     // so a long Result cannot take the verdict, next action, blocker or recorded evidence with it.
     const lead = [
@@ -2880,8 +2890,8 @@ export default async function plugin(bb: BbPluginApi) {
       ...(verdict ? [`Verdict: ${verdict}`] : []),
       ...(verdictPath ? [`Verdict file: ${verdictPath}`] : []),
       ...(plannerReady ? [] : [action]),
-      ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
-      ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
+      ...(params.state === "blocked" ? [`Blocker: ${clipField(params.blocker!, FIELD_ROOM)}`] : []),
+      ...(params.recommendation ? [`Recommendation: ${clipField(params.recommendation, FIELD_ROOM)}`] : []),
     ];
     // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
     const preview = row.role === "reviewer" && !!verdictPath && !!params.result;
@@ -3667,9 +3677,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Who may call chief_research and in which mode. Throws the reason otherwise. */
-  async function researchCaller(threadId: string, projectId: string, mode?: z.infer<typeof researchModeSchema>) {
+  async function researchCaller(threadId: string, projectId: string, mode: z.infer<typeof researchModeSchema> | undefined, call: ResearchCall) {
     // Unmanaged threads (workflow agents included) have no row, which also stops recursion.
     const row = await managedRow(threadId, projectId);
+    // The managed role is recorded as soon as it is known, so a rejected call is still attributed to it.
+    if (row) call.role = row.role;
     if (!row || terminal(row.state)) throw new Error("chief_research is available only in an active Chief, planner, or reviewer thread.");
     if (row.role === "chief" && !isActiveChief(row)) throw new Error("chief_research requires an active registered Chief thread.");
     const role = researchRoleSchema.safeParse(row.role);
@@ -3775,7 +3787,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** What a chief_research call ended as, mutated by research()'s paths and written once to chief_research_calls. */
-  type ResearchCall = { runId: string | null; outcome: "succeeded" | "partial" | "failed" | "still_running" | "start_failed" | "error" };
+  type ResearchCall = { role: string | null; runId: string | null; outcome: "succeeded" | "partial" | "failed" | "still_running" | "start_failed" | "error" };
 
   async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, deadline: number, call: ResearchCall) {
     call.runId = runId;
@@ -3832,15 +3844,15 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function research(params: ResearchParams, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
     const startedAt = Date.now();
-    const { cap, settings, role } = await researchCaller(context.threadId, context.projectId, params.mode);
-    // Every exit past the caller check, thrown or returned, leaves exactly one chief_research_calls row.
-    const call: ResearchCall = { runId: params.runId ?? null, outcome: "error" };
+    // Every exit, caller check and settings read included, thrown or returned, leaves exactly one chief_research_calls row.
+    const call: ResearchCall = { role: null, runId: params.runId ?? null, outcome: "error" };
     try {
+      const { cap, settings } = await researchCaller(context.threadId, context.projectId, params.mode, call);
       return await researchRun(params, context, { startedAt, cap, settings }, call);
     } finally {
       try {
         db.prepare(`INSERT INTO chief_research_calls (caller_thread_id, role, mode, run_id, outcome, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .run(context.threadId, role, params.mode ?? null, call.runId, call.outcome, startedAt, Date.now());
+          .run(context.threadId, call.role, params.mode ?? null, call.runId, call.outcome, startedAt, Date.now());
       } catch (error) {
         bb.log.warn(`Could not record chief_research call: ${String(error)}`);
       }
