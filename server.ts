@@ -731,6 +731,8 @@ interface ManagedRow {
   kind: string | null;
   /** Worker row only: 1 when delegated with simple (#simple); null/0 means a normal worker. */
   simple: number | null;
+  /** Worker row only: 1/0 for planning on/off at delegation; null for rows from before the column. */
+  planner_on: number | null;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
   fails: string | null;
   /** Worker row on a plan: the highest plan_log id chief_log has shown it, or null. */
@@ -1126,6 +1128,13 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN simple INTEGER`,
     // chief_continue stall-clock resets since the last report, so repeated nudges cannot postpone the hard stall alert forever.
     `ALTER TABLE managed_threads ADD COLUMN stall_resets INTEGER NOT NULL DEFAULT 0`,
+    // bb chief stats usage tracking; nothing is backfilled, so older rows read as unknown (planner_on NULL) or absent.
+    // One row per chief_research call. outcome: succeeded | partial | failed | still_running | start_failed | error.
+    `CREATE TABLE chief_research_calls (id INTEGER PRIMARY KEY, caller_thread_id TEXT, role TEXT, mode TEXT, run_id TEXT, outcome TEXT, started_at INTEGER, ended_at INTEGER)`,
+    // Worker row only: whether planning was on when it was delegated (1/0); NULL for rows from before this column.
+    `ALTER TABLE managed_threads ADD COLUMN planner_on INTEGER`,
+    // One row per reviewer verdict report; survives chief_continue (which clears the row's verdict) and replacement reviewers.
+    `CREATE TABLE reviewer_verdicts (id INTEGER PRIMARY KEY, reviewer_thread_id TEXT, worker_thread_id TEXT, verdict TEXT, report_seq INTEGER, at INTEGER)`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1338,12 +1347,13 @@ export default async function plugin(bb: BbPluginApi) {
     replacesThreadId?: string | null;
     kind?: string | null;
     simple?: boolean | null;
+    plannerOn?: boolean | null;
   }) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, replaces_thread_id, kind, simple, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, unplanned_reason, replaces_thread_id, kind, simple, planner_on, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -1353,13 +1363,14 @@ export default async function plugin(bb: BbPluginApi) {
       reviewed_report_seq=excluded.reviewed_report_seq, unplanned_reason=excluded.unplanned_reason,
       replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
       kind=excluded.kind, simple=excluded.simple,
+      planner_on=COALESCE(excluded.planner_on, managed_threads.planner_on),
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.parentThreadId ?? null, input.title, input.state ?? "starting",
       input.status ?? "starting", input.brief ?? null, input.branch ?? null,
       input.issueUrl ?? null, input.prUrl ?? null, input.planThreadId ?? null, input.planWave ?? null,
       input.reviewedReportSeq ?? null, input.unplannedReason ?? null, input.replacesThreadId ?? null,
-      input.kind ?? null, input.simple ? 1 : null,
+      input.kind ?? null, input.simple ? 1 : null, input.plannerOn == null ? null : input.plannerOn ? 1 : 0,
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
@@ -1979,7 +1990,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
     // Planning on means every new delegation starts from a plan wave. replaces: hands off
     // an already-gated delegation, so it passes; the escape hatch must say why.
-    if (planThreadId === undefined && !prior && !params.unplannedReason && !simple && await plannerEnabled()) {
+    const plannerOn = await plannerEnabled();
+    if (planThreadId === undefined && !prior && !params.unplannedReason && !simple && plannerOn) {
       throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. Only bounded work whose shape and cause are already known may skip the plan — pass unplannedReason (CLI: --unplanned-reason) with a short reason why — the cause must come from the user, an issue, or a worker report, not your own code reading — or, only when the user's message contains #simple, pass simple: true (CLI: --simple).");
     }
     const unplannedReason = params.unplannedReason ?? (planThreadId === undefined ? prior?.unplanned_reason ?? undefined : undefined);
@@ -2116,7 +2128,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
       state: "starting", status: thread.status, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
-      kind: kind === "designer" ? kind : null, simple: simple || null,
+      kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn,
     });
     if (prior) {
       const now = Date.now();
@@ -2164,13 +2176,19 @@ export default async function plugin(bb: BbPluginApi) {
       senderThreadId: effectiveChiefId,
     });
     const now = Date.now();
-    const capped = row.stall_resets >= MAX_STALL_RESETS;
-    // Past the cap the nudge still lands, but active_since, active_cycle and the alerted cycles keep their schedule.
-    db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
-      active_since=CASE WHEN ? THEN active_since ELSE ? END, active_cycle=active_cycle+?,
-      stall_alerted_cycle=CASE WHEN ? THEN stall_alerted_cycle ELSE NULL END, stall_resets=stall_resets+?, updated_at=? WHERE thread_id=?`).run(
-      capped ? 1 : 0, now, capped ? 0 : 1, capped ? 1 : 0, capped ? 0 : 1, now, threadId,
-    );
+    // Decide from the stored counter inside one synchronous transaction, not the pre-send snapshot:
+    // overlapping continues and an interleaved report (which zeroes it) must each see the current value.
+    const capped = db.transaction(() => {
+      const stored = db.prepare(`SELECT stall_resets FROM managed_threads WHERE thread_id=?`).get(threadId) as { stall_resets: number } | undefined;
+      const atCap = (stored?.stall_resets ?? 0) >= MAX_STALL_RESETS;
+      // Past the cap the nudge still lands, but active_since, active_cycle and the alerted cycles keep their schedule.
+      db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
+        active_since=CASE WHEN ? THEN active_since ELSE ? END, active_cycle=active_cycle+?,
+        stall_alerted_cycle=CASE WHEN ? THEN stall_alerted_cycle ELSE NULL END, stall_resets=stall_resets+?, updated_at=? WHERE thread_id=?`).run(
+        atCap ? 1 : 0, now, atCap ? 0 : 1, atCap ? 1 : 0, atCap ? 0 : 1, now, threadId,
+      );
+      return atCap;
+    })();
     reloadRoles();
     return capped;
   }
@@ -2379,9 +2397,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
-   * by a fresh one rather than resumed; its verdict and reject_streak carry over onto
-   * the new row, so deadlock detection still sees consecutive rejections across the
-   * fresh reviewers. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
+   * by a fresh one rather than resumed; its reject_streak carries over onto the new
+   * row, so deadlock detection still sees consecutive rejections across the fresh
+   * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
   async function startReview(workerThreadId: string, focus?: string) {
     const inFlight = reviewStarts.get(workerThreadId);
     if (inFlight) return inFlight;
@@ -2837,6 +2855,9 @@ export default async function plugin(bb: BbPluginApi) {
         scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, verdictPath, fails,
         now, threadId,
       );
+      if (row.role === "reviewer" && verdict) {
+        db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at) SELECT thread_id, worker_thread_id, ?, report_seq, ? FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
+      }
       // A plan worker's fails also reach its peer waves through chief_log, so it need not post them twice.
       if (row.role === "worker" && row.plan_thread_id && params.fails?.length) {
         appendPlanLog(row, params.fails.map((entry) => ({ ...entry, kind: "FAIL" as const })));
@@ -2846,42 +2867,75 @@ export default async function plugin(bb: BbPluginApi) {
     const current = roles.get(threadId)!;
     const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
     const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
-    // Everything but Result comes first and Result alone is clipped to what is left of the alert budget,
-    // so a long Result cannot take the verdict, next action, blocker or recorded evidence with it.
-    const lead = [
-      `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
-      `State: ${params.state}`,
-      ...(params.fails?.length ? [`Fails: ${params.fails.length} ruled out (carried to any replaces: successor)`] : []),
-      ...(plannerReady && planWaves
-        ? [
-            `Plan: ${planWaves.length} wave(s)`,
-            ...planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`),
-            ...(inlinePlans.length
-              ? ["To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):", ...inlinePlans]
-              : []),
-            action,
-          ]
-        : []),
-      ...(verdict ? [`Verdict: ${verdict}`] : []),
-      ...(verdictPath ? [`Verdict file: ${verdictPath}`] : []),
-      ...(plannerReady ? [] : [action]),
-      ...(params.state === "blocked" ? [`Blocker: ${params.blocker}`] : []),
-      ...(params.recommendation ? [`Recommendation: ${params.recommendation}`] : []),
-    ];
+    // Blocker and Recommendation each get their own budget, with a pointer when clipped, so neither
+    // can crowd out the other, Recorded or Result. A reviewer's verdict.md already holds its result and
+    // recommendation; any other clipped report gets its full text in report.md (overwritten each report).
+    const FIELD_ROOM = 600;
+    const fullName = verdictPath ? "verdict.md" : "report.md";
+    const clipField = (value: string, room: number) => value.length <= room ? value : `${clip(value, room - 1)} (clipped; full text in ${fullName})`;
     // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
     const preview = row.role === "reviewer" && !!verdictPath && !!params.result;
-    if (preview) lead.push(`Full report and last output: bb chief inspect ${threadId}`);
     const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
     const MIN_RESULT_ROOM = 200;
-    const resultLine = (room: number) => `Result: ${clip(params.result!, preview ? Math.min(room, 300) : room)}`;
-    const recordedRoom = alertRoom - lead.join("\n").length - 1 - "Result: ".length - MIN_RESULT_ROOM;
-    const withRecorded = [...lead, ...(recorded === undefined ? [] : recordedLines(recorded, recordedRoom))];
-    const summary = [
-      ...withRecorded,
-      ...(params.result
-        ? [resultLine(Math.max(MIN_RESULT_ROOM, alertRoom - withRecorded.join("\n").length - 1 - "Result: ".length))]
-        : []),
-    ].join("\n");
+    // Everything but Result comes first and Result alone is clipped to what is left of the alert budget,
+    // so a long Result cannot take the verdict, next action, blocker or recorded evidence with it.
+    // fullLine sits right after State so the whole-alert clip never reaches it; clipped says whether any field was cut.
+    const layout = (fullLine: string | null) => {
+      const lead = [
+        `${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`,
+        `State: ${params.state}`,
+        ...(fullLine ? [fullLine] : []),
+        ...(params.fails?.length ? [`Fails: ${params.fails.length} ruled out (carried to any replaces: successor)`] : []),
+        ...(plannerReady && planWaves
+          ? [
+              `Plan: ${planWaves.length} wave(s)`,
+              ...planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`),
+              ...(inlinePlans.length
+                ? ["To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):", ...inlinePlans]
+                : []),
+              action,
+            ]
+          : []),
+        ...(verdict ? [`Verdict: ${verdict}`] : []),
+        ...(verdictPath ? [`Verdict file: ${verdictPath}`] : []),
+        ...(plannerReady ? [] : [action]),
+        ...(params.state === "blocked" ? [`Blocker: ${clipField(params.blocker!, FIELD_ROOM)}`] : []),
+        ...(params.recommendation ? [`Recommendation: ${clipField(params.recommendation, FIELD_ROOM)}`] : []),
+        ...(preview ? [`Full report and last output: bb chief inspect ${threadId}`] : []),
+      ];
+      const recordedRoom = alertRoom - lead.join("\n").length - 1 - "Result: ".length - MIN_RESULT_ROOM;
+      const recordedBlock = recorded === undefined ? [] : recordedLines(recorded, recordedRoom);
+      const withRecorded = [...lead, ...recordedBlock];
+      const resultRoom = Math.max(MIN_RESULT_ROOM, alertRoom - withRecorded.join("\n").length - 1 - "Result: ".length);
+      const resultLimit = preview ? Math.min(resultRoom, 300) : resultRoom;
+      const summary = [...withRecorded, ...(params.result ? [`Result: ${clip(params.result, resultLimit)}`] : [])].join("\n");
+      const clipped = summary.length > alertRoom
+        || (params.state === "blocked" && params.blocker!.length > FIELD_ROOM)
+        || (params.recommendation?.length ?? 0) > FIELD_ROOM
+        || (params.result?.length ?? 0) > resultLimit
+        || recordedBlock.some((line) => line.startsWith("  …and "));
+      return { summary, clipped };
+    };
+    const first = layout(null);
+    let summary = first.summary;
+    if (first.clipped && !verdictPath) {
+      let fullLine: string;
+      try {
+        const path = await writeStorageFile(threadId, "report.md", [
+          `# ${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, "",
+          `State: ${params.state}`, ...(verdict ? [`Verdict: ${verdict}`] : []), `Next: ${action}`,
+          ...(params.state === "blocked" ? ["", "## Blocker", "", params.blocker!] : []),
+          ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
+          ...(recorded === undefined ? [] : ["", "## Recorded", "", ...recordedLines(recorded)]),
+          ...(params.result ? ["", "## Result", "", params.result] : []),
+        ].join("\n") + "\n");
+        fullLine = `Full report: ${path}`;
+      } catch (error) {
+        bb.log.warn(`Could not write ${threadId}'s report file: ${String(error)}`);
+        fullLine = "Full report: could not write report.md (see the plugin log)";
+      }
+      summary = layout(fullLine).summary;
+    }
     const contentKey = createHash("sha1").update(summary).digest("hex").slice(0, 16);
     return alertChief(current, `report:${current.active_cycle}:${contentKey}`, summary);
   }
@@ -3319,6 +3373,14 @@ export default async function plugin(bb: BbPluginApi) {
         hardStalls: sum(counts.map((c) => c?.hardStalls ?? 0)),
       };
     };
+    // Verdict history is the source for approve/request_changes counts; a reviewer from before reviewer_verdicts
+    // existed has no rows, so its row's current verdict stands in for the one it gave.
+    const verdictsBy = new Map<string, string[]>();
+    for (const entry of db.prepare(`SELECT reviewer_thread_id, verdict FROM reviewer_verdicts ORDER BY id`).all() as { reviewer_thread_id: string; verdict: string }[]) {
+      if (ids.has(entry.reviewer_thread_id)) verdictsBy.set(entry.reviewer_thread_id, [...(verdictsBy.get(entry.reviewer_thread_id) ?? []), entry.verdict]);
+    }
+    const verdictsOf = (list: ManagedRow[]) => list.filter((row) => row.role === "reviewer")
+      .flatMap((row) => verdictsBy.get(row.thread_id) ?? (row.verdict ? [row.verdict] : []));
     const terminal = ["complete", "archived", "deleted"];
     const perTask = [...groups].filter(([, list]) => list.some((row) => row.role === "planner" || row.role === "worker")).map(([key, list]) => {
       const planner = list.find((row) => row.role === "planner");
@@ -3330,13 +3392,18 @@ export default async function plugin(bb: BbPluginApi) {
         : terminal.includes(latest.state) ? "dropped"
         : "open";
       const waves = key.startsWith("plan:") ? new Set(workers.map((row) => row.plan_wave)).size : 1;
-      const reviewers = list.filter((row) => row.role === "reviewer");
+      const verdicts = verdictsOf(list);
       // ponytail: a complete row's updated_at is its completion time; nothing rewrites a complete row except a delete.
       const start = Math.min(...[planner, ...workers].map((row) => row?.created_at ?? Infinity));
       return {
         key, title: planner?.title ?? workers[0]?.title ?? key, status, workers: workers.length, waves,
         replacements: Math.max(0, workers.length - waves),
-        requestChanges: reviewers.filter((row) => row.verdict === "request_changes").length,
+        approvals: verdicts.filter((verdict) => verdict === "approve").length,
+        requestChanges: verdicts.filter((verdict) => verdict === "request_changes").length,
+        category: (key.startsWith("plan:") || workers.some((row) => row.plan_thread_id) ? "planned"
+          : workers[0]?.simple === 1 ? "simple"
+          : workers[0]?.planner_on == null ? "unknown"
+          : workers[0].planner_on === 1 ? "unplanned_planner_on" : "unplanned_planner_off") as "planned" | "simple" | "unknown" | "unplanned_planner_on" | "unplanned_planner_off",
         consults: list.filter((row) => row.role === "advisor").length,
         ...failuresOf(list),
         wallTimeMs: status === "completed" ? latest!.updated_at - start : null,
@@ -3349,10 +3416,26 @@ export default async function plugin(bb: BbPluginApi) {
     const count = (status: string) => perTask.filter((task) => task.status === status).length;
     const todoCount = (state: TodoRow["state"]) => todos.filter((todo) => todo.state === state).length;
     const reviewers = rows.filter((row) => row.role === "reviewer");
-    const requestChanges = reviewers.filter((row) => row.verdict === "request_changes").length;
+    const verdicts = verdictsOf(rows);
+    const requestChanges = verdicts.filter((verdict) => verdict === "request_changes").length;
+    const categoryCount = (category: string) => perTask.filter((task) => task.category === category).length;
+    const researchBy = new Map<string, { role: string; mode: string | null; calls: number; succeeded: number }>();
+    for (const call of db.prepare(`SELECT caller_thread_id, role, mode, outcome FROM chief_research_calls ORDER BY id`).all() as { caller_thread_id: string; role: string; mode: string | null; outcome: string }[]) {
+      if (!ids.has(call.caller_thread_id)) continue;
+      const entry = researchBy.get(`${call.role}\u0000${call.mode}`) ?? { role: call.role, mode: call.mode, calls: 0, succeeded: 0 };
+      entry.calls += 1;
+      if (call.outcome === "succeeded" || call.outcome === "partial") entry.succeeded += 1;
+      researchBy.set(`${call.role}\u0000${call.mode}`, entry);
+    }
     return {
       scope, statsSince: since,
-      tasks: { total: perTask.length, completed: count("completed"), open: count("open"), dropped: count("dropped") },
+      tasks: {
+        total: perTask.length, completed: count("completed"), open: count("open"), dropped: count("dropped"),
+        planned: categoryCount("planned"), unplanned_planner_on: categoryCount("unplanned_planner_on"),
+        unplanned_planner_off: categoryCount("unplanned_planner_off"), simple: categoryCount("simple"), unknown: categoryCount("unknown"),
+      },
+      verdicts: { approve: verdicts.length - requestChanges, request_changes: requestChanges },
+      research: [...researchBy.values()].sort((a, b) => a.role.localeCompare(b.role) || String(a.mode).localeCompare(String(b.mode))),
       todos: { open: todoCount("open"), done: todoCount("done"), dropped: todoCount("dropped") },
       repairs: {
         replacements: sum(perTask.map((task) => task.replacements)), requestChanges,
@@ -3383,18 +3466,21 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function statsText(stats: ReturnType<typeof chiefStats>) {
-    const { tasks, todos, repairs, failures, wallTimeMs } = stats;
+    const { tasks, todos, repairs, failures, wallTimeMs, verdicts, research } = stats;
     const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
     return [
       `Chief stats · ${stats.scope.chiefThreadId ? `Chief run ${stats.scope.chiefThreadId}` : `project ${stats.scope.projectId} (all Chief runs)`}`,
       `Tasks: ${tasks.total} — ${tasks.completed} completed, ${tasks.open} open, ${tasks.dropped} dropped · todos: ${todos.open} open, ${todos.done} done, ${todos.dropped} dropped`,
+      `Task kinds: ${tasks.planned} planned, ${tasks.unplanned_planner_on} unplanned (planner on), ${tasks.unplanned_planner_off} unplanned (planner off), ${tasks.simple} simple, ${tasks.unknown} unknown`,
+      `Reviews: ${verdicts.approve} approve, ${verdicts.request_changes} request_changes`,
+      `Research: ${research.length ? research.map((entry) => `${entry.role} ${entry.mode ?? "resume"} ${entry.succeeded}/${entry.calls} succeeded`).join(", ") : "no calls"}`,
       `Repairs: ${plural(repairs.replacements, "replacement round")}, ${repairs.requestChanges} request_changes (${plural(repairs.regressions, "regression")}), ${plural(repairs.consults, "consult")}`,
       `Failures: provider ${failures.usageLimit + failures.connection} (usage limit ${failures.usageLimit}, connection ${failures.connection}) · timing ${failures.busyRejections + failures.stalls + failures.hardStalls} (busy rejections ${failures.busyRejections}, stalls ${failures.stalls}, hard stalls ${failures.hardStalls}) · rejected reviews ${failures.rejectedReviews} · thread errors ${failures.threadErrors}`,
       `Wall time (${wallTimeMs.completed} completed): median ${duration(wallTimeMs.median)}, total ${duration(wallTimeMs.total)}`,
       "Per task:",
       ...(stats.perTask.length ? stats.perTask.map((task) => {
         const failed = task.usageLimit + task.connection + task.threadErrors + task.busyRejections + task.stalls + task.hardStalls;
-        return `- ${task.status} · ${task.title} · ${plural(task.workers, "worker")}, ${plural(task.replacements, "replacement")}, ${task.requestChanges} request_changes, ${plural(task.consults, "consult")}, ${plural(failed, "failure")} · ${duration(task.wallTimeMs)}`;
+        return `- ${task.status} · ${task.title} · ${plural(task.workers, "worker")}, ${plural(task.replacements, "replacement")}, ${task.approvals} approve, ${task.requestChanges} request_changes, ${plural(task.consults, "consult")}, ${plural(failed, "failure")} · ${duration(task.wallTimeMs)}`;
       }) : ["- none"]),
       "Not measured:",
       ...stats.notes.map((note) => `- ${note}`),
@@ -3620,9 +3706,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Who may call chief_research and in which mode. Throws the reason otherwise. */
-  async function researchCaller(threadId: string, projectId: string, mode?: z.infer<typeof researchModeSchema>) {
+  async function researchCaller(threadId: string, projectId: string, mode: z.infer<typeof researchModeSchema> | undefined, call: ResearchCall) {
     // Unmanaged threads (workflow agents included) have no row, which also stops recursion.
     const row = await managedRow(threadId, projectId);
+    // The managed role is recorded as soon as it is known, so a rejected call is still attributed to it.
+    if (row) call.role = row.role;
     if (!row || terminal(row.state)) throw new Error("chief_research is available only in an active Chief, planner, or reviewer thread.");
     if (row.role === "chief" && !isActiveChief(row)) throw new Error("chief_research requires an active registered Chief thread.");
     const role = researchRoleSchema.safeParse(row.role);
@@ -3727,7 +3815,11 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, deadline: number) {
+  /** What a chief_research call ended as, mutated by research()'s paths and written once to chief_research_calls. */
+  type ResearchCall = { role: string | null; runId: string | null; outcome: "succeeded" | "partial" | "failed" | "still_running" | "start_failed" | "error" };
+
+  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, deadline: number, call: ResearchCall) {
+    call.runId = runId;
     try {
       for (;;) {
         let run: { status: string; result?: unknown; resultOmitted?: boolean; error?: unknown; calls?: unknown };
@@ -3736,6 +3828,7 @@ export default async function plugin(bb: BbPluginApi) {
         } catch (error) {
           context.signal?.throwIfAborted();
           bb.log.warn(`chief_research could not read ${runId}: ${clip(String(error), 200)}`);
+          call.outcome = "error";
           return `Could not read workflow ${runId} from the plugin server. Check it yourself with \`bb workflows status ${runId}\`.`;
         }
         if (run.status === "succeeded") {
@@ -3751,6 +3844,7 @@ export default async function plugin(bb: BbPluginApi) {
           const failures = (result as { failures?: unknown } | null)?.failures;
           const partial = Array.isArray(failures) && failures.length > 0;
           const note = partial ? await failureNote(runId, context) : null;
+          call.outcome = partial ? "partial" : "succeeded";
           return researchOutput([
             `runId: ${runId}`, `status: ${partial ? "partial" : run.status}`, ...(note ? [note] : []),
             ...(summary ? ["", summary as string] : []),
@@ -3759,10 +3853,14 @@ export default async function plugin(bb: BbPluginApi) {
         }
         if (!RUNNING_WORKFLOW.has(run.status)) {
           const note = await failureNote(runId, context);
+          call.outcome = "failed";
           return researchOutput(`runId: ${runId}\nstatus: ${run.status}\nerror: ${JSON.stringify(run.error)}\n${note ? `${note}\n` : ""}calls: ${JSON.stringify(run.calls)}`);
         }
         context.signal?.throwIfAborted();
-        if (Date.now() >= deadline) return `Still running. Call chief_research again with runId: ${runId} to keep waiting.`;
+        if (Date.now() >= deadline) {
+          call.outcome = "still_running";
+          return `Still running. Call chief_research again with runId: ${runId} to keep waiting.`;
+        }
         await researchSleep(RESEARCH_POLL_MS, context.signal);
       }
     } catch (error) {
@@ -3775,10 +3873,30 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function research(params: ResearchParams, context: { threadId: string; projectId: string; signal?: AbortSignal }) {
     const startedAt = Date.now();
-    const { cap, settings } = await researchCaller(context.threadId, context.projectId, params.mode);
+    // Every exit, caller check and settings read included, thrown or returned, leaves exactly one chief_research_calls row.
+    const call: ResearchCall = { role: null, runId: params.runId ?? null, outcome: "error" };
+    try {
+      const { cap, settings } = await researchCaller(context.threadId, context.projectId, params.mode, call);
+      return await researchRun(params, context, { startedAt, cap, settings }, call);
+    } finally {
+      try {
+        db.prepare(`INSERT INTO chief_research_calls (caller_thread_id, role, mode, run_id, outcome, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .run(context.threadId, call.role, params.mode ?? null, call.runId, call.outcome, startedAt, Date.now());
+      } catch (error) {
+        bb.log.warn(`Could not record chief_research call: ${String(error)}`);
+      }
+    }
+  }
+
+  async function researchRun(
+    params: ResearchParams,
+    context: { threadId: string; projectId: string; signal?: AbortSignal },
+    { startedAt, cap, settings }: { startedAt: number; cap: number; settings: Awaited<ReturnType<typeof researchSettings>> },
+    call: ResearchCall,
+  ) {
     const waitMs = (params.mode ? settings.timeoutMinutes[params.mode] : RESEARCH_DEFAULT_TIMEOUT_MINUTES) * 60_000;
     const deadline = startedAt + Math.min(waitMs, RESEARCH_CALL_WAIT_CAP_MS);
-    if (params.runId) return awaitResearch(params.runId, context, deadline);
+    if (params.runId) return awaitResearch(params.runId, context, deadline, call);
     const mode = params.mode!;
     const calls = agentCount(params);
     if (calls > cap) {
@@ -3812,16 +3930,18 @@ export default async function plugin(bb: BbPluginApi) {
       const started = await runWorkflowCli("run", ["--script", script, "--args", JSON.stringify(args)], context);
       if (typeof started?.runId !== "string") throw new Error("bb workflows run returned no runId");
       runId = started.runId;
+      call.runId = runId;
     } catch (error) {
       const failure = clip(error instanceof Error ? error.message : String(error), 200);
       bb.log.warn(`chief_research could not start a workflow from the server: ${failure}`);
+      call.outcome = "start_failed";
       return prefix + [
         `The plugin server could not start the workflow (${failure}), so start it yourself:`,
         "call bb_workflow_run with exactly this script and args, then call chief_research with mode and the runId it returns to wait for the result.",
         "", "script:", "```js", script, "```", "", "args:", "```json", JSON.stringify(args), "```",
       ].join("\n");
     }
-    return prefix + await awaitResearch(runId, context, deadline);
+    return prefix + await awaitResearch(runId, context, deadline, call);
   }
 
   bb.agents.registerTool({
