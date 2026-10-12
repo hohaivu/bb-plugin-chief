@@ -2408,7 +2408,7 @@ export default async function plugin(bb: BbPluginApi) {
       REVIEW_ONLY,
       "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it.",
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
-      ...(opts.research ? ["For a large diff or several concerns at once, chief_research review gives you verified findings to check; the verdict stays yours."] : []),
+      ...(opts.research ? ["Review small changes yourself. Use chief_research only for a large change (several PRs in a stack, more than about 5 files, or more than about 400 lines) or to check a specific suspicion, scoped to that question (survey or review). Verify every research finding against the source before using it; the verdict stays yours."] : []),
       `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
       "Send a `summary` with the report: verdict, count of findings, the most important one with file:line.",
       "Give every finding a file:line and the concrete fix; mark any finding that needs a design or product decision as such.",
