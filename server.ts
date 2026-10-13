@@ -1337,6 +1337,8 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN owner_approved_at INTEGER`,
     // The state of the row's latest chief_report (ready, blocked, active, idle, failed): row.state moves on once the thread runs again, this does not.
     `ALTER TABLE managed_threads ADD COLUMN last_report_state TEXT`,
+    // Rows from before the column: a ready row that has reported provably last reported ready. Active/blocked/idle rows stay NULL (unknown).
+    `UPDATE managed_threads SET last_report_state='ready' WHERE state='ready' AND report_seq > 0 AND last_report_state IS NULL`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2703,7 +2705,7 @@ export default async function plugin(bb: BbPluginApi) {
       opts.focus ? `Review focus: ${opts.focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
       REVIEW_ONLY,
       opts.pinned
-        ? "Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When plan files"
+        ? "Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift."
         : "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.",
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
       ...(opts.research ? ["Review small changes yourself. Use chief_research only for a large change (several PRs in a stack, more than about 5 files, or more than about 400 lines) or to check a specific suspicion, scoped to that question (survey or review). Verify every research finding against the source before using it; the verdict stays yours."] : []),
