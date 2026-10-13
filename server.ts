@@ -1216,7 +1216,7 @@ export const MIGRATIONS = [
     `DROP TABLE IF EXISTS research_model`,
     // A child Chief's todos are its own: NULL keeps the project-wide scope top-level Chiefs share.
     `ALTER TABLE chief_todos ADD COLUMN chief_thread_id TEXT`,
-    // A provider (model '') or one of its models hit its usage limit; new spawns on it are refused until until_at.
+    // A provider model hit its usage limit; new spawns on it are refused until until_at. model '' rows are legacy and ignored.
     `CREATE TABLE IF NOT EXISTS provider_cooldowns (provider_id TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', until_at INTEGER NOT NULL, reason TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (provider_id, model))`,
     // One per machine: reviewers and research switch to it while their primary cools down.
     `CREATE TABLE IF NOT EXISTS chief_fallback_model (host_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
@@ -1425,10 +1425,11 @@ export default async function plugin(bb: BbPluginApi) {
     `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND state='open' AND (backlog_task_id IS NULL OR backlog_task_id LIKE 'pending:%') ORDER BY id ASC`,
   );
   // ponytail: global, not per host: usage limits are account-level; key by host if a provider id ever maps to different accounts per machine.
+  // ponytail: cooldowns are per provider+model; legacy model='' rows (provider-wide, from before this) are never matched, so they are inert.
   // ponytail: expired rows are ignored, never cleaned; they are bounded by the provider/model pairs.
   const anyCooldown = db.prepare<[number]>(`SELECT 1 FROM provider_cooldowns WHERE until_at > ? LIMIT 1`);
   const cooldownFor = db.prepare<[string, string, number]>(
-    `SELECT provider_id, model, until_at, reason FROM provider_cooldowns WHERE provider_id=? AND model IN ('', ?) AND until_at > ? ORDER BY until_at DESC LIMIT 1`,
+    `SELECT provider_id, model, until_at, reason FROM provider_cooldowns WHERE provider_id=? AND model=? AND until_at > ? ORDER BY until_at DESC LIMIT 1`,
   );
   const upsertCooldown = db.prepare<[string, string, number, string, number]>(
     `INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES (?, ?, ?, ?, ?)
@@ -1836,10 +1837,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function cooldownError(providerId: string, model: string) {
-    const row = cooldownFor.get(providerId, model, Date.now()) as { model: string; until_at: number } | undefined;
+    if (!model) return null;
+    const row = cooldownFor.get(providerId, model, Date.now()) as { until_at: number } | undefined;
     if (!row) return null;
     const minutes = Math.max(1, Math.ceil((row.until_at - Date.now()) / 60_000));
-    return new Error(`Provider ${providerId}${row.model ? ` model ${row.model}` : ""} hit its usage limit and is cooling down until ${new Date(row.until_at).toISOString()} (about ${minutes} min). Starting new work on it now would fail the same way. Wait for the reset, retry the failed thread with bb thread retry <id> --send-at ${minutes + 1}m, or pick another model for this role in Chief settings.`);
+    return new Error(`Provider ${providerId} model ${model} hit its usage limit and is cooling down until ${new Date(row.until_at).toISOString()} (about ${minutes} min). Starting new work on it now would fail the same way. Wait for the reset, retry the failed thread with bb thread retry <id> --send-at ${minutes + 1}m, or pick another model for this role in Chief settings.`);
   }
 
   async function defaultHostId() {
@@ -3639,7 +3641,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...(!usageLimit ? [] : resetAt !== null
         ? [`Usage limit resets at ${new Date(resetAt).toISOString()} (about ${minutes} min from now).`]
         : ["The error does not say when the usage limit resets."]),
-      ...(cooling ? [`New chief_delegate/chief_review/chief_plan/chief_consult/chief_research work on ${cooling.providerId}${cooling.model ? `/${cooling.model}` : ""} is refused until ${new Date(cooling.until).toISOString()}.`] : []),
+      ...(cooling ? [`New chief_delegate/chief_review/chief_plan/chief_consult/chief_research work on ${cooling.providerId}/${cooling.model} is refused until ${new Date(cooling.until).toISOString()}; other models on ${cooling.providerId} stay usable.`] : []),
       `Do not spawn a replacement: a fresh thread on the same provider and model hits the same error. Retry this same thread with: bb thread retry ${row.thread_id} --send-at ${backoff} --reason "${usageLimit ? "usage limit reset" : "transient provider error"}"`,
       "If the retry fails the same way again, escalate to the user (wait for the limit or switch provider/model) instead of retrying again.",
     ].join("\n"));
@@ -4297,8 +4299,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Records a usage-limit failure as a cooldown on the thread's provider (or model, for model_cooldown). Never throws. */
-  // ponytail: model_cooldown is text-matched like transientFailure; switch to errorInfo.category once providers populate it.
+  /** Records a usage-limit failure as a cooldown on the thread's provider+model. Never throws. */
   async function noteCooldown(threadId: string, failure: { text: string; at: number }) {
     const transient = transientFailure(failure.text);
     if (!transient?.usageLimit) return null;
@@ -4314,15 +4315,13 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`No provider known for ${threadId}; its usage limit is not recorded as a cooldown.`);
       return null;
     }
-    const modelCooldown = /model_cooldown/i.test(failure.text);
-    if (modelCooldown && !options.model) {
-      bb.log.warn(`No model known for ${threadId}; its model cooldown is not recorded, so other models on ${options.providerId} stay usable.`);
+    if (!options.model) {
+      bb.log.warn(`No model known for ${threadId}; its usage limit is not recorded as a cooldown.`);
       return null;
     }
-    const model = modelCooldown ? options.model! : "";
     const until = failure.at + (transient.resetSeconds ?? 15 * 60) * 1000;
-    upsertCooldown.run(options.providerId, model, until, clip(failure.text, 400), Date.now());
-    return { providerId: options.providerId, model, until };
+    upsertCooldown.run(options.providerId, options.model, until, clip(failure.text, 400), Date.now());
+    return { providerId: options.providerId, model: options.model, until };
   }
 
   async function inspect(threadId: string, projectId: string) {
