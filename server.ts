@@ -1175,6 +1175,8 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN report_path TEXT`,
     // Bumped each time chief_complete replaces the result, so a pending report-path publication can tell its result was replaced.
     `ALTER TABLE managed_threads ADD COLUMN result_rev INTEGER NOT NULL DEFAULT 0`,
+    // Advisor row only: when it first sent a ready or blocked report (its actual advice). Set once; stop, complete, status sync and later reports never clear it. Old rows stay NULL.
+    `ALTER TABLE managed_threads ADD COLUMN advised_at INTEGER`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2020,7 +2022,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`No managed worker ${params.replaces} for this Chief.`);
     }
     if (prior) {
-      // The escalation ladder: round 2 needs a reported consult on this task, round 3 needs the user.
+      // The escalation ladder: round 2 needs a consult that gave its advice on this task, round 3 needs the user.
       // Read from the task's verdict history, not the open reviewer: a fresh or completed reviewer,
       // a re-pointed snapshot, or a second replaces: before the next review must not reset it.
       const { chain, streak, lastAt } = taskRejections(prior.thread_id);
@@ -2028,12 +2030,13 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
       }
       if (streak === CONSULT_AFTER_REJECTIONS) {
-        // A consult counts once: it must have reported, after the latest rejection and after the worker being replaced
-        // started, so a worker already sent on the one more round cannot be replaced on the same consult.
+        // A consult counts once: it must have sent its advice (a ready or blocked report, recorded in advised_at; a
+        // status-only, stopped or completed-unreported consult has none), and started after the latest rejection and
+        // after the worker being replaced, so a worker already sent on the one more round cannot be replaced on the same consult.
         const consulted = db.prepare(`SELECT 1 FROM managed_threads WHERE role='advisor' AND worker_thread_id IN (${chain.map(() => "?").join(",")})
-          AND report_seq > 0 AND created_at >= ? LIMIT 1`).get(...chain, Math.max(lastAt, prior.created_at));
+          AND advised_at IS NOT NULL AND created_at >= ? LIMIT 1`).get(...chain, Math.max(lastAt, prior.created_at));
         if (!consulted) {
-          throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for its report before delegating the one more round.`);
+          throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.`);
         }
       }
     }
@@ -2404,8 +2407,7 @@ export default async function plugin(bb: BbPluginApi) {
       return workerReadyNextStep(row);
     }
     if (row.role === "advisor") {
-      const rejected = row.worker_thread_id ? latestReviewForWorker.get(row.worker_thread_id) as ManagedRow | undefined : undefined;
-      if (rejected?.verdict === "request_changes" && rejected.reject_streak >= STOP_AFTER_REJECTIONS) {
+      if (row.worker_thread_id && taskRejections(row.worker_thread_id).streak >= STOP_AFTER_REJECTIONS) {
         return "The advisor changed nothing. The reviewer has now requested changes 3 times in a row: start no new worker, and escalate to the user with both positions, this advice, and your recommendation.";
       }
       return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${row.worker_thread_id ? ` (replaces: ${row.worker_thread_id})` : " (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
@@ -2944,6 +2946,9 @@ export default async function plugin(bb: BbPluginApi) {
         scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, fails,
         now, threadId,
       ) as { report_seq: number; result_rev: number };
+      if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
+        db.prepare(`UPDATE managed_threads SET advised_at=COALESCE(advised_at, ?) WHERE thread_id=?`).run(now, threadId);
+      }
       if (row.role === "reviewer" && verdict) {
         db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at) SELECT thread_id, worker_thread_id, ?, report_seq, ? FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
       }
@@ -4148,7 +4153,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. replaces: is refused after 2 consecutive request_changes on the task until a consult has reported, and from 3 on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.",
+    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. replaces: is refused after 2 consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from 3 on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.",
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
