@@ -4207,8 +4207,9 @@ export default async function plugin(bb: BbPluginApi) {
       `failures: the ${mode} run passed its time limit and ${stopFailure ? `COULD NOT BE STOPPED (${stopFailure}); it may still be running. Report blocked with that as the blocker and tell Chief to run \`bb workflows stop ${runId}\`` : "was stopped"}. Report the finished answers below as partial, saying it timed out.`,
       ...(note ? [note] : []),
       "", "finished answers:",
-      answers ? (answers.answers.length ? JSON.stringify(answers.answers, null, 2) : "(none finished)") : `(could not read history; try \`bb workflows history ${runId}\`)`,
+      // The marker sits above the JSON: researchOutput clips the tail, which is where a long list would push it.
       ...(answers?.next != null ? [`(list truncated${answers.readError ? ` after a history read failed: ${answers.readError}` : " at 1,000 history records"}; read the rest with \`bb workflows history ${runId} --cursor ${answers.next} --limit 100\`)`] : []),
+      answers ? (answers.answers.length ? JSON.stringify(answers.answers, null, 2) : "(none finished)") : `(could not read history; try \`bb workflows history ${runId}\`)`,
     ].join("\n"));
   }
 
@@ -4268,7 +4269,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (hard && Date.now() >= hard.at) {
           const stopFailure = await stopResearch(runId, context);
           // A run that finished between the status read and the stop is a result, not a timeout.
-          if ((await runWorkflowCli("status", [runId], context).catch(() => null))?.status === "succeeded") continue;
+          if ((await workflowRead("status", [runId], context).catch(() => null))?.status === "succeeded") continue;
           call.outcome = "timed_out";
           return timedOutReport(runId, hard.mode, stopFailure, context);
         }
