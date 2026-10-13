@@ -2,7 +2,7 @@
  * Backlog board panel for Chief. The Kanban board, task card, task modal, filter controls and
  * Markdown rendering are adapted from https://github.com/StreamlinedStartup/bb-plugin-backlog
  * (commit 7f5235e), MIT License, Copyright (c) 2026 StreamlinedStartup; see LICENSE-bb-plugin-backlog.
- * Chief's additions: the off / no-folder / ambiguous states, read-only thread and PR chips, a
+ * Chief's additions: the no-folder / ambiguous states, read-only thread and PR chips, a
  * project picker, an archive button (no delete) and a one-line "new task" form.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";

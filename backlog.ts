@@ -1,5 +1,5 @@
 /**
- * Built-in Backlog.md board module, always on; server.ts only wires it in.
+ * Built-in Backlog.md board module, always on; server.ts only wires it in. A project with a Chief and no Backlog folder gets an empty `backlog/`.
  *
  * The Backlog.md file format, discovery, ordering and `patchTask` code below is adapted from
  * https://github.com/StreamlinedStartup/bb-plugin-backlog (commit 7f5235e), MIT License,
@@ -262,6 +262,8 @@ function parseConfig(raw: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Backlog configuration must be a YAML mapping.");
   return value as Record<string, unknown>;
 }
+/** Written once into a new `backlog/`: just the defaults Chief reads anyway. */
+const DEFAULT_CONFIG_FILE = `statuses: [${defaultConfig.statuses.join(", ")}]\ntask_prefix: ${defaultConfig.prefix}\n`;
 function normalizeConfig(data: Record<string, unknown>): Config {
   const choices = (key: string, fallback: string[]) => {
     const value = data[key];
@@ -377,18 +379,28 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     if (result.sizeBytes > SIZE_LIMIT) throw new Error(`Markdown file exceeds the 512 KiB editing limit: ${file}`);
     return { raw: result.content, revision: result.sha256, modifiedAtMs: result.modifiedAtMs };
   }
-  async function discover(source: { hostId: string; path: string }): Promise<Pick<Cache, "kind" | "folder" | "message" | "candidates" | "config">> {
+  /** `create`: this project has a Chief, so a project with no Backlog folder at all gets an empty `backlog/` (default config) in its default checkout. */
+  async function discover(source: { hostId: string; path: string }, create: boolean): Promise<Pick<Cache, "kind" | "folder" | "message" | "candidates" | "config">> {
     const { hostId, path: root } = source;
     const rootConfig = path.join(root, "backlog.config.yml");
     const candidates = [path.join(root, "backlog"), path.join(root, ".backlog")];
-    const existence = (await bb.sdk.hosts.pathsExist({ hostId, paths: [rootConfig, ...candidates] })).existence;
+    const existence = (await bb.sdk.hosts.pathsExist({ hostId, paths: [root, rootConfig, ...candidates] })).existence;
+    if (!existence[root]) return { kind: "missing", folder: null, candidates: [], message: `Project checkout not found: ${root}`, config: defaultConfig };
     const rootData = existence[rootConfig] ? parseConfig((await readText(hostId, rootConfig, root)).raw) : {};
     let folder: string | null = null;
     if (rootData.backlog_directory !== undefined) {
       if (typeof rootData.backlog_directory !== "string") throw new Error("backlog_directory must be a folder path.");
       folder = absoluteFolder(root, rootData.backlog_directory);
     } else {
-      const found = candidates.filter(p => existence[p]);
+      let found = candidates.filter(p => existence[p]);
+      if (!found.length && create) {
+        // Only here, and only for a project with no backlog_directory and neither folder: never when `.backlog/` exists, never both.
+        // ponytail: check-then-create has a small race window (a `.backlog/` made in between shows up as ambiguous on the re-check); the config write is create-only.
+        const again = (await bb.sdk.hosts.pathsExist({ hostId, paths: candidates })).existence;
+        if (!candidates.some(p => again[p])) await bb.sdk.files.write({ hostId, path: path.join(candidates[0], "config.yml"), rootPath: root, content: DEFAULT_CONFIG_FILE, expectedSha256: null, createParents: true });
+        const after = (await bb.sdk.hosts.pathsExist({ hostId, paths: candidates })).existence;
+        found = candidates.filter(p => after[p]);
+      }
       if (found.length > 1) return { kind: "ambiguous", folder: null, candidates: found, message: "Both backlog/ and .backlog/ exist. Remove one, or set backlog_directory in backlog.config.yml.", config: normalizeConfig(rootData) };
       folder = found[0] ?? null;
     }
@@ -423,7 +435,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
       const source = await deps.projectSource(projectId);
       if (!source) next = { ...emptyState("missing", true, "This project has no checkout on a connected machine."), hostId: null, config: defaultConfig, warnings: [], names: [], complete: false, inspected: false, mtimes: new Map(), sig: "" };
       else {
-        const found = await discover(source);
+        const found = await discover(source, deps.hasChief(projectId));
         next = { ...emptyState(found.kind, true, found.message), folder: found.folder, candidates: found.candidates, statuses: found.config.statuses, hostId: source.hostId, config: found.config, warnings: [], names: [], complete: false, inspected: false, mtimes: new Map(), sig: "" };
         if (found.kind === "ready" && found.folder) {
           const listing = await listFiles(source.hostId, found.folder);
