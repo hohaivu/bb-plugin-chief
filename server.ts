@@ -614,8 +614,15 @@ const failEntry = z.object({
 });
 type FailEntry = z.infer<typeof failEntry>;
 const MAX_CARRIED_FAILS = 12;
-const failsParam = z.array(failEntry).max(5).optional().describe(
-  "Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most 5 per report.",
+const MAX_REPORT_FAILS = 5;
+/** chief_report's fails entry. Published without length limits: checkReport enforces them in one pass, with a fix per field. */
+const reportFailEntry = z.object({
+  text: z.string().trim().describe("at most 400 characters"),
+  scope: z.string().trim().describe("at most 120 characters"),
+  basis: z.string().trim().describe("at most 200 characters: the command, test or input that reproduces it"),
+});
+const failsParam = z.array(reportFailEntry).optional().describe(
+  `Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most ${MAX_REPORT_FAILS} per report.`,
 );
 const MAX_LOG_READ = 30;
 const logParams = z.object({
@@ -623,26 +630,16 @@ const logParams = z.object({
     "Notes for peer waves: FACT for a finding that could change their next step, FAIL for a dead end. Omit to only read.",
   ),
 });
-const summaryParam = z.string().trim().min(1).max(SUMMARY_MAX).optional().describe(
-  `Short summary Chief reads in the alert, at most ${SUMMARY_MAX} characters: outcome, changed files or verdict, verification commands with exit status, and next action. Put the full report in \`result\`; the plugin saves it to a file Chief can open. Leave this unset when \`result\` is already this short.`,
-);
-const optionalReport = z.object({
-  state: z.enum(["active", "idle", "failed"]),
-  result: z.string().trim().max(MAX_RESULT_LENGTH).optional(),
-  summary: summaryParam,
-  blocker: z.never().optional(),
-  recommendation: z.string().trim().max(4_000).optional(),
-  fails: failsParam,
-});
-const planWavesSchema = z.array(z.object({
-  body: z.string().trim().min(1).max(MAX_PLAN_LENGTH),
-  dependsOn: z.array(z.number().int()).max(1).optional().describe(
-    "1-based index of the earlier wave this one builds on. [] = independent: it starts its own branch and pull request on the default base. [k] = builds on wave k and continues on its branch. Omitted = depends on the previous wave (wave 1: none).",
+/** One wave of a planner's plan array, published without limits; checkReport enforces them. */
+const waveShape = z.object({
+  body: z.string().trim(),
+  dependsOn: z.array(z.number().int()).optional().describe(
+    "1-based index of the earlier wave this one builds on, at most one. [] = independent: it starts its own branch and pull request on the default base. [k] = builds on wave k and continues on its branch. Omitted = depends on the previous wave (wave 1: none).",
   ),
   design: z.boolean().optional().describe(
     "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
   ),
-})).min(1).max(MAX_WAVES);
+});
 type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean };
 type WaveLink = { dependsOn?: number[] };
 /** Wave n's parent (1-based): its dependsOn, else the previous wave; null for a chain head. */
@@ -667,38 +664,37 @@ function chainOf(waves: WaveLink[], n: number): number[] {
 function tips(waves: WaveLink[]): number[] {
   return waves.flatMap((_, index) => successorOf(waves, index + 1) === null ? [index + 1] : []);
 }
-const readyReport = z.object({
-  state: z.literal("ready"),
-  result: z.string().trim().min(1).max(MAX_RESULT_LENGTH),
-  summary: summaryParam,
-  verdict: verdictSchema.optional().describe(
-    "Required in a review thread: approve when the change can ship as it stands, request_changes only when at least one blocking finding exists; nits alone never reject. Workers leave this unset.",
+const REPORT_TEXT_MAX = 4_000;
+const LESSON_MAX = 400;
+// One flat object, published without length limits: the validator's own errors cannot be customised, so checkReport()
+// in report() enforces every limit and per-state rule and names all failing fields in one error.
+const reportParams = z.object({
+  state: z.enum(["active", "idle", "failed", "ready", "blocked"]),
+  result: z.string().trim().optional().describe(
+    "The full report, any length; the plugin saves it to a per-report file. Required and non-empty when state is ready.",
   ),
-  lesson: z.string().trim().min(1).max(400).optional().describe(
-    "Advisor only: one durable, project-level rule future workers should follow so this class of rejection does not recur. Omit when the cause is task-specific.",
+  summary: z.string().trim().optional().describe(
+    `Short summary Chief reads in the alert, at most ${SUMMARY_MAX} characters: outcome, changed files or verdict, verification commands with exit status, and next action. Put the full report in \`result\`; the plugin saves it to a file Chief can open. Leave this unset when \`result\` is already this short.`,
+  ),
+  verdict: verdictSchema.optional().describe(
+    "Ready only. Required in a review thread: approve when the change can ship as it stands, request_changes only when at least one blocking finding exists; nits alone never reject. Workers leave this unset.",
+  ),
+  lesson: z.string().trim().optional().describe(
+    `Ready only, advisor only, at most ${LESSON_MAX} characters: one durable, project-level rule future workers should follow so this class of rejection does not recur. Omit when the cause is task-specific.`,
   ),
   regression: z.boolean().optional().describe(
-    "Reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
+    "Ready only, reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
   ),
   plan: z.union([
-    z.string().trim().min(1).max(MAX_PLAN_LENGTH),
-    planWavesSchema,
+    z.string().trim(),
+    z.array(waveShape),
   ]).optional().describe(
-    `A planner's ready report requires this: either the full plan body as Markdown (one wave), or an array of up to ${MAX_WAVES} {body, dependsOn?, design?} (1-based) waves. Chief receives each wave as its own file, not inline. No other role sets this.`,
+    `Ready only. A planner's ready report requires this: either the full plan body as Markdown (one wave), or an array of up to ${MAX_WAVES} {body, dependsOn?, design?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
   ),
-  blocker: z.never().optional(),
-  recommendation: z.string().trim().max(4_000).optional(),
+  blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
+  recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
   fails: failsParam,
 });
-const blockedReport = z.object({
-  state: z.literal("blocked"),
-  result: z.string().trim().max(MAX_RESULT_LENGTH).optional(),
-  summary: summaryParam,
-  blocker: z.string().trim().min(1).max(4_000),
-  recommendation: z.string().trim().min(1).max(4_000),
-  fails: failsParam,
-});
-const reportParams = z.discriminatedUnion("state", [optionalReport, readyReport, blockedReport]);
 
 export const rpcContract = defineRpcContract({
   status: {
@@ -3206,122 +3202,231 @@ export default async function plugin(bb: BbPluginApi) {
     return (end ? rest.slice(0, end.index) : rest).trim() || undefined;
   }
 
-  /** The caller's managed row, recovered from spawn-seeded metadata while insertThread has not run yet. */
+  type ThreadInput = Parameters<typeof insertThread>[0];
+  /** The caller's managed row. While insertThread has not run yet, `pending` holds the row recovered from spawn-seeded
+   * metadata and nothing is written: the caller persists it with insertThread once it has decided to proceed. */
+  async function lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInput }> {
+    const row = roles.get(threadId);
+    if (row) return { row };
+    // configure() already falls back to pluginMetadata seeded at spawn time
+    // because insertThread only runs after threads.spawn resolves; a report can
+    // land in that same gap for a brand-new thread. Recover the same seed here
+    // instead of throwing, so exposing the tool and executing it close together.
+    // pluginMetadata is writable by any API client, another plugin, or the
+    // thread's own agent, so only trust it once originPluginId proves this
+    // thread was actually created by our own spawn call.
+    const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
+    const seeded = live?.originPluginId === bb.pluginId
+      ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
+      : undefined;
+    if (!seeded?.success) return {};
+    return {
+      pending: {
+        threadId,
+        role: seeded.data.role,
+        projectId: live?.projectId ?? callerProjectId,
+        chiefThreadId: seeded.data.chiefThreadId ?? null,
+        title: live?.title ?? live?.titleFallback ?? threadId,
+        state: "active",
+        status: live?.status ?? "active",
+      },
+    };
+  }
+
+  /** The caller's managed row, persisting a spawn-seeded recovery at once. */
   async function managedRow(threadId: string, callerProjectId: string) {
-    let row = roles.get(threadId);
-    if (!row) {
-      // configure() already falls back to pluginMetadata seeded at spawn time
-      // because insertThread only runs after threads.spawn resolves; a report can
-      // land in that same gap for a brand-new thread. Recover the same seed here
-      // instead of throwing, so exposing the tool and executing it close together.
-      // pluginMetadata is writable by any API client, another plugin, or the
-      // thread's own agent, so only trust it once originPluginId proves this
-      // thread was actually created by our own spawn call.
-      const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
-      const seeded = live?.originPluginId === bb.pluginId
-        ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
-        : undefined;
-      if (seeded?.success) {
-        insertThread({
-          threadId,
-          role: seeded.data.role,
-          projectId: live?.projectId ?? callerProjectId,
-          chiefThreadId: seeded.data.chiefThreadId ?? null,
-          title: live?.title ?? live?.titleFallback ?? threadId,
-          state: "active",
-          status: live?.status ?? "active",
-        });
-        row = roles.get(threadId);
-      }
+    const { row, pending } = await lookupRow(threadId, callerProjectId);
+    if (pending) {
+      insertThread(pending);
+      return roles.get(threadId);
     }
     return row;
   }
 
-  async function report(threadId: string, params: z.infer<typeof reportParams>, callerProjectId: string) {
-    const row = await managedRow(threadId, callerProjectId);
-    if (!row || row.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
-    if (["complete", "archived", "deleted"].includes(row.state)) {
-      throw new Error(`Managed thread ${threadId} is ${row.state} and can no longer report.`);
+  type ReportParams = z.infer<typeof reportParams>;
+  type WaveInput = { body: string; dependsOn?: number[]; design?: boolean };
+
+  /** Every reason a report cannot be saved, one line per failing field: the field, its actual size or value, the limit, and the fix. */
+  function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, params: ReportParams, plan: string | unknown[] | undefined): string[] {
+    const errors: string[] = [];
+    const num = (n: number) => n.toLocaleString("en-US");
+    const ready = params.state === "ready";
+    const tooLong = (field: string, value: string | undefined, max: number, fix: string) => {
+      if (value !== undefined && value.length > max) errors.push(`${field} is ${num(value.length)} characters; max ${num(max)}. ${fix}`);
+    };
+    const onlyWhenReady = (field: string, value: unknown) => {
+      if (value !== undefined && !ready) errors.push(`${field} is only allowed when state is ready (state is "${params.state}"); remove it.`);
+    };
+
+    if (params.summary !== undefined) {
+      if (!params.summary) errors.push("summary is empty; send text or omit it.");
+      else tooLong("summary", params.summary, SUMMARY_MAX, "Shorten summary, or leave it unset and keep detail in result.");
     }
-    const verdict = params.state === "ready" ? params.verdict ?? null : null;
-    if (row.role === "reviewer" && params.state === "ready" && !verdict) {
-      throw new Error('A reviewer\'s ready report must carry a verdict: "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
+    if (params.state === "blocked") {
+      for (const field of ["blocker", "recommendation"] as const) {
+        if (!params[field]) errors.push(`${field} is missing; state blocked needs a blocker and a recommendation.`);
+      }
+    } else if (params.blocker !== undefined) {
+      errors.push(`blocker is only for state blocked (state is "${params.state}"); remove blocker or set state to blocked.`);
+    }
+    tooLong("blocker", params.blocker, REPORT_TEXT_MAX, "Shorten it and move detail into result.");
+    tooLong("recommendation", params.recommendation, REPORT_TEXT_MAX, "Shorten it and move detail into result.");
+    if (ready && !params.result) errors.push("result is empty; a ready report needs a non-empty result.");
+    onlyWhenReady("verdict", params.verdict);
+    onlyWhenReady("lesson", params.lesson);
+    onlyWhenReady("regression", params.regression);
+    onlyWhenReady("plan", params.plan);
+    // Emptiness, length and role are independent of each other and of state: each failing one gets its own line.
+    if (params.lesson !== undefined) {
+      if (!params.lesson) errors.push("lesson is empty; send text or omit it.");
+      else tooLong("lesson", params.lesson, LESSON_MAX, "Shorten it to one durable rule.");
+      if (row.role !== "advisor") errors.push(`lesson is only for an advisor's ready report (role is ${row.role}); remove it.`);
+    }
+    if (row.role === "reviewer" && ready && !params.verdict) {
+      errors.push('verdict is missing; a reviewer\'s ready report must carry "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
+    }
+    if (row.role === "worker" && row.plan_thread_id && ready
+      && !/^[ \t]*#{1,6}[ \t]+deviations from plan/im.test(params.result ?? "")) {
+      errors.push('result lacks a "## Deviations from plan" Markdown heading; a plan worker\'s ready report must list each departure from the plan and why, or "None".');
+    }
+
+    if (params.fails?.length) {
+      if (row.role !== "worker" && row.role !== "reviewer") errors.push(`fails is only for a worker's or reviewer's report (role is ${row.role}); remove it.`);
+      if (params.fails.length > MAX_REPORT_FAILS) errors.push(`fails has ${params.fails.length} entries; max ${MAX_REPORT_FAILS}. Keep the ${MAX_REPORT_FAILS} most useful dead ends.`);
+      params.fails.forEach((entry, index) => {
+        for (const [field, max] of [["text", 400], ["scope", 120], ["basis", 200]] as const) {
+          const name = `fails[${index}].${field}`;
+          if (!entry[field]) errors.push(`${name} is empty; send text or drop the entry.`);
+          else tooLong(name, entry[field], max, "Shorten it.");
+        }
+      });
+    }
+
+    // The plan's own shape and rules are checked whatever the state and role; those two have their own lines.
+    if (plan !== undefined) {
+      if (row.role !== "planner") errors.push(`plan is only for a planner's ready report (role is ${row.role}); remove it.`);
+      errors.push(...checkPlan(plan));
+    } else if (row.role === "planner" && ready) {
+      errors.push("plan is missing; a planner's ready report requires the full plan body, as a Markdown string or an array of {body, dependsOn?, design?}.");
+    }
+    return errors;
+  }
+
+  /** The plan-shape and planner-rule lines for checkReport. Each wave is inspected
+   * on its own, so one bad wave never hides another's failures; a check is skipped only when its own input is invalid. */
+  function checkPlan(plan: string | unknown[]): string[] {
+    const errors: string[] = [];
+    const num = (n: number) => n.toLocaleString("en-US");
+    const kind = (value: unknown) => value === null ? "null" : Array.isArray(value) ? "an array" : typeof value === "object" ? "an object" : `a ${typeof value}`;
+    if (Array.isArray(plan) && !plan.length) return [`plan is an empty array; pass a Markdown string, or an array of {body, dependsOn?, design?} with 1 to ${MAX_WAVES} waves.`];
+    const multi = typeof plan !== "string";
+    const items: unknown[] = multi ? plan : [{ body: plan }];
+    if (items.length > MAX_WAVES) errors.push(`plan has ${items.length} waves; max ${MAX_WAVES}. Merge waves.`);
+    // Per wave: its trimmed body (undefined when missing or not a string), the legal earlier waves it may build on
+    // ("any" when dependsOn is not an array), its parent when dependsOn passed every check (null = chain head), and whether design is true.
+    const bodies: (string | undefined)[] = [];
+    const maybeParents: (number[] | "any")[] = [];
+    const parents: (number | null | undefined)[] = [];
+    const designs: boolean[] = [];
+    items.forEach((item, index) => {
+      const n = index + 1;
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        errors.push(`plan wave ${n} is ${kind(item)}, not an object; use {body, dependsOn?, design?}.`);
+        bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false);
+        return;
+      }
+      const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown };
+      const name = multi ? `plan wave ${n} body` : "plan";
+      const body = typeof wave.body === "string" ? wave.body.trim() : undefined;
+      bodies.push(body);
+      if (body === undefined) errors.push(`${name} is ${wave.body === undefined ? "missing" : kind(wave.body)}; send the wave's Markdown text as a string, with its own "## Contracts to verify" heading.`);
+      else if (!body) errors.push(`${name} is empty; send the plan text.`);
+      else if (body.length > MAX_PLAN_LENGTH) errors.push(`${name} is ${num(body.length)} characters; max ${num(MAX_PLAN_LENGTH)}. ${multi ? "Split the wave." : "Split it into waves."}`);
+      if (wave.design !== undefined && typeof wave.design !== "boolean") {
+        errors.push(`plan wave ${n} design is ${JSON.stringify(wave.design)} (${typeof wave.design}); allowed true or false. Send a boolean, or drop design.`);
+      }
+      designs.push(wave.design === true);
+      const deps = wave.dependsOn;
+      const bad = (what: string, fix: string) => errors.push(`plan wave ${n} dependsOn is ${JSON.stringify(deps)}, ${what}; ${fix}`);
+      if (deps === undefined) { maybeParents.push(n > 1 ? [n - 1] : []); parents.push(n > 1 ? n - 1 : null); return; }
+      if (!Array.isArray(deps)) {
+        bad(`${kind(deps)}, not an array`, "use [] or [k] with k the 1-based earlier wave.");
+        maybeParents.push("any"); parents.push(undefined);
+        return;
+      }
+      // Type, count and range are independent: report each that fails, so one fix pass clears them all.
+      const nonIntegers = deps.filter((k) => !Number.isInteger(k));
+      const outOfRange = deps.filter((k) => Number.isInteger(k) && (k < 1 || k >= n));
+      if (nonIntegers.length) bad(`entries ${JSON.stringify(nonIntegers)} are not integers`, "use 1-based wave numbers.");
+      if (deps.length > 1) bad(`${deps.length} entries but max is 1`, "name only the wave it builds on.");
+      if (outOfRange.length) bad(`${JSON.stringify(outOfRange)} ${outOfRange.length > 1 ? "are not earlier waves" : "is not an earlier wave"}`, n === 1 ? "wave 1 depends on nothing; use []." : `use [] or one wave from 1 to ${n - 1}.`);
+      maybeParents.push(deps.filter((k) => Number.isInteger(k) && k >= 1 && k < n));
+      parents.push(nonIntegers.length || outOfRange.length || deps.length > 1 ? undefined : deps[0] ?? null);
+    });
+    // ponytail: headings inside code blocks are deliberately out of scope (user decision).
+    // The heading must be in some wave, so it is demanded whenever no readable body has it, even if another body is unreadable.
+    if (!bodies.some((body) => body !== undefined && /^[ \t]*#{1,6}[ \t]+what we(?:'re|’re| are) not doing/im.test(body))) {
+      errors.push(`plan lacks a "## What we're NOT doing" Markdown heading (any level, not bold text) in some wave; add one.${typeof plan === "string" && plan.startsWith("[")
+        ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string." : ""}`);
+    }
+    bodies.forEach((body, index) => {
+      if (body !== undefined && !contractsOf(body)) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
+    });
+    // A design wave is a chain tip when no later wave could build on it; a later wave whose dependsOn is not an array might, so it blocks the check.
+    designs.forEach((design, index) => {
+      const n = index + 1;
+      if (design && maybeParents.every((candidates, other) => other <= index || (candidates !== "any" && !candidates.includes(n)))) {
+        errors.push(`plan wave ${n} is design: true but no wave builds on it; follow it with the wave that implements it (dependsOn [${n}] or the next wave), or drop design.`);
+      }
+    });
+    const taken = new Set<number>();
+    parents.forEach((parent, index) => {
+      if (parent === undefined || parent === null) return;
+      if (taken.has(parent)) errors.push(`plan wave ${index + 1} and another wave both build on wave ${parent}; waves form chains only, so mark one of them dependsOn [] or chain it after the other.`);
+      taken.add(parent);
+    });
+    return errors;
+  }
+
+  async function report(threadId: string, params: ReportParams, callerProjectId: string) {
+    const found = await lookupRow(threadId, callerProjectId);
+    // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
+    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null });
+    if (!candidate || candidate.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
+    if (found.row && ["complete", "archived", "deleted"].includes(found.row.state)) {
+      throw new Error(`Managed thread ${threadId} is ${found.row.state} and can no longer report.`);
     }
     // Some planners send the wave array JSON-encoded; the string branch would take it as one flat wave.
-    let plan: z.infer<typeof readyReport>["plan"] = params.state === "ready" ? params.plan : undefined;
+    let plan: string | unknown[] | undefined = params.plan;
     if (typeof plan === "string" && plan.startsWith("[")) {
       let decoded: unknown;
       try { decoded = JSON.parse(plan); } catch { decoded = undefined; }
-      if (Array.isArray(decoded)) {
-        const waves = planWavesSchema.safeParse(decoded);
-        if (!waves.success) {
-          throw new Error(`plan is a JSON-encoded wave array that is not valid (${waves.error.issues[0]?.message ?? "check the waves"}). Pass plan as an array of {body}, not a string.`);
-        }
-        plan = waves.data;
-      }
+      if (Array.isArray(decoded)) plan = decoded;
     }
-    if (row.role === "planner" && params.state === "ready" && !plan) {
-      throw new Error("A planner's ready report requires plan: the full plan body.");
-    }
-    if (params.state === "ready" && plan && row.role !== "planner") {
-      throw new Error("Only a planner's ready report carries plan.");
-    }
-    if (row.role === "planner" && params.state === "ready" && plan) {
-      const bodies = typeof plan === "string" ? [plan] : plan.map((wave) => wave.body);
-      // ponytail: headings inside code blocks are deliberately out of scope (user decision).
-      if (!bodies.some((body) => /^[ \t]*#{1,6}[ \t]+what we(?:'re|’re| are) not doing/im.test(body))) {
-        const hint = typeof plan === "string" && plan.startsWith("[")
-          ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string."
-          : "";
-        throw new Error(`A planner's ready report requires a "## What we're NOT doing" Markdown heading (any level, not bold text) in some wave.${hint}`);
-      }
-      bodies.forEach((body, index) => {
-        if (!contractsOf(body)) {
-          throw new Error(`Wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text).`);
-        }
-      });
-    }
-    if (params.state === "ready" && params.lesson && row.role !== "advisor") {
-      throw new Error("Only an advisor's ready report carries lesson.");
-    }
-    if (row.role === "worker" && row.plan_thread_id && params.state === "ready" && !/^[ \t]*#{1,6}[ \t]+deviations from plan/im.test(params.result)) {
-      throw new Error('A plan worker\'s ready report requires a "## Deviations from plan" Markdown heading (list each departure from the plan and why, or "None").');
-    }
-    if (row.role === "planner" && params.state === "ready" && Array.isArray(plan)) {
-      const parents = new Set<number>();
-      plan.forEach((wave, index) => {
-        const n = index + 1;
-        for (const k of wave.dependsOn ?? []) {
-          if (k < 1 || k >= n) throw new Error(`Wave ${n}'s dependsOn [${k}] must name an earlier wave${n === 1 ? ": wave 1 depends on nothing" : ` (1 to ${n - 1})`}.`);
-        }
-        if (wave.design && successorOf(plan, n) === null) {
-          throw new Error(`Wave ${n} is design: true but no wave builds on it: a design-only wave must be followed by the wave that implements it (dependsOn [${n}] or the next wave).`);
-        }
-        const parent = parentOf(plan, n);
-        if (parent === null) return;
-        if (parents.has(parent)) throw new Error(`Wave ${n} and another wave both build on wave ${parent}: waves form chains only, one wave per parent. Mark one of them dependsOn [] or chain it after the other.`);
-        parents.add(parent);
-      });
-    }
+    const errors = checkReport(candidate, params, plan);
+    if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
+    if (found.pending) insertThread(found.pending);
+    const row = roles.get(threadId)!;
+    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?}[], with bodies not yet trimmed if JSON-decoded.
+    const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;
+    const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
+    const verdict = params.state === "ready" ? params.verdict ?? null : null;
     const plannerReady = row.role === "planner" && params.state === "ready";
-    const planWaves = plannerReady && plan ? await writePlan(threadId, row.project_id, plan) : null;
-    const scheduledWaves = planWaves && plan
-      ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof plan === "string" ? plan : plan[index]!.body)!,
-        ...(typeof plan !== "string" && plan[index]!.dependsOn ? { dependsOn: plan[index]!.dependsOn } : {}),
-        ...(typeof plan !== "string" && plan[index]!.design ? { design: true } : {}) }))
+    const planWaves = plannerReady && planInput ? await writePlan(threadId, row.project_id, planInput) : null;
+    const scheduledWaves = planWaves && planInput
+      ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof planInput === "string" ? planInput : planInput[index]!.body)!,
+        ...(typeof planInput !== "string" && planInput[index]!.dependsOn ? { dependsOn: planInput[index]!.dependsOn } : {}),
+        ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}) }))
       : null;
     // Best-effort mirror into Chief's storage: inline-vis resolves paths against the rendering thread.
     let inlinePlans: string[] = [];
-    if (planWaves && plan && row.chief_thread_id) {
+    if (planWaves && planInput && row.chief_thread_id) {
       try {
-        await writePlan(threadId, row.project_id, plan, row.chief_thread_id);
+        await writePlan(threadId, row.project_id, planInput, row.chief_thread_id);
         inlinePlans = planWaves.map((wave) => `::inline-vis{source="thread-storage" file="plans/${threadId}/${basename(wave.path)}"}`);
       } catch (error) {
         bb.log.warn(`Could not mirror ${threadId}'s plan into Chief's storage: ${String(error)}`);
       }
-    }
-    if (params.fails?.length && row.role !== "worker" && row.role !== "reviewer") {
-      throw new Error("Only a worker's or reviewer's report carries fails.");
     }
     let fails: string | null = null;
     if (params.fails?.length) {
@@ -3346,7 +3451,7 @@ export default async function plugin(bb: BbPluginApi) {
         plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
         last_report_state=?, owner_approval=NULL, owner_approved_at=NULL,
         active_since = CASE WHEN ?='active' THEN active_since ELSE NULL END, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
-        params.state, params.result ?? null, params.summary ?? null, params.state === "blocked" ? params.blocker : null,
+        params.state, params.result ?? null, params.summary ?? null, params.state === "blocked" ? params.blocker ?? null : null,
         params.recommendation ?? null, verdict,
         verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
         scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, fails,
@@ -5163,7 +5268,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_report",
     presentation: { label: { pending: "Reporting to Chief…", completed: "Reported to Chief" } },
-    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file. Send a short `summary` with a long `result`; the full result is saved to a per-report file.",
+    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
