@@ -275,8 +275,8 @@
 
 /* ---- Chief additions ---- */
 .backlog-root .link-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
-.backlog-root .link-chip,.backlog-modal .link-chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:1px 7px;border:1px solid #dde1e6;border-radius:9px;background:#f5f6f8;color:#626b77;font-size:11px;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.backlog-root a.link-chip:hover,.backlog-modal a.link-chip:hover{border-color:#9cb3d5;color:#235dc1}
+.backlog-root .link-chip,.backlog-modal .link-chip{font-family:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:1px 7px;border:1px solid #dde1e6;border-radius:9px;background:#f5f6f8;color:#626b77;font-size:11px;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.backlog-root .link-chip:hover,.backlog-modal .link-chip:hover{border-color:#9cb3d5;color:#235dc1}
 .backlog-root .after-chip,.backlog-modal .after-chip{display:inline-block;margin-top:8px;padding:1px 7px;border-radius:9px;background:#fff7df;color:#80641c;font-size:11px}
 .backlog-root .new-task{display:flex;gap:6px;flex:1;min-width:160px;max-width:420px}
 .backlog-root .new-task input{flex:1;min-width:0}

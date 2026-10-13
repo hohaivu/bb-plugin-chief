@@ -330,6 +330,10 @@ interface Cache extends BacklogState {
   hostId: string | null;
   config: Config;
   warnings: string[];
+  /** Every task-like file name found by the last scan, readable or not: ids are allocated above all of them. */
+  names: string[];
+  /** False when a listing hit its limit: ids are never allocated from a partial scan. */
+  complete: boolean;
   sig: string;
 }
 class ConflictError extends Error {}
@@ -386,25 +390,23 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     const legacyData = (await bb.sdk.hosts.pathsExist({ hostId, paths: [legacy] })).existence[legacy] ? parseConfig((await readText(hostId, legacy, folder)).raw) : {};
     return { kind: "ready", folder, candidates: [], message: "", config: normalizeConfig({ ...legacyData, ...rootData }) };
   }
+  /** One recursive listPaths per storage folder: it includes dot entries, ignores .gitignore and reports truncation (SDK backend-sdk.md). */
   async function listFiles(hostId: string, folder: string) {
     const warnings: string[] = [];
     const files: Array<{ path: string; storage: Task["storage"] }> = [];
+    let complete = true;
     const dirs = STORAGE.map(([relative, storage]) => ({ dir: path.join(folder, relative), storage }));
     const existence = (await bb.sdk.hosts.pathsExist({ hostId, paths: dirs.map(d => d.dir) })).existence;
     for (const { dir, storage } of dirs.filter(d => existence[d.dir])) {
-      let names: string[];
-      try {
-        names = (await bb.sdk.hosts.directory({ hostId, path: dir })).entries.filter(e => e.kind === "file").map(e => path.join(dir, e.name));
-      } catch (error) {
-        // ponytail: hosts.directory cap/visibility is unverified; listPaths is the documented fallback.
-        const listed = await bb.sdk.files.listPaths({ hostId, path: dir, includeFiles: true, includeDirectories: false, includeHidden: true, limit: 3000 });
-        if (listed.truncated) warnings.push(`Task scan limit reached in ${dir}.`);
-        names = listed.paths.map(p => p.path).filter(p => path.dirname(p) === dir);
-        bb.log.warn(`hosts.directory failed for ${dir}, used listPaths: ${errorMessage(error)}`);
+      const listed = await bb.sdk.files.listPaths({ hostId, path: dir, includeFiles: true, includeDirectories: false, includeHidden: true, excludeNames: [], limit: 3000 });
+      if (listed.truncated) { complete = false; warnings.push(`Task listing limit reached in ${dir}; new tasks cannot be created until it fits.`); }
+      for (const entry of listed.paths) {
+        // Paths may come back relative to the listed folder.
+        const absolute = entry.path.startsWith("/") ? entry.path : path.join(dir, entry.path);
+        if (path.dirname(absolute) === dir && /\.md$/i.test(absolute)) files.push({ path: absolute, storage });
       }
-      for (const name of names) if (/\.md$/i.test(name)) files.push({ path: name, storage });
     }
-    return { files, warnings };
+    return { files, warnings, complete };
   }
 
   async function load(projectId: string): Promise<void> {
@@ -413,21 +415,20 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     let next: Cache;
     try {
       const source = await deps.projectSource(projectId);
-      if (!source) next = { ...emptyState("missing", true, "This project has no checkout on a connected machine."), hostId: null, config: defaultConfig, warnings: [], sig: "" };
+      if (!source) next = { ...emptyState("missing", true, "This project has no checkout on a connected machine."), hostId: null, config: defaultConfig, warnings: [], names: [], complete: false, sig: "" };
       else {
         const found = await discover(source);
-        next = { ...emptyState(found.kind, true, found.message), folder: found.folder, candidates: found.candidates, statuses: found.config.statuses, hostId: source.hostId, config: found.config, warnings: [], sig: "" };
+        next = { ...emptyState(found.kind, true, found.message), folder: found.folder, candidates: found.candidates, statuses: found.config.statuses, hostId: source.hostId, config: found.config, warnings: [], names: [], complete: false, sig: "" };
         if (found.kind === "ready" && found.folder) {
           const listing = await listFiles(source.hostId, found.folder);
           next.warnings = listing.warnings;
-          const reuse = new Map((previous?.tasks ?? []).filter(t => t.storage !== "active" && previous?.folder === found.folder).map(t => [t.path, t]));
+          next.complete = listing.complete;
+          next.names = listing.files.map(f => path.basename(f.path));
           const tasks: Task[] = [];
           let bytes = 0;
+          // ponytail: every file is re-read on every refresh (the SDK read has no conditional form), so edits to completed/archived files show up too; add an mtime/etag check if boards get large.
           for (let i = 0; i < listing.files.length; i += 12) {
             await Promise.all(listing.files.slice(i, i + 12).map(async file => {
-              // ponytail: completed/archived files are read once per path; active ones every refresh. Add a watcher or mtime check if boards get large.
-              const cached = reuse.get(file.path);
-              if (cached && file.storage !== "active") { tasks.push(cached); return; }
               try {
                 confinedTaskPath(found.folder!, file.path);
                 const record = await readText(source.hostId, file.path, found.folder!);
@@ -445,7 +446,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
       }
     } catch (error) {
       // A broken config or an unreachable host is a visible note, never a thrown error.
-      next = { ...emptyState("missing", true, errorMessage(error)), hostId: null, config: defaultConfig, warnings: [], sig: "" };
+      next = { ...emptyState("missing", true, errorMessage(error)), hostId: null, config: defaultConfig, warnings: [], names: [], complete: false, sig: "" };
     }
     next.sig = JSON.stringify([next.kind, next.folder, next.message, next.statuses, next.warnings, next.tasks.map(t => [t.path, t.revision])]);
     if (!deps.enabled()) { caches.delete(projectId); return; }
@@ -480,20 +481,23 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
 
   /**
    * Hash-guarded edit. `expect` is the revision the caller rendered (board); without it the
-   * tool path patches against a fresh read. A write conflict re-reads once and retries only
-   * if the patch's `before` values still match; otherwise it fails with a clear message.
+   * tool path patches against a fresh read. The edits (with their `before` values) are built
+   * once, from the first read. A write conflict re-reads and retries once with those same
+   * edits: if another writer changed any field we edit, patchTask refuses on the original
+   * `before` and the call fails; a change to other fields merges. Never rebuilt from the
+   * competing version, so a concurrent edit is never overwritten.
    */
   async function mutate(projectId: string, file: string, build: (fresh: Task) => Edit[], expect?: string): Promise<Task> {
     const c = ready(projectId);
     const absolute = confinedTaskPath(c.folder, file);
-    let expected = expect;
+    let edits: Edit[] | undefined;
     for (let attempt = 0; ; attempt++) {
       const current = await readText(c.hostId, absolute, c.folder);
-      if (expected !== undefined && current.revision !== expected) throw new ConflictError("This task changed since the board loaded it.");
+      if (attempt === 0 && expect !== undefined && current.revision !== expect) throw new ConflictError("This task changed since the board loaded it.");
       const meta = { path: absolute, revision: current.revision, storage: storageOf(c.folder, absolute) };
       const fresh = parseTask(current.raw, meta);
       if (fresh.errors.length) throw new Error(fresh.errors.join(" "));
-      const edits = build(fresh);
+      edits ??= build(fresh);
       validateChoices(edits, c.config);
       let content: string;
       try { content = patchTask(current.raw, edits); }
@@ -504,7 +508,6 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
       const result = await bb.sdk.files.write({ hostId: c.hostId, path: absolute, rootPath: c.folder, content, expectedSha256: current.revision, createParents: false });
       if (result.outcome === "written") return parseTask(content, { ...meta, revision: result.sha256 });
       if (attempt >= 1) throw new ConflictError(`Task ${fresh.id} changed since it was read; re-read it and retry.`);
-      expected = undefined;
     }
   }
   /** Move between tasks/, completed/ and archive/tasks/ after a sha check. ponytail: check-then-move is not atomic. */
@@ -522,51 +525,68 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
 
   const find = (projectId: string, taskId: string) => state(projectId).tasks.find(t => sameId(t.id, taskId));
   const doneStatus = (projectId: string) => state(projectId).statuses.at(-1) ?? "Done";
+  /** New tasks: the configured default status. */
   const firstStatus = (c: Cache) => c.config.defaultStatus ?? c.statuses[0]!;
+  /** Reopening: always the first configured status, never default_status (which may be the closed one). */
+  const reopenStatus = (c: Cache) => c.statuses[0]!;
+  /** A new todo is open: the default status unless that is the closed (last) one. */
+  const openStatus = (c: Cache) => c.config.defaultStatus && c.config.defaultStatus !== c.statuses.at(-1) ? c.config.defaultStatus : c.statuses[0]!;
   /** Insertion order for a lane; omitted when the lane has unordered tasks (see insertionOrdinal). */
   function ordinalFor(tasks: Task[], status: string, movingPath: string, before: string | null): number | null {
     try { return insertionOrdinal(tasks.filter(t => t.storage === "active"), movingPath, status, before); } catch { return null; }
   }
 
-  async function createTask(projectId: string, input: { title: string; status?: string; description?: string; after?: string | null; id?: string; onAllocated?: (id: string) => void }): Promise<Task> {
+  /** Number part of a task id or file name such as "TASK-12", "task-12 - Title.md". */
+  const numberOf = (text: string) => /^[A-Za-z][A-Za-z0-9_]*-(\d+)/.exec(text)?.[1];
+  /** Runs inside the project lock, after a fresh scan. */
+  async function createLocked(projectId: string, input: { title: string; status?: string; description?: string; after?: string | null; marker?: string; open?: boolean }): Promise<Task> {
+    await refresh(projectId);
+    const c = ready(projectId);
+    if (!c.complete) throw new Error("The Backlog task listing is incomplete, so a safe task id cannot be chosen. Reduce the number of files in tasks/, completed/ and archive/tasks/, or try again.");
+    const title = input.title.replace(/\s+/g, " ").trim();
+    if (!title) throw new Error("A task needs a title.");
+    const status = input.status ?? (input.open ? openStatus(c) : firstStatus(c));
+    if (!c.statuses.includes(status)) throw new Error(`Status must be one of: ${c.statuses.join(", ")}.`);
+    if (input.description && /<!--\s*(?:SECTION:|AC:|DOD:|COMMENT)/i.test(input.description)) throw new Error("The description cannot contain Backlog section markers.");
+    // Above every id and every file name found by the scan, including files that failed to parse or read.
+    const numbers = [...c.tasks.map(t => t.id), ...c.names].map(numberOf).filter((n): n is string => !!n).map(Number);
+    const id = `${c.config.prefix.toUpperCase()}-${Math.max(0, ...numbers) + 1}`;
+    const slug = title.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50).replace(/-+$/, "") || "task";
+    const file = path.join(c.folder, "tasks", `${id.toLowerCase()} - ${slug}.md`);
+    confinedTaskPath(c.folder, file);
+    const ordinal = ordinalFor(c.tasks, status, "", null);
+    const created = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const description = input.description?.trim();
+    const content = [
+      "---", `id: ${id}`, `title: ${JSON.stringify(title)}`, `status: ${JSON.stringify(status)}`, `created_date: '${created}'`, "labels: []", "dependencies: []",
+      ...(ordinal === null ? [] : [`ordinal: ${ordinal}`]), ...(input.after ? [`chief_after: ${JSON.stringify(input.after)}`] : []),
+      ...(input.marker ? [`chief_import: ${JSON.stringify(input.marker)}`] : []), "---", "",
+      ...(description ? ["## Description", "", "<!-- SECTION:DESCRIPTION:BEGIN -->", description, "<!-- SECTION:DESCRIPTION:END -->", ""] : []),
+    ].join("\n");
+    // ponytail: the Backlog CLI and the Backlog.MD plugin are outside this lock; a simultaneous external create can pick the same id (create-only write below refuses a same-named file, not a same-id file under another slug).
+    // expectedSha256:null is create-only (SDK backend-sdk.md): a conflict outcome means the file appeared meanwhile.
+    const result = await bb.sdk.files.write({ hostId: c.hostId, path: file, rootPath: c.folder, content, expectedSha256: null, createParents: true });
+    if (result.outcome !== "written") throw new Error(`${path.basename(file)} appeared while creating it; try again.`);
+    await refresh(projectId);
+    return find(projectId, id) ?? parseTask(content, { path: file, revision: result.sha256, storage: "active" });
+  }
+  function createTask(projectId: string, input: { title: string; status?: string; description?: string; after?: string | null; open?: boolean }): Promise<Task> {
+    return withLock(projectId, () => createLocked(projectId, input));
+  }
+  /** OFF→ON export of one chief_todos row. `token` is stored in the file (chief_import) and in the row, so a resume after a crash
+   * finds the task this row already created instead of creating a second one, and never claims anyone else's task. */
+  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string }): Promise<Task> {
+    const title = titleOf(input.text);
+    const rest = input.text.trim() === title ? "" : input.text.trim();
     return withLock(projectId, async () => {
-      await load(projectId);
-      const c = ready(projectId);
-      const title = input.title.replace(/\s+/g, " ").trim();
-      if (!title) throw new Error("A task needs a title.");
-      // ponytail: a resumed import trusts that its pre-allocated id still names its own task; a foreign task that took the number meanwhile would be returned instead.
-      if (input.id) { const existing = find(projectId, input.id); if (existing) return existing; }
-      const status = input.status ?? firstStatus(c);
-      if (!c.statuses.includes(status)) throw new Error(`Status must be one of: ${c.statuses.join(", ")}.`);
-      if (input.description && /<!--\s*(?:SECTION:|AC:|DOD:|COMMENT)/i.test(input.description)) throw new Error("The description cannot contain Backlog section markers.");
-      // Highest number across ids and file names (also files that failed to parse), plus one.
-      const numbers = [...c.tasks.map(t => t.id), ...c.tasks.map(t => path.basename(t.path))].map(s => /(\d+)(?: - .*)?(?:\.md)?$/i.exec(s)?.[1]).filter((n): n is string => !!n).map(Number);
-      const number = Math.max(0, ...numbers) + 1;
-      const id = input.id ?? `${c.config.prefix.toUpperCase()}-${number}`;
-      const slug = title.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50).replace(/-+$/, "") || "task";
-      const file = path.join(c.folder, "tasks", `${id.toLowerCase()} - ${slug}.md`);
-      confinedTaskPath(c.folder, file);
-      input.onAllocated?.(id);
-      const ordinal = ordinalFor(c.tasks, status, "", null);
-      const created = new Date().toISOString().slice(0, 16).replace("T", " ");
-      const description = input.description?.trim();
-      const content = [
-        "---", `id: ${id}`, `title: ${JSON.stringify(title)}`, `status: ${JSON.stringify(status)}`, `created_date: '${created}'`, "labels: []", "dependencies: []",
-        ...(ordinal === null ? [] : [`ordinal: ${ordinal}`]), ...(input.after ? [`chief_after: ${JSON.stringify(input.after)}`] : []), "---", "",
-        ...(description ? ["## Description", "", "<!-- SECTION:DESCRIPTION:BEGIN -->", description, "<!-- SECTION:DESCRIPTION:END -->", ""] : []),
-      ].join("\n");
-      // ponytail: the Backlog CLI and the Backlog.MD plugin are outside this lock; a simultaneous external create can pick the same id.
-      // expectedSha256:null is not verified to refuse an existing file, so check inside the lock.
-      if ((await bb.sdk.hosts.pathsExist({ hostId: c.hostId, paths: [file] })).existence[file]) throw new Error(`${path.basename(file)} already exists.`);
-      const result = await bb.sdk.files.write({ hostId: c.hostId, path: file, rootPath: c.folder, content, expectedSha256: null, createParents: true });
-      if (result.outcome !== "written") throw new Error(`${path.basename(file)} appeared while creating it; try again.`);
-      await load(projectId);
-      return find(projectId, id) ?? parseTask(content, { path: file, revision: result.sha256, storage: "active" });
+      await refresh(projectId);
+      const existing = state(projectId).tasks.find(t => t.fields.chief_import === input.token);
+      return existing ?? createLocked(projectId, { title, description: rest, after: input.after, marker: input.token, open: true });
     });
   }
   async function editTask(projectId: string, input: { path: string; revision?: string; edits: Edit[] }): Promise<Task> {
     const task = await mutate(projectId, input.path, () => input.edits, input.revision);
-    await load(projectId);
+    await refresh(projectId);
     return task;
   }
   async function moveTask(projectId: string, input: { path: string; revision?: string; status: string; before?: string | null }): Promise<Task> {
@@ -574,32 +594,32 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
       const ordinal = ordinalFor(state(projectId).tasks, input.status, fresh.path, input.before ?? null);
       return [field(fresh, "status", input.status), ...(ordinal === null ? [] : [field(fresh, "ordinal", ordinal)])];
     }, input.revision);
-    await load(projectId);
+    await refresh(projectId);
     return task;
   }
   async function archiveTask(projectId: string, input: { path: string; revision?: string }): Promise<Task> {
     const task = await relocate(projectId, input.path, "archive/tasks", input.revision);
-    await load(projectId);
+    await refresh(projectId);
     return task;
   }
   /** Back to tasks/ with the first status. */
   async function restoreTask(projectId: string, input: { path: string; revision?: string }): Promise<Task> {
     const c = ready(projectId);
-    const reset = await mutate(projectId, input.path, fresh => [field(fresh, "status", firstStatus(c))], input.revision);
+    const reset = await mutate(projectId, input.path, fresh => [field(fresh, "status", reopenStatus(c))], input.revision);
     const task = await relocate(projectId, reset.path, "tasks");
-    await load(projectId);
-    return { ...task, status: firstStatus(c) };
+    await refresh(projectId);
+    return { ...task, status: reopenStatus(c) };
   }
 
-  /** chief_roster todo add. A long first line is the title; the rest is the description. */
-  function addTodo(projectId: string, input: { text: string; after?: string | null; id?: string; onAllocated?: (id: string) => void }): Promise<Task> {
+  /** chief_backlog add. A long first line is the title; the rest is the description. */
+  function addTodo(projectId: string, input: { text: string; after?: string | null }): Promise<Task> {
     const title = titleOf(input.text);
     const rest = input.text.trim() === title ? "" : input.text.trim();
-    return createTask(projectId, { title, description: rest, after: input.after, id: input.id, onAllocated: input.onAllocated });
+    return createTask(projectId, { title, description: rest, after: input.after, open: true });
   }
-  /** chief_roster todo change: text/after edit, then done (last status), dropped (archive) or open (restore). */
+  /** chief_backlog change: text/after edit, then done (last status), dropped (archive) or open (restore). */
   async function updateTodo(projectId: string, input: { id: string; text?: string; after?: string | null; state?: BacklogTodo["state"] }): Promise<Task> {
-    await load(projectId);
+    await refresh(projectId);
     const c = ready(projectId);
     const found = find(projectId, input.id);
     if (!found) throw new Error(`No backlog task ${input.id} in this project.`);
@@ -607,7 +627,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     const wanted = input.state ?? (task.storage === "archived" ? "dropped" : task.status === c.statuses.at(-1) ? "done" : "open");
     const wasInactive = task.storage !== "active";
     if (wasInactive && wanted !== "dropped") task = await restoreTask(projectId, { path: task.path });
-    const status = wanted === "done" ? c.statuses.at(-1)! : wanted === "open" && !wasInactive && task.status === c.statuses.at(-1) ? firstStatus(c) : null;
+    const status = wanted === "done" ? c.statuses.at(-1)! : wanted === "open" && !wasInactive && task.status === c.statuses.at(-1) ? reopenStatus(c) : null;
     const text = input.text === undefined ? null : titleOf(input.text);
     if (input.text !== undefined && !text) throw new Error("A task needs a title.");
     if (text !== null || input.after !== undefined || (status !== null && status !== task.status)) {
@@ -618,7 +638,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
       ]);
     }
     if (wanted === "dropped" && task.storage !== "archived") task = await relocate(projectId, task.path, "archive/tasks");
-    await load(projectId);
+    await refresh(projectId);
     return find(projectId, task.id) ?? task;
   }
 
@@ -650,7 +670,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     try { return { task: await work(), conflict: false, message: "" }; }
     catch (error) {
       if (!(error instanceof ConflictError)) throw error;
-      await load(projectId);
+      await refresh(projectId);
       return { task: null, conflict: true, message: error.message };
     }
   }
@@ -666,5 +686,5 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     backlogMove: ({ projectId, ...input }: RpcIn<"backlogMove">) => attempt(projectId, () => moveTask(projectId, input)),
     backlogArchive: ({ projectId, ...input }: RpcIn<"backlogArchive">) => attempt(projectId, () => archiveTask(projectId, input)),
   };
-  return { state, refresh, createTask, editTask, moveTask, archiveTask, restoreTask, addTodo, updateTodo, todos, rpcHandlers, forget: (projectId: string) => void caches.delete(projectId) };
+  return { state, refresh, createTask, importTodo, editTask, moveTask, archiveTask, restoreTask, addTodo, updateTodo, todos, rpcHandlers, forget: (projectId: string) => void caches.delete(projectId) };
 }

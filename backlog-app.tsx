@@ -13,6 +13,7 @@ import remarkGfm from "remark-gfm";
 import {
   experimental_ProviderIcon as ProviderIcon,
   experimental_useProviders as useProviders,
+  useBbNavigate,
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
@@ -117,10 +118,11 @@ function Markdown({ children, onEditSection, editable = [] }: { children: string
 
 // ---- Chief: read-only thread / PR chips ----
 function LinkChips({ task }: { task: BoardTask }) {
+  const navigate = useBbNavigate();
   if (!task.links.length && !task.after) return null;
   return <div className="link-chips">
     {task.after && <span className="after-chip" title="Wait condition">after: {task.after}</span>}
-    {task.links.map((link: BacklogLink) => <span className="link-chip" key={link.threadId} title={`${link.role} thread: ${link.title}`}>{link.role} · {link.state}</span>)}
+    {task.links.map((link: BacklogLink) => <button type="button" className="link-chip" key={link.threadId} title={`Open ${link.role} thread ${link.threadId}`} onClick={event => { event.stopPropagation(); navigate.toThread(link.threadId); }}>{link.role} · {link.title || link.threadId} · {link.state}</button>)}
     {task.links.filter(link => link.prUrl).map(link => <a className="link-chip" key={`pr-${link.threadId}`} href={link.prUrl!} target="_blank" rel="noopener noreferrer" onClick={event => event.stopPropagation()}>PR</a>)}
   </div>;
 }
@@ -330,7 +332,7 @@ function TaskModal({ task, statuses, relatedTasks = [], onOpenTask, fieldChoices
   const properties = [...Object.entries(fieldLabels).filter(([key]) => key !== "title" && key !== "ordinal"), ["created_date", "Created"], ["updated_date", "Updated"]] as Array<[string, string]>;
   const primaryKeys = new Set(["status", "priority", "assignee", "due_date"]);
   const primaryProperties = properties.filter(([key]) => primaryKeys.has(key));
-  const secondaryProperties = properties.filter(([key]) => !primaryKeys.has(key) && valueList(current.fields[key]).length > 0);
+  const secondaryProperties = properties.filter(([key]) => !primaryKeys.has(key) && (key === "chief_after" || valueList(current.fields[key]).length > 0));
   const isReadOnlyProperty = (key: string) => key === "created_date" || key === "updated_date";
   const openRelated = (related: Task) => {
     if (draft || pending || recovery) { setError("Save or cancel your edit before opening another task."); return; }
