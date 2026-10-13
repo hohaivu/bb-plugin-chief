@@ -3276,10 +3276,11 @@ export default async function plugin(bb: BbPluginApi) {
     onlyWhenReady("lesson", params.lesson);
     onlyWhenReady("regression", params.regression);
     onlyWhenReady("plan", params.plan);
-    if (params.lesson !== undefined && ready) {
+    // Emptiness, length and role are independent of each other and of state: each failing one gets its own line.
+    if (params.lesson !== undefined) {
       if (!params.lesson) errors.push("lesson is empty; send text or omit it.");
-      else if (row.role !== "advisor") errors.push(`lesson is only for an advisor's ready report (role is ${row.role}); remove it.`);
       else tooLong("lesson", params.lesson, LESSON_MAX, "Shorten it to one durable rule.");
+      if (row.role !== "advisor") errors.push(`lesson is only for an advisor's ready report (role is ${row.role}); remove it.`);
     }
     if (row.role === "reviewer" && ready && !params.verdict) {
       errors.push('verdict is missing; a reviewer\'s ready report must carry "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
@@ -3301,16 +3302,17 @@ export default async function plugin(bb: BbPluginApi) {
       });
     }
 
-    if (plan !== undefined && ready) {
+    // The plan's own shape and rules are checked whatever the state and role; those two have their own lines.
+    if (plan !== undefined) {
       if (row.role !== "planner") errors.push(`plan is only for a planner's ready report (role is ${row.role}); remove it.`);
-      else errors.push(...checkPlan(plan));
+      errors.push(...checkPlan(plan));
     } else if (row.role === "planner" && ready) {
       errors.push("plan is missing; a planner's ready report requires the full plan body, as a Markdown string or an array of {body, dependsOn?, design?}.");
     }
     return errors;
   }
 
-  /** The plan-shape and planner-rule lines for checkReport; a planner's ready report only. Each wave is inspected
+  /** The plan-shape and planner-rule lines for checkReport. Each wave is inspected
    * on its own, so one bad wave never hides another's failures; a check is skipped only when its own input is invalid. */
   function checkPlan(plan: string | unknown[]): string[] {
     const errors: string[] = [];
