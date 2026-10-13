@@ -1182,7 +1182,7 @@ export const MIGRATIONS = [
     // chief_continue stall-clock resets since the last report, so repeated nudges cannot postpone the hard stall alert forever.
     `ALTER TABLE managed_threads ADD COLUMN stall_resets INTEGER NOT NULL DEFAULT 0`,
     // bb chief stats usage tracking; nothing is backfilled, so older rows read as unknown (planner_on NULL) or absent.
-    // One row per chief_research call. outcome: succeeded | partial | failed | still_running | start_failed | error.
+    // One row per chief_research call. outcome: succeeded | partial | failed | still_running | timed_out | spawned | start_failed | error.
     `CREATE TABLE chief_research_calls (id INTEGER PRIMARY KEY, caller_thread_id TEXT, role TEXT, mode TEXT, run_id TEXT, outcome TEXT, started_at INTEGER, ended_at INTEGER)`,
     // Worker row only: whether planning was on when it was delegated (1/0); NULL for rows from before this column.
     `ALTER TABLE managed_threads ADD COLUMN planner_on INTEGER`,
@@ -3698,7 +3698,8 @@ export default async function plugin(bb: BbPluginApi) {
     const categoryCount = (category: string) => perTask.filter((task) => task.category === category).length;
     const researchBy = new Map<string, { role: string; mode: string | null; calls: number; succeeded: number }>();
     for (const call of db.prepare(`SELECT caller_thread_id, role, mode, outcome FROM chief_research_calls ORDER BY id`).all() as { caller_thread_id: string; role: string; mode: string | null; outcome: string }[]) {
-      if (!ids.has(call.caller_thread_id)) continue;
+      // Chief's spawned call only started a researcher; that thread's own calls carry the real outcomes.
+      if (!ids.has(call.caller_thread_id) || call.outcome === "spawned") continue;
       const entry = researchBy.get(`${call.role}\u0000${call.mode}`) ?? { role: call.role, mode: call.mode, calls: 0, succeeded: 0 };
       entry.calls += 1;
       if (call.outcome === "succeeded" || call.outcome === "partial") entry.succeeded += 1;
