@@ -122,8 +122,8 @@ function LinkChips({ task }: { task: BoardTask }) {
   if (!task.links.length && !task.after) return null;
   return <div className="link-chips">
     {task.after && <span className="after-chip" title="Wait condition">after: {task.after}</span>}
-    {task.links.map((link: BacklogLink) => <button type="button" className="link-chip" key={link.threadId} title={`Open ${link.role} thread ${link.threadId}`} onClick={event => { event.stopPropagation(); navigate.toThread(link.threadId); }}>{link.role} · {link.title || link.threadId} · {link.state}</button>)}
-    {task.links.filter(link => link.prUrl).map(link => <a className="link-chip" key={`pr-${link.threadId}`} href={link.prUrl!} target="_blank" rel="noopener noreferrer" onClick={event => event.stopPropagation()}>PR</a>)}
+    {task.links.map((link: BacklogLink) => <button type="button" className="link-chip" key={link.threadId} title={`Open ${link.role} thread ${link.threadId}`} onKeyDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); navigate.toThread(link.threadId); }}>{link.role} · {link.title || link.threadId} · {link.state}</button>)}
+    {task.links.filter(link => link.prUrl).map(link => <a className="link-chip" key={`pr-${link.threadId}`} href={link.prUrl!} target="_blank" rel="noopener noreferrer" onKeyDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>PR</a>)}
   </div>;
 }
 
@@ -515,7 +515,7 @@ export function BacklogPage() {
   else if (board.kind === "missing") body = empty("No Backlog folder", board.message, board.candidates);
   else if (board.kind === "ambiguous") body = empty("Choose a Backlog folder", board.message, board.candidates);
   else body = <>
-    {items.length === 0 && <p className="empty-hint">{board.tasks.length ? "No tasks match these filters." : "No task files yet. Todos added through chief_roster will appear here."}</p>}
+    {items.length === 0 && <p className="empty-hint">{board.tasks.length ? "No tasks match these filters." : "No task files yet. Todos added through chief_backlog will appear here."}</p>}
     <p id="backlog-keyboard-help" className="visually-hidden">On a focused card, Enter opens the task. Alt plus Left or Right moves between statuses. Alt plus Up or Down reorders the lane.</p>
     <div className="lanes">{laneStatuses.map(status => {
       const lane = items.filter(task => task.status === status);
