@@ -811,6 +811,11 @@ interface ManagedRow {
   reviewed_head_sha: string | null;
   /** Worker row only: the worker it replaced through replaces:, or null. */
   replaces_thread_id: string | null;
+  /** Design-wave worker only: the owner's approval of its artboards, in the owner's words as Chief quoted them; null until recorded, and cleared by the worker's next report or chief_continue. */
+  owner_approval: string | null;
+  owner_approved_at: number | null;
+  /** The state of the row's latest chief_report, or null (none sent). */
+  last_report_state: string | null;
   /** Reviewer row only: the verdict-<seq>.md its last ready report was written to, or null. */
   verdict_path: string | null;
   /** The last chief_report's short summary, or null (none sent, or chief_complete replaced the result). */
@@ -871,7 +876,9 @@ const CHIEF_CORE_RULES = `# Chief core rules (always apply)
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason or simple) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file — the one exception: a design-only wave's ready alert asks you to get the owner's approval of its artboards before you delegate the next wave. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (bounded work whose cause evidence already states; see the core rules) or simple: true (only when the user's message contains #simple). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
+  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason or simple) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file — the one exception: a design-only wave's ready alert asks you to get the owner's approval of its artboards before you delegate the next wave. Only the owner approves design-only work, never a reviewer: record their words with chief_owner_approval (chief_review refuses it), and the next wave will not delegate without it. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (bounded work whose cause evidence already states; see the core rules) or simple: true (only when the user's message contains #simple). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
+
+const DESIGN_REVIEW_REFUSAL = "Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.";
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 function researchChiefInstructions(planning: boolean) {
@@ -1325,6 +1332,11 @@ export const MIGRATIONS = [
     // The PR head commit a verdict was given for (copied from the reviewer row by the server, never from a report), and the commit a PR-bound reviewer was pinned to at spawn.
     `ALTER TABLE reviewer_verdicts ADD COLUMN head_sha TEXT`,
     `ALTER TABLE managed_threads ADD COLUMN reviewed_head_sha TEXT`,
+    // Design-wave worker only: the owner's approval of its artboards as Chief quoted it (chief_owner_approval), and when. A new report or chief_continue clears both.
+    `ALTER TABLE managed_threads ADD COLUMN owner_approval TEXT`,
+    `ALTER TABLE managed_threads ADD COLUMN owner_approved_at INTEGER`,
+    // The state of the row's latest chief_report (ready, blocked, active, idle, failed): row.state moves on once the thread runs again, this does not.
+    `ALTER TABLE managed_threads ADD COLUMN last_report_state TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2291,6 +2303,15 @@ export default async function plugin(bb: BbPluginApi) {
       const parent = parentOf(waves, wave);
       if (parent !== null && waves[parent - 1]?.design) implementsDesign = parent;
     }
+    if (implementsDesign !== null) {
+      // The design worker whose artboards this wave builds on: the one being replaced, else the wave's latest.
+      const designer = prior && prior.plan_thread_id === planThreadId && prior.plan_wave === implementsDesign
+        ? prior
+        : waveWorkers(planThreadId!, implementsDesign).at(-1);
+      if (!designer?.owner_approval) {
+        throw new Error(`Wave ${implementsDesign} is design-only and wave ${wave} implements it: the owner must approve its artboards first. ${designer ? `Show the user the artboards from ${designer.thread_id}'s report, then record their decision with chief_owner_approval (workerThreadId: ${designer.thread_id}) and repeat this call.` : `No worker has delegated wave ${implementsDesign} yet.`}`);
+      }
+    }
     // One task branch carries one active worker: a second worktree cannot check out a
     // branch another one already holds, and the spawn would fail with a raw git error.
     const holder = branch
@@ -2462,7 +2483,7 @@ export default async function plugin(bb: BbPluginApi) {
       const stored = db.prepare(`SELECT stall_resets FROM managed_threads WHERE thread_id=?`).get(threadId) as { stall_resets: number } | undefined;
       const atCap = (stored?.stall_resets ?? 0) >= MAX_STALL_RESETS;
       // Past the cap the nudge still lands, but active_since, active_cycle and the alerted cycles keep their schedule.
-      db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL,
+      db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL, owner_approval=NULL, owner_approved_at=NULL,
         active_since=CASE WHEN ? THEN active_since ELSE ? END, active_cycle=active_cycle+?,
         stall_alerted_cycle=CASE WHEN ? THEN stall_alerted_cycle ELSE NULL END, stall_resets=stall_resets+?, updated_at=? WHERE thread_id=?`).run(
         atCap ? 1 : 0, now, atCap ? 0 : 1, atCap ? 1 : 0, atCap ? 0 : 1, now, threadId,
@@ -2478,6 +2499,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (!planThreadId) return [];
     const planner = roles.get(planThreadId);
     return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as PlanWave[]) : [];
+  }
+
+  /** True for a worker delegated on a plan wave marked design: true. */
+  function isDesignWave(row: ManagedRow): boolean {
+    return row.role === "worker" && !!row.plan_thread_id && row.plan_wave != null && !!planWavesFor(row.plan_thread_id)[row.plan_wave - 1]?.design;
   }
 
   /** Linked workers of a planner, optionally for one wave, oldest first. */
@@ -2556,7 +2582,10 @@ export default async function plugin(bb: BbPluginApi) {
     const waves = planWavesFor(row.plan_thread_id);
     const next = row.plan_thread_id && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
     if (next !== null && waves[row.plan_wave! - 1]?.design) {
-      return `Design wave ${row.plan_wave} of ${waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); it runs as a worker, so name the approved artboards in its mission. On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Do not review between waves.`;
+      return `Design wave ${row.plan_wave} of ${waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, first record it: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words); then delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); it runs as a worker, so name the approved artboards in its mission. On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Never chief_review a design wave, and do not review between waves.`;
+    }
+    if (waves[row.plan_wave! - 1]?.design) {
+      return `Design wave ${row.plan_wave} of ${waves.length} is ready and nothing builds on it: its artboards need the owner's approval. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words), then chief_complete (threadId: ${row.thread_id}). Never chief_review it.`;
     }
     if (next !== null) {
       return `Wave ${row.plan_wave} of ${waves.length} is ready. Once it is idle, delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}). Do not review between waves.`;
@@ -2567,7 +2596,7 @@ export default async function plugin(bb: BbPluginApi) {
       const calls = ends.flatMap((tip) => {
         const latest = waveWorkers(row.plan_thread_id!, tip).at(-1);
         const reviewer = latest ? latestReviewForWorker.get(latest.thread_id) as ManagedRow | undefined : undefined;
-        return latest && !(reviewer && reviewer.reviewed_report_seq === latest.report_seq) ? [`chief_review (workerThreadId: ${latest.thread_id})`] : [];
+        return latest && !isDesignWave(latest) && !(reviewer && reviewer.reviewed_report_seq === latest.report_seq) ? [`chief_review (workerThreadId: ${latest.thread_id})`] : [];
       });
       const start = calls.length ? `Start one review per branch now: ${calls.join("; ")}.` : "Every branch already has its review; wait for the verdicts.";
       return `All ${waves.length} waves are ready. ${start} Complete each branch only on its reviewer's approve.`;
@@ -2708,6 +2737,7 @@ export default async function plugin(bb: BbPluginApi) {
     const start = (async () => {
       const worker = roles.get(workerThreadId);
       if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
+      if (isDesignWave(worker)) throw new Error(DESIGN_REVIEW_REFUSAL);
       const previous = existingReview.get(workerThreadId) as ManagedRow | undefined;
       if (previous && BUSY_STATUSES.has(previous.state)) {
         return { threadId: previous.thread_id, title: previous.title, workerThreadId, created: false, pinnedSha: previous.reviewed_head_sha };
@@ -2890,9 +2920,12 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Why a worker may not complete yet, or null when its newest review covers what it would ship.
    * With a pull request the verdict must be an approve given for the PR head the forge reports now;
-   * without one it must be an approve for the worker's current report. #simple work with no verdict
+   * without one it must be an approve for the worker's current report. A design-wave worker needs the owner's recorded approval instead. #simple work with no verdict
    * on its chain passes (review is optional there). Unreadable forge state refuses: fail closed. */
   async function completionRefusal(row: ManagedRow): Promise<string | null> {
+    if (isDesignWave(row)) {
+      return row.owner_approval ? null : `${row.thread_id} is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: ${row.thread_id}), or pass override with a reason to complete anyway.`;
+    }
     const chain = taskChain(row.thread_id);
     const newest = db.prepare(`SELECT v.verdict, v.head_sha, v.worker_thread_id, r.reviewed_report_seq
       FROM reviewer_verdicts v LEFT JOIN managed_threads r ON r.thread_id = v.reviewer_thread_id
@@ -2944,6 +2977,25 @@ export default async function plugin(bb: BbPluginApi) {
     );
     reloadRoles();
     return { row: roles.get(threadId)!, overridden: overrideNote !== null };
+  }
+
+  /** chief_owner_approval: records the owner's approval on a design-wave worker whose latest report was ready.
+   * Writes nothing else; the row may have gone ready -> active -> idle while the owner looked, so it is not
+   * required to be in state ready, only not working, not finished, and last heard from with a ready report. */
+  async function recordOwnerApproval(row: ManagedRow, approval: string) {
+    if (!isDesignWave(row)) throw new Error(`${row.thread_id} is not a worker on a design-only plan wave: chief_owner_approval records only the owner's approval of a design wave.`);
+    if (terminal(row.state)) throw new Error(`${row.thread_id} is ${row.state}.`);
+    const live = await bb.sdk.threads.get({ threadId: row.thread_id });
+    if (BUSY_STATUSES.has(live.status)) busyRejection(row, live.status, "recording the owner's approval");
+    if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`${row.thread_id} is not a live thread.`);
+    if (row.last_report_state !== "ready") throw new Error(`${row.thread_id}'s latest report is ${row.last_report_state ?? "missing"}, not ready: wait for its ready report before asking the owner.`);
+    db.prepare(`UPDATE managed_threads SET owner_approval=?, owner_approved_at=? WHERE thread_id=?`).run(approval, Date.now(), row.thread_id);
+    reloadRoles();
+    const waves = planWavesFor(row.plan_thread_id);
+    const next = successorOf(waves, row.plan_wave!);
+    return next !== null
+      ? `Recorded the owner's approval of wave ${row.plan_wave}. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); name the approved artboards in its mission.`
+      : `Recorded the owner's approval of wave ${row.plan_wave}. Complete it with chief_complete (threadId: ${row.thread_id}). Never chief_review.`;
   }
 
   /** After a worker completes: flips its draft pull request to ready, best-effort. A forge failure
@@ -3270,12 +3322,13 @@ export default async function plugin(bb: BbPluginApi) {
       const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
         reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
         plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets=0,
+        last_report_state=?, owner_approval=NULL, owner_approved_at=NULL,
         active_since=NULL, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
         params.state, params.result ?? null, params.summary ?? null, params.state === "blocked" ? params.blocker : null,
         params.recommendation ?? null, verdict,
         verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
         scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, fails,
-        now, threadId,
+        params.state, now, threadId,
       ) as { report_seq: number; result_rev: number };
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         db.prepare(`UPDATE managed_threads SET advised_at=COALESCE(advised_at, ?) WHERE thread_id=?`).run(now, threadId);
@@ -5049,7 +5102,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_complete",
     presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
-    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. It never archives threads or removes worktrees; that cleanup is left to the user. A worker with a pull request completes only when the newest review is an approve for the pull request's current head commit (a worker without one: for its current report); otherwise it is refused naming the reason. override (a reason) is the only bypass and is recorded in the result. After a worker completes, this call marks its draft pull request ready for review: never run gh pr ready or glab mr update --ready yourself for a worker's pull request.",
+    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. It never archives threads or removes worktrees; that cleanup is left to the user. A design-only wave's worker completes only with the owner's approval recorded by chief_owner_approval. Any other worker with a pull request completes only when the newest review is an approve for the pull request's current head commit (a worker without one: for its current report); otherwise it is refused naming the reason. override (a reason) is the only bypass and is recorded in the result. After a worker completes, this call marks its draft pull request ready for review: never run gh pr ready or glab mr update --ready yourself for a worker's pull request.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional(), override: overrideSchema.describe("Complete a worker even though no approve covers its pull request head (or current report). The reason is recorded in its result. Use only when the user or the evidence justifies skipping the review.") }),
     async execute({ threadId, result, override }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -5063,6 +5116,22 @@ export default async function plugin(bb: BbPluginApi) {
         ? `\n${clip(`Open todos: ${todos.map((todo) => `${todoRef(todo)} ${clip(todo.text, 80)}`).join(", ")} — close any this work finished with ${typeof todos[0]?.id === "string" ? `chief_backlog { id: "${todos[0].id}", state: "done" }` : "chief_roster todo { id, state: \"done\" }"}.`, 1_000)}`
         : "";
       return `Marked “${row.title}” complete${overridden ? ` without a matching approve (override recorded in its result)` : ""}.${ready.line}${todoLine}`;
+    },
+  });
+  bb.agents.registerTool({
+    name: "chief_owner_approval",
+    presentation: { label: { pending: "Recording approval…", completed: "Recorded approval" } },
+    description: "Record the owner's approval of a design-only wave (a plan wave marked design: true). Only the owner approves design-only work; chief_review refuses it. Show the user the artboards from the designer's ready report, ask for explicit approval, then call this with their words verbatim. The wave that implements the artboards cannot be delegated, and the design wave cannot be completed, without it. A new report or chief_continue on the designer clears it. Refused for any other thread.",
+    parameters: z.object({
+      workerThreadId: z.string(),
+      approval: z.string().trim().min(1).max(2_000).describe("The user's own words approving the artboards, verbatim."),
+    }),
+    async execute({ workerThreadId, approval }, context) {
+      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      if (!isActiveChief(caller)) throw new Error(`No managed worker ${workerThreadId} for this Chief.`);
+      const target = await controlledTarget(workerThreadId, caller);
+      touchCallerChief(caller);
+      return recordOwnerApproval(target, approval);
     },
   });
   bb.agents.registerTool({
@@ -5134,7 +5203,7 @@ export default async function plugin(bb: BbPluginApi) {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
           "chief_consult",
-          "chief_forge_init", "chief_delegate", "chief_roster", "chief_backlog", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete",
+          "chief_forge_init", "chief_delegate", "chief_roster", "chief_backlog", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval",
           ...(researchTool ? ["chief_research"] : []),
         ],
         skills: ["chief"],

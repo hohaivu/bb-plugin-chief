@@ -61,6 +61,8 @@ checkout; if that fails, it returns the script and Chief runs it from its own th
 the surrounding policy, including what to skip when a forge step fails, is the **Git workflow** section
 of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 
+**Design waves are owner-approved only.** `chief_review` refuses a worker on a plan wave marked `design: true`; Chief shows the user the artboards and records their words with `chief_owner_approval`. Without that record the next wave cannot be delegated and the design wave cannot be completed (`override` still bypasses completion). A new report or `chief_continue` on the designer clears the approval.
+
 **PR-bound review and completion.** When a worker has a pull request, its reviewer is spawned in its own fresh worktree pinned to the PR's head commit (the SHA the forge reports at spawn time, recorded on the reviewer row and copied into every verdict by the server, never taken from a report) and reads the PR description as its brief; with no PR, or an unreadable head, review runs in the worker's environment as before. `chief_forge_init` therefore writes the mission, success criteria and constraints into the PR body (required for unplanned or `#simple` work). `chief_complete` refuses a worker unless the newest verdict on its `replaces:` chain is an approve whose commit equals the PR's current head (a worker without a PR needs an approve for its current report; `#simple` work with no verdict passes), and pass `override` with a reason (CLI: `--override`) to bypass it; the reason is appended to the stored result. After a worker completes, `chief_complete` also marks its PR ready, best-effort; a forge failure never undoes the completion.
 
 ### Planning
@@ -208,7 +210,7 @@ bb chief review thr_worker [--focus "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
 ```
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_backlog`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_backlog`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, and worker/reviewer/advisor `chief_report`.
 
 ## Build and verify
 
