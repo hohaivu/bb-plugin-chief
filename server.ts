@@ -4145,7 +4145,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (hard && Date.now() >= hard.at) {
           await runWorkflowCli("stop", [runId], context).catch(() => undefined);
           call.outcome = "timed_out";
-          return `Timed out: the ${hard.mode} run ${runId} passed its time limit and was stopped. Report what you have as partial or blocked, saying it timed out.`;
+          return `runId: ${runId}\nstatus: timed_out\nfailures: the ${hard.mode} run passed its time limit and was stopped. Report what you have as partial or blocked, saying it timed out.`;
         }
         if (Date.now() >= deadline) {
           call.outcome = "still_running";
