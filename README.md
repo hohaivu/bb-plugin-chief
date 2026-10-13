@@ -195,7 +195,7 @@ bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
 bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--json]
 bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_...] [--context "..."] [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--simple] [--kind worker|designer] [--json]
+bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--simple] [--kind worker|designer] [--task BCKLG-3] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief stop thr_... [--reason "..."] [--json]
