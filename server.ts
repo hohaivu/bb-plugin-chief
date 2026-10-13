@@ -505,7 +505,7 @@ const delegateShape = z.object({
   planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
   unplannedReason: z.string().trim().min(1).max(300).optional().describe("Required when planning is on and this work skips chief_plan: a short reason why. Allowed only when evidence already states the cause (see the core rules); otherwise call chief_plan. Not needed with planThreadId/wave, replaces, or simple."),
-  kind: z.enum(["worker", "designer"]).optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind."),
+  kind: z.enum(["worker", "designer"]).optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker."),
   userApprovedRound: z.boolean().optional().describe("Set only with replaces: and only after the user explicitly approved another review round in this thread: a replaced worker whose reviewer has requested changes 3 times in a row is refused without it."),
   simple: z.boolean().optional().describe("Set only when the user's message contains #simple. Skips chief_plan (no unplannedReason needed). Pass the user's request verbatim as mission and add no diagnosis of your own: the worker finds the cause itself. Review is at your judgment (see the core rules). Cannot be combined with planThreadId. A replaces: successor keeps it."),
 });
@@ -575,8 +575,11 @@ const planWavesSchema = z.array(z.object({
   dependsOn: z.array(z.number().int()).max(1).optional().describe(
     "1-based index of the earlier wave this one builds on. [] = independent: it starts its own branch and pull request on the default base. [k] = builds on wave k and continues on its branch. Omitted = depends on the previous wave (wave 1: none).",
   ),
+  design: z.boolean().optional().describe(
+    "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
+  ),
 })).min(1).max(MAX_WAVES);
-type PlanWave = { path: string; contracts?: string; dependsOn?: number[] };
+type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean };
 type WaveLink = { dependsOn?: number[] };
 /** Wave n's parent (1-based): its dependsOn, else the previous wave; null for a chain head. */
 function parentOf(waves: WaveLink[], n: number): number | null {
@@ -614,7 +617,7 @@ const readyReport = z.object({
     z.string().trim().min(1).max(MAX_PLAN_LENGTH),
     planWavesSchema,
   ]).optional().describe(
-    `A planner's ready report requires this: either the full plan body as Markdown (one wave), or an array of up to ${MAX_WAVES} {body, dependsOn?} (1-based) waves. Chief receives each wave as its own file, not inline. No other role sets this.`,
+    `A planner's ready report requires this: either the full plan body as Markdown (one wave), or an array of up to ${MAX_WAVES} {body, dependsOn?, design?} (1-based) waves. Chief receives each wave as its own file, not inline. No other role sets this.`,
   ),
   blocker: z.never().optional(),
   recommendation: z.string().trim().max(4_000).optional(),
@@ -794,7 +797,7 @@ const CHIEF_CORE_RULES = `# Chief core rules (always apply)
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason or simple) → chief_forge_init → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (bounded work whose cause evidence already states; see the core rules) or simple: true (only when the user's message contains #simple). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
+  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason or simple) → chief_forge_init → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file — the one exception: a design-only wave's ready alert asks you to get the owner's approval of its artboards before you delegate the next wave. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (bounded work whose cause evidence already states; see the core rules) or simple: true (only when the user's message contains #simple). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 function researchChiefInstructions(planning: boolean) {
@@ -1860,7 +1863,8 @@ export default async function plugin(bb: BbPluginApi) {
       "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file. Keep that result under 800 characters and leave `summary` unset; the plan files are the full plan.",
       "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
       `- Split the work into at most ${MAX_WAVES} waves, each a self-contained plan one worker finishes. One wave by default; split only where one worker cannot finish the work. Give each wave \`dependsOn\`: \`[k]\` only when it truly builds on wave k's changes, \`[]\` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), write that exact interface into both waves' \`## Contracts to verify\` and give the later wave \`dependsOn: []\` so they run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. Keep \`dependsOn\` only when it needs the earlier wave's implementation or branch. Waves contain no phases.`,
-      "- Submit the plan through chief_report's `plan` field: one Markdown string for a single wave, or an array of `{body, dependsOn}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
+      "- When the task mixes UI that no approved design or explicit visual spec fixes with non-UI code (DB, notifications, OCR, …), split it: a design-only wave marked `design: true` (a Designer draws the artboards in the design tool, no app code), then the wave that builds on it with all the code, UI included, against the approved artboards. Never put both in one wave. Pure-UI work, pure non-UI work, and work whose look an approved design or spec already fixes stay as they are, with no `design` flag.",
+      "- Submit the plan through chief_report's `plan` field: one Markdown string for a single wave, or an array of `{body, dependsOn, design?}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
       "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
       "- Give every wave a `## Contracts to verify` Markdown heading: a checklist of the invariants, edge cases and existing behaviour that wave must keep — what a reviewer would otherwise catch only after the fact. The worker and the reviewer both receive this exact list.",
       ...(researchLine("planner", await researchSettings()) ? ["- When the root cause is unclear, or before planning you need a broad multi-file scan or several independent questions (scoping a large issue, mapping many similar call sites or files), use chief_research instead of reading it all yourself: investigate (one sub-question per hypothesis or independent question); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings against the code before relying on them."] : []),
@@ -2060,7 +2064,7 @@ export default async function plugin(bb: BbPluginApi) {
       wave = prior.plan_wave;
     }
     // Same rule for the kind: a fix successor stays a designer, an explicit next wave uses its own.
-    const kind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
+    let kind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
     // A fix successor of a #simple worker stays simple; a plan-linked successor never is, and an explicit false clears it.
     const simple = params.simple ?? (!!prior && planThreadId === undefined && prior.simple === 1);
     // The schema only sees params.planThreadId; a replaces: inherited one must be checked here too.
@@ -2081,6 +2085,8 @@ export default async function plugin(bb: BbPluginApi) {
     let waveTotal: number | undefined;
     let waveNext: number | null = null;
     let waveIndependent = false;
+    let designWave = false;
+    let implementsDesign: number | null = null;
     let contracts: string | undefined;
     if (planThreadId !== undefined) {
       const planner = roles.get(planThreadId);
@@ -2097,6 +2103,11 @@ export default async function plugin(bb: BbPluginApi) {
       waveNext = successorOf(waves, wave);
       waveIndependent = wave > 1 && parentOf(waves, wave) === null && !prior;
       contracts = scheduled.contracts;
+      // A design-only wave draws as a designer unless the caller named a kind.
+      designWave = !!scheduled.design;
+      if (designWave && params.kind === undefined) kind = "designer";
+      const parent = parentOf(waves, wave);
+      if (parent !== null && waves[parent - 1]?.design) implementsDesign = parent;
     }
     // One task branch carries one active worker: a second worktree cannot check out a
     // branch another one already holds, and the spawn would fail with a raw git error.
@@ -2147,6 +2158,8 @@ export default async function plugin(bb: BbPluginApi) {
         `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
         waveNext !== null ? "No review runs after this wave." : "Your ready report leads to the one review of the whole run.",
         ...(waveIndependent ? ["This wave is independent: it has its own branch and PR from the default base; do not build on another wave's branch."] : []),
+        ...(implementsDesign !== null ? [`This wave implements the artboards that wave ${implementsDesign} drew and the owner approved. Read them through the design tool's MCP (read-only; never edit the design) and match them; the artboard names are in your mission or wave ${implementsDesign}'s report.`] : []),
+        ...(designWave ? ["This is a design-only wave: the next wave implements it once the owner approves your artboards."] : []),
       ] : []),
       ...(contracts ? [
         "", "## Contracts to verify", clip(contracts, 3_000),
@@ -2183,6 +2196,7 @@ export default async function plugin(bb: BbPluginApi) {
         "- In your ready result, put screenshot evidence under Automated: for each PNG, the command or tool call that produced it, its exit status when it has one, and the PNG path. For design in code, also list the differences that remain against the artboard. Taste and brand fit go under Manual.",
         "- Design in code or No spec: if the repo has no golden or simulator screenshot tooling, report blocked naming what is missing; do not add screenshot tooling yourself.",
         "- In your report prose, name design nodes by layer name, never by raw node ID.",
+        ...(designWave ? ["- Design-only wave: use Design tool mode. Draw or edit the artboards only; write no app code and change no repo files. In your ready result, list each artboard by layer name with its screenshot path so the owner can approve it."] : []),
       ] : []),
     ].join("\n");
     const thread = await bb.sdk.threads.spawn({
@@ -2350,12 +2364,16 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** A ready worker's exact next call: the wave that builds on it (no review runs between
-   * waves), nothing while other waves are still unready (waveWaitLine), or one review per
+   * waves; a design-only wave first asks the owner to approve its artboards), nothing while
+   * other waves are still unready (waveWaitLine), or one review per
    * branch once every wave is ready — or, with no plan link at all, the same review call. */
   function workerReadyNextStep(row: ManagedRow): string | null {
     if (row.simple) return `#simple work: review is optional, at your judgment. If the report and recorded commands satisfy you, complete it with chief_complete (threadId: ${row.thread_id}) and mark its pull request ready without a review; otherwise start one: chief_review (workerThreadId: ${row.thread_id}).`;
     const waves = planWavesFor(row.plan_thread_id);
     const next = row.plan_thread_id && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
+    if (next !== null && waves[row.plan_wave! - 1]?.design) {
+      return `Design wave ${row.plan_wave} of ${waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); it runs as a worker, so name the approved artboards in its mission. On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Do not review between waves.`;
+    }
     if (next !== null) {
       return `Wave ${row.plan_wave} of ${waves.length} is ready. Once it is idle, delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}). Do not review between waves.`;
     }
@@ -2893,6 +2911,9 @@ export default async function plugin(bb: BbPluginApi) {
         for (const k of wave.dependsOn ?? []) {
           if (k < 1 || k >= n) throw new Error(`Wave ${n}'s dependsOn [${k}] must name an earlier wave${n === 1 ? ": wave 1 depends on nothing" : ` (1 to ${n - 1})`}.`);
         }
+        if (wave.design && successorOf(plan, n) === null) {
+          throw new Error(`Wave ${n} is design: true but no wave builds on it: a design-only wave must be followed by the wave that implements it (dependsOn [${n}] or the next wave).`);
+        }
         const parent = parentOf(plan, n);
         if (parent === null) return;
         if (parents.has(parent)) throw new Error(`Wave ${n} and another wave both build on wave ${parent}: waves form chains only, one wave per parent. Mark one of them dependsOn [] or chain it after the other.`);
@@ -2903,7 +2924,8 @@ export default async function plugin(bb: BbPluginApi) {
     const planWaves = plannerReady && plan ? await writePlan(threadId, plan) : null;
     const scheduledWaves = planWaves && plan
       ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof plan === "string" ? plan : plan[index]!.body)!,
-        ...(typeof plan !== "string" && plan[index]!.dependsOn ? { dependsOn: plan[index]!.dependsOn } : {}) }))
+        ...(typeof plan !== "string" && plan[index]!.dependsOn ? { dependsOn: plan[index]!.dependsOn } : {}),
+        ...(typeof plan !== "string" && plan[index]!.design ? { design: true } : {}) }))
       : null;
     // Best-effort mirror into Chief's storage: inline-vis resolves paths against the rendering thread.
     let inlinePlans: string[] = [];
