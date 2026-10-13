@@ -68,6 +68,8 @@ const RESEARCH_PREAMBLE = `READ-ONLY: ${READ_ONLY}, and run no command that chan
 function serverPath() {
   return `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`;
 }
+/** The environment every forge CLI call runs with: the server's PATH plus Homebrew, so a GUI-launched server still finds gh and glab. */
+const forgeEnv = () => ({ ...process.env, PATH: serverPath() });
 const FORGE_SCRIPT_TIMEOUT_MS = 120_000;
 
 type Forge = "github" | "gitlab";
@@ -104,7 +106,7 @@ async function pullRequestForges(pullRequest: string, cwd: string | null) {
   let forges: Forge[] = forge ? [forge] : [];
   if (!forges.length) {
     const remote = cwd
-      ? await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: FORGE_CLI_TIMEOUT_MS })
+      ? await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() })
           .then((result) => result.stdout.trim())
           .catch(() => "")
       : "";
@@ -134,14 +136,14 @@ const SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
 
 async function githubHead(target: string, repo: string | null, cwd: string | null) {
   const args = ["pr", "view", target, "--json", "headRefName,headRefOid,baseRefName", ...(repo ? ["--repo", repo] : [])];
-  const { stdout } = await execFileAsync("gh", args, { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS });
+  const { stdout } = await execFileAsync("gh", args, { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
   const parsed = JSON.parse(stdout) as { headRefName?: string; headRefOid?: string; baseRefName?: string };
   return headOf(parsed.headRefName, parsed.headRefOid, parsed.baseRefName);
 }
 
 async function gitlabHead(target: string, repo: string | null, cwd: string | null) {
   const args = ["mr", "view", target, "-F", "json", ...(repo ? ["--repo", repo] : [])];
-  const { stdout } = await execFileAsync("glab", args, { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS });
+  const { stdout } = await execFileAsync("glab", args, { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
   const parsed = JSON.parse(stdout) as { source_branch?: string; sha?: string; diff_refs?: { head_sha?: string }; target_branch?: string };
   return headOf(parsed.source_branch, parsed.sha ?? parsed.diff_refs?.head_sha, parsed.target_branch);
 }
@@ -162,7 +164,7 @@ async function markPrReady(pullRequest: string, cwd: string | null): Promise<{ r
         ? ["gh", ["pr", "ready", target, ...(repo ? ["--repo", repo] : [])]]
         : ["glab", ["mr", "update", target, "--ready", "--yes", ...(repo ? ["--repo", repo] : [])]];
       try {
-        await execFileAsync(cli as string, args as string[], { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS });
+        await execFileAsync(cli as string, args as string[], { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
         return { ready: true };
       } catch (failure) {
         error = clip(String((failure as { stderr?: unknown }).stderr || failure).trim(), 200);
