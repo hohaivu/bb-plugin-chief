@@ -1,5 +1,5 @@
 /**
- * Built-in Backlog.md board module. Opt-in (`backlogEnabled`); server.ts only wires it in.
+ * Built-in Backlog.md board module, always on; server.ts only wires it in.
  *
  * The Backlog.md file format, discovery, ordering and `patchTask` code below is adapted from
  * https://github.com/StreamlinedStartup/bb-plugin-backlog (commit 7f5235e), MIT License,
@@ -30,7 +30,7 @@ export type Task = z.infer<typeof taskSchema>;
 const boardTaskSchema = taskSchema.extend({ after: z.string().nullable(), links: z.array(linkSchema) });
 export type BoardTask = z.infer<typeof boardTaskSchema>;
 const boardSchema = z.object({
-  enabled: z.boolean(), kind: z.enum(["off", "missing", "ambiguous", "ready"]),
+  kind: z.enum(["missing", "ambiguous", "ready"]),
   projectId: z.string(), folder: z.string().nullable(), message: z.string(), candidates: z.array(z.string()),
   statuses: z.array(z.string()), choices: z.record(z.string(), z.array(z.string())),
   warnings: z.array(z.string()), tasks: z.array(boardTaskSchema),
@@ -293,7 +293,7 @@ const storageOf = (folder: string, file: string): Task["storage"] => {
 
 // ---- Chief module (Chief's own code) ----
 export const backlogRpc = {
-  backlogProjects: { input: z.null(), output: z.object({ enabled: z.boolean(), projects: z.array(z.object({ id: z.string(), name: z.string() })) }).strict() },
+  backlogProjects: { input: z.null(), output: z.object({ projects: z.array(z.object({ id: z.string(), name: z.string() })) }).strict() },
   backlogBoard: { input: z.object({ projectId: z.string().trim().min(1) }).strict(), output: boardSchema },
   backlogCreate: { input: z.object({ projectId: z.string().trim().min(1), title: z.string().trim().min(1).max(200), status: z.string().optional(), description: z.string().optional() }).strict(), output: z.object({ task: taskSchema.nullable(), conflict: z.boolean(), message: z.string() }).strict() },
   backlogSave: { input: z.object({ projectId: z.string().trim().min(1), path: z.string(), revision: z.string(), edits: z.array(editSchema).min(1).max(20) }).strict(), output: z.object({ task: taskSchema.nullable(), conflict: z.boolean(), message: z.string() }).strict() },
@@ -304,8 +304,6 @@ type RpcIn<K extends keyof typeof backlogRpc> = z.infer<(typeof backlogRpc)[K]["
 type MutationResult = z.infer<typeof backlogRpc.backlogSave.output>;
 
 export interface BacklogDeps {
-  /** Live read of the `backlogEnabled` setting. */
-  enabled(): boolean;
   projectSource(projectId: string): Promise<{ hostId: string; path: string } | null>;
   linksFor(projectId: string, taskId: string): BacklogLink[];
   /** Called after a refresh changed what the cache holds. */
@@ -315,7 +313,7 @@ export interface BacklogDeps {
   projects(): Promise<Array<{ id: string; name: string }>>;
 }
 export interface BacklogState {
-  kind: "off" | "missing" | "ambiguous" | "ready";
+  kind: "missing" | "ambiguous" | "ready";
   /** False until the first refresh of this project finished. */
   loaded: boolean;
   folder: string | null;
@@ -365,12 +363,11 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
 
   /** Synchronous: reads only the cache. */
   function state(projectId: string): BacklogState {
-    if (!deps.enabled()) return emptyState("off", true);
     return caches.get(projectId) ?? emptyState("missing", false, "Reading the Backlog folder…");
   }
   function ready(projectId: string) {
     const cache = caches.get(projectId);
-    if (!deps.enabled() || !cache || cache.kind !== "ready" || !cache.folder || !cache.hostId) throw new Error("The Backlog board is not ready for this project.");
+    if (!cache || cache.kind !== "ready" || !cache.folder || !cache.hostId) throw new Error("The Backlog board is not ready for this project.");
     return { ...cache, folder: cache.folder, hostId: cache.hostId };
   }
 
@@ -420,7 +417,6 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
   }
 
   async function load(projectId: string): Promise<void> {
-    if (!deps.enabled()) { caches.delete(projectId); return; }
     const previous = caches.get(projectId);
     let next: Cache;
     try {
@@ -465,7 +461,6 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
       next = { ...emptyState("missing", true, errorMessage(error)), hostId: null, config: defaultConfig, warnings: [], names: [], complete: false, inspected: false, mtimes: new Map(), sig: "" };
     }
     next.sig = JSON.stringify([next.kind, next.folder, next.message, next.statuses, next.warnings, next.tasks.map(t => [t.path, t.revision])]);
-    if (!deps.enabled()) { caches.delete(projectId); return; }
     caches.set(projectId, next);
     if (next.sig !== previous?.sig) deps.onChange(projectId);
   }
@@ -562,15 +557,17 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
   /**
    * Who owns an export token, decided on the scan just taken (the final one before anything is written): a file a crashed run created
    * may have been unreadable in an earlier scan. One owner is returned; several conflict; none is only believed when every candidate
-   * file was inspected. `open: false` (the todo was closed since): an existing owner is a conflict, never closed or reused.
+   * file was inspected. An owner counts only if it still holds the whole exported payload (title, description, wait condition): a
+   * mismatch is a conflict, never acknowledged, so the todo stays pending in Chief's own list and nothing is overwritten.
    */
-  function ownerOf(c: Cache, marker: string, title: string, after: string | null, open: boolean): Task | null {
+  function ownerOf(c: Cache, marker: string, title: string, description: string, after: string | null): Task | null {
     const owners = c.tasks.filter(t => t.fields.chief_import === marker);
     if (owners.length > 1) throw new Error(`Import conflict: ${owners.length} Backlog tasks claim the same export token (${owners.map(t => t.id).join(", ")}). Resolve the duplicates; the todo stays in Chief's own list.`);
     if (owners[0]) {
-      if (!open) throw new Error(`Import conflict: ${owners[0].id} was exported from a todo that has since been closed. Close or archive ${owners[0].id} on the board; the todo stays in Chief's own list until then.`);
-      if (owners[0].title !== title || taskAfter(owners[0]) !== after) throw new Error(`Import conflict: ${owners[0].id} was already exported from this todo, but the todo or the task changed since. The todo stays in Chief's own list until they match.`);
-      return owners[0];
+      const task = owners[0];
+      const text = (value: string) => value.replace(/\r\n/g, "\n");
+      if (task.title !== title || text(task.sections.description ?? "") !== text(description) || taskAfter(task) !== after) throw new Error(`Import conflict: ${task.id} was already exported from this todo, but the todo or the task changed since. The todo stays in Chief's own list until they match.`);
+      return task;
     }
     if (!c.inspected) throw new Error("Some Backlog task files could not be read, so it cannot be ruled out that this todo was already exported. Nothing was created; it will be retried.");
     return null;
@@ -584,8 +581,9 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     if (!c.complete) throw new Error("The Backlog task listing is incomplete, so a safe task id cannot be chosen. Reduce the number of files in tasks/, completed/ and archive/tasks/, or try again.");
     const title = input.title.replace(/\s+/g, " ").trim();
     if (!title) throw new Error("A task needs a title.");
+    const description = input.description?.trim();
     if (input.marker) {
-      const owner = ownerOf(c, input.marker, title, input.after ?? null, true);
+      const owner = ownerOf(c, input.marker, title, description ?? "", input.after ?? null);
       if (owner) return owner;
     }
     const status = input.status ?? (input.open ? openStatus(c) : firstStatus(c));
@@ -599,7 +597,6 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     confinedTaskPath(c.folder, file);
     const ordinal = ordinalFor(c.tasks, status, "", null);
     const created = new Date().toISOString().slice(0, 16).replace("T", " ");
-    const description = input.description?.trim();
     const content = [
       "---", `id: ${id}`, `title: ${JSON.stringify(title)}`, `status: ${JSON.stringify(status)}`, `created_date: '${created}'`, "labels: []", "dependencies: []",
       ...(ordinal === null ? [] : [`ordinal: ${ordinal}`]), ...(input.after ? [`chief_after: ${JSON.stringify(input.after)}`] : []),
@@ -616,19 +613,12 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
   function createTask(projectId: string, input: { title: string; status?: string; description?: string; after?: string | null; marker?: string; open?: boolean }): Promise<Task> {
     return withLock(projectId, () => createLocked(projectId, input));
   }
-  /** OFF→ON export of one chief_todos row. `token` is stored in the file (chief_import) and in the row; createLocked looks it up
+  /** Export of one chief_todos row. `token` is stored in the file (chief_import) and in the row; createLocked looks it up
    * on its final scan, so a resume after a crash finds the task this row already created instead of creating a second one. */
-  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string; open: true }): Promise<Task>;
-  /** A row closed after its marker was written: confirms no task was exported for it (null), or throws; never creates one. */
-  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string; open: false }): Promise<null>;
-  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string; open: boolean }): Promise<Task | null> {
+  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string }): Promise<Task> {
     const title = titleOf(input.text);
     const rest = input.text.trim() === title ? "" : input.text.trim();
-    if (input.open) return createTask(projectId, { title, description: rest, after: input.after, marker: input.token, open: true });
-    return withLock(projectId, async () => {
-      await refresh(projectId);
-      return ownerOf(ready(projectId), input.token, title, input.after ?? null, false);
-    });
+    return createTask(projectId, { title, description: rest, after: input.after, marker: input.token, open: true });
   }
   async function editTask(projectId: string, input: { path: string; revision?: string; edits: Edit[] }): Promise<Task> {
     const task = await mutate(projectId, input.path, () => input.edits, input.revision);
@@ -707,14 +697,13 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     const cache = caches.get(projectId);
     const choices: Record<string, string[]> = s.kind === "ready" && cache ? { priority: cache.config.priorities, type: cache.config.types, project: cache.config.projects } : {};
     return {
-      enabled: deps.enabled(), kind: s.kind, projectId, folder: s.folder, message: s.message, candidates: s.candidates, statuses: s.statuses, choices,
+      kind: s.kind, projectId, folder: s.folder, message: s.message, candidates: s.candidates, statuses: s.statuses, choices,
       warnings: cache?.warnings ?? [],
       tasks: s.tasks.map(task => ({ ...task, after: taskAfter(task), links: deps.linksFor(projectId, task.id) })),
     };
   }
   function guard(projectId: string) {
     if (!deps.hasChief(projectId)) throw new Error("No Chief is running in this project.");
-    if (!deps.enabled()) throw new Error("The Backlog board is off. Turn on “Backlog board” in Chief's settings.");
   }
   async function attempt(projectId: string, work: () => Promise<Task>): Promise<MutationResult> {
     guard(projectId);
@@ -727,9 +716,9 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
   }
 
   const rpcHandlers = {
-    backlogProjects: async () => ({ enabled: deps.enabled(), projects: deps.enabled() ? await deps.projects() : [] }),
+    backlogProjects: async () => ({ projects: await deps.projects() }),
     backlogBoard: async ({ projectId }: RpcIn<"backlogBoard">) => {
-      if (deps.enabled() && deps.hasChief(projectId)) await refresh(projectId);
+      if (deps.hasChief(projectId)) await refresh(projectId);
       return board(projectId);
     },
     backlogCreate: ({ projectId, ...input }: RpcIn<"backlogCreate">) => attempt(projectId, () => createTask(projectId, input)),
@@ -737,5 +726,5 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     backlogMove: ({ projectId, ...input }: RpcIn<"backlogMove">) => attempt(projectId, () => moveTask(projectId, input)),
     backlogArchive: ({ projectId, ...input }: RpcIn<"backlogArchive">) => attempt(projectId, () => archiveTask(projectId, input)),
   };
-  return { state, refresh, createTask, importTodo, editTask, moveTask, archiveTask, restoreTask, addTodo, updateTodo, todos, rpcHandlers, forget: (projectId: string) => void caches.delete(projectId) };
+  return { state, refresh, createTask, importTodo, editTask, moveTask, archiveTask, restoreTask, addTodo, updateTodo, todos, rpcHandlers };
 }
