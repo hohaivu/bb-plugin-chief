@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
   defineRpcContract,
@@ -2865,24 +2865,52 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** The server, not the planner, owns writing the plan: the planner submits it
-   * through chief_report and this lands it at the thread's own storage location. */
-  async function writePlan(threadId: string, plan: string | { body: string }[], mirrorFor?: string) {
+   * through chief_report and this lands it in the shared artifact folder (see artifactDir). */
+  async function writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string) {
     const bodies = typeof plan === "string" ? [{ name: "plan.md", body: plan }]
       : plan.map((wave, index) => ({ name: `plan-${index + 1}.md`, body: wave.body }));
-    // mirrorFor writes a copy under that thread's storage, in plans/<threadId>/.
-    const dir = mirrorFor ? join("plans", threadId) : "";
     const paths = [];
-    for (const wave of bodies) paths.push({ path: await writeStorageFile(mirrorFor ?? threadId, join(dir, wave.name), `${wave.body}\n`) });
+    // mirrorFor writes a render copy under that thread's storage, in plans/<threadId>/: inline-vis only reads thread storage.
+    for (const wave of bodies) {
+      const content = `${wave.body}\n`;
+      paths.push({ path: mirrorFor ? await writeStorageFile(mirrorFor, join("plans", threadId, wave.name), content)
+        : await writeArtifact(threadId, projectId, wave.name, content) });
+    }
     return paths;
   }
 
-  /** Writes a file under a thread's own storage root and returns its absolute path.
-   * Atomic: the content lands under a temp name and is moved into place, so a failed
-   * write never leaves a partial file under the final name. */
+  /** Where Chief's own artifacts (plans, reports, verdicts) live: <BB data dir>/chief/<projectId>/<threadId>/ on the
+   * thread's host, so every Chief instance and worktree of a project shares them and nothing lands in a checkout.
+   * Falls back to the thread's storage root when the data dir is unknown. */
+  const dataDirs = new Map<string, string | null>();
+  async function artifactDir(threadId: string, projectId: string) {
+    const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
+    if (!dataDirs.has(hostId)) {
+      // ponytail: per-process cache; a moved BB data dir needs a plugin reload
+      const dataDir = await bb.sdk.hosts.get({ hostId }).then((host) => host.threadStorageRootPath ? dirname(host.threadStorageRootPath) : null)
+        .catch((error) => { bb.log.warn(`Could not read host ${hostId}'s thread storage root: ${String(error)}`); return null; });
+      if (dataDir) dataDirs.set(hostId, dataDir);
+      else return { hostId, dir: storageRootPath };
+    }
+    return { hostId, dir: join(dataDirs.get(hostId)!, "chief", projectId, threadId) };
+  }
+
+  /** Writes one of Chief's artifacts to its shared folder and returns the absolute path. */
+  async function writeArtifact(threadId: string, projectId: string, name: string, content: string) {
+    const { hostId, dir } = await artifactDir(threadId, projectId);
+    return atomicWrite(hostId, join(dir, name), content);
+  }
+
+  /** Writes a file under a thread's own storage root and returns its absolute path. */
   async function writeStorageFile(threadId: string, relPath: string, content: string) {
     const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
     // Thread storage lives on the thread's host, which need not be this plugin server's machine.
-    const path = join(storageRootPath, relPath);
+    return atomicWrite(hostId, join(storageRootPath, relPath), content);
+  }
+
+  /** Atomic: the content lands under a temp name and is moved into place, so a failed
+   * write never leaves a partial file under the final name. */
+  async function atomicWrite(hostId: string, path: string, content: string) {
     const tmp = `${path}.tmp-${randomUUID()}`;
     try {
       await bb.sdk.files.write({ hostId, path: tmp, content, createParents: true });
@@ -3012,7 +3040,7 @@ export default async function plugin(bb: BbPluginApi) {
       });
     }
     const plannerReady = row.role === "planner" && params.state === "ready";
-    const planWaves = plannerReady && plan ? await writePlan(threadId, plan) : null;
+    const planWaves = plannerReady && plan ? await writePlan(threadId, row.project_id, plan) : null;
     const scheduledWaves = planWaves && plan
       ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof plan === "string" ? plan : plan[index]!.body)!,
         ...(typeof plan !== "string" && plan[index]!.dependsOn ? { dependsOn: plan[index]!.dependsOn } : {}),
@@ -3022,7 +3050,7 @@ export default async function plugin(bb: BbPluginApi) {
     let inlinePlans: string[] = [];
     if (planWaves && plan && row.chief_thread_id) {
       try {
-        await writePlan(threadId, plan, row.chief_thread_id);
+        await writePlan(threadId, row.project_id, plan, row.chief_thread_id);
         inlinePlans = planWaves.map((wave) => `::inline-vis{source="thread-storage" file="plans/${threadId}/${basename(wave.path)}"}`);
       } catch (error) {
         bb.log.warn(`Could not mirror ${threadId}'s plan into Chief's storage: ${String(error)}`);
@@ -3087,7 +3115,7 @@ export default async function plugin(bb: BbPluginApi) {
     let verdictPath: string | null = null;
     if (reviewerVerdict) {
       try {
-        verdictPath = await writeStorageFile(threadId, verdictName, [
+        verdictPath = await writeArtifact(threadId, row.project_id, verdictName, [
           `# Review verdict (${threadId})`, "",
           `Verdict: ${verdict}`, ...(regressionFlag ? ["Regression: yes"] : []),
           `Reviewed worker: ${row.worker_thread_id ?? "none"}`,
@@ -3128,7 +3156,7 @@ export default async function plugin(bb: BbPluginApi) {
       // A reviewer's fallback preview keeps the legacy 300; a supplied summary is budgeted like any Result.
       const cap = preview && !summaryLine ? 300 : Infinity;
       // ponytail: the pointer and Verdict file lines carry absolute storage paths unclipped; BB keeps the root short
-      // (~/.bb/thread-storage/<thread>/), so the budget assumes roots well under ~1600 characters. Bound them if that changes.
+      // (~/.bb/chief/<projectId>/<threadId>/), so the budget assumes roots well under ~1600 characters. Bound them if that changes.
       const top = [
         clip(`${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, 200),
         `State: ${params.state}`,
@@ -3187,7 +3215,7 @@ export default async function plugin(bb: BbPluginApi) {
     } else if (longResult || first.clipped) {
       let pointer: Pointer;
       try {
-        reportPath = await writeStorageFile(threadId, reportName, [
+        reportPath = await writeArtifact(threadId, row.project_id, reportName, [
           `# ${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, "",
           `State: ${params.state}`, ...(verdict ? [`Verdict: ${verdict}`] : []), `Next: ${action}`,
           ...(waveLines.length ? ["", "## Plan files", "", ...waveLines, ...inlinePlans] : []),
