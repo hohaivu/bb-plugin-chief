@@ -9,7 +9,6 @@ import {
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
-import { BacklogPage } from "./backlog-app";
 import type { ModelConfiguration, ModelSelection, ResearchConfiguration, rpcContract, TodoItem } from "./server";
 
 const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
@@ -635,12 +634,5 @@ export default definePluginApp((app) => {
     title: "Chief to-do",
     icon: "Crown",
     component: ChiefPendingPanel,
-  });
-  app.slots.navPanel({
-    id: "backlog",
-    title: "Backlog",
-    icon: "ListTodo",
-    path: "backlog",
-    component: BacklogPage,
   });
 });

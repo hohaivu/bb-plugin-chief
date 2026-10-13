@@ -10,7 +10,6 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
-import { backlogRpc, createBacklog } from "./backlog";
 
 const SECTION_NAME = "Chief";
 const RULES_FILE = "chief.md";
@@ -745,19 +744,16 @@ export const rpcContract = defineRpcContract({
     input: z.object({ threadId: z.string() }).strict(),
     output: z.object({ chief: z.boolean(), items: z.array(todoItemSchema), doneOmitted: z.number() }).strict(),
   },
-  ...backlogRpc,
 });
 
 interface TodoRow {
-  /** A chief_todos number, or a Backlog task id once the board is ready. */
-  id: number | string;
+  id: number;
   project_id: string;
   text: string;
   after: string | null;
   state: "open" | "done" | "dropped";
   chief_thread_id: string | null;
   updated_at: number;
-  backlog_task_id?: string | null;
 }
 
 interface ManagedRow {
@@ -820,8 +816,6 @@ interface ManagedRow {
   report_path: string | null;
   /** Incremented when chief_complete replaces the result; guards the report_path publication in report(). */
   result_rev: number;
-  /** Worker row only: the Backlog task this work implements (delegated with taskId), or null. */
-  backlog_task_id: string | null;
   /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. */
   kind: string | null;
   /** Worker row only: 1 when delegated with simple (#simple); null/0 means a normal worker. */
@@ -884,10 +878,7 @@ function researchChiefInstructions(planning: boolean) {
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
 const ROSTER_CHIEF_INSTRUCTIONS =
-  "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list. Track every todo — including work the user queued that nobody has delegated yet — as a Backlog task with chief_backlog (the Pending block lists them); never use Memory files, TodoWrite, or Task tools for Chief work. When work a todo tracks is finished, close that task in the same turn with chief_backlog { id, state: \"done\" }.";
-
-const BACKLOG_CHIEF_INSTRUCTIONS =
-  "Todos live on the project's Backlog.md board. When the Pending block lists todos with Backlog ids (like BCKLG-3), they are Backlog.md tasks: add, change, close and link them with chief_backlog, never with chief_roster's `todo` field (it refuses). When you delegate work for a task, call chief_backlog { id, linkThreadId } with the new worker so the board shows its thread and pull request. The board is always on: a project with no Backlog folder gets one automatically. If the Pending block says the board is unusable (both backlog/ and .backlog/ exist, or the folder cannot be read), tell the user: todos are not tracked until it is fixed, and nothing falls back to another list.";
+  "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list. Track every todo — including work the user queued that nobody has delegated yet — with chief_roster's `todo` field; never use Memory files, TodoWrite, or Task tools for Chief work. When work a todo tracks is finished, close that todo in the same turn with chief_roster todo { id, state: \"done\" }.";
 
 /** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
 const WAIT_CHIEF_INSTRUCTIONS =
@@ -1415,10 +1406,18 @@ export default async function plugin(bb: BbPluginApi) {
   const researchModelRow = db.prepare<[string, string]>(
     `SELECT provider_id, model, reasoning_level FROM research_mode_models WHERE host_id=? AND mode=?`,
   );
-  /** Compare-and-set of the export marker: (new, id, project, expected old — NULL, or the "pending:<token>" written first). */
-  const markTodoExported = db.prepare<[string | null, number, string, string | null]>(`UPDATE chief_todos SET backlog_task_id=? WHERE id=? AND project_id=? AND backlog_task_id IS ?`);
-  const todosToExport = db.prepare<[string]>(
-    `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND state='open' AND (backlog_task_id IS NULL OR backlog_task_id LIKE 'pending:%') ORDER BY id ASC`,
+  const todosForProject = db.prepare<[string]>(
+    `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND state='open' ORDER BY id ASC`,
+  );
+  const closedTodosForProject = db.prepare<[string]>(
+    `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND state<>'open' ORDER BY id ASC`,
+  );
+  const todoById = db.prepare<[number, string]>(`SELECT * FROM chief_todos WHERE id=? AND project_id=? AND chief_thread_id IS NULL`);
+  const insertTodo = db.prepare<[string, string, string | null, number, number]>(
+    `INSERT INTO chief_todos (project_id, text, after, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+  );
+  const updateTodo = db.prepare<[string, string | null, string, number, number, string]>(
+    `UPDATE chief_todos SET text=?, after=?, state=?, updated_at=? WHERE id=? AND project_id=? AND chief_thread_id IS NULL`,
   );
   // ponytail: global, not per host: usage limits are account-level; key by host if a provider id ever maps to different accounts per machine.
   // ponytail: cooldowns are per provider+model; legacy model='' rows (provider-wide, from before this) are never matched, so they are inert.
@@ -1433,34 +1432,6 @@ export default async function plugin(bb: BbPluginApi) {
   );
   let roles = new Map<string, ManagedRow>();
   let plannerActive = false;
-  /** Projects whose open chief_todos rows were exported to Backlog tasks (this process, while their folder was ready). */
-  const backlogImported = new Set<string>();
-  /** Why a project's export is stuck (unreadable files, an import conflict), shown by backlogNote until a pass succeeds. */
-  const backlogExportError = new Map<string, string>();
-  const backlogImporting = new Map<string, Promise<void>>();
-  /** One FIFO queue per project for the turns that export a chief_todos row to the board (numeric writes no longer exist).
-   * Synchronous readers do not use it. */
-  const todoQueues = new Map<string, Promise<unknown>>();
-  function todoTurn<T>(projectId: string, work: () => T | Promise<T>): Promise<T> {
-    const run = (todoQueues.get(projectId) ?? Promise.resolve()).then(work);
-    todoQueues.set(projectId, run.catch(() => undefined));
-    return run;
-  }
-  const backlog = createBacklog(bb, {
-    projectSource: async (projectId) => {
-      const [hostId, path] = await Promise.all([projectHostId(projectId), projectPath(projectId)]);
-      return hostId && path ? { hostId, path } : null;
-    },
-    linksFor: (projectId, taskId) => [...roles.values()]
-      .filter((row) => row.project_id === projectId && row.backlog_task_id?.toLowerCase() === taskId.toLowerCase())
-      .map((row) => ({ threadId: row.thread_id, role: row.role, title: row.title, state: row.state, prUrl: row.pr_url })),
-    onChange: (projectId) => { publishPending(); bb.realtime.publish("backlog", null); void ensureImported(projectId); },
-    hasChief: (projectId) => !!chiefForProject(projectId),
-    projects: async () => {
-      const ids = [...new Set([...roles.values()].filter(isActiveChief).map((row) => row.project_id))];
-      return Promise.all(ids.map(async (id) => ({ id, name: await projectName(id) })));
-    },
-  });
   // ponytail: cached for wave 2's synchronous configure(); the chief_research gate reads live settings.
   let researchActive: ResearchSettings | null = null;
   const rulesCache = new Map<string, string>();
@@ -1572,7 +1543,6 @@ export default async function plugin(bb: BbPluginApi) {
     kind?: string | null;
     simple?: boolean | null;
     plannerOn?: boolean | null;
-    backlogTaskId?: string | null;
   }) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
@@ -1599,8 +1569,6 @@ export default async function plugin(bb: BbPluginApi) {
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );
-    // Set only when given, so a repeat insert for the same thread never clears the link.
-    if (input.backlogTaskId) db.prepare(`UPDATE managed_threads SET backlog_task_id=? WHERE thread_id=?`).run(input.backlogTaskId, input.threadId);
     reloadRoles();
   }
 
@@ -2017,9 +1985,7 @@ export default async function plugin(bb: BbPluginApi) {
     })();
     chiefStarts.set(target, start);
     try {
-      const result = await start;
-      void syncBacklogFor(target); // creates backlog/ when the project has none, then exports its open todos
-      return result;
+      return await start;
     } finally {
       chiefStarts.delete(target);
     }
@@ -2157,8 +2123,8 @@ export default async function plugin(bb: BbPluginApi) {
   // ponytail: one delegation at a time, so a second call on the same branch sees the first
   // one's row in the holder check below; per-branch queues if parallel spawns get slow.
   let delegating: Promise<unknown> = Promise.resolve();
-  function delegate(params: z.infer<typeof delegateParams>, callerThreadId?: string | null, taskId?: string) {
-    const run = delegating.then(() => startWorker(params, callerThreadId, taskId));
+  function delegate(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
+    const run = delegating.then(() => startWorker(params, callerThreadId));
     delegating = run.catch(() => undefined);
     return run;
   }
@@ -2212,7 +2178,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { chain, streak: Math.max(end === -1 ? verdicts.length : end, carried?.reject_streak ?? 0), lastAt: verdicts[0]?.at ?? 0 };
   }
 
-  async function startWorker(params: z.infer<typeof delegateParams>, callerThreadId?: string | null, taskId?: string) {
+  async function startWorker(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
     const prior = params.replaces ? roles.get(params.replaces) : undefined;
     if (params.replaces && (!prior || prior.role !== "worker" || !controlsThread(prior, chief.thread_id) || prior.project_id !== projectId)) {
@@ -2256,9 +2222,6 @@ export default async function plugin(bb: BbPluginApi) {
       planThreadId = prior.plan_thread_id;
       wave = prior.plan_wave;
     }
-    // A fix successor keeps the prior worker's Backlog task, like its plan link.
-    let backlogTaskId = prior?.backlog_task_id ?? null;
-    if (taskId) backlogTaskId = linkableTask(projectId, taskId).id;
     // Same rule for the kind: a fix successor stays a designer, an explicit next wave uses its own.
     let kind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
     // A fix successor of a #simple worker stays simple; a plan-linked successor never is, and an explicit false clears it.
@@ -2439,7 +2402,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
       state: "starting", status: thread.status, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
-      kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn, backlogTaskId,
+      kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn,
     });
     await persistBrief(thread.id, prompt);
     if (prior) {
@@ -3769,7 +3732,6 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           await reconcile();
           await sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
-          void syncBacklog(); // file IO stays off the tick's critical path
           const values = await settings.get();
           const parsed = Number(values.stallMinutes);
           const threshold = (Number.isFinite(parsed) && parsed > 0 ? parsed : 15) * 60_000;
@@ -3827,56 +3789,6 @@ export default async function plugin(bb: BbPluginApi) {
     plannerActive = next.plannerEnabled;
     researchActive = researchFrom(next);
   });
-
-  /** Export each open chief_todos row once. A random token is stored in the row ("pending:<token>") before the
-   * task file is created and inside the file (chief_import), so a crash resumes by finding that exact file — never by id —
-   * and never claims another task. A pending or exported row takes no numeric edits (chief_roster refuses them), so the
-   * resumed export always sees the text it started with; the owner is still only acknowledged when the task holds that
-   * whole text (title, description, after), else the import stays pending and reports a conflict. Closed rows and history are untouched.
-   * The project switches to the board only in the same synchronous step that finds no unexported row left, so a todo
-   * added to chief_todos meanwhile is exported by the next pass, never hidden. */
-  function ensureImported(projectId: string): Promise<void> {
-    if (backlogImported.has(projectId) || backlog.state(projectId).kind !== "ready") return Promise.resolve();
-    const running = backlogImporting.get(projectId);
-    if (running) return running;
-    const live = () => backlog.state(projectId).kind === "ready";
-    // One queue turn per row (snapshot → pending marker → task → exported marker), so a numeric write lands between rows, never inside one.
-    const exportNext = () => todoTurn(projectId, async () => {
-      if (!live()) return false;
-      const row = todosToExport.get(projectId) as TodoRow | undefined;
-      if (!row) { backlogImported.add(projectId); return false; }
-      const id = row.id as number;
-      const resumed = row.backlog_task_id?.startsWith("pending:") ? row.backlog_task_id.slice("pending:".length) : undefined;
-      const token = resumed ?? randomUUID();
-      if (!resumed) markTodoExported.run(`pending:${token}`, id, projectId, null);
-      const task = await backlog.importTodo(projectId, { text: row.text, after: row.after, token });
-      if (markTodoExported.run(task.id, id, projectId, `pending:${token}`).changes !== 1) throw new Error(`Todo #${id} changed while it was being exported.`);
-      return true;
-    });
-    const promise: Promise<void> = (async () => {
-      while (await exportNext());
-      backlogExportError.delete(projectId);
-      publishPending();
-      bb.realtime.publish("backlog", null);
-    })().catch((error) => {
-      bb.log.warn(`Could not export todos to the Backlog board for ${projectId}: ${String(error)}`);
-      backlogExportError.set(projectId, error instanceof Error ? error.message : String(error));
-      publishPending();
-    })
-      .finally(() => { if (backlogImporting.get(projectId) === promise) backlogImporting.delete(projectId); });
-    backlogImporting.set(projectId, promise);
-    return promise;
-  }
-  /** Refresh one project's board cache (a project with a Chief and no Backlog folder gets one here), then export its todos once. Never throws. */
-  async function syncBacklogFor(id: string) {
-    try {
-      await backlog.refresh(id);
-      await ensureImported(id);
-    } catch (error) { bb.log.warn(`Could not refresh the Backlog board for ${id}: ${String(error)}`); }
-  }
-  async function syncBacklog() {
-    await Promise.all([...new Set([...roles.values()].filter(isActiveChief).map((row) => row.project_id))].map(syncBacklogFor));
-  }
 
   function rosterFor(projectId: string, includeComplete = false) {
     return [...roles.values()].filter((row) => row.project_id === projectId && (includeComplete || row.state !== "complete"));
@@ -4231,67 +4143,20 @@ export default async function plugin(bb: BbPluginApi) {
     return pending.length || todos.length ? ["Pending:", ...pending, ...todos] : ["Pending: none."];
   }
 
-  /** The board is the todo list for this project: the folder is ready and its legacy chief_todos rows were exported. */
-  function useBacklog(projectId: string) {
-    const ready = backlog.state(projectId).kind === "ready";
-    if (!ready) backlogImported.delete(projectId);
-    return ready && backlogImported.has(projectId);
-  }
-  /** A task of a ready board a worker can be linked to. */
-  function linkableTask(projectId: string, taskId: string) {
-    if (!useBacklog(projectId)) throw new Error("A Backlog task can only be linked once the Backlog board is ready for this project.");
-    const task = backlog.state(projectId).tasks.find((candidate) => candidate.id.toLowerCase() === taskId.toLowerCase());
-    if (!task) throw new Error(`No Backlog task ${taskId} in this project.`);
-    return task;
-  }
-  function backlogRows(projectId: string): TodoRow[] {
-    return backlog.todos(projectId).map((todo) => ({
-      id: todo.id, project_id: projectId, text: todo.text, after: todo.after, state: todo.state,
-      chief_thread_id: null, updated_at: todo.updatedAt, backlog_task_id: todo.id,
-    }));
-  }
-  /** Every todo reader goes through these two. Only the board: while it is unusable they are empty and backlogNote says why. */
-  function openTodos(projectId: string): TodoRow[] {
-    return useBacklog(projectId) ? backlogRows(projectId).filter((todo) => todo.state === "open") : [];
-  }
-  function closedTodos(projectId: string): TodoRow[] {
-    return useBacklog(projectId) ? backlogRows(projectId).filter((todo) => todo.state !== "open") : [];
-  }
-  const todoRef = (todo: TodoRow) => typeof todo.id === "number" ? `#${todo.id}` : todo.id;
-  /** Why this project's board is not the todo list yet (null once it is). Names the old chief_todos rows still waiting for export, so none goes unseen. */
-  function backlogProblem(projectId: string): string | null {
-    if (useBacklog(projectId)) return null;
-    const state = backlog.state(projectId);
-    const failure = backlogExportError.get(projectId);
-    const legacy = todosToExport.all(projectId) as TodoRow[];
-    if (state.kind === "ready" && !failure && !legacy.length) return null; // between "folder read" and "export pass finished"
-    const problem = state.kind !== "ready" ? state.message : failure ? `exporting this project's todos failed: ${failure}` : "this project's todos are being exported.";
-    const waiting = legacy.length ? ` ${legacy.length} open todo${legacy.length === 1 ? "" : "s"} from Chief's old list will move to the board once it is usable: ${legacy.slice(0, 5).map((todo) => `#${todo.id} ${clip(todo.text, 80)}`).join("; ")}${legacy.length > 5 ? "; …" : ""}.` : "";
-    return `${problem}${waiting} Todos are not tracked until the board is usable.`;
-  }
-  const backlogNote = (projectId: string) => { const problem = backlogProblem(projectId); return problem ? `- Backlog board: ${problem}` : null; };
-  /** Before a tool reads or writes todos: read the folder (and create it) if this process has not yet, and finish the export pass. */
-  async function settleBacklog(projectId: string) {
-    if (!backlog.state(projectId).loaded) await backlog.refresh(projectId);
-    await ensureImported(projectId);
-  }
-
   function todoLine(todo: TodoRow) {
     const state = todo.state === "open" ? "" : ` [${todo.state}]`;
-    return `- todo ${todoRef(todo)}${state}: ${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`;
+    return `- todo #${todo.id}${state}: ${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`;
   }
 
   /** A project's open todos as Pending lines — after thread lines, so clipping drops them first.
    * With `collapseWaiting`, todos that wait on an `after:` condition fold into one count line. */
   function todoLines(projectId: string | undefined, collapseWaiting = false) {
-    const todos = projectId ? openTodos(projectId) : [];
-    const note = projectId ? backlogNote(projectId) : null;
-    if (!collapseWaiting) return [...todos.map(todoLine), ...(note ? [note] : [])];
+    const todos = projectId ? (todosForProject.all(projectId) as TodoRow[]) : [];
+    if (!collapseWaiting) return todos.map(todoLine);
     const waiting = todos.filter((todo) => todo.after);
     const lines = todos.filter((todo) => !todo.after).map(todoLine);
     const n = waiting.length;
-    if (n) lines.push(`- ${n} waiting todo${n === 1 ? "" : "s"} (${waiting.map(todoRef).join(", ")}) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.`);
-    if (note) lines.push(note);
+    if (n) lines.push(`- ${n} waiting todo${n === 1 ? "" : "s"} (#${waiting.map((todo) => todo.id).join(", #")}) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.`);
     return lines;
   }
 
@@ -4331,20 +4196,20 @@ export default async function plugin(bb: BbPluginApi) {
       id: row.thread_id, label: `${row.role} “${row.title}”`, status: row.state, action: done ? null : nextAction(row), done,
     });
     const todoItem = (todo: TodoRow) => ({
-      id: `todo ${todoRef(todo)}`, label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`,
+      id: `todo #${todo.id}`, label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`,
       status: todo.state, action: null, done: todo.state !== "open",
     });
     const open = rows.filter(isOpenItem).map((row) => threadItem(row, false));
     const projectId = roles.get(chiefThreadId)?.project_id;
     const doneRows = [
       ...rows.filter((row) => !isOpenItem(row)).map((row) => [row.updated_at, threadItem(row, true)] as const),
-      ...(projectId ? closedTodos(projectId) : []).map((todo) => [todo.updated_at, todoItem(todo)] as const),
+      ...(projectId ? closedTodosForProject.all(projectId) as TodoRow[] : []).map((todo) => [todo.updated_at, todoItem(todo)] as const),
     ].sort((a, b) => b[0] - a[0]);
     return {
       items: [
         ...open.filter((item) => item.action),
         ...open.filter((item) => !item.action),
-        ...(projectId ? openTodos(projectId) : []).map(todoItem),
+        ...(projectId ? todosForProject.all(projectId) as TodoRow[] : []).map(todoItem),
         ...doneRows.slice(0, MAX_DONE_ITEMS).map(([, item]) => item),
       ],
       doneOmitted: Math.max(0, doneRows.length - MAX_DONE_ITEMS),
@@ -5083,7 +4948,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_roster",
     presentation: { label: { pending: "Reading roster…", completed: "Read roster" } },
-    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert. Todos are the project's Backlog tasks (ids like TASK-3), listed in the Pending block; add and change them with chief_backlog — this tool's `todo` field only refuses. Todos with an after: condition are summarised as one line; pass includeWaiting: true to list them.",
+    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert. Add a todo with `todo.text` (and optional `after`, e.g. 'PR #42 merges'); change one by `todo.id`; close it with `state: done|dropped`. Track all Chief work here — including queued work nobody has delegated yet. Todos with an after: condition are summarised as one line; pass includeWaiting: true to list them.",
     parameters: z.object({
       includeComplete: z.boolean().optional(),
       includeWaiting: z.boolean().optional().describe("List todos that wait on an after: condition in full; by default the Pending block shows them as one count line."),
@@ -5098,12 +4963,18 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error("chief_roster requires an active registered Chief thread.");
       touchCallerChief(caller);
-      await settleBacklog(caller.project_id);
       if (todo) {
-        const problem = backlogProblem(caller.project_id);
-        throw new Error(problem
-          ? `The Backlog board is not usable for this project: ${problem} Nothing was changed.`
-          : "Todos are Backlog tasks: add, change and close them with chief_backlog (ids like TASK-3). chief_roster's `todo` field changes nothing; nothing was changed.");
+        const now = Date.now();
+        if (todo.id === undefined) {
+          if (!todo.text) throw new Error("chief_roster todo needs text to add, or an id to change.");
+          insertTodo.run(caller.project_id, todo.text, todo.after || null, now, now);
+        } else {
+          const existing = todoById.get(todo.id, caller.project_id) as TodoRow | undefined;
+          if (!existing) throw new Error(`No todo #${todo.id} in this project.`);
+          const after = todo.after === undefined ? existing.after : todo.after || null;
+          updateTodo.run(todo.text ?? existing.text, after, todo.state ?? existing.state, now, todo.id, caller.project_id);
+        }
+        reloadRoles();
       }
       const rows = rosterForChief(caller.thread_id, includeComplete);
       const reversed = [...rows].reverse();
@@ -5116,46 +4987,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (room <= 0) return pending;
       const rest = clip([
         ...reversed.map((row) => rosterRowLines(row).join("\n  ")),
-        ...(includeComplete ? closedTodos(caller.project_id).map(todoLine) : []),
+        ...(includeComplete ? (closedTodosForProject.all(caller.project_id) as TodoRow[]).map(todoLine) : []),
       ].join("\n"), room);
       return `${pending}\n${rest}`;
-    },
-  });
-  bb.agents.registerTool({
-    name: "chief_backlog",
-    presentation: { label: { pending: "Updating Backlog…", completed: "Updated Backlog" } },
-    description: "Todos are the project's Backlog.md tasks, with ids like TASK-3 (the Pending block says when the board is unusable). Add a task with `text` (and optional `after`, e.g. 'PR #42 merges'); change one by `id`; `state: done` moves it to the last status, `dropped` archives it, `open` restores it. `linkThreadId` (with `id`) links one of your workers to the task so the board shows its thread and pull request; a replaces: successor keeps the link. Returns the open tasks.",
-    parameters: z.object({
-      id: z.string().trim().min(1).max(60).optional().describe("Task id such as BCKLG-3. Omit to add a task."),
-      text: z.string().trim().min(1).max(500).optional(),
-      after: z.string().trim().max(200).optional().describe("Empty string clears it."),
-      state: z.enum(["open", "done", "dropped"]).optional(),
-      linkThreadId: z.string().optional().describe("A managed worker thread that implements this task. Needs id."),
-    }),
-    async execute({ id, text, after, state, linkThreadId }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
-      if (!isActiveChief(caller)) throw new Error("chief_backlog requires an active registered Chief thread.");
-      touchCallerChief(caller);
-      const projectId = caller.project_id;
-      await settleBacklog(projectId);
-      if (!useBacklog(projectId)) throw new Error(`The Backlog board is not usable for this project: ${backlogProblem(projectId) ?? "it is still loading, try again."}`);
-      if (id === undefined) {
-        if (!text) throw new Error("chief_backlog needs text to add a task, or an id to change one.");
-        if (state || linkThreadId) throw new Error("state and linkThreadId need a task id.");
-        await backlog.addTodo(projectId, { text, after: after || null });
-      } else {
-        if (linkThreadId) {
-          const task = linkableTask(projectId, id);
-          const worker = roles.get(linkThreadId);
-          if (!worker || worker.role !== "worker" || worker.project_id !== projectId || !controlsThread(worker, caller.thread_id)) throw new Error(`No managed worker ${linkThreadId} for this Chief.`);
-          db.prepare(`UPDATE managed_threads SET backlog_task_id=? WHERE thread_id=?`).run(task.id, linkThreadId);
-          reloadRoles();
-          bb.realtime.publish("backlog", null);
-        }
-        if (text !== undefined || after !== undefined || state !== undefined) await backlog.updateTodo(projectId, { id, text, after, state });
-      }
-      const open = todoLines(projectId);
-      return ["Backlog updated.", ...(open.length ? ["Open:", ...open] : ["No open todos."])].join("\n");
     },
   });
   bb.agents.registerTool({
@@ -5242,9 +5076,9 @@ export default async function plugin(bb: BbPluginApi) {
       touchCallerChief(caller);
       const { row, overridden } = await markComplete(threadId, result, override);
       const ready = await readyPullRequest(row);
-      const todos = row.role === "worker" ? openTodos(caller.project_id) : [];
+      const todos = row.role === "worker" ? todosForProject.all(caller.project_id) as TodoRow[] : [];
       const todoLine = todos.length
-        ? `\n${clip(`Open todos: ${todos.map((todo) => `${todoRef(todo)} ${clip(todo.text, 80)}`).join(", ")} — close any this work finished with ${typeof todos[0]?.id === "string" ? `chief_backlog { id: "${todos[0].id}", state: "done" }` : "chief_roster todo { id, state: \"done\" }"}.`, 1_000)}`
+        ? `\n${clip(`Open todos: ${todos.map((todo) => `#${todo.id} ${clip(todo.text, 80)}`).join(", ")} — close any this work finished with chief_roster todo { id, state: "done" }.`, 1_000)}`
         : "";
       return `Marked “${row.title}” complete${overridden ? ` without a matching approve (override recorded in its result)` : ""}.${ready.line}${todoLine}`;
     },
@@ -5334,7 +5168,7 @@ export default async function plugin(bb: BbPluginApi) {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
           "chief_consult",
-          "chief_forge_init", "chief_delegate", "chief_roster", "chief_backlog", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval",
+          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval",
           ...(researchTool ? ["chief_research"] : []),
         ],
         skills: ["chief"],
@@ -5343,8 +5177,6 @@ export default async function plugin(bb: BbPluginApi) {
           "",
           ROSTER_CHIEF_INSTRUCTIONS,
           WAIT_CHIEF_INSTRUCTIONS,
-          "",
-          BACKLOG_CHIEF_INSTRUCTIONS,
           ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
           ...(research ? ["", research, researchChiefInstructions(plannerActive)] : []),
           "",
@@ -5378,7 +5210,6 @@ export default async function plugin(bb: BbPluginApi) {
     create: ({ projectId }) => createChief(projectId),
     // The header badge asks for one thread's role on every thread it renders on: not the roster.
     role: ({ threadId }) => ({ role: roles.get(threadId)?.role ?? null }),
-    ...backlog.rpcHandlers,
     pending: ({ threadId }) =>
       isActiveChief(roles.get(threadId)) ? { chief: true, ...todoItems(threadId) } : { chief: false, items: [], doneOmitted: 0 },
     modelConfiguration: async () => ({
@@ -5509,10 +5340,9 @@ export default async function plugin(bb: BbPluginApi) {
       const args = parseArgs(rest);
       const json = args.bool("json");
       const ok = (data: unknown, text: string) => ({ exitCode: 0, stdout: clip(json ? JSON.stringify(data, null, 2) : text, 64_000) + "\n" });
-      const help = `${usage}\n  (bb chief delegate also takes --task BCKLG-3 to link a Backlog task)`;
-      const fail = (message: string) => ({ exitCode: 1, stderr: `${message}\n\n${help}\n` });
+      const fail = (message: string) => ({ exitCode: 1, stderr: `${message}\n\n${usage}\n` });
       try {
-        if (!command || command === "help" || command === "--help") return ok({}, help);
+        if (!command || command === "help" || command === "--help") return ok({}, usage);
         // The agent tools refuse anyone but the active Chief; the CLI is the same door from a
         // shell. A user's own shell or thread (no managed row) stays trusted.
         const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -5543,7 +5373,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (chiefId && chief?.role !== "chief") return fail(`No Chief thread ${chiefId}.`);
           const projectId = chief?.project_id ?? args.one("project") ?? context.projectId ?? (await settings.get()).chiefProject;
           if (!projectId) return fail("stats requires --project outside a project thread");
-          const todos = [...openTodos(projectId), ...closedTodos(projectId)];
+          const todos = [...todosForProject.all(projectId), ...closedTodosForProject.all(projectId)] as TodoRow[];
           const stats = chiefStats({ projectId, chiefThreadId: chiefId ?? null }, chiefId ? rosterForChief(chiefId, true) : rosterFor(projectId, true), todos);
           return ok(stats, statsText(stats));
         }
@@ -5608,7 +5438,7 @@ export default async function plugin(bb: BbPluginApi) {
             simple: args.bool("simple") || undefined,
           });
           if (!parsed.success) return fail(`Invalid delegate brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
-          const result = await delegate(parsed.data, context.threadId, args.one("task"));
+          const result = await delegate(parsed.data, context.threadId);
           return ok(result, `Started worker “${result.title}” in ${result.threadId}.`);
         }
         if (command === "inspect") {
@@ -5687,7 +5517,6 @@ export default async function plugin(bb: BbPluginApi) {
   await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
   await researchSettings().catch((error) => bb.log.warn(`Could not read the researcher settings: ${String(error)}`));
   const initial = await settings.get();
-  void syncBacklog();
   if (initial.autoSpawn && initial.chiefProject) {
     void ensureChief(initial.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
   }

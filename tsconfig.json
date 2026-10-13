@@ -22,8 +22,6 @@
   },
   "include": [
     "server.ts",
-    "backlog.ts",
-    "backlog-app.tsx",
     "app.tsx",
     "components",
     "lib",
