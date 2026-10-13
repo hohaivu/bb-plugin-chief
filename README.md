@@ -115,8 +115,10 @@ the next worker round or escalates.
 
 ### Researcher
 
-`chief_research` fans a read-only question out to parallel BB workflow agents and waits for the
-result. It has three modes:
+`chief_research` fans a read-only question out to parallel BB workflow agents. A planner or reviewer
+waits for the result. Chief does not: its call returns at once with the id of a **researcher** child
+thread, which runs the research and reports through `chief_report`; the report arrives as a lifecycle
+alert, so Chief ends its turn instead of polling. It has three modes:
 
 - **survey** answers one question for each of a list of items (files, symbols, topics), one row each
   with evidence.
@@ -125,7 +127,8 @@ result. It has three modes:
   the merge base with `origin/HEAD`, so uncommitted changes are not reviewed. Pass `diffRef` for
   another range. The findings are advisory: the reviewer still decides the verdict.
 - **investigate** runs one agent per sub-question, then one agent merges the answers into a brief
-  with Confirmed and Unconfirmed sections.
+  with Confirmed and Unconfirmed sections. In a researcher thread the workflow skips this merge: the
+  researcher merges the answers itself and reports the brief.
 
 A failed scan, verify, or combine no longer loses the run: the result carries what finished, the
 missed items, a count line (`verified`, `dropped`), and the first failed worker's reason. `dropped`
@@ -138,9 +141,16 @@ and that it reads no project code itself: it uses research for broad multi-file 
 independent questions, or checking doubtful evidence, sends finding a cause to `chief_plan` (only while planning is on), and after
 a failed or partial run sends the open question to `chief_plan` (`chief_consult` when planning is off) or the doubtful evidence to `chief_review` instead of rerunning it.
 
+The researcher thread reuses Chief's own environment and permission mode, so it reads Chief's
+checkout. If that checkout cannot be shared, the call fails with a clear error; it never falls back
+to a fresh worktree. The thread runs on the mode's per-machine pick, or on Chief's model when no
+pick is set or the machine can no longer serve it. A researcher that reports ready is absorbed (its
+alert carries the result); one whose run failed, was partial, or timed out says so in its report. The
+mode's timeout bounds the whole run from the thread's start, after which the run is stopped.
+
 The agents share the caller's checkout and permissions. They are read-only only because the prompt
-tells them to be. Each call waits up to its mode's timeout (10 minutes by default), and never more than 4 minutes, because BB ends tool calls at
-about 5 minutes. If the run is still going, the call returns its runId, and calling again with that runId keeps waiting
+tells them to be. A planner's or reviewer's call, and each call a researcher thread makes while resuming, waits up to its mode's timeout (10 minutes by default), and never more than 4 minutes, because BB ends tool calls at
+about 5 minutes. A researcher run's timeout is a hard stop, kept by the plugin server from the thread's start: the run is stopped even when the researcher thread is not calling, and the next call returns the answers that had finished. If the run is still going, the call returns its runId, and calling again with that runId keeps waiting
 (the run keeps going in between). If the plugin server can't start the
 workflow, the tool returns the exact script and args so the agent can start it with
 `bb_workflow_run` and then wait on its runId. One cap on agent calls per run (1–100, default 24)

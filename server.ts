@@ -40,6 +40,8 @@ const REVIEW_ONLY = `Remain review-only: ${READ_ONLY}. A repair goes back to the
 const PLAN_ONLY = `Remain read-only: ${READ_ONLY}. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.`;
 /** Same for an advisor: said when the consult starts and again on every continuation. */
 const ADVISE_ONLY = `Remain advisory: ${READ_ONLY}. You may read code and run commands to reproduce the problem (a filtered test or build whose only side effects are untracked build or cache output). Report your advice to Chief; a worker makes the change.`;
+/** Same for a researcher: said when it starts and again on every continuation. It shares Chief's checkout. */
+const RESEARCH_ONLY = `Remain read-only: ${READ_ONLY}, and run no command that changes tracked files or git state; you share Chief's checkout. Report the findings through chief_report; a worker makes any change.`;
 /** Consecutive request_changes verdicts on one task before Chief must consult the advisor. */
 const CONSULT_AFTER_REJECTIONS = 2;
 /** Consecutive request_changes verdicts on one task before Chief stops and escalates to the user. */
@@ -125,7 +127,8 @@ async function gitlabHead(target: string, repo: string | null, cwd: string | nul
   return parsed.source_branch?.trim() || null;
 }
 
-const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor"]);
+/** `researcher` is a support role like the advisor: the child a Chief's chief_research runs in. */
+const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "researcher"]);
 /** What a spawn seeds into a thread's pluginMetadata, read back in bb.agents.configure.
  * insertThread runs only after threads.spawn resolves, so the very first configure()
  * call for a brand-new thread can land before that row exists; pluginMetadata is
@@ -139,8 +142,9 @@ const spawnMetadataSchema = z.object({
  * parsing a ship-or-fix opinion out of the report prose. */
 const verdictSchema = z.enum(["approve", "request_changes"]);
 /** The role key chief_models stores a per-machine model pick under: the lifecycle roles plus
- * `designer` (a worker kind, not a thread role). */
-const modelRoleSchema = z.enum([...roleSchema.options, "designer"]);
+ * `designer` (a worker kind, not a thread role). Explicit, not derived from roleSchema: the researcher's
+ * model is the mode's research pick, and chief_models' CHECK would refuse it. */
+const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer"]);
 const stateSchema = z.enum([
   "starting",
   "pending",
@@ -171,7 +175,7 @@ const modelSelectionSchema = z.object({
 });
 export type ModelSelection = z.infer<typeof modelSelectionSchema>;
 
-const researchRoleSchema = z.enum(["chief", "planner", "reviewer"]);
+const researchRoleSchema = z.enum(["chief", "planner", "reviewer", "researcher"]);
 const stageSchema = z.enum(["scan", "verify", "combine"]);
 const researchModeSchema = z.enum(["survey", "review", "investigate"]);
 type ResearchRole = z.infer<typeof researchRoleSchema>;
@@ -181,6 +185,7 @@ const RESEARCH_MODES: Record<ResearchRole, z.infer<typeof researchModeSchema>[]>
   chief: ["survey", "review", "investigate"],
   planner: ["survey", "investigate"],
   reviewer: ["review", "survey"],
+  researcher: ["survey", "review", "investigate"],
 };
 const agentCapSchema = z.number().int().min(1).max(100);
 /** How long one chief_research call waits, in minutes; the run itself keeps going. */
@@ -258,14 +263,18 @@ type ResearchParams = z.infer<typeof researchParams>;
 /** The one chief_research instruction line for a role, or null when the role has none or the switch is off. */
 function researchLine(role: string, settings: ResearchSettings | null) {
   const parsed = researchRoleSchema.safeParse(role);
-  if (!parsed.success || !settings?.enabled) return null;
-  return `Use chief_research (modes: ${RESEARCH_MODES[parsed.data].join(", ")}) for parallel read-only research; it waits for the result.`;
+  // A researcher's brief says how to use chief_research, so it gets no line.
+  if (!parsed.success || parsed.data === "researcher" || !settings?.enabled) return null;
+  const modes = RESEARCH_MODES[parsed.data].join(", ");
+  return parsed.data === "chief"
+    ? `Use chief_research (modes: ${modes}) for parallel read-only research; it runs in a child researcher thread and its report arrives as a lifecycle alert.`
+    : `Use chief_research (modes: ${modes}) for parallel read-only research; it waits for the result.`;
 }
 
 /** Agent calls a fresh run needs; feeds the cap check. */
-function agentCount(params: ResearchParams) {
+function agentCount(params: ResearchParams, combine: boolean) {
   if (params.mode === "review") return params.concerns!.length + (params.verify ? 1 : 0);
-  if (params.mode === "investigate") return params.questions!.length + 1;
+  if (params.mode === "investigate") return params.questions!.length + (combine ? 1 : 0);
   return Math.ceil(params.items!.length / params.batchSize) + (params.verify ? 1 : 0);
 }
 
@@ -412,8 +421,9 @@ const ANSWER = {
   required: ["answer", "evidence", "confirmed"],
   additionalProperties: false,
 };
+const combine = args.combine !== false;
 const limit = Math.min(args.cap, budget().maxAgentCalls);
-const needed = args.questions.length + 1;
+const needed = args.questions.length + (combine ? 1 : 0);
 if (needed > limit) throw new Error("Investigation needs " + needed + " agent calls; the limit is " + limit + ".");
 const scanned = await parallel(args.questions.map((q) => () => agent(
   PRE + "Goal: " + args.question + "\nQuestion: " + q + "\n\nAnswer it from the code. Evidence is file:line or command output. Set confirmed only when the evidence settles it.",
@@ -424,6 +434,8 @@ const failures = [];
 const lost = scanned.filter((result) => !result).length;
 if (lost) failures.push("Scan: " + lost + " of " + args.questions.length + " questions failed");
 if (lost === args.questions.length) throw new Error("All " + lost + " question scans failed; skipped Combine. See the failed calls for the provider error.");
+// The researcher thread that called this merges the answers itself.
+if (!combine) return { answers, failures };
 let brief = null;
 let reason = "no brief returned";
 try {
@@ -804,7 +816,7 @@ const PLANNER_CHIEF_INSTRUCTIONS =
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 function researchChiefInstructions(planning: boolean) {
-  return `chief_research is optional, and each call can wait up to its mode's timeout. Use it for a broad multi-file scan or several independent questions at once, for example scoping a large issue${planning ? " before chief_plan" : ""} or checking doubtful worker or reviewer evidence. ${planning ? "Finding a cause is the planner's job: send that to chief_plan. " : ""}When a run fails or comes back partial, do not rerun the same fan-out: send the open question to ${planning ? "chief_plan" : "chief_consult"}, or the doubtful evidence to chief_review.`;
+  return `chief_research is optional. Each call returns at once with the researcher thread's id: the fan-out runs in that child thread, and its merged result arrives as the researcher's report alert, so end your turn and wait instead of polling. Use it for a broad multi-file scan or several independent questions at once, for example scoping a large issue${planning ? " before chief_plan" : ""} or checking doubtful worker or reviewer evidence. ${planning ? "Finding a cause is the planner's job: send that to chief_plan. " : ""}When a report says the run failed, was partial, or timed out, do not rerun the same fan-out: send the open question to ${planning ? "chief_plan" : "chief_consult"}, or the doubtful evidence to chief_review.`;
 }
 
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
@@ -1170,7 +1182,7 @@ export const MIGRATIONS = [
     // chief_continue stall-clock resets since the last report, so repeated nudges cannot postpone the hard stall alert forever.
     `ALTER TABLE managed_threads ADD COLUMN stall_resets INTEGER NOT NULL DEFAULT 0`,
     // bb chief stats usage tracking; nothing is backfilled, so older rows read as unknown (planner_on NULL) or absent.
-    // One row per chief_research call. outcome: succeeded | partial | failed | still_running | start_failed | error.
+    // One row per chief_research call. outcome: succeeded | partial | failed | still_running | timed_out | spawned | start_failed | error.
     `CREATE TABLE chief_research_calls (id INTEGER PRIMARY KEY, caller_thread_id TEXT, role TEXT, mode TEXT, run_id TEXT, outcome TEXT, started_at INTEGER, ended_at INTEGER)`,
     // Worker row only: whether planning was on when it was delegated (1/0); NULL for rows from before this column.
     `ALTER TABLE managed_threads ADD COLUMN planner_on INTEGER`,
@@ -1186,6 +1198,65 @@ export const MIGRATIONS = [
     // Durable lessons an advisor recorded at a consult; the newest few are injected into every later managed thread in the project.
     `CREATE TABLE chief_lessons (id INTEGER PRIMARY KEY, project_id TEXT NOT NULL, text TEXT NOT NULL, source_thread_id TEXT NOT NULL, worker_thread_id TEXT, at INTEGER NOT NULL)`,
     `CREATE INDEX chief_lessons_project ON chief_lessons(project_id, at)`,
+    // Admitting the researcher role widens managed_threads' role CHECK, which SQLite cannot alter, so rebuild it once more
+    // (same pattern as managed_threads_v3). Column order is the live table's: v3's columns, then every ALTER-added column in
+    // migration order, which INSERT ... SELECT * relies on. If another migration that adds a managed_threads column is
+    // merged before this one, list its column here too; a mismatch fails the INSERT loudly instead of dropping data.
+    `CREATE TABLE managed_threads_v4 (
+      thread_id TEXT PRIMARY KEY,
+      role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','researcher')),
+      project_id TEXT NOT NULL,
+      chief_thread_id TEXT,
+      worker_thread_id TEXT,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      status TEXT,
+      result TEXT,
+      blocker TEXT,
+      recommendation TEXT,
+      active_since INTEGER,
+      active_cycle INTEGER NOT NULL DEFAULT 0,
+      stall_alerted_cycle INTEGER,
+      lifecycle_alert_key TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      tier TEXT,
+      branch TEXT,
+      issue_url TEXT,
+      pr_url TEXT,
+      verdict TEXT,
+      brief TEXT,
+      reject_streak INTEGER NOT NULL DEFAULT 0,
+      parent_thread_id TEXT,
+      stop_alerted_cycle INTEGER,
+      plan_waves TEXT,
+      plan_thread_id TEXT,
+      plan_wave INTEGER,
+      regression INTEGER,
+      report_seq INTEGER NOT NULL DEFAULT 0,
+      reviewed_report_seq INTEGER,
+      unplanned_reason TEXT,
+      release_pending INTEGER NOT NULL DEFAULT 0,
+      replaces_thread_id TEXT,
+      thread_errors INTEGER NOT NULL DEFAULT 0,
+      busy_rejections INTEGER NOT NULL DEFAULT 0,
+      verdict_path TEXT,
+      kind TEXT,
+      fails TEXT,
+      log_read_id INTEGER,
+      simple INTEGER,
+      stall_resets INTEGER NOT NULL DEFAULT 0,
+      planner_on INTEGER,
+      summary TEXT,
+      report_path TEXT,
+      result_rev INTEGER NOT NULL DEFAULT 0,
+      advised_at INTEGER
+    )`,
+    `INSERT INTO managed_threads_v4 SELECT * FROM managed_threads`,
+    `DROP TABLE managed_threads`,
+    `ALTER TABLE managed_threads_v4 RENAME TO managed_threads`,
+    // Dropping the table dropped its index with it.
+    `CREATE INDEX IF NOT EXISTS managed_threads_chief ON managed_threads (chief_thread_id, created_at)`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1302,9 +1373,11 @@ export default async function plugin(bb: BbPluginApi) {
   const load = () => new Map((allRows.all() as ManagedRow[]).map((row) => [row.thread_id, row]));
   const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
   /** A supporting row whose work was absorbed: a reviewer or advisor of a complete worker,
-   * or a planner once every branch's final wave is complete and every linked worker is terminal. */
+   * a researcher that reported ready (its report alert carries the result), or a planner once
+   * every branch's final wave is complete and every linked worker is terminal. */
   function absorbed(row: ManagedRow) {
     if (terminal(row.state) || BUSY_STATUSES.has(row.state)) return false;
+    if (row.role === "researcher") return row.state === "ready";
     if (row.role === "reviewer" || row.role === "advisor") {
       return !!row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete";
     }
@@ -2268,11 +2341,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (instruction.trim().length > MAX_NUDGE_LENGTH) {
       throw new Error(`chief_continue is a short nudge of at most ${MAX_NUDGE_LENGTH} characters to a thread that is still working. ${row.role === "worker" ? handoff : rerouteSteps(row)}`);
     }
-    // Planners, reviewers, and advisors all stay out of the files; only a worker
+    // Planners, reviewers, advisors, and researchers all stay out of the files; only a worker
     // edits. The instruction leads so the child reads what it says first, ahead of
     // the read-only reminder. steer-if-active steers a running turn instead of
     // waiting in BB's queue, and starts a turn when the thread is idle.
-    const reminder = ({ reviewer: REVIEW_ONLY, planner: PLAN_ONLY, advisor: ADVISE_ONLY } as Partial<Record<ManagedRow["role"], string>>)[row.role] ?? null;
+    const reminder = ({ reviewer: REVIEW_ONLY, planner: PLAN_ONLY, advisor: ADVISE_ONLY, researcher: RESEARCH_ONLY } as Partial<Record<ManagedRow["role"], string>>)[row.role] ?? null;
     const text = reminder ? `${instruction}\n\n${reminder}` : instruction;
     await bb.sdk.threads.send({
       threadId,
@@ -3003,7 +3076,9 @@ export default async function plugin(bb: BbPluginApi) {
     })();
     reloadRoles();
     const current = roles.get(threadId)!;
-    const action = nextAction(current) ?? waveWaitLine(current) ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
+    const action = nextAction(current) ?? waveWaitLine(current)
+      ?? (row.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or timeout it reports. Nothing to review or complete." : null)
+      ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
     const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
     const verdictName = `verdict-${seq}.md`;
     const reportName = `report-${seq}.md`;
@@ -3362,6 +3437,7 @@ export default async function plugin(bb: BbPluginApi) {
         : `Once it is idle, chief_complete it, then start a fresh chief_review for branch ${row.branch}.`;
     }
     if (row.role === "planner") return "Once it is idle, start a fresh chief_plan with a narrower brief.";
+    if (row.role === "researcher") return "Once it is idle, decide without it or start a fresh chief_research with a narrower question.";
     return "Once it is idle, decide without it or start a fresh chief_consult with a narrower question.";
   }
 
@@ -3622,7 +3698,8 @@ export default async function plugin(bb: BbPluginApi) {
     const categoryCount = (category: string) => perTask.filter((task) => task.category === category).length;
     const researchBy = new Map<string, { role: string; mode: string | null; calls: number; succeeded: number }>();
     for (const call of db.prepare(`SELECT caller_thread_id, role, mode, outcome FROM chief_research_calls ORDER BY id`).all() as { caller_thread_id: string; role: string; mode: string | null; outcome: string }[]) {
-      if (!ids.has(call.caller_thread_id)) continue;
+      // Chief's spawned call only started a researcher; that thread's own calls carry the real outcomes.
+      if (!ids.has(call.caller_thread_id) || call.outcome === "spawned") continue;
       const entry = researchBy.get(`${call.role}\u0000${call.mode}`) ?? { role: call.role, mode: call.mode, calls: 0, succeeded: 0 };
       entry.calls += 1;
       if (call.outcome === "succeeded" || call.outcome === "partial") entry.succeeded += 1;
@@ -3961,7 +4038,11 @@ export default async function plugin(bb: BbPluginApi) {
       if (chosen) models[stage] = chosen;
     }
     for (const note of notes) bb.log.warn(note);
-    return { models, notes, hostId, caller };
+    // A researcher child runs on `pick` (the mode's own pick, never a per-call override), else on Chief's own model.
+    const own = live?.providerId && callerOptions?.model
+      ? { providerId: live.providerId, model: callerOptions.model, reasoningLevel: callerOptions.reasoningLevel }
+      : null;
+    return { models, notes, hostId, caller, pick, own, environmentId: live?.environmentId ?? null, permissionMode: callerMode };
   }
 
   /** Why the run cannot start (a provider signed out or at 100% of a usage window), or null. */
@@ -4018,26 +4099,145 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** What a chief_research call ended as, mutated by research()'s paths and written once to chief_research_calls. */
-  type ResearchCall = { role: string | null; runId: string | null; outcome: "succeeded" | "partial" | "failed" | "still_running" | "start_failed" | "error" };
+  /** runWorkflowCli with 3 tries 1 s apart, for reads whose single failure would drop a run or its answers. */
+  async function workflowRead(sub: string, args: string[], context: { threadId: string; projectId: string }) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await runWorkflowCli(sub, args, context);
+      } catch (error) {
+        if (attempt >= 3) throw error;
+        await researchSleep(1_000);
+      }
+    }
+  }
 
-  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, deadline: number, call: ResearchCall) {
+  /** Stops a run and confirms it ended, retrying; returns why it could not, or null. Never throws. */
+  async function stopResearch(runId: string, context: { threadId: string; projectId: string }) {
+    let reason = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let stopError = "";
+      await runWorkflowCli("stop", [runId], context).catch((error) => { stopError = clip(error instanceof Error ? error.message : String(error), 200); });
+      try {
+        const run = await runWorkflowCli("status", [runId], context);
+        if (!RUNNING_WORKFLOW.has(run.status)) return null;
+        reason = `the run is still ${run.status} after stop${stopError ? ` (stop: ${stopError})` : ""}`;
+      } catch (error) {
+        reason = stopError || clip(error instanceof Error ? error.message : String(error), 200);
+      }
+      await researchSleep(1_000);
+    }
+    bb.log.warn(`chief_research could not stop ${runId}: ${reason}`);
+    return reason;
+  }
+
+  /**
+   * The answers of every agent call that finished, for a partial report; null when history is unreadable.
+   * `next` is the history cursor to continue from when the list stops short (1,000 records or a failed page).
+   */
+  async function finishedAnswers(runId: string, context: { threadId: string; projectId: string }) {
+    const done: { phase?: string; result?: unknown }[] = [];
+    let next: number | null = null;
+    let readError = "";
+    for (let cursor = 0, pages = 0; ; pages++) {
+      let records: { type?: string; status?: string; phase?: string; result?: unknown; hasMore?: boolean; nextCursor?: number }[];
+      try {
+        const lines: unknown = await workflowRead("history", [runId, "--cursor", String(cursor), "--limit", "100"], context);
+        records = (Array.isArray(lines) ? lines : [lines]) as typeof records;
+      } catch (error) {
+        if (!pages) return null;
+        next = cursor;
+        readError = clip(error instanceof Error ? error.message : String(error), 200);
+        break;
+      }
+      done.push(...records.filter((record) => record?.type === "call" && record.status === "succeeded"));
+      const page = records.find((record) => record?.type === "page");
+      if (!page?.hasMore || typeof page.nextCursor !== "number") break;
+      cursor = page.nextCursor;
+      if (pages + 1 >= 10) { next = cursor; break; }
+    }
+    return { answers: done.map((record) => ({ phase: record.phase, result: record.result })), next, readError };
+  }
+
+  /**
+   * A researcher run's hard stop, kept by the server so it does not depend on the child resuming. A failed stop
+   * alerts Chief and re-arms. ponytail: 5 rounds 30 s apart, then the alert is the escalation; timers are per
+   * process (a restart waits for the child's next call to re-arm), persist them if that ever matters.
+   */
+  const RESEARCH_STOP_ROUNDS = 5;
+  const researchStops = new Map<string, ReturnType<typeof setTimeout>>();
+  function armResearchStop(runId: string, at: number, context: { threadId: string; projectId: string }, round = 0) {
+    if (!round && researchStops.has(runId)) return;
+    const timer = setTimeout(async () => {
+      try {
+        // No status gate: stopping a finished run is a no-op, and stopResearch confirms the status itself.
+        const failure = await stopResearch(runId, context);
+        if (researchStops.get(runId) !== timer) return; // disarmed or re-armed meanwhile
+        if (!failure) return void researchStops.delete(runId);
+        const row = roles.get(context.threadId);
+        if (row) {
+          await alertChief(row, `research-stop:${runId}`, [
+            `Researcher “${row.title}” (${row.thread_id}): workflow ${runId} passed its time limit and could not be stopped (${failure}). It may still be running.`,
+            `The server retries ${RESEARCH_STOP_ROUNDS - round - 1} more times. Check it with \`bb workflows status ${runId}\` and stop it with \`bb workflows stop ${runId}\`.`,
+          ].join("\n"));
+        }
+        if (round + 1 < RESEARCH_STOP_ROUNDS) armResearchStop(runId, Date.now() + 30_000, context, round + 1);
+        else researchStops.delete(runId);
+      } catch (error) {
+        // An alert that could not even be queued (no Chief) must not end the retries.
+        bb.log.warn(`chief_research deadline stop for ${runId} failed: ${clip(String(error), 200)}`);
+        if (researchStops.get(runId) === timer) {
+          if (round + 1 < RESEARCH_STOP_ROUNDS) armResearchStop(runId, Date.now() + 30_000, context, round + 1);
+          else researchStops.delete(runId);
+        }
+      }
+    }, Math.max(0, at - Date.now()));
+    timer.unref?.();
+    researchStops.set(runId, timer);
+  }
+  function disarmResearchStop(runId: string) {
+    clearTimeout(researchStops.get(runId));
+    researchStops.delete(runId);
+  }
+
+  /** What a researcher gets once its run passed the time limit: stop status, failures and the answers that finished. */
+  async function timedOutReport(runId: string, mode: string, stopFailure: string | null, context: { threadId: string; projectId: string }) {
+    const [note, answers] = await Promise.all([failureNote(runId, context), finishedAnswers(runId, context)]);
+    return researchOutput([
+      `runId: ${runId}`, "status: timed_out",
+      `failures: the ${mode} run passed its time limit and ${stopFailure ? `COULD NOT BE STOPPED (${stopFailure}); it may still be running. Report blocked with that as the blocker and tell Chief to run \`bb workflows stop ${runId}\`` : "was stopped"}. Report the finished answers below as partial, saying it timed out.`,
+      ...(note ? [note] : []),
+      "", "finished answers:",
+      // The marker sits above the JSON: researchOutput clips the tail, which is where a long list would push it.
+      ...(answers?.next != null ? [`(list truncated${answers.readError ? ` after a history read failed: ${answers.readError}` : " at 1,000 history records"}; read the rest with \`bb workflows history ${runId} --cursor ${answers.next} --limit 100\`)`] : []),
+      answers ? (answers.answers.length ? JSON.stringify(answers.answers, null, 2) : "(none finished)") : `(could not read history; try \`bb workflows history ${runId}\`)`,
+    ].join("\n"));
+  }
+
+  /** What a chief_research call ended as, mutated by research()'s paths and written once to chief_research_calls. */
+  type ResearchCall = { role: string | null; runId: string | null; outcome: "succeeded" | "partial" | "failed" | "still_running" | "timed_out" | "spawned" | "start_failed" | "error" };
+
+  async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, deadline: number, call: ResearchCall, hard?: { at: number; mode: string }) {
     call.runId = runId;
+    if (hard) armResearchStop(runId, hard.at, context);
     try {
       for (;;) {
         let run: { status: string; result?: unknown; resultOmitted?: boolean; error?: unknown; calls?: unknown };
         try {
-          run = await runWorkflowCli("status", [runId], context);
+          run = await workflowRead("status", [runId], context);
         } catch (error) {
           context.signal?.throwIfAborted();
           bb.log.warn(`chief_research could not read ${runId}: ${clip(String(error), 200)}`);
-          call.outcome = "error";
-          return `Could not read workflow ${runId} from the plugin server. Check it yourself with \`bb workflows status ${runId}\`.`;
+          if (!hard) {
+            call.outcome = "error";
+            return `Could not read workflow ${runId} from the plugin server. Check it yourself with \`bb workflows status ${runId}\`.`;
+          }
+          run = { status: "running" }; // unknown is not finished: keep waiting, and past the deadline the stop path still runs
         }
+        if (!RUNNING_WORKFLOW.has(run.status)) disarmResearchStop(runId);
         if (run.status === "succeeded") {
           let result = run.result;
           if (run.resultOmitted) {
-            const history: unknown = await runWorkflowCli("history", [runId, "--cursor", "0", "--limit", "1"], context).catch(() => null);
+            const history: unknown = await workflowRead("history", [runId, "--cursor", "0", "--limit", "1"], context).catch(() => null);
             const record = (Array.isArray(history) ? history : [history]).find((line) => line?.type === "run");
             result = record?.result ?? "(result omitted; read it with bb workflows history)";
           }
@@ -4054,21 +4254,34 @@ export default async function plugin(bb: BbPluginApi) {
             "", "result:", JSON.stringify(result, null, 2),
           ].join("\n"));
         }
+        // Cancelled past the deadline is the hard stop (the server's timer or an earlier call), not a failure.
+        if (hard && run.status === "cancelled" && Date.now() >= hard.at) {
+          call.outcome = "timed_out";
+          return timedOutReport(runId, hard.mode, null, context);
+        }
         if (!RUNNING_WORKFLOW.has(run.status)) {
           const note = await failureNote(runId, context);
           call.outcome = "failed";
           return researchOutput(`runId: ${runId}\nstatus: ${run.status}\nerror: ${JSON.stringify(run.error)}\n${note ? `${note}\n` : ""}calls: ${JSON.stringify(run.calls)}`);
         }
         context.signal?.throwIfAborted();
+        // The hard deadline comes first: when both have passed, the run is over, not "still running".
+        if (hard && Date.now() >= hard.at) {
+          const stopFailure = await stopResearch(runId, context);
+          // A run that finished between the status read and the stop is a result, not a timeout.
+          if ((await workflowRead("status", [runId], context).catch(() => null))?.status === "succeeded") continue;
+          call.outcome = "timed_out";
+          return timedOutReport(runId, hard.mode, stopFailure, context);
+        }
         if (Date.now() >= deadline) {
           call.outcome = "still_running";
-          return `Still running. Call chief_research again with runId: ${runId} to keep waiting.`;
+          return `Still running. Call chief_research again with ${hard ? `mode: ${hard.mode} and ` : ""}runId: ${runId} to keep waiting.`;
         }
         await researchSleep(RESEARCH_POLL_MS, context.signal);
       }
     } catch (error) {
       if (context.signal?.aborted) {
-        await runWorkflowCli("stop", [runId], context).catch(() => undefined);
+        await stopResearch(runId, context); // no alert: an abort is the caller's own cancellation
       }
       throw error;
     }
@@ -4079,8 +4292,8 @@ export default async function plugin(bb: BbPluginApi) {
     // Every exit, caller check and settings read included, thrown or returned, leaves exactly one chief_research_calls row.
     const call: ResearchCall = { role: null, runId: params.runId ?? null, outcome: "error" };
     try {
-      const { cap, settings } = await researchCaller(context.threadId, context.projectId, params.mode, call);
-      return await researchRun(params, context, { startedAt, cap, settings }, call);
+      const { cap, settings, role, row } = await researchCaller(context.threadId, context.projectId, params.mode, call);
+      return await researchRun(params, context, { startedAt, cap, settings, role, row }, call);
     } finally {
       try {
         db.prepare(`INSERT INTO chief_research_calls (caller_thread_id, role, mode, run_id, outcome, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -4091,43 +4304,125 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function researchRun(
-    params: ResearchParams,
-    context: { threadId: string; projectId: string; signal?: AbortSignal },
-    { startedAt, cap, settings }: { startedAt: number; cap: number; settings: Awaited<ReturnType<typeof researchSettings>> },
-    call: ResearchCall,
-  ) {
-    const waitMs = (params.mode ? settings.timeoutMinutes[params.mode] : RESEARCH_DEFAULT_TIMEOUT_MINUTES) * 60_000;
-    const deadline = startedAt + Math.min(waitMs, RESEARCH_CALL_WAIT_CAP_MS);
-    if (params.runId) return awaitResearch(params.runId, context, deadline, call);
+  /** Cap, model, cooldown and quota checks, and the script and args of a fresh run. Throws the reason it cannot start. */
+  async function researchPrepare(params: ResearchParams, threadId: string, cap: number, combine: boolean, spawn = false) {
     const mode = params.mode!;
-    const calls = agentCount(params);
+    const calls = agentCount(params, combine);
     if (calls > cap) {
       const fix = mode === "survey" ? "Raise batchSize or split the items." : mode === "review" ? "Use fewer concerns." : "Ask fewer questions.";
       throw new Error(`This ${mode} needs ${calls} agent calls; the limit is ${cap}. ${fix}`);
     }
-    const script = RESEARCH_SCRIPTS[mode];
-    const { models, notes, hostId, caller } = await researchModels(context.threadId, mode, params.models);
+    const found = await researchModels(threadId, mode, params.models);
+    const { models, notes, hostId, caller } = found;
+    // The stages that execute, and for a spawn the thread that will run them: the mode's pick, else Chief's own model.
+    const stages: Stage[] = ["scan", ...(mode !== "investigate" && params.verify ? ["verify" as const] : []), ...(mode === "investigate" && combine ? ["combine" as const] : [])];
+    const child = spawn
+      ? found.pick ? { providerId: found.pick.provider, model: found.pick.model, reasoningLevel: found.pick.reasoningLevel } : found.own
+      : null;
+    if (spawn && !child) {
+      throw new Error("chief_research did not start: Chief's own provider and model could not be read, so the researcher thread cannot be pinned to them. Retry, or set a researcher model for this mode in Chief settings.");
+    }
     if (anyCooldown.get(Date.now())) {
-      for (const stage of stageSchema.options) {
-        const chosen = models[stage];
-        const target = chosen ? { providerId: chosen.provider, model: chosen.model } : caller;
+      const targets = [...stages.map((stage) => { const chosen = models[stage]; return chosen ? { providerId: chosen.provider, model: chosen.model } : caller; }), child];
+      for (const target of targets) {
         const cooling = target ? cooldownError(target.providerId, target.model) : null;
         if (cooling) throw cooling;
       }
     }
-    const stages: Stage[] = ["scan", ...(mode !== "investigate" && params.verify ? ["verify" as const] : []), ...(mode === "investigate" ? ["combine" as const] : [])];
-    const providerIds = stages.map((stage) => models[stage]?.provider ?? caller?.providerId).filter((id): id is string => !!id);
+    const providerIds = [...stages.map((stage) => models[stage]?.provider ?? caller?.providerId), child?.providerId].filter((id): id is string => !!id);
     const blocked = hostId ? await researchPreflight(hostId, providerIds) : null;
     if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher model in Chief settings or retry after the reset.`);
-    const prefix = notes.length ? notes.join("\n") + "\n\n" : "";
     const args = {
-      preamble: RESEARCH_PREAMBLE, question: params.question, verify: params.verify, cap,
+      preamble: RESEARCH_PREAMBLE, question: params.question, verify: params.verify, cap, combine,
       models,
       ...(mode === "survey" ? { items: params.items, batchSize: params.batchSize } : {}),
       ...(mode === "review" ? { concerns: params.concerns, diffRef: params.diffRef ?? null } : {}),
       ...(mode === "investigate" ? { questions: params.questions } : {}),
     };
+    // Without Combine the Combine phase would sit empty in the run view.
+    const script = combine ? RESEARCH_SCRIPTS[mode] : RESEARCH_SCRIPTS[mode].replace(', { title: "Combine" }]', "]");
+    return { ...found, child, script, args, prefix: notes.length ? notes.join("\n") + "\n\n" : "" };
+  }
+
+  /**
+   * Chief's chief_research: the researcher runs in a child thread on Chief's own checkout. Everything that can
+   * be refused (cap, cooldown, quota, no shareable checkout) is refused here, before a thread exists.
+   */
+  async function startResearcher(params: ResearchParams, chief: ManagedRow, cap: number) {
+    const prepared = await researchPrepare(params, chief.thread_id, cap, false, true);
+    // The child reads Chief's working tree, so it must reuse Chief's environment: no fresh worktree fallback.
+    if (!prepared.environmentId) {
+      throw new Error("chief_research did not start: Chief's checkout cannot be shared with a researcher thread (this thread has no reusable environment).");
+    }
+    const execution = prepared.child!;
+    const mode = params.mode!;
+    const sectionId = await ensureSection();
+    await readRules(chief.project_id);
+    const title = `Research · ${mode} · ${clip(params.question!, 60)}`;
+    const { runId: _runId, ...call } = params;
+    const prompt = [
+      `You are the managed researcher for a ${mode} requested by Chief thread ${chief.thread_id}. Report to that Chief.`,
+      "", "## Question", params.question!,
+      "", "## Working contract",
+      `- ${RESEARCH_ONLY}`,
+      "- Call chief_research once with exactly these parameters:",
+      "```json", JSON.stringify(call), "```",
+      `- If it answers "Still running", call chief_research again with mode: ${mode} and the runId it gave; repeat until it returns the result, fails, or reports timed_out. Never start a second run for the same question.`,
+      "- timed_out means the run was stopped at its time limit: the response lists the answers that finished. Report those as a partial result, saying it timed out. If the response says the stop failed, report blocked with that as the blocker.",
+      ...({
+        survey: ["- Merge: one table with every row and its evidence."],
+        review: ["- Merge: deduplicated findings, each with severity, file:line and evidence."],
+        investigate: ["- An investigate result has the scanned answers but no brief: merge them yourself into a brief with ## Confirmed (each with its evidence) and ## Unconfirmed sections."],
+      }[mode]),
+      "- Check nothing new in the code yourself beyond reconciling conflicting answers. Keep every listed failure, and say the result is partial when there are failures or the run timed out.",
+      `- Report with chief_report state ready (blocked only when the run could not start or the stop failed): \`result\` is the full report within ${MAX_RESULT_LENGTH} characters, with the runId on its first line, and \`summary\` at most 800 characters. When nothing usable came back, report blocked with the cause as blocker and your recommended next step as recommendation.`,
+      "- Do not ask the user directly from this thread.",
+    ].join("\n");
+    let thread;
+    try {
+      thread = await bb.sdk.threads.spawn({
+        projectId: chief.project_id,
+        environment: { type: "reuse", environmentId: prepared.environmentId },
+        sectionId,
+        parentThreadId: chief.thread_id,
+        visibility: "visible",
+        title,
+        ...execution,
+        ...(prepared.permissionMode ? { permissionMode: prepared.permissionMode } : {}),
+        ...(await lifecycleOwner(chief.thread_id)),
+        prompt,
+        pluginMetadata: { role: "researcher", chiefThreadId: chief.thread_id },
+      });
+    } catch (error) {
+      throw new Error(`chief_research did not start: BB could not run a researcher thread in Chief's checkout (${clip(error instanceof Error ? error.message : String(error), 200)}). Nothing was started in a fresh worktree.`);
+    }
+    insertThread({ threadId: thread.id, role: "researcher", projectId: chief.project_id, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, brief: prompt, state: "starting", status: thread.status });
+    return { threadId: thread.id, title, prefix: prepared.prefix };
+  }
+
+  async function researchRun(
+    params: ResearchParams,
+    context: { threadId: string; projectId: string; signal?: AbortSignal },
+    { startedAt, cap, settings, role, row }: { startedAt: number; cap: number; settings: Awaited<ReturnType<typeof researchSettings>>; role: "chief" | "planner" | "reviewer" | "researcher"; row: ManagedRow },
+    call: ResearchCall,
+  ) {
+    const waitMs = (params.mode ? settings.timeoutMinutes[params.mode] : RESEARCH_DEFAULT_TIMEOUT_MINUTES) * 60_000;
+    let deadline = startedAt + Math.min(waitMs, RESEARCH_CALL_WAIT_CAP_MS);
+    // A researcher keeps re-calling until the run ends, so the mode's timeout bounds the whole run, counted from its spawn.
+    let hard: { at: number; mode: string } | undefined;
+    if (role === "researcher") {
+      if (!params.mode) throw new Error("A researcher resumes with mode and runId together.");
+      hard = { at: row.created_at + waitMs, mode: params.mode };
+      deadline = Math.min(deadline, hard.at);
+    }
+    if (params.runId) return awaitResearch(params.runId, context, deadline, call, hard);
+    if (role === "chief") {
+      const started = await startResearcher(params, row, cap);
+      call.outcome = "spawned";
+      return `${started.prefix}Started researcher thread ${started.threadId} (${started.title}). It runs the ${params.mode} in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.`;
+    }
+    const prepared = await researchPrepare(params, context.threadId, cap, role !== "researcher");
+    const { script, args, prefix } = prepared;
     let runId: string;
     try {
       const started = await runWorkflowCli("run", ["--script", script, "--args", JSON.stringify(args)], context);
@@ -4144,7 +4439,7 @@ export default async function plugin(bb: BbPluginApi) {
         "", "script:", "```js", script, "```", "", "args:", "```json", JSON.stringify(args), "```",
       ].join("\n");
     }
-    return prefix + await awaitResearch(runId, context, deadline, call);
+    return prefix + await awaitResearch(runId, context, deadline, call, hard);
   }
 
   bb.agents.registerTool({
@@ -4440,7 +4735,8 @@ export default async function plugin(bb: BbPluginApi) {
       "investigate: one agent per `questions` entry, then one merges the answers into a brief with Confirmed and Unconfirmed sections.",
       "Chief may use survey, review, investigate; a planner survey, investigate; a reviewer review, survey.",
       "Read-only by prompt only: the agents share your checkout and permissions, and are told not to edit, commit, or push.",
-      "Each call waits up to the mode's timeout (10 minutes unless set in Chief researcher settings), and never more than 4 minutes, because BB ends tool calls at about 5 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting; the run keeps going in between.",
+      "From Chief the call returns at once with the id of a researcher thread that runs the research in your checkout and reports through chief_report; its report arrives as a lifecycle alert, so end your turn instead of polling.",
+      "From a planner or reviewer, each call waits up to the mode's timeout (10 minutes unless set in Chief researcher settings), and never more than 4 minutes, because BB ends tool calls at about 5 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting; the run keeps going in between.",
     ].join(" "),
     parameters: researchParams,
     async execute(params, context) {
@@ -4468,13 +4764,15 @@ export default async function plugin(bb: BbPluginApi) {
     if (!role) return { tools: [], skills: [] };
     const rules = rulesCache.get(context.project.id) ?? BUILT_IN_RULES;
     const research = researchLine(role, researchActive);
+    // A researcher's brief says how to use chief_research, so it has no line but still needs the tool while research is on.
+    const researchTool = !!research || (role === "researcher" && !!researchActive?.enabled);
     if (role === "chief") {
       return {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
           "chief_consult",
           "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete",
-          ...(research ? ["chief_research"] : []),
+          ...(researchTool ? ["chief_research"] : []),
         ],
         skills: ["chief"],
         instructions: [
@@ -4497,7 +4795,7 @@ export default async function plugin(bb: BbPluginApi) {
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skill cover the rest.
     return {
-      tools: ["chief_report", ...(role === "worker" && row?.plan_thread_id ? ["chief_log"] : []), ...(research ? ["chief_research"] : [])],
+      tools: ["chief_report", ...(role === "worker" && row?.plan_thread_id ? ["chief_log"] : []), ...(researchTool ? ["chief_research"] : [])],
       skills: ["chief-worker"],
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: short \`summary\`, full \`result\`; after reporting, end with one line.`,
