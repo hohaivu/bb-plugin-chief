@@ -42,6 +42,8 @@ const PLAN_ONLY = `Remain read-only: ${READ_ONLY}. Submit the plan itself throug
 const ADVISE_ONLY = `Remain advisory: ${READ_ONLY}. You may read code and run commands to reproduce the problem (a filtered test or build whose only side effects are untracked build or cache output). Report your advice to Chief; a worker makes the change.`;
 /** Consecutive request_changes verdicts on one task before Chief must consult the advisor. */
 const CONSULT_AFTER_REJECTIONS = 2;
+/** Consecutive request_changes verdicts on one task before Chief stops and escalates to the user. */
+const STOP_AFTER_REJECTIONS = 3;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const execFileAsync = promisify(execFile);
@@ -504,6 +506,7 @@ const delegateShape = z.object({
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
   unplannedReason: z.string().trim().min(1).max(300).optional().describe("Required when planning is on and this work skips chief_plan: a short reason why. Allowed only when evidence already states the cause (see the core rules); otherwise call chief_plan. Not needed with planThreadId/wave, replaces, or simple."),
   kind: z.enum(["worker", "designer"]).optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind."),
+  userApprovedRound: z.boolean().optional().describe("Set only with replaces: and only after the user explicitly approved another review round in this thread: a replaced worker whose reviewer has requested changes 3 times in a row is refused without it."),
   simple: z.boolean().optional().describe("Set only when the user's message contains #simple. Skips chief_plan (no unplannedReason needed). Pass the user's request verbatim as mission and add no diagnosis of your own: the worker finds the cause itself. Review is at your judgment (see the core rules). Cannot be combined with planThreadId. A replaces: successor keeps it."),
 });
 
@@ -1172,6 +1175,8 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN report_path TEXT`,
     // Bumped each time chief_complete replaces the result, so a pending report-path publication can tell its result was replaced.
     `ALTER TABLE managed_threads ADD COLUMN result_rev INTEGER NOT NULL DEFAULT 0`,
+    // Advisor row only: when it first sent a ready or blocked report (its actual advice). Set once; stop, complete, status sync and later reports never clear it. Old rows stay NULL.
+    `ALTER TABLE managed_threads ADD COLUMN advised_at INTEGER`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1993,11 +1998,47 @@ export default async function plugin(bb: BbPluginApi) {
     return out;
   }
 
+  /** Consecutive request_changes on a task, across its whole replaces: chain and every reviewer of it (open,
+   * completed or re-pointed), from reviewer_verdicts; an approve ends it. Rows from before that table fall
+   * back to the newest reviewer's carried reject_streak. lastAt is the newest verdict's time. */
+  function taskRejections(workerThreadId: string) {
+    const chain: string[] = [];
+    for (let worker = roles.get(workerThreadId); worker && !chain.includes(worker.thread_id);
+      worker = worker.replaces_thread_id ? roles.get(worker.replaces_thread_id) : undefined) {
+      chain.push(worker.thread_id);
+    }
+    if (!chain.length) chain.push(workerThreadId);
+    const marks = chain.map(() => "?").join(",");
+    const verdicts = db.prepare(`SELECT verdict, at FROM reviewer_verdicts WHERE worker_thread_id IN (${marks}) ORDER BY id DESC`).all(...chain) as { verdict: string; at: number }[];
+    const end = verdicts.findIndex((entry) => entry.verdict !== "request_changes");
+    const carried = db.prepare(`SELECT reject_streak FROM managed_threads WHERE role='reviewer' AND worker_thread_id IN (${marks}) ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(...chain) as { reject_streak: number } | undefined;
+    return { chain, streak: Math.max(end === -1 ? verdicts.length : end, carried?.reject_streak ?? 0), lastAt: verdicts[0]?.at ?? 0 };
+  }
+
   async function startWorker(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
     const prior = params.replaces ? roles.get(params.replaces) : undefined;
     if (params.replaces && (!prior || prior.role !== "worker" || !controlsThread(prior, chief.thread_id) || prior.project_id !== projectId)) {
       throw new Error(`No managed worker ${params.replaces} for this Chief.`);
+    }
+    if (prior) {
+      // The escalation ladder: round 2 needs a consult that gave its advice on this task, round 3 needs the user.
+      // Read from the task's verdict history, not the open reviewer: a fresh or completed reviewer,
+      // a re-pointed snapshot, or a second replaces: before the next review must not reset it.
+      const { chain, streak, lastAt } = taskRejections(prior.thread_id);
+      if (streak >= STOP_AFTER_REJECTIONS && !params.userApprovedRound) {
+        throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
+      }
+      if (streak === CONSULT_AFTER_REJECTIONS) {
+        // A consult counts once: it must have sent its advice (a ready or blocked report, recorded in advised_at; a
+        // status-only, stopped or completed-unreported consult has none), and started after the latest rejection and
+        // after the worker being replaced, so a worker already sent on the one more round cannot be replaced on the same consult.
+        const consulted = db.prepare(`SELECT 1 FROM managed_threads WHERE role='advisor' AND worker_thread_id IN (${chain.map(() => "?").join(",")})
+          AND advised_at IS NOT NULL AND created_at >= ? LIMIT 1`).get(...chain, Math.max(lastAt, prior.created_at));
+        if (!consulted) {
+          throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.`);
+        }
+      }
     }
     let priorLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
     if (prior) {
@@ -2366,6 +2407,9 @@ export default async function plugin(bb: BbPluginApi) {
       return workerReadyNextStep(row);
     }
     if (row.role === "advisor") {
+      if (row.worker_thread_id && taskRejections(row.worker_thread_id).streak >= STOP_AFTER_REJECTIONS) {
+        return "The advisor changed nothing. The reviewer has now requested changes 3 times in a row: start no new worker, and escalate to the user with both positions, this advice, and your recommendation.";
+      }
       return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${row.worker_thread_id ? ` (replaces: ${row.worker_thread_id})` : " (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
     }
     if (row.role !== "reviewer" || !row.verdict) return null;
@@ -2374,10 +2418,13 @@ export default async function plugin(bb: BbPluginApi) {
     // A worker independently marked complete already absorbed this reviewer's verdict.
     if (row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete") return null;
     if (row.verdict === "approve") return `The reviewer approves. chief_complete (threadId: ${row.worker_thread_id ?? row.thread_id}), then mark the pull request ready.`;
-    if (row.reject_streak >= CONSULT_AFTER_REJECTIONS) {
-      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. This pair is not converging. If every finding names file:line and a concrete fix, hand it straight to a fresh worker with ${row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : `chief_delegate (branch: ${row.branch})`}. Call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} only when a finding is disputed, ambiguous, or needs a design or product decision. If an earlier consult's advice already failed, or the disagreement is a genuine decision, escalate to the user with both positions and your recommendation instead of funding another round.`;
-    }
     const flagged = row.regression ? " The reviewer reports this change introduced a new problem; make the fix's brief name it." : "";
+    if (row.reject_streak >= STOP_AFTER_REJECTIONS) {
+      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.${flagged}`;
+    }
+    if (row.reject_streak >= CONSULT_AFTER_REJECTIONS) {
+      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with ${row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : `chief_delegate (branch: ${row.branch})`} and run exactly one more review. If that review still requires changes, stop and escalate to the user.${flagged}`;
+    }
     return row.worker_thread_id
       ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`
       : `The reviewer requires changes, and no managed worker owns branch ${row.branch}.${flagged} Hand the fix to a fresh worker with chief_delegate (branch: ${row.branch}${row.pr_url ? `, prUrl: ${row.pr_url}` : ""}; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.`;
@@ -2519,11 +2566,13 @@ export default async function plugin(bb: BbPluginApi) {
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
       insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status, reviewedReportSeq: worker.report_seq });
-      if (previous) {
+      // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
+      const streak = taskRejections(workerThreadId).streak;
+      if (previous || streak) {
         const now = Date.now();
         db.transaction(() => {
-          db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(previous.reject_streak, now, thread.id);
-          db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, previous.thread_id);
+          db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(Math.max(previous?.reject_streak ?? 0, streak), now, thread.id);
+          if (previous) db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, previous.thread_id);
         })();
         reloadRoles();
       }
@@ -2897,6 +2946,9 @@ export default async function plugin(bb: BbPluginApi) {
         scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, fails,
         now, threadId,
       ) as { report_seq: number; result_rev: number };
+      if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
+        db.prepare(`UPDATE managed_threads SET advised_at=COALESCE(advised_at, ?) WHERE thread_id=?`).run(now, threadId);
+      }
       if (row.role === "reviewer" && verdict) {
         db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at) SELECT thread_id, worker_thread_id, ?, report_seq, ? FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
       }
@@ -4101,7 +4153,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple.",
+    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. replaces: is refused after 2 consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from 3 on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.",
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -4615,6 +4667,7 @@ export default async function plugin(bb: BbPluginApi) {
             wave: args.one("wave") !== undefined ? Number(args.one("wave")) : undefined,
             unplannedReason: args.one("unplanned-reason"),
             kind: args.one("kind"),
+            userApprovedRound: args.bool("user-approved-round") || undefined,
             // undefined, not false: an absent flag must not override replaces: inheritance.
             simple: args.bool("simple") || undefined,
           });
