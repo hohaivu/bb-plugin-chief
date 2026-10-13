@@ -608,7 +608,10 @@ const readyReport = z.object({
   result: z.string().trim().min(1).max(MAX_RESULT_LENGTH),
   summary: summaryParam,
   verdict: verdictSchema.optional().describe(
-    "Required in a review thread: approve when the change can ship as it stands, request_changes when the worker must fix something. Workers leave this unset.",
+    "Required in a review thread: approve when the change can ship as it stands, request_changes only when at least one blocking finding exists; nits alone never reject. Workers leave this unset.",
+  ),
+  lesson: z.string().trim().min(1).max(400).optional().describe(
+    "Advisor only: one durable, project-level rule future workers should follow so this class of rejection does not recur. Omit when the cause is task-specific.",
   ),
   regression: z.boolean().optional().describe(
     "Reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
@@ -797,7 +800,7 @@ const CHIEF_CORE_RULES = `# Chief core rules (always apply)
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason or simple) → chief_forge_init → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file — the one exception: a design-only wave's ready alert asks you to get the owner's approval of its artboards before you delegate the next wave. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (bounded work whose cause evidence already states; see the core rules) or simple: true (only when the user's message contains #simple). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
+  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason or simple) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file — the one exception: a design-only wave's ready alert asks you to get the owner's approval of its artboards before you delegate the next wave. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (bounded work whose cause evidence already states; see the core rules) or simple: true (only when the user's message contains #simple). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 function researchChiefInstructions(planning: boolean) {
@@ -1180,6 +1183,9 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN result_rev INTEGER NOT NULL DEFAULT 0`,
     // Advisor row only: when it first sent a ready or blocked report (its actual advice). Set once; stop, complete, status sync and later reports never clear it. Old rows stay NULL.
     `ALTER TABLE managed_threads ADD COLUMN advised_at INTEGER`,
+    // Durable lessons an advisor recorded at a consult; the newest few are injected into every later managed thread in the project.
+    `CREATE TABLE chief_lessons (id INTEGER PRIMARY KEY, project_id TEXT NOT NULL, text TEXT NOT NULL, source_thread_id TEXT NOT NULL, worker_thread_id TEXT, at INTEGER NOT NULL)`,
+    `CREATE INDEX chief_lessons_project ON chief_lessons(project_id, at)`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1942,6 +1948,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Reproduce before concluding: run the failing test or command, and quote the command and its exit status.",
       "- A ready report gives the root cause, the evidence, what earlier rounds missed, and the recommended next step for a fresh worker. Put the full advice in `result` and a short `summary` (at most 800 characters: root cause, recommended fix, evidence command).",
       "- A blocked report must include the blocker and your recommended decision or next action.",
+      ...(worker ? ["- If the repeated rejections come from a project-level rule a future worker should know (not a task-specific bug), set `lesson`: one sentence, at most 400 characters. Otherwise omit it."] : []),
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
     const thread = await bb.sdk.threads.spawn({
@@ -2147,6 +2154,7 @@ export default async function plugin(bb: BbPluginApi) {
         "", `## Review findings to fix (${findings.thread_id})`,
         ...verdictPreview(findings),
         ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
+        "Fix every blocking finding. Nits are optional: fix one only when it is trivial and inside this task's scope.",
       ] : []),
       ...(ruledOut.length ? [
         "", "## Already ruled out",
@@ -2178,6 +2186,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
+      ...(planPath !== undefined ? ["- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`."] : []),
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -2407,9 +2416,9 @@ export default async function plugin(bb: BbPluginApi) {
         : heads.filter((head) => !waveWorkers(row.thread_id, head).length);
       if (!undelegated.length) return null;
       if (heads.length === 1) {
-        return `Delegate wave 1 now: chief_delegate (planThreadId: ${row.thread_id}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`;
+        return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${row.thread_id}, wave: 1), then chief_delegate (planThreadId: ${row.thread_id}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`;
       }
-      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — one chief_delegate per wave in this turn (planThreadId: ${row.thread_id}, wave: N). Each independent wave gets its own task title and so its own branch and PR from the default base (chief_forge_init without base); do not stack them. The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.`;
+      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${row.thread_id}, wave: N), then chief_delegate (planThreadId: ${row.thread_id}, wave: N), all in this turn. Each independent wave gets its own task title and so its own branch and PR from the default base (chief_forge_init without base); do not stack them. The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.`;
     }
     if (row.role === "worker") {
       // A reviewer that still covers this worker's latest report — either busy
@@ -2435,7 +2444,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.worker_thread_id && row.reviewed_report_seq === null) return null;
     // A worker independently marked complete already absorbed this reviewer's verdict.
     if (row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete") return null;
-    if (row.verdict === "approve") return `The reviewer approves. chief_complete (threadId: ${row.worker_thread_id ?? row.thread_id}), then mark the pull request ready.`;
+    if (row.verdict === "approve") return `The reviewer approves. chief_complete (threadId: ${row.worker_thread_id ?? row.thread_id}), then mark the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.`;
     const flagged = row.regression ? " The reviewer reports this change introduced a new problem; make the fix's brief name it." : "";
     if (row.reject_streak >= STOP_AFTER_REJECTIONS) {
       return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.${flagged}`;
@@ -2471,12 +2480,14 @@ export default async function plugin(bb: BbPluginApi) {
       opts.subject,
       opts.focus ? `Review focus: ${opts.focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
       REVIEW_ONLY,
-      "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it.",
+      "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.",
       "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
       ...(opts.research ? ["Review small changes yourself. Use chief_research only for a large change (several PRs in a stack, more than about 5 files, or more than about 400 lines) or to check a specific suspicion, scoped to that question (survey or review). Verify every research finding against the source before using it; the verdict stays yours."] : []),
-      `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict: approve when the change can ship as it stands, request_changes when the worker must fix something.`,
-      "Send a `summary` with the report: verdict, count of findings, the most important one with file:line.",
-      "Give every finding a file:line and the concrete fix; mark any finding that needs a design or product decision as such.",
+      `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict.`,
+      "Classify every finding as blocking or nit. Blocking means the change cannot ship as it stands. These are always blocking: a bug or incorrect behaviour, an unmet listed contract, a regression, missing or false verification evidence, a designer mismatch the brief does not accept, and scope drift the worker did not state. A nit is style, naming, a minor simplification, or an optional improvement.",
+      "The verdict is request_changes only when at least one blocking finding exists; nits alone mean approve.",
+      "List blocking findings first, then at most 5 nits, then write \"and N more nits\" for the rest. Give every finding a file:line and the concrete fix; mark any finding that needs a design or product decision as such.",
+      "Send a `summary` with the report: verdict, blocking count, nit count, the most important blocking finding with file:line.",
       "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
       "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
       ...opts.provenance,
@@ -2563,11 +2574,12 @@ export default async function plugin(bb: BbPluginApi) {
             "", `## The previous review (${previous.thread_id})`,
             ...verdictPreview(previous),
             ...(previous.recommendation ? [`Recommendation: ${clip(previous.recommendation, 600)}`] : []),
-            "", "Check each finding above against the current worktree: say which were fixed and which remain. Do not re-open points it approved.",
+            "", "Check each finding above against the current worktree: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again.",
           ] : []),
           ...(waves.length ? [
             "", `This branch carries wave${chain.length > 1 ? "s" : ""} ${chain.join(", ")} of ${waves.length}. Review the whole branch against its base against ${chain.length > 1 ? "these waves' plans" : "this wave's plan"}:`,
             ...chain.map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}`),
+            "Read the worker's full report (Full report path above, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
           ] : []),
         ],
       });
@@ -2904,6 +2916,12 @@ export default async function plugin(bb: BbPluginApi) {
         }
       });
     }
+    if (params.state === "ready" && params.lesson && row.role !== "advisor") {
+      throw new Error("Only an advisor's ready report carries lesson.");
+    }
+    if (row.role === "worker" && row.plan_thread_id && params.state === "ready" && !/^[ \t]*#{1,6}[ \t]+deviations from plan/im.test(params.result)) {
+      throw new Error('A plan worker\'s ready report requires a "## Deviations from plan" Markdown heading (list each departure from the plan and why, or "None").');
+    }
     if (row.role === "planner" && params.state === "ready" && Array.isArray(plan)) {
       const parents = new Set<number>();
       plan.forEach((wave, index) => {
@@ -2970,6 +2988,9 @@ export default async function plugin(bb: BbPluginApi) {
       ) as { report_seq: number; result_rev: number };
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         db.prepare(`UPDATE managed_threads SET advised_at=COALESCE(advised_at, ?) WHERE thread_id=?`).run(now, threadId);
+      }
+      if (row.role === "advisor" && params.state === "ready" && params.lesson) {
+        db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at) VALUES (?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now);
       }
       if (row.role === "reviewer" && verdict) {
         db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at) SELECT thread_id, worker_thread_id, ?, report_seq, ? FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
@@ -3046,7 +3067,8 @@ export default async function plugin(bb: BbPluginApi) {
       const recordedHead = recorded === undefined ? [] : recordedLines(recorded, 0);
       const blocker = params.state === "blocked" ? params.blocker! : null;
       const fieldCount = (blocker === null ? 0 : 1) + (params.recommendation ? 1 : 0);
-      const fixedCost = cost([...top, ...planHead, ...verdictLines, actionLine, ...inspectLine, ...recordedHead]);
+      const lessonLines = params.state === "ready" && params.lesson ? [`Lesson recorded for future managed threads: ${clip(params.lesson, 300)}`] : [];
+      const fixedCost = cost([...top, ...planHead, ...verdictLines, actionLine, ...lessonLines, ...inspectLine, ...recordedHead]);
       const fieldRoom = Math.min(FIELD_ROOM, Math.max(100, Math.floor((alertRoom - fixedCost) / Math.max(fieldCount, 1)) - 20));
       const suffix = pointer?.name ? ` (clipped; full text in ${pointer.name})` : " (clipped)";
       const field = (name: string, value: string) => `${name}: ${value.length <= fieldRoom ? value : `${clip(value, fieldRoom - suffix.length)}${suffix}`}`;
@@ -3065,7 +3087,7 @@ export default async function plugin(bb: BbPluginApi) {
       // A file-bearing report (first pass long or clipped) labels its Result as clipped; only a short, unclipped one stays plain.
       const label = filed ? longLabel : summaryLine ? "Summary: " : "Result: ";
       const text = [
-        ...top, ...planHead, ...waveFit.lines, ...inlineBlock, ...verdictLines, actionLine, ...fields, ...inspectLine,
+        ...top, ...planHead, ...waveFit.lines, ...inlineBlock, ...verdictLines, actionLine, ...fields, ...lessonLines, ...inspectLine,
         ...recordedHead, ...commands,
         ...(resultText && resultRoom > 0 ? [`${label}${clip(resultText, resultRoom)}`] : []),
       ].join("\n");
@@ -4133,13 +4155,36 @@ export default async function plugin(bb: BbPluginApi) {
       title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
       base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request. Stack only when this work builds on that pull request's changes; independent work gets its own PR on the default base."),
       body: z.string().trim().min(1).max(4_000).optional().describe("Short summary for the issue and pull request body."),
+      planThreadId: z.string().optional().describe("For planned work: the planner thread the task's wave comes from. Give it with wave; the plan summary and the wave's contracts are added to the issue and pull request body."),
+      wave: z.number().int().min(1).optional().describe("For planned work: the 1-based wave this task implements. Give it with planThreadId."),
     }),
-    async execute(params, context) {
+    async execute({ planThreadId, wave, ...params }, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) {
         throw new Error("chief_forge_init requires an active registered Chief thread.");
       }
-      const { branch, script } = forgeInitScript(params);
+      if ((planThreadId === undefined) !== (wave === undefined)) {
+        throw new Error("Pass planThreadId and wave together, or neither.");
+      }
+      let body = params.body;
+      if (planThreadId !== undefined && wave !== undefined) {
+        const planner = roles.get(planThreadId);
+        if (!planner || planner.role !== "planner" || !controlsThread(planner, caller.thread_id)) {
+          throw new Error(`No managed planner ${planThreadId} for this Chief.`);
+        }
+        const waves = planWavesFor(planThreadId);
+        if (wave > waves.length) {
+          throw new Error(`Wave ${wave} is out of range: planner ${planThreadId} scheduled ${waves.length} wave(s).`);
+        }
+        body = [
+          params.body ?? `Tracking work for ${params.title}.`,
+          "", `<details><summary>Plan — wave ${wave} of ${waves.length} (planner ${planThreadId})</summary>`,
+          "", clip(planner.result ?? "", 1_500),
+          "", "### Contracts to verify", clip(waves[wave - 1]!.contracts ?? "None listed.", 2_000),
+          "</details>",
+        ].join("\n");
+      }
+      const { branch, script } = forgeInitScript({ ...params, body });
       const cwd = await projectPath(caller.project_id);
       let failure: string | null = null;
       if (cwd) {
@@ -4447,6 +4492,8 @@ export default async function plugin(bb: BbPluginApi) {
       };
     }
     const chiefThreadId = row?.chief_thread_id ?? (seeded?.success ? seeded.data.chiefThreadId ?? null : null);
+    // The newest 10 lessons, shown oldest first and clipped; better-sqlite3 is synchronous, so configure stays so.
+    const lessons = (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skill cover the rest.
     return {
@@ -4456,6 +4503,7 @@ export default async function plugin(bb: BbPluginApi) {
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: short \`summary\`, full \`result\`; after reporting, end with one line.`,
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
+        ...(lessons.length ? ["", clip(["## Lessons from earlier review rounds", ...lessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
       ].join("\n"),
     };
   });
