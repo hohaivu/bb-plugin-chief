@@ -293,7 +293,7 @@ const storageOf = (folder: string, file: string): Task["storage"] => {
 
 // ---- Chief module (Chief's own code) ----
 export const backlogRpc = {
-  backlogProjects: { input: z.null(), output: z.object({ projects: z.array(z.object({ id: z.string(), name: z.string() })) }).strict() },
+  backlogProjects: { input: z.null(), output: z.object({ enabled: z.boolean(), projects: z.array(z.object({ id: z.string(), name: z.string() })) }).strict() },
   backlogBoard: { input: z.object({ projectId: z.string().trim().min(1) }).strict(), output: boardSchema },
   backlogCreate: { input: z.object({ projectId: z.string().trim().min(1), title: z.string().trim().min(1).max(200), status: z.string().optional(), description: z.string().optional() }).strict(), output: z.object({ task: taskSchema.nullable(), conflict: z.boolean(), message: z.string() }).strict() },
   backlogSave: { input: z.object({ projectId: z.string().trim().min(1), path: z.string(), revision: z.string(), edits: z.array(editSchema).min(1).max(20) }).strict(), output: z.object({ task: taskSchema.nullable(), conflict: z.boolean(), message: z.string() }).strict() },
@@ -656,7 +656,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
   }
 
   const rpcHandlers = {
-    backlogProjects: async () => ({ projects: await deps.projects() }),
+    backlogProjects: async () => ({ enabled: deps.enabled(), projects: deps.enabled() ? await deps.projects() : [] }),
     backlogBoard: async ({ projectId }: RpcIn<"backlogBoard">) => {
       if (deps.enabled() && deps.hasChief(projectId)) await refresh(projectId);
       return board(projectId);

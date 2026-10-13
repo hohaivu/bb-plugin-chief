@@ -420,6 +420,7 @@ export function BacklogPage() {
   const rpc = useRpc<typeof rpcContract>();
   const connection = useRealtimeConnectionState();
   const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
+  const [enabled, setEnabled] = useState<boolean | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [board, setBoard] = useState<BacklogBoard | null>(null);
   const [error, setError] = useState("");
@@ -436,11 +437,11 @@ export function BacklogPage() {
   const load = useCallback(async () => {
     const request = ++serial.current;
     try {
-      const { projects: all } = await rpc.call("backlogProjects", null);
+      const { enabled: on, projects: all } = await rpc.call("backlogProjects", null);
       const id = selected && all.some(project => project.id === selected) ? selected : all[0]?.id ?? null;
       const snapshot = id ? await rpc.call("backlogBoard", { projectId: id }) : null;
       if (request !== serial.current) return;
-      setProjects(all); setSelected(id); setBoard(snapshot); setError("");
+      setEnabled(on); setProjects(all); setSelected(id); setBoard(snapshot); setError("");
     } catch (cause) { if (request === serial.current) setError(textError(cause)); }
   }, [rpc, selected]);
   useEffect(() => {
@@ -493,7 +494,7 @@ export function BacklogPage() {
   };
   const archive = async () => {
     if (!modal || !board) return;
-    const result = await mutation(() => rpc.call("backlogArchive", { projectId: board.projectId, path: modal.path, revision: modal.revision }));
+    const result = await mutation(() => rpc.call("backlogArchive", { projectId: board.projectId, path: modal.path, revision: (currentTask ?? modal).revision }));
     if (!result.conflict) setModal(null);
   };
   const create = async () => {
@@ -506,7 +507,8 @@ export function BacklogPage() {
 
   const empty = (title: string, message: string, extra?: string[]) => <div className="empty"><h2>{title}</h2><p>{message}</p>{extra?.map(item => <p key={item}>{item}</p>)}</div>;
   let body: React.ReactNode;
-  if (!board) body = <div className="empty">{error ? "" : projects.length || !selected ? "Loading tasks..." : "Select a project to view its tasks."}</div>;
+  if (enabled === false) body = empty("Backlog board is off", "Turn on “Backlog board” in Chief's settings to track todos as Backlog.md tasks.");
+  else if (!board) body = <div className="empty">{error || enabled === null ? "Loading tasks..." : "No Chief is running in any project."}</div>;
   else if (board.kind === "off") body = empty("Backlog board is off", board.message || "Turn on “Backlog board” in Chief's settings to track todos as Backlog.md tasks.");
   else if (board.kind === "missing") body = empty("No Backlog folder", board.message, board.candidates);
   else if (board.kind === "ambiguous") body = empty("Choose a Backlog folder", board.message, board.candidates);
@@ -519,7 +521,7 @@ export function BacklogPage() {
     })}</div>
   </>;
 
-  const ready = board?.kind === "ready";
+  const ready = enabled !== false && board?.kind === "ready";
   return <div className="backlog-root">
     <header className="app-header">
       <div className="header-project"><strong>Backlog</strong><span aria-hidden="true">/</span><select aria-label="BB project" title={board?.folder ?? undefined} value={selected ?? ""} disabled={Boolean(modal) || !projects.length} onChange={event => changeProject(event.target.value)}>{!projects.length && <option value="">No Chief running</option>}{projects.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>
