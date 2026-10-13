@@ -559,6 +559,22 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     try { return insertionOrdinal(tasks.filter(t => t.storage === "active"), movingPath, status, before); } catch { return null; }
   }
 
+  /**
+   * Who owns an export token, decided on the scan just taken (the final one before anything is written): a file a crashed run created
+   * may have been unreadable in an earlier scan. One owner is returned; several conflict; none is only believed when every candidate
+   * file was inspected. `open: false` (the todo was closed since): an existing owner is a conflict, never closed or reused.
+   */
+  function ownerOf(c: Cache, marker: string, title: string, after: string | null, open: boolean): Task | null {
+    const owners = c.tasks.filter(t => t.fields.chief_import === marker);
+    if (owners.length > 1) throw new Error(`Import conflict: ${owners.length} Backlog tasks claim the same export token (${owners.map(t => t.id).join(", ")}). Resolve the duplicates; the todo stays in Chief's own list.`);
+    if (owners[0]) {
+      if (!open) throw new Error(`Import conflict: ${owners[0].id} was exported from a todo that has since been closed. Close or archive ${owners[0].id} on the board; the todo stays in Chief's own list until then.`);
+      if (owners[0].title !== title || taskAfter(owners[0]) !== after) throw new Error(`Import conflict: ${owners[0].id} was already exported from this todo, but the todo or the task changed since. The todo stays in Chief's own list until they match.`);
+      return owners[0];
+    }
+    if (!c.inspected) throw new Error("Some Backlog task files could not be read, so it cannot be ruled out that this todo was already exported. Nothing was created; it will be retried.");
+    return null;
+  }
   /** Number part of a task id or file name such as "TASK-12", "task-12 - Title.md". */
   const numberOf = (text: string) => /^[A-Za-z][A-Za-z0-9_]*-(\d+)/.exec(text)?.[1];
   /** Runs inside the project lock, after a fresh scan. */
@@ -569,15 +585,8 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     const title = input.title.replace(/\s+/g, " ").trim();
     if (!title) throw new Error("A task needs a title.");
     if (input.marker) {
-      // Ownership is decided here, on the final scan before anything is written: a file a previous (crashed) run created
-      // may have been unreadable in an earlier scan. Absent owner + any unreadable candidate = unknown, so nothing is created.
-      const owners = c.tasks.filter(t => t.fields.chief_import === input.marker);
-      if (owners.length > 1) throw new Error(`Import conflict: ${owners.length} Backlog tasks claim the same export token (${owners.map(t => t.id).join(", ")}). Resolve the duplicates; the todo stays in Chief's own list.`);
-      if (owners[0]) {
-        if (owners[0].title !== title || taskAfter(owners[0]) !== (input.after || null)) throw new Error(`Import conflict: ${owners[0].id} was already exported from this todo, but the todo or the task changed since. The todo stays in Chief's own list until they match.`);
-        return owners[0];
-      }
-      if (!c.inspected) throw new Error("Some Backlog task files could not be read, so it cannot be ruled out that this todo was already exported. Nothing was created; it will be retried.");
+      const owner = ownerOf(c, input.marker, title, input.after ?? null, true);
+      if (owner) return owner;
     }
     const status = input.status ?? (input.open ? openStatus(c) : firstStatus(c));
     if (!c.statuses.includes(status)) throw new Error(`Status must be one of: ${c.statuses.join(", ")}.`);
@@ -609,10 +618,17 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
   }
   /** OFF→ON export of one chief_todos row. `token` is stored in the file (chief_import) and in the row; createLocked looks it up
    * on its final scan, so a resume after a crash finds the task this row already created instead of creating a second one. */
-  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string }): Promise<Task> {
+  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string; open: true }): Promise<Task>;
+  /** A row closed after its marker was written: confirms no task was exported for it (null), or throws; never creates one. */
+  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string; open: false }): Promise<null>;
+  function importTodo(projectId: string, input: { text: string; after?: string | null; token: string; open: boolean }): Promise<Task | null> {
     const title = titleOf(input.text);
     const rest = input.text.trim() === title ? "" : input.text.trim();
-    return createTask(projectId, { title, description: rest, after: input.after, marker: input.token, open: true });
+    if (input.open) return createTask(projectId, { title, description: rest, after: input.after, marker: input.token, open: true });
+    return withLock(projectId, async () => {
+      await refresh(projectId);
+      return ownerOf(ready(projectId), input.token, title, input.after ?? null, false);
+    });
   }
   async function editTask(projectId: string, input: { path: string; revision?: string; edits: Edit[] }): Promise<Task> {
     const task = await mutate(projectId, input.path, () => input.edits, input.revision);

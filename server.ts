@@ -1370,9 +1370,9 @@ export default async function plugin(bb: BbPluginApi) {
     `UPDATE chief_todos SET text=?, after=?, state=?, updated_at=? WHERE id=? AND project_id=? AND chief_thread_id IS NULL`,
   );
   /** Compare-and-set of the export marker: (new, id, project, expected old — NULL, or the "pending:<token>" written first). */
-  const markTodoExported = db.prepare<[string, number, string, string | null]>(`UPDATE chief_todos SET backlog_task_id=? WHERE id=? AND project_id=? AND backlog_task_id IS ?`);
+  const markTodoExported = db.prepare<[string | null, number, string, string | null]>(`UPDATE chief_todos SET backlog_task_id=? WHERE id=? AND project_id=? AND backlog_task_id IS ?`);
   const todosToExport = db.prepare<[string]>(
-    `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND state='open' AND (backlog_task_id IS NULL OR backlog_task_id LIKE 'pending:%') ORDER BY id ASC`,
+    `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND ((state='open' AND backlog_task_id IS NULL) OR backlog_task_id LIKE 'pending:%') ORDER BY id ASC`,
   );
   // ponytail: global, not per host: usage limits are account-level; key by host if a provider id ever maps to different accounts per machine.
   // ponytail: expired rows are ignored, never cleaned; they are bounded by the provider/model pairs.
@@ -1392,6 +1392,8 @@ export default async function plugin(bb: BbPluginApi) {
   const backlogImported = new Set<string>();
   /** Bumped on every enable and disable: an import started under an older value stops before its next row and never publishes. */
   let backlogGen = 0;
+  /** Why a project's export is stuck (unreadable files, an import conflict), shown by backlogNote until a pass succeeds or the board goes off. */
+  const backlogExportError = new Map<string, string>();
   const backlogImporting = new Map<string, { gen: number; promise: Promise<void> }>();
   /** One FIFO queue per project for every turn that changes chief_todos (numeric roster writes) or exports a row to the board, so a
    * numeric write is either seen by the export or refused once the row was exported — never accepted and then lost.
@@ -3522,6 +3524,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (!backlogActive && backlogWasOn) {
       // chief_todos is authoritative again, exactly as it was; the next enable re-exports nothing already exported.
       backlogImported.clear();
+      backlogExportError.clear();
       publishPending();
       bb.realtime.publish("backlog", null);
     }
@@ -3547,15 +3550,24 @@ export default async function plugin(bb: BbPluginApi) {
       const resumed = row.backlog_task_id?.startsWith("pending:") ? row.backlog_task_id.slice("pending:".length) : undefined;
       const token = resumed ?? randomUUID();
       if (!resumed) markTodoExported.run(`pending:${token}`, id, projectId, null);
-      const task = await backlog.importTodo(projectId, { text: row.text, after: row.after, token });
-      markTodoExported.run(task.id, id, projectId, `pending:${token}`);
+      // A pending row closed while the board was off (crash, then OFF) is checked for an owner but never exported: the marker is cleared
+      // when no task exists, and an existing one is reported as a conflict.
+      const task = row.state === "open"
+        ? await backlog.importTodo(projectId, { text: row.text, after: row.after, token, open: true })
+        : await backlog.importTodo(projectId, { text: row.text, after: row.after, token, open: false });
+      if (markTodoExported.run(task?.id ?? null, id, projectId, `pending:${token}`).changes !== 1) throw new Error(`Todo #${id} changed while it was being exported.`);
       return true;
     });
     const promise: Promise<void> = (async () => {
       while (await exportNext());
+      if (gen === backlogGen) backlogExportError.delete(projectId);
       publishPending();
       bb.realtime.publish("backlog", null);
-    })().catch((error) => bb.log.warn(`Could not export todos to the Backlog board for ${projectId}: ${String(error)}`))
+    })().catch((error) => {
+      bb.log.warn(`Could not export todos to the Backlog board for ${projectId}: ${String(error)}`);
+      if (gen === backlogGen) backlogExportError.set(projectId, error instanceof Error ? error.message : String(error));
+      publishPending();
+    })
       .finally(() => { if (backlogImporting.get(projectId)?.promise === promise) backlogImporting.delete(projectId); });
     backlogImporting.set(projectId, { gen, promise });
     return promise;
@@ -3958,9 +3970,9 @@ export default async function plugin(bb: BbPluginApi) {
   function backlogNote(projectId: string): string | null {
     if (!backlogActive) return null;
     const state = backlog.state(projectId);
-    return state.loaded && (state.kind === "missing" || state.kind === "ambiguous")
-      ? `- Backlog board is on, but ${state.message} Todos stay in Chief's own list for this project.`
-      : null;
+    if (state.loaded && (state.kind === "missing" || state.kind === "ambiguous")) return `- Backlog board is on, but ${state.message} Todos stay in Chief's own list for this project.`;
+    const failure = backlogExportError.get(projectId);
+    return failure && state.kind === "ready" && !backlogImported.has(projectId) ? `- Backlog board is on, but exporting this project's todos failed: ${failure} Todos stay in Chief's own list for this project.` : null;
   }
 
   function todoLine(todo: TodoRow) {
@@ -4786,8 +4798,9 @@ export default async function plugin(bb: BbPluginApi) {
             const existing = todoById.get(todo.id, projectId) as TodoRow | undefined;
             if (!existing) throw new Error(`No todo #${todo.id} in this project.`);
             // Exported (or being exported) to a board that is ready: the task is the todo now, and this write would never reach it.
-            if (backlogActive && existing.backlog_task_id && backlog.state(projectId).kind === "ready") {
-              throw new Error(`Todo #${todo.id} was exported to the Backlog board${existing.backlog_task_id.startsWith("pending:") ? " (still finishing)" : ` as task ${existing.backlog_task_id}`}. Change it with chief_backlog once the board is on for this project; nothing was changed.`);
+            // Whatever the board's state right now (it may just be reloading or unreachable): the task is the todo, and a write here would be lost.
+            if (backlogActive && existing.backlog_task_id) {
+              throw new Error(`Todo #${todo.id} was exported to the Backlog board${existing.backlog_task_id.startsWith("pending:") ? " (still finishing)" : ` as task ${existing.backlog_task_id}`}. Change it with chief_backlog once the board is ready for this project; nothing was changed.`);
             }
             const after = todo.after === undefined ? existing.after : todo.after || null;
             updateTodo.run(todo.text ?? existing.text, after, todo.state ?? existing.state, now, todo.id, projectId);
