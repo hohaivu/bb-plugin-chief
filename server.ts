@@ -4099,17 +4099,30 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Stops a run and confirms it ended, retrying; returns why it could not, or null. */
+  /** runWorkflowCli with 3 tries 1 s apart, for reads whose single failure would drop a run or its answers. */
+  async function workflowRead(sub: string, args: string[], context: { threadId: string; projectId: string }) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await runWorkflowCli(sub, args, context);
+      } catch (error) {
+        if (attempt >= 3) throw error;
+        await researchSleep(1_000);
+      }
+    }
+  }
+
+  /** Stops a run and confirms it ended, retrying; returns why it could not, or null. Never throws. */
   async function stopResearch(runId: string, context: { threadId: string; projectId: string }) {
     let reason = "";
     for (let attempt = 0; attempt < 3; attempt++) {
+      let stopError = "";
+      await runWorkflowCli("stop", [runId], context).catch((error) => { stopError = clip(error instanceof Error ? error.message : String(error), 200); });
       try {
-        await runWorkflowCli("stop", [runId], context);
         const run = await runWorkflowCli("status", [runId], context);
         if (!RUNNING_WORKFLOW.has(run.status)) return null;
-        reason = `the run is still ${run.status} after stop`;
+        reason = `the run is still ${run.status} after stop${stopError ? ` (stop: ${stopError})` : ""}`;
       } catch (error) {
-        reason = clip(error instanceof Error ? error.message : String(error), 200);
+        reason = stopError || clip(error instanceof Error ? error.message : String(error), 200);
       }
       await researchSleep(1_000);
     }
@@ -4117,38 +4130,65 @@ export default async function plugin(bb: BbPluginApi) {
     return reason;
   }
 
-  /** The answers of every agent call that finished, for a partial report; null when history is unreadable. */
+  /**
+   * The answers of every agent call that finished, for a partial report; null when history is unreadable.
+   * `next` is the history cursor to continue from when the list stops short (1,000 records or a failed page).
+   */
   async function finishedAnswers(runId: string, context: { threadId: string; projectId: string }) {
-    try {
-      const done: { phase?: string; result?: unknown }[] = [];
-      for (let cursor = 0, pages = 0; pages < 10; pages++) {
-        const lines: unknown = await runWorkflowCli("history", [runId, "--cursor", String(cursor), "--limit", "100"], context);
-        const records = (Array.isArray(lines) ? lines : [lines]) as { type?: string; status?: string; phase?: string; result?: unknown; hasMore?: boolean; nextCursor?: number }[];
-        done.push(...records.filter((record) => record?.type === "call" && record.status === "succeeded"));
-        const page = records.find((record) => record?.type === "page");
-        if (!page?.hasMore || typeof page.nextCursor !== "number") break;
-        cursor = page.nextCursor;
+    const done: { phase?: string; result?: unknown }[] = [];
+    let next: number | null = null;
+    let readError = "";
+    for (let cursor = 0, pages = 0; ; pages++) {
+      let records: { type?: string; status?: string; phase?: string; result?: unknown; hasMore?: boolean; nextCursor?: number }[];
+      try {
+        const lines: unknown = await workflowRead("history", [runId, "--cursor", String(cursor), "--limit", "100"], context);
+        records = (Array.isArray(lines) ? lines : [lines]) as typeof records;
+      } catch (error) {
+        if (!pages) return null;
+        next = cursor;
+        readError = clip(error instanceof Error ? error.message : String(error), 200);
+        break;
       }
-      return done.map((record) => ({ phase: record.phase, result: record.result }));
-    } catch {
-      return null;
+      done.push(...records.filter((record) => record?.type === "call" && record.status === "succeeded"));
+      const page = records.find((record) => record?.type === "page");
+      if (!page?.hasMore || typeof page.nextCursor !== "number") break;
+      cursor = page.nextCursor;
+      if (pages + 1 >= 10) { next = cursor; break; }
     }
+    return { answers: done.map((record) => ({ phase: record.phase, result: record.result })), next, readError };
   }
 
   /**
-   * A researcher run's hard stop, kept by the server so it does not depend on the child resuming. The timer is
-   * per process: after a plugin restart the child's next call re-arms it. ponytail: no persisted timers.
+   * A researcher run's hard stop, kept by the server so it does not depend on the child resuming. A failed stop
+   * alerts Chief and re-arms. ponytail: 5 rounds 30 s apart, then the alert is the escalation; timers are per
+   * process (a restart waits for the child's next call to re-arm), persist them if that ever matters.
    */
+  const RESEARCH_STOP_ROUNDS = 5;
   const researchStops = new Map<string, ReturnType<typeof setTimeout>>();
-  function armResearchStop(runId: string, at: number, context: { threadId: string; projectId: string }) {
-    if (researchStops.has(runId)) return;
+  function armResearchStop(runId: string, at: number, context: { threadId: string; projectId: string }, round = 0) {
+    if (!round && researchStops.has(runId)) return;
     const timer = setTimeout(async () => {
-      researchStops.delete(runId);
       try {
-        const run = await runWorkflowCli("status", [runId], context);
-        if (RUNNING_WORKFLOW.has(run.status)) await stopResearch(runId, context);
+        // No status gate: stopping a finished run is a no-op, and stopResearch confirms the status itself.
+        const failure = await stopResearch(runId, context);
+        if (researchStops.get(runId) !== timer) return; // disarmed or re-armed meanwhile
+        if (!failure) return void researchStops.delete(runId);
+        const row = roles.get(context.threadId);
+        if (row) {
+          await alertChief(row, `research-stop:${runId}`, [
+            `Researcher “${row.title}” (${row.thread_id}): workflow ${runId} passed its time limit and could not be stopped (${failure}). It may still be running.`,
+            `The server retries ${RESEARCH_STOP_ROUNDS - round - 1} more times. Check it with \`bb workflows status ${runId}\` and stop it with \`bb workflows stop ${runId}\`.`,
+          ].join("\n"));
+        }
+        if (round + 1 < RESEARCH_STOP_ROUNDS) armResearchStop(runId, Date.now() + 30_000, context, round + 1);
+        else researchStops.delete(runId);
       } catch (error) {
-        bb.log.warn(`chief_research deadline check for ${runId} failed: ${clip(String(error), 200)}`);
+        // An alert that could not even be queued (no Chief) must not end the retries.
+        bb.log.warn(`chief_research deadline stop for ${runId} failed: ${clip(String(error), 200)}`);
+        if (researchStops.get(runId) === timer) {
+          if (round + 1 < RESEARCH_STOP_ROUNDS) armResearchStop(runId, Date.now() + 30_000, context, round + 1);
+          else researchStops.delete(runId);
+        }
       }
     }, Math.max(0, at - Date.now()));
     timer.unref?.();
@@ -4167,7 +4207,8 @@ export default async function plugin(bb: BbPluginApi) {
       `failures: the ${mode} run passed its time limit and ${stopFailure ? `COULD NOT BE STOPPED (${stopFailure}); it may still be running. Report blocked with that as the blocker and tell Chief to run \`bb workflows stop ${runId}\`` : "was stopped"}. Report the finished answers below as partial, saying it timed out.`,
       ...(note ? [note] : []),
       "", "finished answers:",
-      answers ? (answers.length ? JSON.stringify(answers, null, 2) : "(none finished)") : `(could not read history; try \`bb workflows history ${runId}\`)`,
+      answers ? (answers.answers.length ? JSON.stringify(answers.answers, null, 2) : "(none finished)") : `(could not read history; try \`bb workflows history ${runId}\`)`,
+      ...(answers?.next != null ? [`(list truncated${answers.readError ? ` after a history read failed: ${answers.readError}` : " at 1,000 history records"}; read the rest with \`bb workflows history ${runId} --cursor ${answers.next} --limit 100\`)`] : []),
     ].join("\n"));
   }
 
@@ -4181,18 +4222,21 @@ export default async function plugin(bb: BbPluginApi) {
       for (;;) {
         let run: { status: string; result?: unknown; resultOmitted?: boolean; error?: unknown; calls?: unknown };
         try {
-          run = await runWorkflowCli("status", [runId], context);
+          run = await workflowRead("status", [runId], context);
         } catch (error) {
           context.signal?.throwIfAborted();
           bb.log.warn(`chief_research could not read ${runId}: ${clip(String(error), 200)}`);
-          call.outcome = "error";
-          return `Could not read workflow ${runId} from the plugin server. Check it yourself with \`bb workflows status ${runId}\`.`;
+          if (!hard) {
+            call.outcome = "error";
+            return `Could not read workflow ${runId} from the plugin server. Check it yourself with \`bb workflows status ${runId}\`.`;
+          }
+          run = { status: "running" }; // unknown is not finished: keep waiting, and past the deadline the stop path still runs
         }
         if (!RUNNING_WORKFLOW.has(run.status)) disarmResearchStop(runId);
         if (run.status === "succeeded") {
           let result = run.result;
           if (run.resultOmitted) {
-            const history: unknown = await runWorkflowCli("history", [runId, "--cursor", "0", "--limit", "1"], context).catch(() => null);
+            const history: unknown = await workflowRead("history", [runId, "--cursor", "0", "--limit", "1"], context).catch(() => null);
             const record = (Array.isArray(history) ? history : [history]).find((line) => line?.type === "run");
             result = record?.result ?? "(result omitted; read it with bb workflows history)";
           }
@@ -4222,7 +4266,6 @@ export default async function plugin(bb: BbPluginApi) {
         context.signal?.throwIfAborted();
         // The hard deadline comes first: when both have passed, the run is over, not "still running".
         if (hard && Date.now() >= hard.at) {
-          disarmResearchStop(runId);
           const stopFailure = await stopResearch(runId, context);
           // A run that finished between the status read and the stop is a result, not a timeout.
           if ((await runWorkflowCli("status", [runId], context).catch(() => null))?.status === "succeeded") continue;
@@ -4237,7 +4280,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
     } catch (error) {
       if (context.signal?.aborted) {
-        await runWorkflowCli("stop", [runId], context).catch((stopError) => bb.log.warn(`chief_research could not stop ${runId} after an abort: ${clip(String(stopError), 200)}`));
+        await stopResearch(runId, context); // no alert: an abort is the caller's own cancellation
       }
       throw error;
     }
