@@ -4224,6 +4224,8 @@ export default async function plugin(bb: BbPluginApi) {
         if (hard && Date.now() >= hard.at) {
           disarmResearchStop(runId);
           const stopFailure = await stopResearch(runId, context);
+          // A run that finished between the status read and the stop is a result, not a timeout.
+          if ((await runWorkflowCli("status", [runId], context).catch(() => null))?.status === "succeeded") continue;
           call.outcome = "timed_out";
           return timedOutReport(runId, hard.mode, stopFailure, context);
         }
