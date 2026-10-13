@@ -1369,7 +1369,8 @@ export default async function plugin(bb: BbPluginApi) {
   const updateTodo = db.prepare<[string, string | null, string, number, number, string]>(
     `UPDATE chief_todos SET text=?, after=?, state=?, updated_at=? WHERE id=? AND project_id=? AND chief_thread_id IS NULL`,
   );
-  const markTodoExported = db.prepare<[string, number]>(`UPDATE chief_todos SET backlog_task_id=? WHERE id=?`);
+  /** Compare-and-set of the export marker: (new, id, project, expected old — NULL, or the "pending:<token>" written first). */
+  const markTodoExported = db.prepare<[string, number, string, string | null]>(`UPDATE chief_todos SET backlog_task_id=? WHERE id=? AND project_id=? AND backlog_task_id IS ?`);
   const todosToExport = db.prepare<[string]>(
     `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND state='open' AND (backlog_task_id IS NULL OR backlog_task_id LIKE 'pending:%') ORDER BY id ASC`,
   );
@@ -1389,7 +1390,18 @@ export default async function plugin(bb: BbPluginApi) {
   let backlogActive = false;
   /** Projects whose open chief_todos rows were exported to Backlog tasks since the board was last turned on. */
   const backlogImported = new Set<string>();
-  const backlogImporting = new Map<string, Promise<void>>();
+  /** Bumped on every enable and disable: an import started under an older value stops before its next row and never publishes. */
+  let backlogGen = 0;
+  const backlogImporting = new Map<string, { gen: number; promise: Promise<void> }>();
+  /** One FIFO queue per project for every turn that changes chief_todos (numeric roster writes) or exports a row to the board, so a
+   * numeric write is either seen by the export or refused once the row was exported — never accepted and then lost.
+   * Synchronous readers do not use it. */
+  const todoQueues = new Map<string, Promise<unknown>>();
+  function todoTurn<T>(projectId: string, work: () => T | Promise<T>): Promise<T> {
+    const run = (todoQueues.get(projectId) ?? Promise.resolve()).then(work);
+    todoQueues.set(projectId, run.catch(() => undefined));
+    return run;
+  }
   const backlog = createBacklog(bb, {
     enabled: () => backlogActive,
     projectSource: async (projectId) => {
@@ -3505,6 +3517,7 @@ export default async function plugin(bb: BbPluginApi) {
     researchActive = researchFrom(next);
     const backlogWasOn = backlogActive;
     backlogActive = next.backlogEnabled;
+    if (backlogActive !== backlogWasOn) backlogGen++;
     if (backlogActive && !backlogWasOn) void syncBacklog();
     if (!backlogActive && backlogWasOn) {
       // chief_todos is authoritative again, exactly as it was; the next enable re-exports nothing already exported.
@@ -3522,28 +3535,30 @@ export default async function plugin(bb: BbPluginApi) {
   function ensureImported(projectId: string): Promise<void> {
     if (!backlogActive || backlogImported.has(projectId) || backlog.state(projectId).kind !== "ready") return Promise.resolve();
     const running = backlogImporting.get(projectId);
-    if (running) return running;
-    const run = (async () => {
-      for (;;) {
-        const rows = todosToExport.all(projectId) as TodoRow[];
-        if (!rows.length) {
-          if (backlogActive && backlog.state(projectId).kind === "ready") backlogImported.add(projectId);
-          break;
-        }
-        for (const row of rows) {
-          const resumed = row.backlog_task_id?.startsWith("pending:") ? row.backlog_task_id.slice("pending:".length) : undefined;
-          const token = resumed ?? randomUUID();
-          if (!resumed) markTodoExported.run(`pending:${token}`, row.id as number);
-          const task = await backlog.importTodo(projectId, { text: row.text, after: row.after, token });
-          markTodoExported.run(task.id, row.id as number);
-        }
-      }
+    if (running?.gen === backlogGen) return running.promise;
+    const gen = backlogGen;
+    const live = () => backlogActive && gen === backlogGen && backlog.state(projectId).kind === "ready";
+    // One queue turn per row (snapshot → pending marker → task → exported marker), so a numeric write lands between rows, never inside one.
+    const exportNext = () => todoTurn(projectId, async () => {
+      if (!live()) return false;
+      const row = todosToExport.get(projectId) as TodoRow | undefined;
+      if (!row) { backlogImported.add(projectId); return false; }
+      const id = row.id as number;
+      const resumed = row.backlog_task_id?.startsWith("pending:") ? row.backlog_task_id.slice("pending:".length) : undefined;
+      const token = resumed ?? randomUUID();
+      if (!resumed) markTodoExported.run(`pending:${token}`, id, projectId, null);
+      const task = await backlog.importTodo(projectId, { text: row.text, after: row.after, token });
+      markTodoExported.run(task.id, id, projectId, `pending:${token}`);
+      return true;
+    });
+    const promise: Promise<void> = (async () => {
+      while (await exportNext());
       publishPending();
       bb.realtime.publish("backlog", null);
     })().catch((error) => bb.log.warn(`Could not export todos to the Backlog board for ${projectId}: ${String(error)}`))
-      .finally(() => backlogImporting.delete(projectId));
-    backlogImporting.set(projectId, run);
-    return run;
+      .finally(() => { if (backlogImporting.get(projectId)?.promise === promise) backlogImporting.delete(projectId); });
+    backlogImporting.set(projectId, { gen, promise });
+    return promise;
   }
   /** Refresh the board cache for every project with an active Chief, then export once per enable. Never throws. */
   async function syncBacklog() {
@@ -4758,18 +4773,26 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error("chief_roster requires an active registered Chief thread.");
       touchCallerChief(caller);
-      if (todo && useBacklog(caller.project_id)) throw new Error("The Backlog board is on for this project: todos are its Backlog tasks. Add or change them with chief_backlog (ids like BCKLG-3).");
       if (todo) {
-        const now = Date.now();
-        if (todo.id === undefined) {
-          if (!todo.text) throw new Error("chief_roster todo needs text to add, or an id to change.");
-          insertTodo.run(caller.project_id, todo.text, todo.after || null, now, now);
-        } else {
-          const existing = todoById.get(todo.id, caller.project_id) as TodoRow | undefined;
-          if (!existing) throw new Error(`No todo #${todo.id} in this project.`);
-          const after = todo.after === undefined ? existing.after : todo.after || null;
-          updateTodo.run(todo.text ?? existing.text, after, todo.state ?? existing.state, now, todo.id, caller.project_id);
-        }
+        const projectId = caller.project_id;
+        // Routing, the row read and the write all happen inside one queue turn (see todoTurn).
+        await todoTurn(projectId, () => {
+          if (useBacklog(projectId)) throw new Error("The Backlog board is on for this project: todos are its Backlog tasks. Add or change them with chief_backlog (ids like BCKLG-3).");
+          const now = Date.now();
+          if (todo.id === undefined) {
+            if (!todo.text) throw new Error("chief_roster todo needs text to add, or an id to change.");
+            insertTodo.run(projectId, todo.text, todo.after || null, now, now);
+          } else {
+            const existing = todoById.get(todo.id, projectId) as TodoRow | undefined;
+            if (!existing) throw new Error(`No todo #${todo.id} in this project.`);
+            // Exported (or being exported) to a board that is ready: the task is the todo now, and this write would never reach it.
+            if (backlogActive && existing.backlog_task_id && backlog.state(projectId).kind === "ready") {
+              throw new Error(`Todo #${todo.id} was exported to the Backlog board${existing.backlog_task_id.startsWith("pending:") ? " (still finishing)" : ` as task ${existing.backlog_task_id}`}. Change it with chief_backlog once the board is on for this project; nothing was changed.`);
+            }
+            const after = todo.after === undefined ? existing.after : todo.after || null;
+            updateTodo.run(todo.text ?? existing.text, after, todo.state ?? existing.state, now, todo.id, projectId);
+          }
+        });
         reloadRoles();
       }
       const rows = rosterForChief(caller.thread_id, includeComplete);

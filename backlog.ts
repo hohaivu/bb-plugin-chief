@@ -62,7 +62,7 @@ function insertionOrdinal(tasks: Task[], movingPath: string, status: string, bef
 type Meta = Pick<Task, "path" | "revision" | "storage">;
 type Span = { start: number; end: number; value: string };
 const fieldLabels: Record<string, string> = {
- title: "Title", status: "Status", type: "Type", priority: "Priority", assignee: "Assignees", reporter: "Reporter", labels: "Labels", milestone: "Milestone", due_date: "Due date", project: "Project classification", dependencies: "Dependencies", references: "References", documentation: "Documentation", modified_files: "Modified files", ordinal: "Order", chief_after: "Wait condition",
+ title: "Title", status: "Status", type: "Type", priority: "Priority", assignee: "Assignees", reporter: "Reporter", labels: "Labels", milestone: "Milestone", due_date: "Due date", project: "Project classification", dependencies: "Dependencies", references: "References", documentation: "Documentation", modified_files: "Modified files", ordinal: "Order", chief_after: "Wait condition", updated_date: "Updated date",
 };
 const listFields = new Set(["assignee", "labels", "dependencies", "references", "documentation", "modified_files"]);
 const sectionDefinitions: Record<string, { title: string; marker: string }> = {
@@ -334,6 +334,10 @@ interface Cache extends BacklogState {
   names: string[];
   /** False when a listing hit its limit: ids are never allocated from a partial scan. */
   complete: boolean;
+  /** True only when every candidate file was read and parsed, so "no task owns this token" can be believed. `complete` covers the listing alone. */
+  inspected: boolean;
+  /** File modification times (ms) from the last scan: the closed-list fallback when a task has no updated_date. Internal, not part of Task. */
+  mtimes: Map<string, number>;
   sig: string;
 }
 class ConflictError extends Error {}
@@ -341,10 +345,16 @@ const SIZE_LIMIT = 512 * 1024;
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 const titleOf = (text: string) => text.split("\n").map(line => line.trim()).find(Boolean)?.slice(0, 200) ?? "";
 const taskAfter = (task: Task) => typeof task.fields.chief_after === "string" && task.fields.chief_after.trim() ? task.fields.chief_after : null;
-const taskTime = (task: Task) => {
-  const stamp = Date.parse(String(task.fields.updated_date ?? task.fields.created_date ?? "").replace(" ", "T") + "Z");
-  return Number.isFinite(stamp) ? stamp : 0;
+/** Backlog dates are "YYYY-MM-DD[ HH:mm]" in UTC; ones that already carry Z or an offset are taken as written. Invalid → null. */
+const parseStamp = (value: unknown): number | null => {
+  const text = typeof value === "string" || value instanceof Date ? String(value instanceof Date ? value.toISOString() : value).trim().replace(" ", "T") : "";
+  if (!text) return null;
+  const ms = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(text) || /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text}Z`);
+  return Number.isFinite(ms) ? ms : null;
 };
+/** Last modification: updated_date, else the file's mtime, else the creation date (never preferred over a real modification time). */
+const taskTime = (task: Task, mtime: number | undefined) => parseStamp(task.fields.updated_date) ?? mtime ?? parseStamp(task.fields.created_date) ?? 0;
+const nowStamp = () => new Date().toISOString().slice(0, 16).replace("T", " ");
 const sameId = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
@@ -368,7 +378,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     const result = await bb.sdk.files.read({ hostId, path: file, rootPath });
     if (result.contentEncoding !== "utf8") throw new Error(`Not a UTF-8 text file: ${file}`);
     if (result.sizeBytes > SIZE_LIMIT) throw new Error(`Markdown file exceeds the 512 KiB editing limit: ${file}`);
-    return { raw: result.content, revision: result.sha256 };
+    return { raw: result.content, revision: result.sha256, modifiedAtMs: result.modifiedAtMs };
   }
   async function discover(source: { hostId: string; path: string }): Promise<Pick<Cache, "kind" | "folder" | "message" | "candidates" | "config">> {
     const { hostId, path: root } = source;
@@ -415,10 +425,10 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     let next: Cache;
     try {
       const source = await deps.projectSource(projectId);
-      if (!source) next = { ...emptyState("missing", true, "This project has no checkout on a connected machine."), hostId: null, config: defaultConfig, warnings: [], names: [], complete: false, sig: "" };
+      if (!source) next = { ...emptyState("missing", true, "This project has no checkout on a connected machine."), hostId: null, config: defaultConfig, warnings: [], names: [], complete: false, inspected: false, mtimes: new Map(), sig: "" };
       else {
         const found = await discover(source);
-        next = { ...emptyState(found.kind, true, found.message), folder: found.folder, candidates: found.candidates, statuses: found.config.statuses, hostId: source.hostId, config: found.config, warnings: [], names: [], complete: false, sig: "" };
+        next = { ...emptyState(found.kind, true, found.message), folder: found.folder, candidates: found.candidates, statuses: found.config.statuses, hostId: source.hostId, config: found.config, warnings: [], names: [], complete: false, inspected: false, mtimes: new Map(), sig: "" };
         if (found.kind === "ready" && found.folder) {
           const listing = await listFiles(source.hostId, found.folder);
           next.warnings = listing.warnings;
@@ -426,6 +436,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
           next.names = listing.files.map(f => path.basename(f.path));
           const tasks: Task[] = [];
           let bytes = 0;
+          let unreadable = 0;
           // ponytail: every file is re-read on every refresh (the SDK read has no conditional form), so edits to completed/archived files show up too; add an mtime/etag check if boards get large.
           for (let i = 0; i < listing.files.length; i += 12) {
             await Promise.all(listing.files.slice(i, i + 12).map(async file => {
@@ -434,10 +445,15 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
                 const record = await readText(source.hostId, file.path, found.folder!);
                 bytes += Buffer.byteLength(record.raw);
                 if (bytes > 5 * 1024 * 1024) throw new Error("Board exceeds the 5 MiB content limit.");
-                tasks.push(parseTask(record.raw, { path: file.path, revision: record.revision, storage: file.storage }));
-              } catch (error) { next.warnings.push(`${path.basename(file.path)}: ${errorMessage(error)}`); }
+                const task = parseTask(record.raw, { path: file.path, revision: record.revision, storage: file.storage });
+                // No frontmatter fields means the fallback parse: this file's chief_import (if any) could not be read.
+                if (!Object.keys(task.fields).length) unreadable++;
+                if (record.modifiedAtMs !== undefined) next.mtimes.set(file.path, record.modifiedAtMs);
+                tasks.push(task);
+              } catch (error) { unreadable++; next.warnings.push(`${path.basename(file.path)}: ${errorMessage(error)}`); }
             }));
           }
+          next.inspected = listing.complete && unreadable === 0;
           const ids = new Map<string, Task[]>();
           for (const task of tasks) ids.set(task.id.toLowerCase(), [...(ids.get(task.id.toLowerCase()) ?? []), task]);
           for (const [id, same] of ids) if (same.length > 1) for (const task of same) task.errors.push(`Duplicate task ID ${id}; resolve duplicates before editing.`);
@@ -446,7 +462,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
       }
     } catch (error) {
       // A broken config or an unreachable host is a visible note, never a thrown error.
-      next = { ...emptyState("missing", true, errorMessage(error)), hostId: null, config: defaultConfig, warnings: [], names: [], complete: false, sig: "" };
+      next = { ...emptyState("missing", true, errorMessage(error)), hostId: null, config: defaultConfig, warnings: [], names: [], complete: false, inspected: false, mtimes: new Map(), sig: "" };
     }
     next.sig = JSON.stringify([next.kind, next.folder, next.message, next.statuses, next.warnings, next.tasks.map(t => [t.path, t.revision])]);
     if (!deps.enabled()) { caches.delete(projectId); return; }
@@ -487,7 +503,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
    * `before` and the call fails; a change to other fields merges. Never rebuilt from the
    * competing version, so a concurrent edit is never overwritten.
    */
-  async function mutate(projectId: string, file: string, build: (fresh: Task) => Edit[], expect?: string): Promise<Task> {
+  async function mutate(projectId: string, file: string, build: (fresh: Task) => Edit[], expect?: string, touch = false): Promise<Task> {
     const c = ready(projectId);
     const absolute = confinedTaskPath(c.folder, file);
     let edits: Edit[] | undefined;
@@ -500,8 +516,15 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
       edits ??= build(fresh);
       validateChoices(edits, c.config);
       let content: string;
-      try { content = patchTask(current.raw, edits); }
-      catch (error) {
+      try {
+        content = patchTask(current.raw, edits);
+        // Internal modification time, patched after the user's edits passed their own `before` checks (so a concurrent change to
+        // updated_date never conflicts with a different-field edit) and against this attempt's content. Unchanged content keeps its date, unless `touch`.
+        if (content !== current.raw || touch) {
+          const before = (parseTask(content, meta).fields.updated_date as FieldValue | undefined) ?? null;
+          content = patchTask(content, [{ kind: "field", key: "updated_date", before, value: nowStamp() }]);
+        }
+      } catch (error) {
         if (/^Conflict:/.test(errorMessage(error))) throw new ConflictError(`Task ${fresh.id} changed since it was read; re-read it and retry.`);
         throw error;
       }
@@ -545,6 +568,17 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     if (!c.complete) throw new Error("The Backlog task listing is incomplete, so a safe task id cannot be chosen. Reduce the number of files in tasks/, completed/ and archive/tasks/, or try again.");
     const title = input.title.replace(/\s+/g, " ").trim();
     if (!title) throw new Error("A task needs a title.");
+    if (input.marker) {
+      // Ownership is decided here, on the final scan before anything is written: a file a previous (crashed) run created
+      // may have been unreadable in an earlier scan. Absent owner + any unreadable candidate = unknown, so nothing is created.
+      const owners = c.tasks.filter(t => t.fields.chief_import === input.marker);
+      if (owners.length > 1) throw new Error(`Import conflict: ${owners.length} Backlog tasks claim the same export token (${owners.map(t => t.id).join(", ")}). Resolve the duplicates; the todo stays in Chief's own list.`);
+      if (owners[0]) {
+        if (owners[0].title !== title || taskAfter(owners[0]) !== (input.after || null)) throw new Error(`Import conflict: ${owners[0].id} was already exported from this todo, but the todo or the task changed since. The todo stays in Chief's own list until they match.`);
+        return owners[0];
+      }
+      if (!c.inspected) throw new Error("Some Backlog task files could not be read, so it cannot be ruled out that this todo was already exported. Nothing was created; it will be retried.");
+    }
     const status = input.status ?? (input.open ? openStatus(c) : firstStatus(c));
     if (!c.statuses.includes(status)) throw new Error(`Status must be one of: ${c.statuses.join(", ")}.`);
     if (input.description && /<!--\s*(?:SECTION:|AC:|DOD:|COMMENT)/i.test(input.description)) throw new Error("The description cannot contain Backlog section markers.");
@@ -570,19 +604,15 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     await refresh(projectId);
     return find(projectId, id) ?? parseTask(content, { path: file, revision: result.sha256, storage: "active" });
   }
-  function createTask(projectId: string, input: { title: string; status?: string; description?: string; after?: string | null; open?: boolean }): Promise<Task> {
+  function createTask(projectId: string, input: { title: string; status?: string; description?: string; after?: string | null; marker?: string; open?: boolean }): Promise<Task> {
     return withLock(projectId, () => createLocked(projectId, input));
   }
-  /** OFF→ON export of one chief_todos row. `token` is stored in the file (chief_import) and in the row, so a resume after a crash
-   * finds the task this row already created instead of creating a second one, and never claims anyone else's task. */
+  /** OFF→ON export of one chief_todos row. `token` is stored in the file (chief_import) and in the row; createLocked looks it up
+   * on its final scan, so a resume after a crash finds the task this row already created instead of creating a second one. */
   function importTodo(projectId: string, input: { text: string; after?: string | null; token: string }): Promise<Task> {
     const title = titleOf(input.text);
     const rest = input.text.trim() === title ? "" : input.text.trim();
-    return withLock(projectId, async () => {
-      await refresh(projectId);
-      const existing = state(projectId).tasks.find(t => t.fields.chief_import === input.token);
-      return existing ?? createLocked(projectId, { title, description: rest, after: input.after, marker: input.token, open: true });
-    });
+    return createTask(projectId, { title, description: rest, after: input.after, marker: input.token, open: true });
   }
   async function editTask(projectId: string, input: { path: string; revision?: string; edits: Edit[] }): Promise<Task> {
     const task = await mutate(projectId, input.path, () => input.edits, input.revision);
@@ -597,8 +627,13 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
     await refresh(projectId);
     return task;
   }
+  /** A CAS write of the modification time first, then the (non-atomic) move at the resulting revision. */
+  async function archive(projectId: string, file: string, expect?: string): Promise<Task> {
+    const touched = await mutate(projectId, file, () => [], expect, true);
+    return relocate(projectId, touched.path, "archive/tasks", touched.revision);
+  }
   async function archiveTask(projectId: string, input: { path: string; revision?: string }): Promise<Task> {
-    const task = await relocate(projectId, input.path, "archive/tasks", input.revision);
+    const task = await archive(projectId, input.path, input.revision);
     await refresh(projectId);
     return task;
   }
@@ -637,7 +672,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
         ...(status !== null && status !== fresh.status ? [field(fresh, "status", status)] : []),
       ]);
     }
-    if (wanted === "dropped" && task.storage !== "archived") task = await relocate(projectId, task.path, "archive/tasks");
+    if (wanted === "dropped" && task.storage !== "archived") task = await archive(projectId, task.path);
     await refresh(projectId);
     return find(projectId, task.id) ?? task;
   }
@@ -646,7 +681,7 @@ export function createBacklog(bb: BbPluginApi, deps: BacklogDeps) {
   function todos(projectId: string): BacklogTodo[] {
     const last = doneStatus(projectId);
     return state(projectId).tasks.filter(t => !t.errors.length).map(task => ({
-      id: task.id, text: task.title, after: taskAfter(task), updatedAt: taskTime(task),
+      id: task.id, text: task.title, after: taskAfter(task), updatedAt: taskTime(task, caches.get(projectId)?.mtimes.get(task.path)),
       state: task.storage === "archived" ? "dropped" as const : task.storage === "completed" || task.status === last ? "done" as const : "open" as const,
     }));
   }
