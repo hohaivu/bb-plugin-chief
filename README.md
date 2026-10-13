@@ -149,8 +149,8 @@ alert carries the result); one whose run failed, was partial, or timed out says 
 mode's timeout bounds the whole run from the thread's start, after which the run is stopped.
 
 The agents share the caller's checkout and permissions. They are read-only only because the prompt
-tells them to be. Each call waits up to its mode's timeout (10 minutes by default), and never more than 4 minutes, because BB ends tool calls at
-about 5 minutes. If the run is still going, the call returns its runId, and calling again with that runId keeps waiting
+tells them to be. A planner's or reviewer's call, and each call a researcher thread makes while resuming, waits up to its mode's timeout (10 minutes by default), and never more than 4 minutes, because BB ends tool calls at
+about 5 minutes. A researcher run's timeout is a hard stop, kept by the plugin server from the thread's start: the run is stopped even when the researcher thread is not calling, and the next call returns the answers that had finished. If the run is still going, the call returns its runId, and calling again with that runId keeps waiting
 (the run keeps going in between). If the plugin server can't start the
 workflow, the tool returns the exact script and args so the agent can start it with
 `bb_workflow_run` and then wait on its runId. One cap on agent calls per run (1–100, default 24)
