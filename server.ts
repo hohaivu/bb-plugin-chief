@@ -1996,6 +1996,23 @@ export default async function plugin(bb: BbPluginApi) {
     return out;
   }
 
+  /** Consecutive request_changes on a task, across its whole replaces: chain and every reviewer of it (open,
+   * completed or re-pointed), from reviewer_verdicts; an approve ends it. Rows from before that table fall
+   * back to the newest reviewer's carried reject_streak. lastAt is the newest verdict's time. */
+  function taskRejections(workerThreadId: string) {
+    const chain: string[] = [];
+    for (let worker = roles.get(workerThreadId); worker && !chain.includes(worker.thread_id);
+      worker = worker.replaces_thread_id ? roles.get(worker.replaces_thread_id) : undefined) {
+      chain.push(worker.thread_id);
+    }
+    if (!chain.length) chain.push(workerThreadId);
+    const marks = chain.map(() => "?").join(",");
+    const verdicts = db.prepare(`SELECT verdict, at FROM reviewer_verdicts WHERE worker_thread_id IN (${marks}) ORDER BY id DESC`).all(...chain) as { verdict: string; at: number }[];
+    const end = verdicts.findIndex((entry) => entry.verdict !== "request_changes");
+    const carried = db.prepare(`SELECT reject_streak FROM managed_threads WHERE role='reviewer' AND worker_thread_id IN (${marks}) ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(...chain) as { reject_streak: number } | undefined;
+    return { chain, streak: Math.max(end === -1 ? verdicts.length : end, carried?.reject_streak ?? 0), lastAt: verdicts[0]?.at ?? 0 };
+  }
+
   async function startWorker(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
     const prior = params.replaces ? roles.get(params.replaces) : undefined;
@@ -2003,19 +2020,20 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`No managed worker ${params.replaces} for this Chief.`);
     }
     if (prior) {
-      // The escalation ladder: round 2 needs a reported consult on this worker, round 3 needs the user.
-      const rejected = existingReview.get(prior.thread_id) as ManagedRow | undefined;
-      // Same "still open" test as nextAction: a re-pointed or in-flight reviewer carries a streak but no live verdict.
-      if (rejected?.verdict === "request_changes" && rejected.reviewed_report_seq !== null) {
-        if (rejected.reject_streak >= STOP_AFTER_REJECTIONS && !params.userApprovedRound) {
-          throw new Error(`The reviewer has requested changes ${rejected.reject_streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
-        }
-        if (rejected.reject_streak === CONSULT_AFTER_REJECTIONS) {
-          const consulted = db.prepare(`SELECT 1 FROM managed_threads WHERE role='advisor' AND worker_thread_id=? AND state IN ('ready','blocked','complete')
-            AND created_at >= COALESCE((SELECT MAX(at) FROM reviewer_verdicts WHERE reviewer_thread_id=?), 0) LIMIT 1`).get(prior.thread_id, rejected.thread_id);
-          if (!consulted) {
-            throw new Error(`The reviewer has requested changes ${rejected.reject_streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for its report before delegating the one more round.`);
-          }
+      // The escalation ladder: round 2 needs a reported consult on this task, round 3 needs the user.
+      // Read from the task's verdict history, not the open reviewer: a fresh or completed reviewer,
+      // a re-pointed snapshot, or a second replaces: before the next review must not reset it.
+      const { chain, streak, lastAt } = taskRejections(prior.thread_id);
+      if (streak >= STOP_AFTER_REJECTIONS && !params.userApprovedRound) {
+        throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
+      }
+      if (streak === CONSULT_AFTER_REJECTIONS) {
+        // A consult counts once: it must have reported, after the latest rejection and after the worker being replaced
+        // started, so a worker already sent on the one more round cannot be replaced on the same consult.
+        const consulted = db.prepare(`SELECT 1 FROM managed_threads WHERE role='advisor' AND worker_thread_id IN (${chain.map(() => "?").join(",")})
+          AND report_seq > 0 AND created_at >= ? LIMIT 1`).get(...chain, Math.max(lastAt, prior.created_at));
+        if (!consulted) {
+          throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for its report before delegating the one more round.`);
         }
       }
     }
@@ -2546,11 +2564,13 @@ export default async function plugin(bb: BbPluginApi) {
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
       insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status, reviewedReportSeq: worker.report_seq });
-      if (previous) {
+      // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
+      const streak = taskRejections(workerThreadId).streak;
+      if (previous || streak) {
         const now = Date.now();
         db.transaction(() => {
-          db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(previous.reject_streak, now, thread.id);
-          db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, previous.thread_id);
+          db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(Math.max(previous?.reject_streak ?? 0, streak), now, thread.id);
+          if (previous) db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, previous.thread_id);
         })();
         reloadRoles();
       }
@@ -4128,7 +4148,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. replaces: is refused after 2 consecutive request_changes until a consult on that worker has reported, and after 3 unless userApprovedRound is set.",
+    description: "Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. replaces: is refused after 2 consecutive request_changes on the task until a consult has reported, and from 3 on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.",
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
