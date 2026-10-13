@@ -2887,10 +2887,14 @@ export default async function plugin(bb: BbPluginApi) {
     const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
     if (!dataDirs.has(hostId)) {
       // ponytail: per-process cache; a moved BB data dir needs a plugin reload
+      let reason = "its thread storage root is unknown";
       const dataDir = await bb.sdk.hosts.get({ hostId }).then((host) => host.threadStorageRootPath ? dirname(host.threadStorageRootPath) : null)
-        .catch((error) => { bb.log.warn(`Could not read host ${hostId}'s thread storage root: ${String(error)}`); return null; });
+        .catch((error) => { reason = `reading it failed: ${String(error)}`; return null; });
       if (dataDir) dataDirs.set(hostId, dataDir);
-      else return { hostId, dir: storageRootPath };
+      else {
+        bb.log.warn(`Host ${hostId}'s BB data dir is unavailable (${reason}); writing Chief artifacts to thread storage instead.`);
+        return { hostId, dir: storageRootPath };
+      }
     }
     return { hostId, dir: join(dataDirs.get(hostId)!, "chief", projectId, threadId) };
   }
