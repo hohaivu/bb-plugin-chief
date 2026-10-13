@@ -4793,6 +4793,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`chief_research did not start: BB could not run a researcher thread in Chief's checkout (${clip(error instanceof Error ? error.message : String(error), 200)}). Nothing was started in a fresh worktree.`);
     }
     insertThread({ threadId: thread.id, role: "researcher", projectId: chief.project_id, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, brief: prompt, state: "starting", status: thread.status });
+    await persistBrief(thread.id, prompt);
     return { threadId: thread.id, title, prefix: prepared.prefix };
   }
 
