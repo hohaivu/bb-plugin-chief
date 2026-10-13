@@ -3202,33 +3202,43 @@ export default async function plugin(bb: BbPluginApi) {
     return (end ? rest.slice(0, end.index) : rest).trim() || undefined;
   }
 
-  /** The caller's managed row, recovered from spawn-seeded metadata while insertThread has not run yet. */
+  type ThreadInput = Parameters<typeof insertThread>[0];
+  /** The caller's managed row. While insertThread has not run yet, `pending` holds the row recovered from spawn-seeded
+   * metadata and nothing is written: the caller persists it with insertThread once it has decided to proceed. */
+  async function lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInput }> {
+    const row = roles.get(threadId);
+    if (row) return { row };
+    // configure() already falls back to pluginMetadata seeded at spawn time
+    // because insertThread only runs after threads.spawn resolves; a report can
+    // land in that same gap for a brand-new thread. Recover the same seed here
+    // instead of throwing, so exposing the tool and executing it close together.
+    // pluginMetadata is writable by any API client, another plugin, or the
+    // thread's own agent, so only trust it once originPluginId proves this
+    // thread was actually created by our own spawn call.
+    const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
+    const seeded = live?.originPluginId === bb.pluginId
+      ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
+      : undefined;
+    if (!seeded?.success) return {};
+    return {
+      pending: {
+        threadId,
+        role: seeded.data.role,
+        projectId: live?.projectId ?? callerProjectId,
+        chiefThreadId: seeded.data.chiefThreadId ?? null,
+        title: live?.title ?? live?.titleFallback ?? threadId,
+        state: "active",
+        status: live?.status ?? "active",
+      },
+    };
+  }
+
+  /** The caller's managed row, persisting a spawn-seeded recovery at once. */
   async function managedRow(threadId: string, callerProjectId: string) {
-    let row = roles.get(threadId);
-    if (!row) {
-      // configure() already falls back to pluginMetadata seeded at spawn time
-      // because insertThread only runs after threads.spawn resolves; a report can
-      // land in that same gap for a brand-new thread. Recover the same seed here
-      // instead of throwing, so exposing the tool and executing it close together.
-      // pluginMetadata is writable by any API client, another plugin, or the
-      // thread's own agent, so only trust it once originPluginId proves this
-      // thread was actually created by our own spawn call.
-      const live = await bb.sdk.threads.get({ threadId }).catch(() => null);
-      const seeded = live?.originPluginId === bb.pluginId
-        ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
-        : undefined;
-      if (seeded?.success) {
-        insertThread({
-          threadId,
-          role: seeded.data.role,
-          projectId: live?.projectId ?? callerProjectId,
-          chiefThreadId: seeded.data.chiefThreadId ?? null,
-          title: live?.title ?? live?.titleFallback ?? threadId,
-          state: "active",
-          status: live?.status ?? "active",
-        });
-        row = roles.get(threadId);
-      }
+    const { row, pending } = await lookupRow(threadId, callerProjectId);
+    if (pending) {
+      insertThread(pending);
+      return roles.get(threadId);
     }
     return row;
   }
@@ -3237,7 +3247,7 @@ export default async function plugin(bb: BbPluginApi) {
   type WaveInput = { body: string; dependsOn?: number[]; design?: boolean };
 
   /** Every reason a report cannot be saved, one line per failing field: the field, its actual size or value, the limit, and the fix. */
-  function checkReport(row: ManagedRow, params: ReportParams, plan: string | unknown[] | undefined): string[] {
+  function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, params: ReportParams, plan: string | unknown[] | undefined): string[] {
     const errors: string[] = [];
     const num = (n: number) => n.toLocaleString("en-US");
     const ready = params.state === "ready";
@@ -3300,68 +3310,85 @@ export default async function plugin(bb: BbPluginApi) {
     return errors;
   }
 
-  /** The plan-shape and planner-rule lines for checkReport; a planner's ready report only. */
+  /** The plan-shape and planner-rule lines for checkReport; a planner's ready report only. Each wave is inspected
+   * on its own, so one bad wave never hides another's failures; a check is skipped only when its own input is invalid. */
   function checkPlan(plan: string | unknown[]): string[] {
     const errors: string[] = [];
     const num = (n: number) => n.toLocaleString("en-US");
-    const isWave = (value: unknown): value is WaveInput => typeof value === "object" && value !== null && typeof (value as WaveInput).body === "string";
-    if (typeof plan !== "string" && !(Array.isArray(plan) && plan.length && plan.every(isWave))) {
-      return ["plan is not a Markdown string or an array of {body, dependsOn?, design?}; pass one of those."];
-    }
-    const waves = typeof plan === "string" ? undefined : plan as WaveInput[];
-    const bodies = waves ? waves.map((wave) => wave.body.trim()) : [plan as string];
-    if (waves && waves.length > MAX_WAVES) errors.push(`plan has ${waves.length} waves; max ${MAX_WAVES}. Merge waves.`);
-    bodies.forEach((body, index) => {
-      const name = waves ? `plan wave ${index + 1} body` : "plan";
-      if (!body) errors.push(`${name} is empty; send the plan text.`);
-      else if (body.length > MAX_PLAN_LENGTH) errors.push(`${name} is ${num(body.length)} characters; max ${num(MAX_PLAN_LENGTH)}. ${waves ? "Split the wave." : "Split it into waves."}`);
+    if (Array.isArray(plan) && !plan.length) return [`plan is an empty array; pass a Markdown string, or an array of {body, dependsOn?, design?} with 1 to ${MAX_WAVES} waves.`];
+    const multi = typeof plan !== "string";
+    const items: unknown[] = multi ? plan : [{ body: plan }];
+    if (items.length > MAX_WAVES) errors.push(`plan has ${items.length} waves; max ${MAX_WAVES}. Merge waves.`);
+    // Per wave: its trimmed body (undefined when missing or not a string), the waves it may build on ("any" when
+    // unknowable), its parent when dependsOn passed every check (null = chain head), and whether design is true.
+    const bodies: (string | undefined)[] = [];
+    const maybeParents: (number[] | "any")[] = [];
+    const parents: (number | null | undefined)[] = [];
+    const designs: boolean[] = [];
+    items.forEach((item, index) => {
+      const n = index + 1;
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        errors.push(`plan wave ${n} is ${item === null ? "null" : Array.isArray(item) ? "an array" : `a ${typeof item}`}, not an object; use {body, dependsOn?, design?}.`);
+        bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false);
+        return;
+      }
+      const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown };
+      const name = multi ? `plan wave ${n} body` : "plan";
+      const body = typeof wave.body === "string" ? wave.body.trim() : undefined;
+      bodies.push(body);
+      if (body === undefined) errors.push(`${name} is ${wave.body === undefined ? "missing" : `${Array.isArray(wave.body) ? "an array" : `a ${typeof wave.body}`}`}; send the wave's Markdown text as a string.`);
+      else if (!body) errors.push(`${name} is empty; send the plan text.`);
+      else if (body.length > MAX_PLAN_LENGTH) errors.push(`${name} is ${num(body.length)} characters; max ${num(MAX_PLAN_LENGTH)}. ${multi ? "Split the wave." : "Split it into waves."}`);
+      if (wave.design !== undefined && typeof wave.design !== "boolean") {
+        errors.push(`plan wave ${n} design is ${JSON.stringify(wave.design)} (${typeof wave.design}); allowed true or false. Send a boolean, or drop design.`);
+      }
+      designs.push(wave.design === true);
+      const deps = wave.dependsOn;
+      const bad = (what: string, fix: string) => errors.push(`plan wave ${n} dependsOn is ${JSON.stringify(deps)}, ${what}; ${fix}`);
+      if (deps === undefined) { maybeParents.push(n > 1 ? [n - 1] : []); parents.push(n > 1 ? n - 1 : null); return; }
+      parents.push(undefined);
+      if (!Array.isArray(deps) || !deps.every((k) => Number.isInteger(k))) {
+        bad("not an array of integers", "use [] or [k] with k the 1-based earlier wave.");
+        maybeParents.push(Array.isArray(deps) ? deps.filter((k): k is number => Number.isInteger(k)) : "any");
+        return;
+      }
+      maybeParents.push(deps as number[]);
+      if (deps.length > 1) bad(`${deps.length} entries but max is 1`, "name only the wave it builds on.");
+      else if (deps.some((k) => k < 1 || k >= n)) bad("not an earlier wave", n === 1 ? "wave 1 depends on nothing; use []." : `use a wave from 1 to ${n - 1}.`);
+      else parents[index] = deps[0] ?? null;
     });
     // ponytail: headings inside code blocks are deliberately out of scope (user decision).
-    if (!bodies.some((body) => /^[ \t]*#{1,6}[ \t]+what we(?:'re|’re| are) not doing/im.test(body))) {
+    // The NOT-doing heading may sit in a wave whose body was unreadable, so it is only demanded when every body is a string.
+    if (bodies.every((body) => body !== undefined) && !bodies.some((body) => /^[ \t]*#{1,6}[ \t]+what we(?:'re|’re| are) not doing/im.test(body!))) {
       errors.push(`plan lacks a "## What we're NOT doing" Markdown heading (any level, not bold text) in some wave; add one.${typeof plan === "string" && plan.startsWith("[")
         ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string." : ""}`);
     }
     bodies.forEach((body, index) => {
       if (body && !contractsOf(body)) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
     });
-    if (!waves) return errors;
-    let chainsValid = true;
-    waves.forEach((wave, index) => {
+    // A design wave is a chain tip when no other wave could build on it, a decision that needs every other wave's possible parents.
+    designs.forEach((design, index) => {
       const n = index + 1;
-      const deps = wave.dependsOn;
-      if (deps === undefined) return;
-      if (!Array.isArray(deps) || !deps.every((k) => Number.isInteger(k))) {
-        errors.push(`plan wave ${n} dependsOn is not an array of integers; use [] or [k] with k the 1-based earlier wave.`);
-        chainsValid = false;
-      } else if (deps.length > 1) {
-        errors.push(`plan wave ${n} dependsOn has ${deps.length} entries; max 1. Name only the wave it builds on.`);
-        chainsValid = false;
-      } else if (deps.some((k) => k < 1 || k >= n)) {
-        errors.push(`plan wave ${n} dependsOn [${deps[0]}] must name an earlier wave${n === 1 ? ": wave 1 depends on nothing; use []" : ` (1 to ${n - 1})`}.`);
-        chainsValid = false;
+      if (design && maybeParents.every((candidates, other) => other === index || (candidates !== "any" && !candidates.includes(n)))) {
+        errors.push(`plan wave ${n} is design: true but no wave builds on it; follow it with the wave that implements it (dependsOn [${n}] or the next wave), or drop design.`);
       }
     });
-    if (chainsValid) {
-      const parents = new Set<number>();
-      waves.forEach((wave, index) => {
-        const n = index + 1;
-        if (wave.design && successorOf(waves, n) === null) {
-          errors.push(`plan wave ${n} is design: true but no wave builds on it; follow it with the wave that implements it (dependsOn [${n}] or the next wave), or drop design.`);
-        }
-        const parent = parentOf(waves, n);
-        if (parent === null) return;
-        if (parents.has(parent)) errors.push(`plan wave ${n} and another wave both build on wave ${parent}; waves form chains only, so mark one of them dependsOn [] or chain it after the other.`);
-        parents.add(parent);
-      });
-    }
+    const taken = new Set<number>();
+    parents.forEach((parent, index) => {
+      if (parent === undefined || parent === null) return;
+      if (taken.has(parent)) errors.push(`plan wave ${index + 1} and another wave both build on wave ${parent}; waves form chains only, so mark one of them dependsOn [] or chain it after the other.`);
+      taken.add(parent);
+    });
     return errors;
   }
 
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
-    const row = await managedRow(threadId, callerProjectId);
-    if (!row || row.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
-    if (["complete", "archived", "deleted"].includes(row.state)) {
-      throw new Error(`Managed thread ${threadId} is ${row.state} and can no longer report.`);
+    const found = await lookupRow(threadId, callerProjectId);
+    // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
+    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null });
+    if (!candidate || candidate.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
+    if (found.row && ["complete", "archived", "deleted"].includes(found.row.state)) {
+      throw new Error(`Managed thread ${threadId} is ${found.row.state} and can no longer report.`);
     }
     // Some planners send the wave array JSON-encoded; the string branch would take it as one flat wave.
     let plan: string | unknown[] | undefined = params.plan;
@@ -3370,8 +3397,10 @@ export default async function plugin(bb: BbPluginApi) {
       try { decoded = JSON.parse(plan); } catch { decoded = undefined; }
       if (Array.isArray(decoded)) plan = decoded;
     }
-    const errors = checkReport(row, params, plan);
+    const errors = checkReport(candidate, params, plan);
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
+    if (found.pending) insertThread(found.pending);
+    const row = roles.get(threadId)!;
     // checkReport proved the shape: a wave array here is {body, dependsOn?, design?}[], with bodies not yet trimmed if JSON-decoded.
     const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
