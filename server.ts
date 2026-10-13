@@ -2069,6 +2069,7 @@ export default async function plugin(bb: BbPluginApi) {
       pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
     });
     insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, state: "starting", status: thread.status });
+    await persistBrief(thread.id, prompt);
     return { threadId: thread.id, title, projectId };
   }
 
@@ -2149,6 +2150,7 @@ export default async function plugin(bb: BbPluginApi) {
       workerThreadId: worker?.thread_id ?? null, parentThreadId: chief.thread_id, title,
       state: "starting", status: thread.status,
     });
+    await persistBrief(thread.id, prompt);
     return { threadId: thread.id, title, projectId };
   }
 
@@ -2372,14 +2374,22 @@ export default async function plugin(bb: BbPluginApi) {
       ...(branch || issueUrl || prUrl ? [
         "", "## Git workflow",
         ...(branch ? [`Your worktree is based on ${branch}. Check that branch out and commit your work there.`] : []),
-        ...(prior ? [`This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them. Its last report: bb chief inspect ${prior.thread_id}`] : []),
+        ...(prior ? [`This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them.${prior.result ? "" : ` Its last report: bb chief inspect ${prior.thread_id}`}`] : []),
         ...(issueUrl ? [`Tracking issue: ${issueUrl}`] : []),
         ...(prUrl ? [`Draft pull request: ${prUrl}`] : []),
         "Do not create, merge, or mark ready any pull request — Chief owns the forge. Commit and push your work, then report ready.",
       ] : []),
+      ...(prior?.result ? [
+        "", "## Predecessor's last report",
+        prior.summary ?? clip(prior.result, 1_500),
+        ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
+        ...(prior.recommendation ? [`Recommendation: ${clip(prior.recommendation, 600)}`] : []),
+        ...(prior.report_path ? [`Full report: ${prior.report_path}`] : []),
+      ] : []),
       "", "## Working contract",
       "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file or verdict file, read that file in full too before starting.",
       "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
+      "- Commit and push after each meaningful step (a passing sub-change, before any risky edit, before reporting); the pushed branch is your checkpoint and what the reviewer sees.",
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
       ...(planPath !== undefined ? ["- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`."] : []),
@@ -2431,6 +2441,7 @@ export default async function plugin(bb: BbPluginApi) {
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
       kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn, backlogTaskId,
     });
+    await persistBrief(thread.id, prompt);
     if (prior) {
       const now = Date.now();
       db.transaction(() => {
@@ -2827,6 +2838,7 @@ export default async function plugin(bb: BbPluginApi) {
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
       insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha });
+      await persistBrief(thread.id, prompt);
       // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
       const streak = taskRejections(workerThreadId).streak;
       if (previous || streak) {
@@ -2900,6 +2912,7 @@ export default async function plugin(bb: BbPluginApi) {
         threadId: thread.id, role: "reviewer", projectId, chiefThreadId, parentThreadId: chiefThreadId, title,
         state: "starting", status: thread.status, branch, prUrl: pullRequestRef,
       });
+      await persistBrief(thread.id, prompt);
       return { threadId: thread.id, title, workerThreadId: null, created: true };
     })();
     reviewStarts.set(key, start);
@@ -3164,6 +3177,11 @@ export default async function plugin(bb: BbPluginApi) {
     return path;
   }
 
+  /** Best-effort: keeps the exact spawn prompt in the thread's own storage so it can re-read its brief after a compaction. Never throws. */
+  async function persistBrief(threadId: string, prompt: string) {
+    await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
+  }
+
   /** A reviewer's verdict for another thread's prompt: the clipped findings plus where to read them in full. */
   function verdictPreview(review: ManagedRow, suffix = "") {
     return [
@@ -3321,14 +3339,14 @@ export default async function plugin(bb: BbPluginApi) {
     const { report_seq: seq, result_rev: resultRev } = db.transaction(() => {
       const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
         reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END,
-        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets=0,
+        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
         last_report_state=?, owner_approval=NULL, owner_approved_at=NULL,
-        active_since=NULL, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
+        active_since = CASE WHEN ?='active' THEN active_since ELSE NULL END, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
         params.state, params.result ?? null, params.summary ?? null, params.state === "blocked" ? params.blocker : null,
         params.recommendation ?? null, verdict,
         verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0,
         scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, fails,
-        params.state, now, threadId,
+        params.state, params.state, params.state, now, threadId,
       ) as { report_seq: number; result_rev: number };
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         db.prepare(`UPDATE managed_threads SET advised_at=COALESCE(advised_at, ?) WHERE thread_id=?`).run(now, threadId);
@@ -3600,6 +3618,12 @@ export default async function plugin(bb: BbPluginApi) {
         db.prepare(`UPDATE managed_threads SET thread_errors=thread_errors+1 WHERE thread_id=?`).run(thread.id);
         reloadRoles();
       }
+      // `error:` never `failed:`, so chiefStats keeps counting only transient failures as `:failed:`; the outbox dedupes per cycle.
+      await alertChief(row, `error:${row.active_cycle}`, [
+        `${row.role} “${row.title}” (${row.thread_id}) failed.`,
+        ...(failure ? [`Provider error: ${clip(failure.text, 400)}`] : ["No provider error was recorded."]),
+        rerouteSteps(row),
+      ].join("\n"));
       return;
     }
     const { usageLimit, resetSeconds } = transient;
@@ -5233,6 +5257,7 @@ export default async function plugin(bb: BbPluginApi) {
       skills: ["chief-worker"],
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: short \`summary\`, full \`result\`; after reporting, end with one line.`,
+        "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
         ...(lessons.length ? ["", clip(["## Lessons from earlier review rounds", ...lessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),

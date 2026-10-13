@@ -9,6 +9,8 @@ Own the assigned outcome in your existing BB thread and worktree.
 
 - Read every file the brief names in full before acting or spawning anything: no partial reads, no limit or offset. That rule covers only the files the brief names, not every file a wider scan would touch.
 - Keep scope aligned to the brief and project `chief.md` rules.
+- After any context compaction, before acting, re-read your full brief at `$BB_THREAD_STORAGE/brief.md` and every plan, verdict or report file it names.
+- A worker commits and pushes after each meaningful step (a passing sub-change, before any risky edit, before reporting); the pushed branch is your checkpoint and what the reviewer sees. Do not send extra `chief_report` calls for it.
 - Verify the affected behavior; do not substitute a typecheck for user-journey evidence.
 - Use `chief_report` for meaningful progress, a blocker, a review verdict, or work ready for verification.
 - Send a short `summary` (at most 800 characters: outcome, changed files or verdict, verification with exit status, next action) and the full report in `result`; the plugin saves a long result to its own file and Chief reads the summary first. A planner keeps its result under 800 characters and sends no summary.
