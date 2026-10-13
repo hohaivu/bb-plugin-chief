@@ -179,10 +179,13 @@ open todos, with done items (the newest 50) struck through in a collapsed group.
 while it names a next action (the same one Pending shows) or is still in progress; supporting
 threads close with their worker. It updates
 live as managed threads change (and refetches after the realtime connection reconnects).
-Chief's own todos — including queued work nobody has delegated yet — live there too as
-`todo #N` lines: `chief_roster` with `todo: { text, after? }` adds one, `todo: { id, text?, after?, state? }`
-changes or closes it (`done`/`dropped`). Todos persist per project, so a new or replacement Chief
-sees them; Chief is told to use them instead of Memory files, TodoWrite, or Task tools.
+Chief's own todos — including queued work nobody has delegated yet — are the project's Backlog.md tasks and
+live there too as `todo TASK-N` lines. The board is always on: the first time Chief runs in a project with no
+`backlog/` or `.backlog/` folder, Chief creates an empty `backlog/` (default config) in the project's default
+checkout and exports the project's open legacy todos to it once; from then on `chief_backlog` adds, changes and
+closes them (`done` = last status, `dropped` = archive) and `chief_roster`'s `todo` field only refuses. If both
+folders exist or the folder cannot be read, Pending says so and todos are not tracked until it is fixed.
+Chief is told to use them instead of Memory files, TodoWrite, or Task tools.
 Open todos with an `after:` condition show in Pending as one count line; `chief_roster includeWaiting: true` lists them.
 
 ## CLI
@@ -203,7 +206,7 @@ bb chief review thr_worker [--focus "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
 ```
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster`, `chief_backlog`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, and worker/reviewer/advisor `chief_report`.
 
 ## Build and verify
 
