@@ -70,9 +70,8 @@ function orchestrate() {
       for (const suffix of ["", "-wal", "-shm"]) rmSync(copy + suffix, { force: true });
       copyFileSync(db, copy);
       const out = join(work, `${build.name}.txt`);
-      const child = spawnSync(process.execPath, [SELF, "--capture", dist, "--db", copy, "--out", out], { encoding: "utf8", maxBuffer: 1 << 28 });
+      const child = spawnSync(process.execPath, [SELF, "--capture", dist, "--db", copy, "--out", out], { encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "inherit"] });
       process.stdout.write(`== ${build.name} (${build.name === "base" ? sha1.slice(0, 9) : "working tree"})\n${child.stdout}`);
-      process.stderr.write(child.stderr);
       return { out, status: child.status };
     });
     const failed = builds.find((build) => build.status !== 0);
@@ -198,9 +197,11 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   let section: any = null;
   const thread = (overrides: object) => makeThreadResponse(overrides as never);
   const storedThread = (threadId: string) => {
-    const row = database.prepare(`SELECT project_id, title, status FROM managed_threads WHERE thread_id=?`).get(threadId) as { project_id: string; title: string; status: string } | undefined;
+    const row = database.prepare(`SELECT project_id, title, status, state FROM managed_threads WHERE thread_id=?`).get(threadId) as { project_id: string; title: string; status: string; state: string } | undefined;
     if (!row) return undefined;
-    return thread({ id: threadId, projectId: row.project_id, environmentId: `env_${threadId}`, title: row.title, sectionId: null, visibility: "visible", status: row.status, originPluginId: "chief", ...overrides.get(threadId) });
+    return thread({ id: threadId, projectId: row.project_id, environmentId: `env_${threadId}`, title: row.title, sectionId: "sec_snap", visibility: "visible", status: row.status, originPluginId: "chief",
+      // Mirror the row, so the supervisor's load-time reconcile finds nothing to change (it would un-archive rows, one reload each).
+      archivedAt: row.state === "archived" ? 1 : null, deletedAt: row.state === "deleted" ? 1 : null, ...overrides.get(threadId) });
   };
   const catalogModel = (model: string, isDefault = false) => ({
     id: model, model, displayName: model, description: "", isDefault, defaultReasoningEffort: "medium",
@@ -309,14 +310,18 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   const bb: any = Object.create(fake, { storage: { value: { ...fake.storage, database: () => database } } });
 
   const mod: any = await import(pathToFileURL(distPath).href);
+  process.stderr.write("  plugin loading\n");
   await mod.default(bb);
+  process.stderr.write("  plugin loaded\n");
 
   // ----- output plumbing
   const lines: string[] = [];
   const counts = new Map<string, number>();
   let category = "";
   let logged = 0;
-  const begin = (name: string) => { category = name; counts.set(name, counts.get(name) ?? 0); lines.push(`\n######## ${name}`); };
+  let stepCount = 0;
+  const started = performance.now();
+  const begin = (name: string) => { category = name; counts.set(name, counts.get(name) ?? 0); lines.push(`\n######## ${name}`); process.stderr.write(`  ${name}\n`); };
   const show = (value: unknown) => (typeof value === "string" ? value : stable(value) ?? String(value));
   async function step(label: string, fn: () => unknown) {
     events.length = 0;
@@ -328,6 +333,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     for (const entry of harness.logEntries.slice(logged)) lines.push(`  ! log.${entry.level} ${entry.message}`);
     logged = harness.logEntries.length;
     counts.set(category, (counts.get(category) ?? 0) + 1);
+    if (++stepCount % 250 === 0) process.stderr.write(`  ... ${stepCount} steps (${category}) ${((performance.now() - started) / 1000).toFixed(0)}s\n`);
   }
   const rows = () => database.prepare(`SELECT * FROM managed_threads ORDER BY thread_id`).all() as any[];
   const isLive = (row: any) => !TERMINAL.includes(row.state);
