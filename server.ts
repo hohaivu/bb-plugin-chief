@@ -1103,7 +1103,7 @@ export default async function plugin(bb: BbPluginApi) {
       publishPending();
     },
   });
-  const ledger = createReviewLedger<ManagedRow>(db, store.get);
+  const ledger = createReviewLedger<ManagedRow>(db, store.get, store);
   const schedule = createWaveSchedule<ManagedRow>(store.rows);
   const { planWavesFor, isDesignWave, waveWorkers, reviewTargetsFor } = schedule;
   let plannerActive = false;

@@ -96,6 +96,11 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     return result;
   }
 
+  /** The review ledger's writes run inside the caller's store.batch, which reloads once: they never reload on their own. */
+  function inBatch() {
+    if (!batching) throw new Error("A review ledger write must run inside store.batch.");
+  }
+
   function insert(input: ThreadInsert<Row["role"], Row["state"]>) {
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
@@ -297,6 +302,25 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       db.prepare(`UPDATE managed_threads SET stall_alerted_cycle=?, stop_alerted_cycle=?, updated_at=? WHERE thread_id=?`)
         .run(stallCycle, stopCycle, Date.now(), threadId);
       wrote();
+    },
+
+    /** replaces: the open reviewer of the prior worker follows the fresh one. The snapshot resets too: it was tied to the
+     * prior worker's report_seq, and the fresh worker restarts its own count from 0, so a stale value here could
+     * coincidentally match a future report and wrongly suppress its review. Batch only; no reload. */
+    repointReviewer(priorThreadId: string, successorThreadId: string, now: number) {
+      inBatch();
+      db.prepare(`UPDATE managed_threads SET worker_thread_id=?, reviewed_report_seq=NULL, updated_at=? WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(successorThreadId, now, priorThreadId);
+    },
+    /** A new reviewer starts from the task's carried reject streak. Batch only; no reload. */
+    setRejectStreak(reviewerThreadId: string, streak: number, now: number) {
+      inBatch();
+      db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(streak, now, reviewerThreadId);
+    },
+    /** A report's verdict: a request_changes adds one to reject_streak, an approve resets it. Batch only; no reload. */
+    bumpRejectStreak(threadId: string, verdict: string | null) {
+      inBatch();
+      db.prepare(`UPDATE managed_threads SET reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END WHERE thread_id=?`)
+        .run(verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0, threadId);
     },
 
     /** A Chief that failed a turn is active again once it calls a tool. */

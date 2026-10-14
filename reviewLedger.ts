@@ -25,12 +25,20 @@ interface LedgerRow {
   report_seq: number;
 }
 
+/** The managed_threads writes the ledger makes; the thread store owns them and they run in the caller's store.batch. */
+interface LedgerWrites {
+  repointReviewer(priorThreadId: string, successorThreadId: string, now: number): void;
+  setRejectStreak(reviewerThreadId: string, streak: number, now: number): void;
+  bumpRejectStreak(threadId: string, verdict: string | null): void;
+}
+
 /** One module owns verdict recording, review targets and the 2/3 reject ladder. It returns data and decisions,
  * never sentences, and its write functions run inside the caller's transaction: they never open their own.
  * getRow reads the server's live row cache, which is reloaded after writes. */
 export function createReviewLedger<Row extends LedgerRow>(
   db: ReturnType<BbPluginApi["storage"]["database"]>,
   getRow: (threadId: string) => Row | undefined,
+  writes: LedgerWrites,
 ) {
   // A worker's reviewers are found through review_targets: one plan review covers the latest worker of every branch.
   const openReviewOf = db.prepare<[string]>(
@@ -98,10 +106,7 @@ export function createReviewLedger<Row extends LedgerRow>(
 
   /** replaces: re-points an open review at the fresh worker: the reviewer row and every target of an open review. */
   function repoint(priorThreadId: string, successorThreadId: string, now: number) {
-    // Reset the snapshot too: it was tied to the prior worker's report_seq, and the
-    // fresh worker restarts its own count from 0, so a stale value here could
-    // coincidentally match a future report and wrongly suppress its review.
-    db.prepare(`UPDATE managed_threads SET worker_thread_id=?, reviewed_report_seq=NULL, updated_at=? WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(successorThreadId, now, priorThreadId);
+    writes.repointReviewer(priorThreadId, successorThreadId, now);
     // The same re-point for every worker an open review covers, so a plan review's other branches follow their fresh workers too.
     db.prepare(`UPDATE review_targets SET worker_thread_id=?, report_seq=NULL WHERE worker_thread_id=? AND reviewer_thread_id IN (SELECT thread_id FROM managed_threads WHERE role='reviewer' AND state NOT IN ('complete','archived','deleted'))`).run(successorThreadId, priorThreadId);
   }
@@ -118,15 +123,14 @@ export function createReviewLedger<Row extends LedgerRow>(
   const carriedStreak = (workerThreadIds: string[]) => Math.max(0, ...workerThreadIds.map((id) => taskRejections(id).streak));
 
   function seedStreak(reviewerThreadId: string, streak: number, previous: { reject_streak: number } | undefined, now: number) {
-    db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(Math.max(previous?.reject_streak ?? 0, streak), now, reviewerThreadId);
+    writes.setRejectStreak(reviewerThreadId, Math.max(previous?.reject_streak ?? 0, streak), now);
   }
 
   /** A report's verdict: reject_streak counts only consecutive request_changes verdicts and resets on an approve; a
    * reviewer's verdict also writes one reviewer_verdicts row per covered worker, each with the head and report it was
    * bound to (-1 marks a target re-pointed to a fresh worker, which no report matches). */
   function recordVerdict(row: { thread_id: string; role: string }, verdict: string | null, reportSeq: number, now: number) {
-    db.prepare(`UPDATE managed_threads SET reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END WHERE thread_id=?`)
-      .run(verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0, row.thread_id);
+    writes.bumpRejectStreak(row.thread_id, verdict);
     if (row.role !== "reviewer" || !verdict) return;
     const covered = targets(row.thread_id);
     if (covered.length) {
