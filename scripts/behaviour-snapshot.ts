@@ -159,6 +159,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   // ----- fixtures: the copy has no live designer, planner with a design wave, or active child of each role.
   const notes: string[] = [];
   const chief = database.prepare(`SELECT thread_id, project_id FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND state='idle' ORDER BY thread_id LIMIT 1`).get() as { thread_id: string; project_id: string } | undefined;
+  let seedStacked: (() => void) | undefined;
   if (chief) {
     const at = clock - 100_000;
     const insert = (row: Record<string, unknown>, offset: number) => {
@@ -192,16 +193,19 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       insert({ thread_id: `thr_fx_id_${id}`, role: "worker", title: `Fixture idle-ready worker ${id}`, state: "ready", branch: `feature/fx-id-${id}`, pr_url: `https://github.com/o/r/pull/${9201 + index}`, reviewed_head_sha: String(index + 5).repeat(40),
         plan_thread_id: "thr_fx_id_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture idle-ready worker ${id} brief` }, 61 + index);
     }
-    // The stacked-plan fixture: a chain of three waves, each on its own branch and pull request (no replaces:), all ready (e1e).
-    insert({ thread_id: "thr_fx_st_planner", role: "planner", title: "Fixture stacked planner", state: "ready", result: "Fixture stacked plan", summary: "Fixture stacked plan summary", plan_waves: JSON.stringify([
-      { path: `${FILES_ROOT}/thr_fx_st_planner/plan-1.md`, contracts: "Fixture stacked contract 1", dependsOn: [] },
-      { path: `${FILES_ROOT}/thr_fx_st_planner/plan-2.md`, contracts: "Fixture stacked contract 2", dependsOn: [1] },
-      { path: `${FILES_ROOT}/thr_fx_st_planner/plan-3.md`, contracts: "Fixture stacked contract 3", dependsOn: [2] },
-    ]), report_seq: 1, last_report_state: "ready", brief: "Fixture stacked planner brief" }, 70);
-    for (const [index, id] of ["a", "b", "c"].entries()) {
-      insert({ thread_id: `thr_fx_st_${id}`, role: "worker", title: `Fixture stacked worker ${id}`, state: "ready", branch: `feature/fx-st-${id}`, pr_url: `https://github.com/o/r/pull/${9301 + index}`, reviewed_head_sha: String(index + 7).repeat(40),
-        plan_thread_id: "thr_fx_st_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture stacked worker ${id} brief` }, 71 + index);
-    }
+    // The stacked-plan fixture: a chain of three waves, each on its own branch and pull request (no replaces:), all ready.
+    // Seeded by e1e itself, so the earlier categories read the same rows as before it existed.
+    seedStacked = () => {
+      insert({ thread_id: "thr_fx_st_planner", role: "planner", title: "Fixture stacked planner", state: "ready", result: "Fixture stacked plan", summary: "Fixture stacked plan summary", plan_waves: JSON.stringify([
+        { path: `${FILES_ROOT}/thr_fx_st_planner/plan-1.md`, contracts: "Fixture stacked contract 1", dependsOn: [] },
+        { path: `${FILES_ROOT}/thr_fx_st_planner/plan-2.md`, contracts: "Fixture stacked contract 2", dependsOn: [1] },
+        { path: `${FILES_ROOT}/thr_fx_st_planner/plan-3.md`, contracts: "Fixture stacked contract 3", dependsOn: [2] },
+      ]), report_seq: 1, last_report_state: "ready", brief: "Fixture stacked planner brief" }, 70);
+      for (const [index, id] of ["a", "b", "c"].entries()) {
+        insert({ thread_id: `thr_fx_st_${id}`, role: "worker", title: `Fixture stacked worker ${id}`, state: "ready", branch: `feature/fx-st-${id}`, pr_url: `https://github.com/o/r/pull/${9301 + index}`, reviewed_head_sha: String(index + 7).repeat(40),
+          plan_thread_id: "thr_fx_st_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture stacked worker ${id} brief` }, 71 + index);
+      }
+    };
     // The wave-schedule fixture: a planner that has not reported its plan yet (e1c drives it through tools).
     insert({ thread_id: "thr_fx_wv_planner", role: "planner", title: "Fixture wave planner", state: "active", status: "idle", active_since: clock - 5_000, active_cycle: 1, brief: "Fixture wave planner brief" }, 50);
     ROLES.filter((role) => role !== "chief").forEach((role, index) => insert({
@@ -664,9 +668,12 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     // a moved head on one wave must still refuse it. The last step completes any leftover with an override, so both builds
     // leave the same live rows for e2 onward.
     begin("e1e-stacked-review");
+    seedStacked?.();
     {
       const planner = "thr_fx_st_planner";
       const start = one(`SELECT chief_thread_id, project_id FROM managed_threads WHERE thread_id=?`, planner);
+      // The server caches rows; an idle event on the Chief (already idle) makes it reload, and nothing else changes.
+      if (start) await harness.emitThreadEvent("thread.idle", { thread: storedThread(start.chief_thread_id as string)! } as never);
       if (!start) { await step("stacked: no planner fixture in the copy", () => "skipped"); }
       else {
         const owner = start.chief_thread_id as string;
