@@ -84,14 +84,15 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return { heads: chainHeads, undelegated };
   }
 
-  /** The workers one review of this chain tip covers, in tip order: the latest worker of every chain,
-   * minus design waves and workers already complete (the one passed in always stays). A worker with no
-   * plan link (or #simple) covers only itself. Assumes reviewRefusal passed. */
+  /** The workers one review of this chain tip covers, in wave order: the latest worker of every wave,
+   * minus design waves and workers already complete (the one passed in always stays). A replaces: chain's
+   * earlier waves are complete, so they drop out; a stacked chain whose waves each have their own PR is
+   * covered wave by wave. A worker with no plan link (or #simple) covers only itself. Assumes reviewRefusal passed. */
   function reviewTargetsFor(worker: Row): Row[] {
     const waves = planWavesFor(worker.plan_thread_id);
     if (!waves.length || worker.plan_wave == null) return [worker];
-    return tips(waves).flatMap((tip) => {
-      const latest = waveWorkers(worker.plan_thread_id!, tip).at(-1);
+    return waves.flatMap((_, index) => {
+      const latest = waveWorkers(worker.plan_thread_id!, index + 1).at(-1);
       return latest && !isDesignWave(latest) && (latest.thread_id === worker.thread_id || latest.state !== "complete") ? [latest] : [];
     });
   }

@@ -2201,9 +2201,10 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (waveWaitLine(row)) return null;
     const targets = reviewTargetsFor(row);
-    // The tips whose current report no review covers yet. The plan's one call is named on the first of them
+    // The targets whose current report no review covers yet. The plan's one call is named on the first of them
     // (whichever tip a replaces: successor or an earlier review left stale), so Pending never drops it.
-    const stale = targets.filter((target) => !ledger.isCurrent(target));
+    // Only a chain tip can start the review (reviewRefusal), so a stale earlier wave is never the namer.
+    const stale = targets.filter((target) => !ledger.isCurrent(target) && successorOf(waves, target.plan_wave!) === null);
     if (!stale.length) return null;
     const namer = stale.find((target) => target.state === "ready") ?? stale[0]!;
     if (!forAlert && namer.thread_id !== row.thread_id) return null;
