@@ -183,6 +183,8 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         plan_thread_id: "thr_fx_lad_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture ladder worker ${id} brief` }, 41 + index);
     }
     insert({ thread_id: "thr_fx_lad_c", role: "worker", title: "Fixture ladder worker c", state: "ready", branch: "feature/fx-lad-c", pr_url: "https://github.com/o/r/pull/9005", reviewed_head_sha: "3".repeat(40), result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: "Fixture ladder worker c brief" }, 43);
+    // The wave-schedule fixture: a planner that has not reported its plan yet (e1c drives it through tools).
+    insert({ thread_id: "thr_fx_wv_planner", role: "planner", title: "Fixture wave planner", state: "active", status: "idle", active_since: clock - 5_000, active_cycle: 1, brief: "Fixture wave planner brief" }, 50);
     ROLES.filter((role) => role !== "chief").forEach((role, index) => insert({
       thread_id: `thr_fx_${role}_active`, role, title: `Fixture active ${role}`, state: "active", status: "active", active_since: clock - 5_000, active_cycle: 1,
       brief: `Fixture ${role} brief`, branch: role === "worker" ? "feature/fx-active" : null,
@@ -516,6 +518,89 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     await ladder("single", "thr_fx_plain");
     await ladder("two-branch", "thr_fx_lad_a", "thr_fx_lad_b");
     await ladder("re-pointed", "thr_fx_lad_c", undefined, true);
+    // e1c. the wave schedule, driven only through tools: a planner reports 4 waves (a two-wave chain, then a
+    // design-only wave and the wave that implements it), the waves are delegated once the owner approves the design,
+    // one review covers both chain tips, one tip is replaced, and every worker completes. Each step records its
+    // text, alerts, spawn prompts and the tables, a refusal included.
+    begin("e1c-wave-schedule");
+    {
+      const planner = "thr_fx_wv_planner";
+      const start = one(`SELECT chief_thread_id, project_id FROM managed_threads WHERE thread_id=?`, planner);
+      if (!start) { await step("wave schedule: no planner fixture in the copy", () => "skipped"); }
+      else {
+        const owner = start.chief_thread_id as string;
+        const project = start.project_id as string;
+        const spawnedBeforeWaves = spawnIndex;
+        const mineWave = (column: string) => `(${column}='${planner}' OR ${column} IN (SELECT thread_id FROM managed_threads WHERE plan_thread_id='${planner}') OR (${column} LIKE 'thr_snap_%' AND CAST(substr(${column}, 10) AS INTEGER) > ${spawnedBeforeWaves}))`;
+        const waveTables = () => [["managed_threads", "thread_id", "thread_id"], ["reviewer_verdicts", "reviewer_thread_id", "id"], ["review_targets", "reviewer_thread_id", "reviewer_thread_id, worker_thread_id"], ["alert_outbox", "source_thread_id", "rowid"]]
+          .map(([table, column, order]) => `${table}\n${(database.prepare(`SELECT * FROM ${table} WHERE ${mineWave(column!)} ORDER BY ${order}`).all() as object[]).map(stable).join("\n")}`)
+          .concat(`plan_log\n${(database.prepare(`SELECT * FROM plan_log WHERE plan_thread_id=? ORDER BY id`).all(planner) as object[]).map(stable).join("\n")}`).join("\n");
+        const waveStep = (label: string, fn: () => unknown) => step(`waves: ${label}`, async () => {
+          let outcome: string;
+          try { outcome = show(await fn()); } catch (error) { outcome = `ERR ${error instanceof Error ? error.message : String(error)}`; }
+          return `${outcome}\n${waveTables()}`;
+        });
+        const workerOf = (wave: number) => one(`SELECT thread_id FROM managed_threads WHERE role='worker' AND plan_thread_id=? AND plan_wave=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, planner, wave)?.thread_id as string | undefined;
+        const reviewerOfWave = (workerId: string | undefined) => (workerId ? one(`SELECT r.thread_id FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined : undefined);
+        const as = (id: string | undefined, name: string, params: unknown, chiefCalls = false) => (id ? tool(name, params, chiefCalls ? owner : id, project) : "no such thread");
+        const body = (n: number) => `# Wave ${n}\nDo the work of wave ${n}.\n\n## Contracts to verify\n- Wave ${n} keeps its invariant\n\n## What we're NOT doing\n- Nothing else`;
+        const ready = { state: "ready", summary: "Snapshot wave worker summary", result: "Changed server.ts:1.\n\n## Deviations from plan\nNone\n\n## Verification\nAutomated: npm test; echo=0\nManual: none" };
+        const verdict = (kind: string) => ({ state: "ready", verdict: kind, summary: `Snapshot wave ${kind}`, result: `Snapshot wave review: ${kind}.` });
+        const delegate = (n: number, extra: object = {}) => tool("chief_delegate", { title: `Snapshot plan wave ${n}`, mission: `Snapshot mission, wave ${n}`, planThreadId: planner, wave: n, ...extra }, owner, project);
+        const review = (workerId: string | undefined) => as(workerId, "chief_review", { workerThreadId: workerId }, true);
+        const roster = (label: string) => waveStep(`chief_roster ${label}`, () => tool("chief_roster", { includeComplete: true }, owner, project));
+
+        await waveStep("planner reports 4 waves", () => tool("chief_report", { state: "ready", summary: "Snapshot wave plan", result: "Snapshot wave plan result", plan: [
+          { body: body(1) }, { body: body(2), dependsOn: [1] }, { body: body(3), dependsOn: [], design: true }, { body: body(4), dependsOn: [3] },
+        ] }, planner, project));
+        await roster("after the plan");
+        // Each chain has its own branch and pull request; the forge stub answers a head for the first worker row of each.
+        await waveStep("delegate wave 1", () => delegate(1, { branch: "feature/wv-a", prUrl: "https://github.com/o/r/pull/9101" }));
+        await waveStep("delegate wave 3", () => delegate(3, { branch: "feature/wv-b", prUrl: "https://github.com/o/r/pull/9102" }));
+        await waveStep("delegate wave 4 before the design wave is ready", () => delegate(4));
+        await roster("after waves 1 and 3");
+        const [w1, w3] = [workerOf(1), workerOf(3)];
+        for (const [id, head] of [[w1, "c"], [w3, "d"]] as const) database.prepare(`UPDATE managed_threads SET reviewed_head_sha=? WHERE thread_id=?`).run(head.repeat(40), id);
+        await waveStep("worker 3 ready", () => as(w3, "chief_report", ready));
+        await waveStep("worker 1 ready", () => as(w1, "chief_report", ready));
+        await roster("after both are ready");
+        await waveStep("chief_review the design wave refused", () => review(w3));
+        await waveStep("chief_review wave 1 between waves refused", () => review(w1));
+        await waveStep("chief_owner_approval on a non-design worker refused", () => as(w1, "chief_owner_approval", { workerThreadId: w1, approval: "Snapshot: approved" }, true));
+        await waveStep("delegate wave 4 unapproved", () => delegate(4, { replaces: w3 }));
+        await waveStep("chief_owner_approval the design worker", () => as(w3, "chief_owner_approval", { workerThreadId: w3, approval: "Snapshot: approved, ship it" }, true));
+        await waveStep("worker 3 reports again, which clears the approval", () => as(w3, "chief_report", ready));
+        await waveStep("delegate wave 4 after the approval was cleared", () => delegate(4, { replaces: w3 }));
+        await waveStep("chief_owner_approval the design worker again", () => as(w3, "chief_owner_approval", { workerThreadId: w3, approval: "Snapshot: approved again" }, true));
+        await waveStep("delegate wave 2 replaces wave 1", () => delegate(2, { replaces: w1 }));
+        await waveStep("delegate wave 4 replaces the design worker", () => delegate(4, { replaces: w3 }));
+        const [w2, w4] = [workerOf(2), workerOf(4)];
+        await roster("after all four waves are delegated");
+                for (const [name, id] of [["1", w1], ["2", w2], ["3", w3], ["4", w4]] as const) {
+          await waveStep(`chief_log wave ${name} worker`, () => as(id, "chief_log", name === "2" ? { entries: [{ kind: "FACT", text: "Snapshot fact", scope: "server.ts", basis: "read it" }] } : {}));
+        }
+        await waveStep("worker 2 ready", () => as(w2, "chief_report", ready));
+        await waveStep("chief_review wave 2, wave 4 not ready", () => review(w2));
+        await waveStep("worker 4 ready", () => as(w4, "chief_report", ready));
+        await waveStep("chief_review the tip: one review of the plan", () => review(w4));
+        await waveStep("chief_review wave 2 again", () => review(w2));
+        await roster("in review");
+        await waveStep("reviewer request_changes", () => as(reviewerOfWave(w4), "chief_report", verdict("request_changes")));
+        await waveStep("delegate replaces wave 4's worker", () => delegate(4, { replaces: w4 }));
+        const w5 = workerOf(4);
+        await waveStep("chief_review the superseded tip refused", () => review(w4));
+        await waveStep("replacement ready", () => as(w5, "chief_report", ready));
+        await waveStep("chief_review the replaced tip", () => review(w5));
+        await waveStep("reviewer approves", () => as(reviewerOfWave(w5), "chief_report", verdict("approve")));
+        await roster("approved");
+        // Replaced workers are complete already; the two tips remain, and the planner completes with the last.
+        for (const id of [w2, w5]) {
+          await waveStep(`chief_complete ${id}`, () => as(id, "chief_complete", { threadId: id }, true));
+          await waveStep(`planner state after ${id}`, () => one(`SELECT state FROM managed_threads WHERE thread_id=?`, planner)?.state);
+        }
+        await roster("complete");
+      }
+    }
     begin("e-mutations (continued)");
 
     // e2. every live worker: review, both replaces: calls, complete
