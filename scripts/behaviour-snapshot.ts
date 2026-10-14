@@ -452,7 +452,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     // Like step, but the three tables follow the outcome, a refusal included.
     const ladderStep = (label: string, fn: () => unknown) => step(label, async () => {
       let outcome: string;
-      try { outcome = `OK ${show(await fn())}`; } catch (error) { outcome = `ERR ${error instanceof Error ? error.message : String(error)}`; }
+      try { outcome = show(await fn()); } catch (error) { outcome = `ERR ${error instanceof Error ? error.message : String(error)}`; }
       return `${outcome}\n${tables()}`;
     });
     const reviewerOf = (workerId: string) => one(`SELECT r.thread_id FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
@@ -473,7 +473,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       };
       // The workers send their ready reports once a successor exists, so the next review may start.
       const ready = async (tag: string, ...ids: (string | undefined)[]) => {
-        for (const id of ids) await ladderStep(`ladder ${name} ${tag} worker ready ${id}`, () => ladderReport(id, { state: "ready", summary: "Snapshot ladder worker summary", result: "Changed server.ts:1.\n\n## Deviations from plan\nNone\n\n## Verification\nAutomated: npm test; echo=0\nManual: none" }, project));
+        for (const id of ids.filter(Boolean)) await ladderStep(`ladder ${name} ${tag} worker ready ${id}`, () => ladderReport(id, { state: "ready", summary: "Snapshot ladder worker summary", result: "Changed server.ts:1.\n\n## Deviations from plan\nNone\n\n## Verification\nAutomated: npm test; echo=0\nManual: none" }, project));
       };
       let tip = firstWorker;
       let other = extraBranchWorker;
