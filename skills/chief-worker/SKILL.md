@@ -1,6 +1,6 @@
 ---
 name: chief-worker
-description: Shared rules for every Chief-managed thread: brief, scope, chief_report and the report contract reviewers check.
+description: "Shared rules for every Chief-managed thread: brief, scope, chief_report and the report contract reviewers check."
 ---
 
 # Chief-managed thread: shared core
