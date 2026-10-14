@@ -904,6 +904,17 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       await step("bb chief stats --json after the research calls", () => (owner ? cli(["stats", "--json"], { threadId: owner.id, projectId: owner.project }) : "no chief"));
     }
 
+    // e3. the start-up sites no earlier category reaches: chief_plan and a branch review (a fresh-worktree reviewer).
+    // The ledger and research categories reach the other four; the full spawn arguments and rows land in "f".
+    begin("e3-start-sites");
+    {
+      const owner = chief ? { id: chief.thread_id, project: chief.project_id } : null;
+      const asChief = (name: string, input: unknown) => (owner ? tool(name, input, owner.id, owner.project) : "no chief");
+      await step("chief_plan", () => asChief("chief_plan", { title: "Snapshot start-site plan", mission: "Snapshot plan mission", context: "Snapshot plan context" }));
+      await step("chief_review of a branch no worker carries", () => asChief("chief_review", { branch: "feature/snapshot-branch-review", focus: "Snapshot focus" }));
+      await step("chief_review of the same branch again", () => asChief("chief_review", { branch: "feature/snapshot-branch-review" }));
+    }
+
     // f. final state of every table the scenarios touch
     begin("f-final-state");
     const dump = (table: string, order: string) => async () => (database.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all() as object[]).map(stable).join("\n");
