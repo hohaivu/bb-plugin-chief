@@ -2562,11 +2562,13 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (waveWaitLine(row)) return null;
     const targets = reviewTargetsFor(row);
-    if (targets.every((target) => (coveringReviewer.get(target.thread_id) as { target_seq: number | null } | undefined)?.target_seq === target.report_seq)) return null;
-    // One call for the whole plan: only its first reviewable tip's Pending line names it; every tip's ready alert does.
-    if (!forAlert && targets[0]?.thread_id !== row.thread_id) return null;
+    // The tips whose current report no review covers yet. The plan's one call is named on the first of them
+    // (whichever tip a replaces: successor or an earlier review left stale), so Pending never drops it.
+    const stale = targets.filter((target) => (coveringReviewer.get(target.thread_id) as { target_seq: number | null } | undefined)?.target_seq !== target.report_seq);
+    if (!stale.length) return null;
+    if (!forAlert && stale[0]!.thread_id !== row.thread_id) return null;
     const branches = targets.map((target) => `${target.thread_id}${target.branch ? ` (${target.branch})` : ""}`).join(", ");
-    return `${waves.length === 1 ? "The plan's only wave is" : `All ${waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${targets[0]!.thread_id}). It covers every branch (${branches}). Complete each worker only on that reviewer's approve.`;
+    return `${waves.length === 1 ? "The plan's only wave is" : `All ${waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${stale[0]!.thread_id}). It covers every branch (${branches}). Complete each worker only on that reviewer's approve.`;
   }
 
   /** A row's single pending call, reused identically in report()'s alert and
