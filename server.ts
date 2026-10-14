@@ -10,8 +10,10 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
-import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger } from "./reviewLedger";
-import { chainOf, createWaveSchedule, heads as waveHeads, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
+import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
+import { createManagedSpawn } from "./managedSpawn";
+import { createPlanProgress, type SegmentState } from "./planProgress";
+import { chainOf, createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
 import {
   ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY, REVIEW_ONLY,
   managedSkills, modelRoleSchema, roleSchema, workerKindSchema,
@@ -1093,7 +1095,7 @@ export default async function plugin(bb: BbPluginApi) {
   let roles = new Map<string, ManagedRow>();
   const ledger = createReviewLedger<ManagedRow>(db, (threadId) => roles.get(threadId));
   const schedule = createWaveSchedule<ManagedRow>(() => roles);
-  const { planWavesFor, isDesignWave, waveWorkers, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
+  const { planWavesFor, isDesignWave, waveWorkers, reviewTargetsFor } = schedule;
   let plannerActive = false;
   // ponytail: cached for wave 2's synchronous configure(); the chief_research gate reads live settings.
   let researchActive: ResearchSettings | null = null;
@@ -1105,6 +1107,7 @@ export default async function plugin(bb: BbPluginApi) {
   let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
   const load = () => new Map((allRows.all() as ManagedRow[]).map((row) => [row.thread_id, row]));
   const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
+  const progress = createPlanProgress<ManagedRow>(() => roles, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
   /** A supporting row whose work was absorbed: a reviewer or advisor of a complete worker,
    * a researcher that reported ready (its report alert carries the result), or a planner once
    * every branch's final wave is complete and every linked worker is terminal. */
@@ -1119,9 +1122,7 @@ export default async function plugin(bb: BbPluginApi) {
       return !!row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete";
     }
     if (row.role !== "planner" || !row.plan_waves) return false;
-    const linked = waveWorkers(row.thread_id);
-    return tips(planWavesFor(row.thread_id)).every((tip) => linked.some((w) => w.plan_wave === tip && w.state === "complete"))
-      && linked.every((w) => terminal(w.state));
+    return progress.plannerAbsorbed(row);
   }
   /** Completes absorbed rows, each only after a fresh threads.get shows it live and not busy.
    * A failed or busy read leaves the row alone (fail closed); a later reload retries. */
@@ -1552,6 +1553,7 @@ export default async function plugin(bb: BbPluginApi) {
     return researchActive;
   }
 
+  // Not on managedSpawn: it picks the model after building its prompt, skips the cooldown check, hands over between spawn and insert, and has no parent or brief file.
   async function spawnChief(target: string, previous?: ManagedRow) {
     const sectionId = await ensureSection();
     const name = await projectName(target);
@@ -1655,17 +1657,15 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  const managedSpawn = createManagedSpawn({ bb, db, spawnExecution, ensureSection, readRules, lifecycleOwner, insertThread, persistBrief });
+
   /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
     if (!(await plannerEnabled())) {
       throw new Error("Planning is off. Turn on “Plan before delegating” in Chief's settings, or delegate this work directly.");
     }
     const { chief, projectId } = await owningChief(callerThreadId);
-    const execution = await spawnExecution("planner", await projectHostId(projectId), projectId);
-    const sectionId = await ensureSection();
-    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-    // the rules into every planner turn, so the spawn prompt does not repeat them.
-    await readRules(projectId);
+    const prepared = await managedSpawn.prepare(projectId, { role: "planner", hostId: await projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = [
       `You are the managed planner for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
@@ -1686,20 +1686,8 @@ export default async function plugin(bb: BbPluginApi) {
       "- A genuine product or scope decision is Chief's, not yours. If it blocks a sound plan, report blocked with the question as blocker and your recommended answer as recommendation. If the plan holds under a stated assumption, report ready and list the question and the assumption under `## Open questions` in the wave it affects. Never ask the user directly from this thread.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
     ].join("\n");
-    const thread = await bb.sdk.threads.spawn({
-      projectId,
-      environment: { type: "project-default" },
-      sectionId,
-      parentThreadId: chief.thread_id,
-      visibility: "visible",
-      title,
-      ...execution,
-      ...(await lifecycleOwner(chief.thread_id)),
-      prompt,
-      pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
-    });
-    insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, state: "starting", status: thread.status });
-    await persistBrief(thread.id, prompt);
+    const thread = await managedSpawn.launch(prepared, { projectId, environment: { type: "project-default" }, title, prompt },
+      { role: "planner", chiefThreadId: chief.thread_id });
     return { threadId: thread.id, title, projectId };
   }
 
@@ -1720,11 +1708,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!workerLive.environmentId) throw new Error(`Worker ${worker.thread_id} has no reusable environment.`);
     }
     const hostId = worker ? await environmentHostId(workerLive!.environmentId!) : await projectHostId(projectId);
-    const execution = await spawnExecution("advisor", hostId, projectId);
-    const sectionId = await ensureSection();
-    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-    // the rules into every advisor turn, so the spawn prompt does not repeat them.
-    await readRules(projectId);
+    const prepared = await managedSpawn.prepare(projectId, { role: "advisor", hostId });
     const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
     const reviews = worker ? taskReviews(worker) : [];
     const prompt = [
@@ -1761,26 +1745,13 @@ export default async function plugin(bb: BbPluginApi) {
       ...(worker ? ["- If the repeated rejections come from a project-level rule a future worker should know (not a task-specific bug), set `lesson`: one sentence, at most 400 characters. Otherwise omit it."] : []),
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
-    const thread = await bb.sdk.threads.spawn({
+    const thread = await managedSpawn.launch(prepared, {
       projectId,
       environment: worker
         ? { type: "reuse", environmentId: workerLive!.environmentId! }
         : { type: "project-default" },
-      sectionId,
-      parentThreadId: chief.thread_id,
-      visibility: "visible",
-      title,
-      ...execution,
-      ...(await lifecycleOwner(chief.thread_id)),
-      prompt,
-      pluginMetadata: { role: "advisor", chiefThreadId: chief.thread_id },
-    });
-    insertThread({
-      threadId: thread.id, role: "advisor", projectId, chiefThreadId: chief.thread_id,
-      workerThreadId: worker?.thread_id ?? null, parentThreadId: chief.thread_id, title,
-      state: "starting", status: thread.status,
-    });
-    await persistBrief(thread.id, prompt);
+      title, prompt,
+    }, { role: "advisor", chiefThreadId: chief.thread_id, workerThreadId: worker?.thread_id ?? null });
     return { threadId: thread.id, title, projectId };
   }
 
@@ -1923,11 +1894,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
     const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
-    const execution = await spawnExecution(kind, hostId, projectId);
-    const sectionId = await ensureSection();
-    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-    // the rules into every worker turn, so the spawn prompt does not repeat them.
-    await readRules(projectId);
+    const prepared = await managedSpawn.prepare(projectId, { role: kind, hostId });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
     const render = (mission: string, contextText?: string) => [
@@ -2013,7 +1980,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(designWave ? ["- Design-only wave: use Design tool mode. Draw or edit the artboards only; write no app code and change no repo files. In your ready result, list each artboard by layer name with its screenshot path so the owner can approve it."] : []),
       ] : []),
     ].join("\n");
-    const thread = await bb.sdk.threads.spawn({
+    const thread = await managedSpawn.launch(prepared, {
       projectId,
       environment: prior
         ? { type: "reuse", environmentId: priorLive!.environmentId! }
@@ -2025,22 +1992,12 @@ export default async function plugin(bb: BbPluginApi) {
             baseBranch: branch ? { kind: "named" as const, name: branch } : { kind: "default" as const },
           },
         },
-      sectionId,
-      parentThreadId: chief.thread_id,
-      visibility: "visible",
-      title: params.title,
-      ...execution,
-      ...(await lifecycleOwner(chief.thread_id)),
-      prompt,
-      pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id, ...(kind === "designer" ? { kind } : {}) },
-    });
-    insertThread({
-      threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
-      state: "starting", status: thread.status, brief: reviewerBrief,
+      title: params.title, prompt,
+    }, {
+      role: "worker", chiefThreadId: chief.thread_id, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
       kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn,
     });
-    await persistBrief(thread.id, prompt);
     if (prior) {
       const now = Date.now();
       db.transaction(() => {
@@ -2149,32 +2106,28 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready. */
   function reviewRefusal(worker: ManagedRow): string | null {
-    if (isDesignWave(worker)) return DESIGN_REVIEW_REFUSAL;
-    const waves = planWavesFor(worker.plan_thread_id);
-    if (!waves.length || worker.plan_wave == null) return null;
-    const planThreadId = worker.plan_thread_id!;
-    const latest = waveWorkers(planThreadId, worker.plan_wave).at(-1);
-    if (latest && latest.thread_id !== worker.thread_id) {
-      return `${worker.thread_id} is superseded by ${latest.thread_id}. The plan's one review starts from the latest workers: chief_review (workerThreadId: ${latest.thread_id}) once every wave is ready.`;
+    const block = progress.reviewBlock(worker);
+    if (!block) return null;
+    switch (block.kind) {
+      case "design": return DESIGN_REVIEW_REFUSAL;
+      case "superseded":
+        return `${worker.thread_id} is superseded by ${block.latest.thread_id}. The plan's one review starts from the latest workers: chief_review (workerThreadId: ${block.latest.thread_id}) once every wave is ready.`;
+      case "restack":
+        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} is stacked on it and still builds on the old head: restack it first — chief_delegate (replaces: ${block.successor.thread_id}).`;
+      case "restacked":
+        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} was already restacked as ${block.successor.thread_id}; start the plan's one review from the latest chain-tip worker once every wave is ready.`;
+      case "betweenWaves":
+        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}).`;
+      case "pending":
+        return `One review covers the whole plan once every wave is ready; wave(s) ${block.pending.join(", ")} of ${block.waves.length} are not ready yet. Wait for their ready reports (delegate any wave not delegated yet), then start the review.`;
     }
-    const next = successorOf(waves, worker.plan_wave);
-    if (next !== null) {
-      return `Wave ${worker.plan_wave} of ${waves.length}: no review runs between waves. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${planThreadId}, wave: ${next}, replaces: ${worker.thread_id}).`;
-    }
-    const pending = pendingWaves(planThreadId, waves);
-    return pending.length
-      ? `One review covers the whole plan once every wave is ready; wave(s) ${pending.join(", ")} of ${waves.length} are not ready yet. Wait for their ready reports (delegate any wave not delegated yet), then start the review.`
-      : null;
   }
 
   /** A ready chain-tip worker's waiting line while other waves of its plan are not ready yet, else null. */
   function waveWaitLine(row: ManagedRow): string | null {
-    if (row.role !== "worker" || row.state !== "ready" || !row.plan_thread_id || row.plan_wave == null) return null;
-    const waves = planWavesFor(row.plan_thread_id);
-    if (successorOf(waves, row.plan_wave) !== null) return null;
-    const pending = pendingWaves(row.plan_thread_id, waves);
-    return pending.length
-      ? `Wave ${row.plan_wave} of ${waves.length} is ready; the one review of the whole plan waits until wave(s) ${pending.join(", ")} are ready. Do not review yet.`
+    const waiting = progress.waitingOn(row);
+    return waiting
+      ? `Wave ${row.plan_wave} of ${waiting.waves.length} is ready; the one review of the whole plan waits until wave(s) ${waiting.pending.join(", ")} are ready. Do not review yet.`
       : null;
   }
 
@@ -2185,31 +2138,24 @@ export default async function plugin(bb: BbPluginApi) {
    * plan link at all, its own review call. */
   function workerReadyNextStep(row: ManagedRow, forAlert = false): string | null {
     if (row.simple) return `#simple work: review is optional, at your judgment. If the report and recorded commands satisfy you, complete it with chief_complete (threadId: ${row.thread_id}; it marks the pull request ready) without a review; otherwise start one: chief_review (workerThreadId: ${row.thread_id}).`;
-    const waves = planWavesFor(row.plan_thread_id);
-    const next = row.plan_thread_id && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
-    if (next !== null && waves[row.plan_wave! - 1]?.design) {
-      return `Design wave ${row.plan_wave} of ${waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, first record it: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words); then delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); it runs as a worker, so name the approved artboards in its mission. On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Never chief_review a design wave, and do not review between waves.`;
+    const step = progress.readyStep(row, forAlert);
+    if (!step) return null;
+    switch (step.kind) {
+      case "designNext":
+        return `Design wave ${row.plan_wave} of ${step.waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, first record it: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words); then delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}); it runs as a worker, so name the approved artboards in its mission. On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Never chief_review a design wave, and do not review between waves.`;
+      case "designDone":
+        return `Design wave ${row.plan_wave} of ${step.waves.length} is ready and nothing builds on it: its artboards need the owner's approval. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words), then chief_complete (threadId: ${row.thread_id}). Never chief_review it.`;
+      case "restack":
+        return `Wave ${row.plan_wave} of ${step.waves.length} is ready after its fix. Wave ${step.next} is stacked on it and still builds on the old head: once this worker is idle, restack it — chief_delegate (replaces: ${step.successor.thread_id}), with a mission to rebase ${step.successor.branch ?? `wave ${step.next}'s branch`} onto ${row.branch ?? "this branch"} and fix what the rebase breaks; the review's findings are attached automatically. Do not review between waves.`;
+      case "nextWave":
+        return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}). Do not review between waves.`;
+      case "unplanned":
+        return `Start its review now: chief_review (workerThreadId: ${row.thread_id}). Complete the work only on the reviewer's approve.`;
+      case "review": {
+        const branches = step.targets.map((target) => `${target.thread_id}${target.branch ? ` (${target.branch})` : ""}`).join(", ");
+        return `${step.waves.length === 1 ? "The plan's only wave is" : `All ${step.waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${step.namer.thread_id}). It covers every branch (${branches}). Complete each worker only on that reviewer's approve.`;
+      }
     }
-    if (waves[row.plan_wave! - 1]?.design) {
-      return `Design wave ${row.plan_wave} of ${waves.length} is ready and nothing builds on it: its artboards need the owner's approval. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words), then chief_complete (threadId: ${row.thread_id}). Never chief_review it.`;
-    }
-    if (next !== null) {
-      return `Wave ${row.plan_wave} of ${waves.length} is ready. Once it is idle, delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}). Do not review between waves.`;
-    }
-    if (!row.plan_thread_id || row.plan_wave == null || !waves.length) {
-      return `Start its review now: chief_review (workerThreadId: ${row.thread_id}). Complete the work only on the reviewer's approve.`;
-    }
-    if (waveWaitLine(row)) return null;
-    const targets = reviewTargetsFor(row);
-    // The targets whose current report no review covers yet. The plan's one call is named on the first of them
-    // (whichever tip a replaces: successor or an earlier review left stale), so Pending never drops it.
-    // Only a chain tip can start the review (reviewRefusal), so a stale earlier wave is never the namer.
-    const stale = targets.filter((target) => !ledger.isCurrent(target) && successorOf(waves, target.plan_wave!) === null);
-    if (!stale.length) return null;
-    const namer = stale.find((target) => target.state === "ready") ?? stale[0]!;
-    if (!forAlert && namer.thread_id !== row.thread_id) return null;
-    const branches = targets.map((target) => `${target.thread_id}${target.branch ? ` (${target.branch})` : ""}`).join(", ");
-    return `${waves.length === 1 ? "The plan's only wave is" : `All ${waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${namer.thread_id}). It covers every branch (${branches}). Complete each worker only on that reviewer's approve.`;
   }
 
   /** A row's single pending call, reused identically in report()'s alert and
@@ -2247,13 +2193,12 @@ export default async function plugin(bb: BbPluginApi) {
       return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${row.worker_thread_id ? ` (replaces: ${row.worker_thread_id})` : " (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
     }
     if (row.role !== "reviewer" || !row.verdict) return null;
-    const covered = ledger.targets(row.thread_id);
-    // replaces: re-pointed a covered worker to a fresh one (its report reset to null): that branch's findings were handed off.
-    if (covered.some((target) => target.report_seq === null)) return null;
-    // Workers independently marked complete already absorbed this reviewer's verdict; only the rest still need a call.
-    const open = covered.filter((target) => roles.get(target.worker_thread_id)?.state !== "complete");
-    if (covered.length && !open.length) return null;
-    const plan = covered.length > 1;
+    // Null: replaces: re-pointed a covered worker to a fresh one (that branch's findings were handed off), or every covered worker is complete.
+    const round = progress.fixRound(row);
+    if (!round) return null;
+    const { open, plan, stacks, loose } = round;
+    // A stacked chain's waves each build on the one before, so they are fixed one at a time, never in parallel.
+    const wave = (target: ReviewTarget) => roles.get(target.worker_thread_id)?.plan_wave;
     const workers = open.map((target) => target.worker_thread_id).join(", ");
     if (row.verdict === "approve") {
       if (plan) {
@@ -2271,9 +2216,14 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (rung === "consult") {
       if (plan) {
-        return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult (workerThreadId: ${open[0]!.worker_thread_id}) now, before any further delegation, with every branch of the review (${workers}) in its context — one consult unlocks the fix for each. Then hand its advice to one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review. If that review still requires changes, stop and escalate to the user.${flagged}`;
+        return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult (workerThreadId: ${open[0]!.worker_thread_id}) now, before any further delegation, with every branch of the review (${workers}) in its context — one consult unlocks the fix for each. Then hand its advice to ${stacks.length
+          ? `fresh workers with chief_delegate (replaces: …): on the stacked waves ${stacks.map((stack) => stack.map(wave).join(" → ")).join("; ")} one at a time in wave order, the earliest wave the findings name first, then each later wave restacked on it as its ready report directs; any other branch the findings name in this turn. Run exactly one more review once every wave is ready.`
+          : "one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review."} If that review still requires changes, stop and escalate to the user.${flagged}`;
       }
       return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with ${row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : `chief_delegate (branch: ${row.branch})`} and run exactly one more review. If that review still requires changes, stop and escalate to the user.${flagged}`;
+    }
+    if (plan && stacks.length) {
+      return `The reviewer requires changes.${flagged} ${stacks.map((stack) => `Waves ${stack.map(wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${wave(target)}: ${target.worker_thread_id}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${loose.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${loose.map((target) => `chief_delegate (replaces: ${target.worker_thread_id})`).join(" / ")}.` : ""} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`;
     }
     if (plan) {
       return `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map((target) => `chief_delegate (replaces: ${target.worker_thread_id})`).join(" / ")}; their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`;
@@ -2392,11 +2342,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
-      const execution = await spawnExecution("reviewer", hostId, worker.project_id);
-      const sectionId = await ensureSection();
-      // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-      // the rules into every reviewer turn, so the spawn prompt does not repeat them.
-      await readRules(worker.project_id);
+      const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
       const title = `Review · ${worker.title}`;
       const waves = planWavesFor(worker.plan_thread_id);
       // A plan review sees every wave; a single worker's reviewer sees only its chain's waves.
@@ -2473,27 +2419,16 @@ export default async function plugin(bb: BbPluginApi) {
           ] : []),
         ],
       });
-      const thread = await bb.sdk.threads.spawn({
+      const thread = await managedSpawn.launch(prepared, {
         projectId: worker.project_id,
         environment: head
           ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
           : { type: "reuse", environmentId: live.environmentId! },
-        sectionId,
-        parentThreadId: worker.chief_thread_id ?? undefined,
-        visibility: "visible",
-        title,
-        ...execution,
-        ...(await lifecycleOwner(worker.chief_thread_id)),
-        prompt,
-        pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
-      });
-      db.transaction(() => {
-        insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha });
-        ledger.addTargets(thread.id, targets.map((target) => ({
-          threadId: target.thread_id, reportSeq: target.report_seq, headSha: heads.get(target.thread_id)?.sha ?? null, prUrl: target.pr_url, branch: target.branch,
-        })));
-      })();
-      await persistBrief(thread.id, prompt);
+        title, prompt,
+      }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha },
+      (threadId) => ledger.addTargets(threadId, targets.map((target) => ({
+        threadId: target.thread_id, reportSeq: target.report_seq, headSha: heads.get(target.thread_id)?.sha ?? null, prUrl: target.pr_url, branch: target.branch,
+      }))));
       // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
       const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
       if (openReviews.length || streak) {
@@ -2536,11 +2471,7 @@ export default async function plugin(bb: BbPluginApi) {
       const duplicate = existingBranchReview.get(chiefThreadId, projectId, branch) as ManagedRow | undefined;
       if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId: null, created: false };
       const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
-      const execution = await spawnExecution("reviewer", hostId, projectId);
-      const sectionId = await ensureSection();
-      // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-      // the rules into every reviewer turn, so the spawn prompt does not repeat them.
-      await readRules(projectId);
+      const prepared = await managedSpawn.prepare(projectId, { role: "reviewer", hostId });
       const title = `Review · ${branch}`;
       const prompt = reviewerPrompt({
         // This worktree is cut from the branch itself, so "its base" would be an empty diff.
@@ -2551,27 +2482,15 @@ export default async function plugin(bb: BbPluginApi) {
         focus,
         provenance: [],
       });
-      const thread = await bb.sdk.threads.spawn({
+      const thread = await managedSpawn.launch(prepared, {
         projectId,
         environment: {
           type: "host",
           hostId,
           workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: branch } },
         },
-        sectionId,
-        parentThreadId: chiefThreadId,
-        visibility: "visible",
-        title,
-        ...execution,
-        ...(await lifecycleOwner(chiefThreadId)),
-        prompt,
-        pluginMetadata: { role: "reviewer", chiefThreadId },
-      });
-      insertThread({
-        threadId: thread.id, role: "reviewer", projectId, chiefThreadId, parentThreadId: chiefThreadId, title,
-        state: "starting", status: thread.status, branch, prUrl: pullRequestRef,
-      });
-      await persistBrief(thread.id, prompt);
+        title, prompt,
+      }, { role: "reviewer", chiefThreadId, branch, prUrl: pullRequestRef });
       return { threadId: thread.id, title, workerThreadId: null, created: true };
     })();
     reviewStarts.set(key, start);
@@ -2660,8 +2579,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.last_report_state !== "ready") throw new Error(`${row.thread_id}'s latest report is ${row.last_report_state ?? "missing"}, not ready: wait for its ready report before asking the owner.`);
     db.prepare(`UPDATE managed_threads SET owner_approval=?, owner_approved_at=? WHERE thread_id=?`).run(approval, Date.now(), row.thread_id);
     reloadRoles();
-    const waves = planWavesFor(row.plan_thread_id);
-    const next = successorOf(waves, row.plan_wave!);
+    const { waves, next } = progress.nextWave(row);
     return next !== null
       ? `Recorded the owner's approval of wave ${row.plan_wave}. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); name the approved artboards in its mission.`
       : `Recorded the owner's approval of wave ${row.plan_wave}. Complete it with chief_complete (threadId: ${row.thread_id}). Never chief_review.`;
@@ -3599,42 +3517,17 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
+  const SEGMENT_LABELS = { notDelegated: "not delegated", approved: "approved", changesRequested: "changes requested", inReview: "in review" } as const;
+
   /** A planner's wave schedule and how far it has been delegated, or a worker's own
    * wave — shared by chief_roster and bb chief status so the two never disagree either. */
   function waveLines(row: ManagedRow): string[] {
     if (row.role === "planner" && row.plan_waves) {
       const waves = planWavesFor(row.thread_id);
-      const chainHeads = waveHeads(waves);
-      let done = 0;
-      const segments = chainHeads.map((head) => {
-        const chain = chainOf(waves, head);
-        // The chain's current worker: its highest plan_wave linked to this planner,
-        // breaking ties (a same-wave fix worker) by the newest.
-        const current = waveWorkers(row.thread_id)
-          .filter((other) => chain.includes(other.plan_wave ?? 0) || (chainHeads.length === 1 && other.plan_wave == null))
-          .reduce<ManagedRow | undefined>((best, other) => (
-            !best || (other.plan_wave ?? 0) > (best.plan_wave ?? 0)
-              || ((other.plan_wave ?? 0) === (best.plan_wave ?? 0) && other.created_at >= best.created_at)
-          ) ? other : best, undefined);
-        const currentWave = current?.plan_wave ?? head;
-        const isFinalWave = currentWave === chain.at(-1);
-        const reviewer = current ? ledger.covering(current.thread_id) : undefined;
-        // Only trust the reviewer's verdict/busy-ness for the wave's state when it
-        // still covers the current worker's latest report — the same report_seq tie
-        // nextAction uses, so a stale (re-pointed but not-yet-reported) reviewer
-        // does not show an approval or rejection that predates the current attempt.
-        const reviewerCovers = reviewer != null && ledger.isCurrent(current!);
-        const approved = isFinalWave && reviewerCovers && reviewer!.verdict === "approve";
-        const state = !current ? "not delegated"
-          : approved ? "approved"
-          : reviewerCovers && reviewer!.verdict === "request_changes" ? "changes requested"
-          : reviewerCovers && BUSY_STATUSES.has(reviewer!.state) ? "in review"
-          : current.state;
-        done += Math.max(0, chain.indexOf(currentWave)) + (approved ? 1 : 0);
-        return `wave ${currentWave} ${state}`;
-        });
+      const { done, total, segments } = progress.waveProgress(row);
+      const segmentLabel = (state: SegmentState) => (state.kind === "worker" ? state.state : SEGMENT_LABELS[state.kind]);
       return [
-        `waves: ${done}/${waves.length} done, ${segments.join(", ")}`,
+        `waves: ${done}/${total} done, ${segments.map((segment) => `wave ${segment.wave} ${segmentLabel(segment.state)}`).join(", ")}`,
         ...waves.map((wave, index) => `  wave ${index + 1} of ${waves.length}: ${wave.path}${
           wave.dependsOn ? wave.dependsOn.length ? ` (after wave ${wave.dependsOn[0]})` : " (independent)" : ""}`),
       ];
@@ -3726,7 +3619,7 @@ export default async function plugin(bb: BbPluginApi) {
       const latest = workers.at(-1);
       // A worker completed before its plan's final wave means the plan stopped mid-way: dropped.
       const status = !latest ? (planner && terminal.includes(planner.state) ? "dropped" : "open")
-        : latest.state === "complete" && onFinalWave(latest) ? "completed"
+        : latest.state === "complete" && progress.onFinalWave(latest) ? "completed"
         : terminal.includes(latest.state) ? "dropped"
         : "open";
       const waves = key.startsWith("plan:") ? new Set(workers.map((row) => row.plan_wave)).size : 1;
@@ -4023,7 +3916,7 @@ export default async function plugin(bb: BbPluginApi) {
   const { research, researchSleep } = createResearch({
     db, bb, managedRow, roleRow: (threadId) => roles.get(threadId), terminal, isActiveChief, researchSettings, readResearchModel,
     environmentHostId, discover, catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError,
-    lastOutput, ensureSection, readRules, insertThread, persistBrief, lifecycleOwner, alertChief, serverPath, clip, execFileAsync,
+    lastOutput, managedSpawn, alertChief, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   });
 

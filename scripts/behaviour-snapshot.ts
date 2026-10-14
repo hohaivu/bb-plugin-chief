@@ -160,6 +160,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   const notes: string[] = [];
   const chief = database.prepare(`SELECT thread_id, project_id FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND state='idle' ORDER BY thread_id LIMIT 1`).get() as { thread_id: string; project_id: string } | undefined;
   let seedStacked: (() => void) | undefined;
+  let seedStackedFix: (() => void) | undefined;
   if (chief) {
     const at = clock - 100_000;
     const insert = (row: Record<string, unknown>, offset: number) => {
@@ -204,6 +205,19 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       for (const [index, id] of ["a", "b", "c"].entries()) {
         insert({ thread_id: `thr_fx_st_${id}`, role: "worker", title: `Fixture stacked worker ${id}`, state: "ready", branch: `feature/fx-st-${id}`, pr_url: `https://github.com/o/r/pull/${9301 + index}`, reviewed_head_sha: String(index + 7).repeat(40),
           plan_thread_id: "thr_fx_st_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture stacked worker ${id} brief` }, 71 + index);
+      }
+    };
+    // The stacked fix-round fixture: the same chain of three stacked waves (no replaces:), all ready, for e1f.
+    // Seeded by e1f itself, like e1e's, so the earlier categories read the same rows as before it existed.
+    seedStackedFix = () => {
+      insert({ thread_id: "thr_fx_sf_planner", role: "planner", title: "Fixture stacked fix planner", state: "ready", result: "Fixture stacked fix plan", summary: "Fixture stacked fix plan summary", plan_waves: JSON.stringify([
+        { path: `${FILES_ROOT}/thr_fx_sf_planner/plan-1.md`, contracts: "Fixture stacked fix contract 1", dependsOn: [] },
+        { path: `${FILES_ROOT}/thr_fx_sf_planner/plan-2.md`, contracts: "Fixture stacked fix contract 2", dependsOn: [1] },
+        { path: `${FILES_ROOT}/thr_fx_sf_planner/plan-3.md`, contracts: "Fixture stacked fix contract 3", dependsOn: [2] },
+      ]), report_seq: 1, last_report_state: "ready", brief: "Fixture stacked fix planner brief" }, 80);
+      for (const [index, id] of ["a", "b", "c"].entries()) {
+        insert({ thread_id: `thr_fx_sf_${id}`, role: "worker", title: `Fixture stacked fix worker ${id}`, state: "ready", branch: `feature/fx-sf-${id}`, pr_url: `https://github.com/o/r/pull/${9401 + index}`, reviewed_head_sha: "def"[index]!.repeat(40),
+          plan_thread_id: "thr_fx_sf_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture stacked fix worker ${id} brief` }, 81 + index);
       }
     };
     // The wave-schedule fixture: a planner that has not reported its plan yet (e1c drives it through tools).
@@ -708,6 +722,58 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         }
       }
     }
+    // e1f. a stacked plan's fix round: the tip's one review requests changes on the chain of three waves, each on its own
+    // branch and pull request. Each wave is then fixed with replaces: and reports ready, the review is refused, and the
+    // second round reaches the consult rung. Every step records its text, the alerts and the tables. The last step completes
+    // any leftover with an override, so both builds leave the same live rows for e2 onward.
+    begin("e1f-stacked-fix-round");
+    seedStackedFix?.();
+    {
+      const planner = "thr_fx_sf_planner";
+      const start = one(`SELECT chief_thread_id, project_id FROM managed_threads WHERE thread_id=?`, planner);
+      // The server caches rows; an idle event on the Chief (already idle) makes it reload, and nothing else changes.
+      if (start) await harness.emitThreadEvent("thread.idle", { thread: storedThread(start.chief_thread_id as string)! } as never);
+      if (!start) { await step("stacked fix: no planner fixture in the copy", () => "skipped"); }
+      else {
+        const owner = start.chief_thread_id as string;
+        const project = start.project_id as string;
+        const spawnedBeforeFix = spawnIndex;
+        const mineFix = (column: string) => `(${column} LIKE 'thr_fx_sf_%' OR (${column} LIKE 'thr_snap_%' AND CAST(substr(${column}, 10) AS INTEGER) > ${spawnedBeforeFix}))`;
+        const fixTables = () => [["managed_threads", "thread_id", "thread_id"], ["reviewer_verdicts", "reviewer_thread_id", "id"], ["review_targets", "reviewer_thread_id", "reviewer_thread_id, worker_thread_id"], ["alert_outbox", "source_thread_id", "rowid"]]
+          .map(([table, column, order]) => `${table}\n${(database.prepare(`SELECT * FROM ${table} WHERE ${mineFix(column!)} ORDER BY ${order}`).all() as object[]).map(stable).join("\n")}`).join("\n");
+        const fixStep = (label: string, fn: () => unknown) => step(`stacked fix: ${label}`, async () => {
+          let outcome: string;
+          try { outcome = show(await fn()); } catch (error) { outcome = `ERR ${error instanceof Error ? error.message : String(error)}`; }
+          return `${outcome}\n${fixTables()}`;
+        });
+        const reviewerOfFix = (workerId: string) => one(`SELECT r.thread_id FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
+        const replacementOf = (workerId: string) => one(`SELECT thread_id FROM managed_threads WHERE role='worker' AND replaces_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
+        const as = (id: string | undefined, params: unknown) => (id ? tool("chief_report", params, id, project) : "no such thread");
+        const ready = { state: "ready", summary: "Snapshot stacked fix worker summary", result: "Changed server.ts:1.\n\n## Deviations from plan\nNone\n\n## Verification\nAutomated: npm test; echo=0\nManual: none" };
+        const verdict = { state: "ready", verdict: "request_changes", summary: "Snapshot stacked fix request_changes", result: "Snapshot stacked fix review: request_changes." };
+        const fix = (id: string) => tool("chief_delegate", { title: "Snapshot stacked fix", mission: "Snapshot stacked fix mission", replaces: id }, owner, project);
+        await fixStep("chief_review the tip", () => tool("chief_review", { workerThreadId: "thr_fx_sf_c" }, owner, project));
+        await fixStep("reviewer request_changes", () => as(reviewerOfFix("thr_fx_sf_c"), verdict));
+        await fixStep("chief_roster before the fix", () => tool("chief_roster", { includeComplete: true }, owner, project));
+        await fixStep("chief_delegate replaces wave 1", () => fix("thr_fx_sf_a"));
+        const f1 = replacementOf("thr_fx_sf_a");
+        await fixStep("wave 1 fix ready", () => as(f1, ready));
+        await fixStep("chief_review the wave 1 fix refused", () => (f1 ? tool("chief_review", { workerThreadId: f1 }, owner, project) : "no such thread"));
+        await fixStep("chief_roster after the wave 1 fix", () => tool("chief_roster", { includeComplete: true }, owner, project));
+        await fixStep("chief_delegate replaces wave 2", () => fix("thr_fx_sf_b"));
+        const f2 = replacementOf("thr_fx_sf_b");
+        await fixStep("wave 2 fix ready", () => as(f2, ready));
+        await fixStep("chief_delegate replaces wave 3", () => fix("thr_fx_sf_c"));
+        const f3 = replacementOf("thr_fx_sf_c");
+        await fixStep("wave 3 fix ready", () => as(f3, ready));
+        await fixStep("chief_review the new tip", () => (f3 ? tool("chief_review", { workerThreadId: f3 }, owner, project) : "no such thread"));
+        await fixStep("second reviewer request_changes", () => as(f3 ? reviewerOfFix(f3) : undefined, verdict));
+        await fixStep("chief_roster after the second review", () => tool("chief_roster", { includeComplete: true }, owner, project));
+        for (const { thread_id: id } of database.prepare(`SELECT thread_id FROM managed_threads WHERE ${mineFix("thread_id")} AND state NOT IN ('complete','archived','deleted') ORDER BY thread_id`).all() as { thread_id: string }[]) {
+          await fixStep(`converge ${id}`, () => tool("chief_complete", { threadId: id, override: "Snapshot: converge stacked fix fixture" }, owner, project));
+        }
+      }
+    }
     begin("e-mutations (continued)");
 
     // e2. every live worker: review, both replaces: calls, complete
@@ -836,6 +902,17 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       // 6. One chief_research_calls row per call that reached the tool (the invalid-mode call fails the schema first).
       await step("chief_research_calls rows added by this category", async () => (database.prepare(`SELECT * FROM chief_research_calls WHERE id > ? ORDER BY id`).all(callsBefore) as object[]).map(stable).join("\n"));
       await step("bb chief stats --json after the research calls", () => (owner ? cli(["stats", "--json"], { threadId: owner.id, projectId: owner.project }) : "no chief"));
+    }
+
+    // e3. the start-up sites no earlier category reaches: chief_plan and a branch review (a fresh-worktree reviewer).
+    // The ledger and research categories reach the other four; the full spawn arguments and rows land in "f".
+    begin("e3-start-sites");
+    {
+      const owner = chief ? { id: chief.thread_id, project: chief.project_id } : null;
+      const asChief = (name: string, input: unknown) => (owner ? tool(name, input, owner.id, owner.project) : "no chief");
+      await step("chief_plan", () => asChief("chief_plan", { title: "Snapshot start-site plan", mission: "Snapshot plan mission", context: "Snapshot plan context" }));
+      await step("chief_review of a branch no worker carries", () => asChief("chief_review", { branch: "feature/snapshot-branch-review", focus: "Snapshot focus" }));
+      await step("chief_review of the same branch again", () => asChief("chief_review", { branch: "feature/snapshot-branch-review" }));
     }
 
     // f. final state of every table the scenarios touch
