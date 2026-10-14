@@ -13,7 +13,7 @@ import { forgeInitScript } from "./forge";
 import {
   ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY, READ_ONLY, RESEARCH_ONLY, REVIEW_ONLY,
   managedSkills, modelRoleSchema, researchRoleSchema, roleSchema, workerKindSchema,
-  type ModelRole, type ResearchRole,
+  type ModelRole, type ResearchRole, type Role,
 } from "./roles";
 
 const SECTION_NAME = "Chief";
@@ -673,7 +673,7 @@ interface TodoRow {
 
 interface ManagedRow {
   thread_id: string;
-  role: z.infer<typeof roleSchema>;
+  role: Role;
   branch: string | null;
   issue_url: string | null;
   pr_url: string | null;
