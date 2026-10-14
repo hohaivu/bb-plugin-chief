@@ -2,6 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ManagedSpawn } from "./managedSpawn";
 import type { createReviewLedger } from "./reviewLedger";
 import { REVIEW_ONLY } from "./roles";
+import type { ThreadStore } from "./threadStore";
 import { chainOf, type PlanWave } from "./waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
@@ -203,8 +204,7 @@ interface ReviewInsert {
 
 export interface ReviewStartDeps<Row extends ReviewRow> {
   db: Database;
-  /** The live role cache; it is replaced on reload, so read it through the getter each time. */
-  roles: () => Map<string, Row>;
+  store: ThreadStore<Row>;
   ledger: ReturnType<typeof createReviewLedger<Row>>;
   managedSpawn: ManagedSpawn<ReviewInsert>;
   requireChiefCaller: (caller: Row | undefined, what: string) => asserts caller is Row;
@@ -226,16 +226,15 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   verdictPreview: (review: Row) => string[];
   clip: (value: string, limit?: number) => string;
   clipMiddle: (value: string, limit: number) => string;
-  reloadRoles: () => void;
 }
 
 /** One module owns starting a reviewer: the owner and duplicate checks, the in-flight dedupe, the pinned heads,
  * the brief, the launch, and retiring the reviews it supersedes. It returns data; alerts and tool-result wording stay in the server. */
 export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<Row>) {
   const {
-    db, roles, ledger, managedSpawn, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
+    db, store, ledger, managedSpawn, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
     busyStatuses, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
-    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, reloadRoles,
+    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle,
   } = deps;
   const existingBranchReview = db.prepare<[string, string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND chief_thread_id=? AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
@@ -261,7 +260,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
    * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
   async function startReview(caller: Row | undefined, workerThreadId: string, focus?: string) {
     deps.requireChiefCaller(caller, "Starting a review");
-    const worker = roles().get(workerThreadId);
+    const worker = store.get(workerThreadId);
     if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
     const refusal = reviewRefusal(worker);
     if (refusal) throw new Error(refusal);
@@ -349,11 +348,10 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
       if (openReviews.length || streak) {
         const now = Date.now();
-        db.transaction(() => {
+        store.batch(() => {
           ledger.seedStreak(thread.id, streak, previous, now);
-          for (const old of openReviews) db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, old.thread_id);
-        })();
-        reloadRoles();
+          for (const old of openReviews) store.completeSuperseded(old.thread_id, now);
+        });
       }
       return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id) };
     });
@@ -366,7 +364,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     deps.requireChiefCaller(caller, "Starting a review");
     const { thread_id: chiefThreadId, project_id: projectId } = caller;
     // A branch a managed worker still carries is reviewed through that worker, so the review follows its plan and head.
-    const owner = [...roles().values()].find((row) => row.role === "worker" && !terminal(row.state)
+    const owner = store.all().find((row) => row.role === "worker" && !terminal(row.state)
       && row.chief_thread_id === chiefThreadId && row.project_id === projectId && row.branch === branch);
     if (owner) throw new Error(`Branch ${branch} is owned by worker ${owner.thread_id}: use chief_review (workerThreadId: ${owner.thread_id}).`);
     return dedupe(JSON.stringify(["branch", chiefThreadId, projectId, branch]), async () => {
