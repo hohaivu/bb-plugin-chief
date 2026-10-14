@@ -11,6 +11,7 @@ import {
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
+import { createManagedSpawn } from "./managedSpawn";
 import { createPlanProgress, type SegmentState } from "./planProgress";
 import { chainOf, createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
 import {
@@ -1552,6 +1553,7 @@ export default async function plugin(bb: BbPluginApi) {
     return researchActive;
   }
 
+  // Not on managedSpawn: it picks the model after building its prompt, skips the cooldown check, hands over between spawn and insert, and has no parent or brief file.
   async function spawnChief(target: string, previous?: ManagedRow) {
     const sectionId = await ensureSection();
     const name = await projectName(target);
@@ -1655,17 +1657,15 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  const managedSpawn = createManagedSpawn({ bb, db, spawnExecution, ensureSection, readRules, lifecycleOwner, insertThread, persistBrief });
+
   /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
     if (!(await plannerEnabled())) {
       throw new Error("Planning is off. Turn on “Plan before delegating” in Chief's settings, or delegate this work directly.");
     }
     const { chief, projectId } = await owningChief(callerThreadId);
-    const execution = await spawnExecution("planner", await projectHostId(projectId), projectId);
-    const sectionId = await ensureSection();
-    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-    // the rules into every planner turn, so the spawn prompt does not repeat them.
-    await readRules(projectId);
+    const prepared = await managedSpawn.prepare(projectId, { role: "planner", hostId: await projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = [
       `You are the managed planner for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
@@ -1686,20 +1686,8 @@ export default async function plugin(bb: BbPluginApi) {
       "- A genuine product or scope decision is Chief's, not yours. If it blocks a sound plan, report blocked with the question as blocker and your recommended answer as recommendation. If the plan holds under a stated assumption, report ready and list the question and the assumption under `## Open questions` in the wave it affects. Never ask the user directly from this thread.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
     ].join("\n");
-    const thread = await bb.sdk.threads.spawn({
-      projectId,
-      environment: { type: "project-default" },
-      sectionId,
-      parentThreadId: chief.thread_id,
-      visibility: "visible",
-      title,
-      ...execution,
-      ...(await lifecycleOwner(chief.thread_id)),
-      prompt,
-      pluginMetadata: { role: "planner", chiefThreadId: chief.thread_id },
-    });
-    insertThread({ threadId: thread.id, role: "planner", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, state: "starting", status: thread.status });
-    await persistBrief(thread.id, prompt);
+    const thread = await managedSpawn.launch(prepared, { projectId, environment: { type: "project-default" }, title, prompt },
+      { role: "planner", chiefThreadId: chief.thread_id });
     return { threadId: thread.id, title, projectId };
   }
 
@@ -1720,11 +1708,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!workerLive.environmentId) throw new Error(`Worker ${worker.thread_id} has no reusable environment.`);
     }
     const hostId = worker ? await environmentHostId(workerLive!.environmentId!) : await projectHostId(projectId);
-    const execution = await spawnExecution("advisor", hostId, projectId);
-    const sectionId = await ensureSection();
-    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-    // the rules into every advisor turn, so the spawn prompt does not repeat them.
-    await readRules(projectId);
+    const prepared = await managedSpawn.prepare(projectId, { role: "advisor", hostId });
     const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
     const reviews = worker ? taskReviews(worker) : [];
     const prompt = [
@@ -1761,26 +1745,13 @@ export default async function plugin(bb: BbPluginApi) {
       ...(worker ? ["- If the repeated rejections come from a project-level rule a future worker should know (not a task-specific bug), set `lesson`: one sentence, at most 400 characters. Otherwise omit it."] : []),
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ].join("\n");
-    const thread = await bb.sdk.threads.spawn({
+    const thread = await managedSpawn.launch(prepared, {
       projectId,
       environment: worker
         ? { type: "reuse", environmentId: workerLive!.environmentId! }
         : { type: "project-default" },
-      sectionId,
-      parentThreadId: chief.thread_id,
-      visibility: "visible",
-      title,
-      ...execution,
-      ...(await lifecycleOwner(chief.thread_id)),
-      prompt,
-      pluginMetadata: { role: "advisor", chiefThreadId: chief.thread_id },
-    });
-    insertThread({
-      threadId: thread.id, role: "advisor", projectId, chiefThreadId: chief.thread_id,
-      workerThreadId: worker?.thread_id ?? null, parentThreadId: chief.thread_id, title,
-      state: "starting", status: thread.status,
-    });
-    await persistBrief(thread.id, prompt);
+      title, prompt,
+    }, { role: "advisor", chiefThreadId: chief.thread_id, workerThreadId: worker?.thread_id ?? null });
     return { threadId: thread.id, title, projectId };
   }
 
@@ -1923,11 +1894,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
     const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
-    const execution = await spawnExecution(kind, hostId, projectId);
-    const sectionId = await ensureSection();
-    // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-    // the rules into every worker turn, so the spawn prompt does not repeat them.
-    await readRules(projectId);
+    const prepared = await managedSpawn.prepare(projectId, { role: kind, hostId });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
     const render = (mission: string, contextText?: string) => [
@@ -2013,7 +1980,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(designWave ? ["- Design-only wave: use Design tool mode. Draw or edit the artboards only; write no app code and change no repo files. In your ready result, list each artboard by layer name with its screenshot path so the owner can approve it."] : []),
       ] : []),
     ].join("\n");
-    const thread = await bb.sdk.threads.spawn({
+    const thread = await managedSpawn.launch(prepared, {
       projectId,
       environment: prior
         ? { type: "reuse", environmentId: priorLive!.environmentId! }
@@ -2025,22 +1992,12 @@ export default async function plugin(bb: BbPluginApi) {
             baseBranch: branch ? { kind: "named" as const, name: branch } : { kind: "default" as const },
           },
         },
-      sectionId,
-      parentThreadId: chief.thread_id,
-      visibility: "visible",
-      title: params.title,
-      ...execution,
-      ...(await lifecycleOwner(chief.thread_id)),
-      prompt,
-      pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id, ...(kind === "designer" ? { kind } : {}) },
-    });
-    insertThread({
-      threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
-      state: "starting", status: thread.status, brief: reviewerBrief,
+      title: params.title, prompt,
+    }, {
+      role: "worker", chiefThreadId: chief.thread_id, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
       kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn,
     });
-    await persistBrief(thread.id, prompt);
     if (prior) {
       const now = Date.now();
       db.transaction(() => {
@@ -2385,11 +2342,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
-      const execution = await spawnExecution("reviewer", hostId, worker.project_id);
-      const sectionId = await ensureSection();
-      // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-      // the rules into every reviewer turn, so the spawn prompt does not repeat them.
-      await readRules(worker.project_id);
+      const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
       const title = `Review · ${worker.title}`;
       const waves = planWavesFor(worker.plan_thread_id);
       // A plan review sees every wave; a single worker's reviewer sees only its chain's waves.
@@ -2466,27 +2419,16 @@ export default async function plugin(bb: BbPluginApi) {
           ] : []),
         ],
       });
-      const thread = await bb.sdk.threads.spawn({
+      const thread = await managedSpawn.launch(prepared, {
         projectId: worker.project_id,
         environment: head
           ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
           : { type: "reuse", environmentId: live.environmentId! },
-        sectionId,
-        parentThreadId: worker.chief_thread_id ?? undefined,
-        visibility: "visible",
-        title,
-        ...execution,
-        ...(await lifecycleOwner(worker.chief_thread_id)),
-        prompt,
-        pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
-      });
-      db.transaction(() => {
-        insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha });
-        ledger.addTargets(thread.id, targets.map((target) => ({
-          threadId: target.thread_id, reportSeq: target.report_seq, headSha: heads.get(target.thread_id)?.sha ?? null, prUrl: target.pr_url, branch: target.branch,
-        })));
-      })();
-      await persistBrief(thread.id, prompt);
+        title, prompt,
+      }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha },
+      (threadId) => ledger.addTargets(threadId, targets.map((target) => ({
+        threadId: target.thread_id, reportSeq: target.report_seq, headSha: heads.get(target.thread_id)?.sha ?? null, prUrl: target.pr_url, branch: target.branch,
+      }))));
       // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
       const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
       if (openReviews.length || streak) {
@@ -2529,11 +2471,7 @@ export default async function plugin(bb: BbPluginApi) {
       const duplicate = existingBranchReview.get(chiefThreadId, projectId, branch) as ManagedRow | undefined;
       if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId: null, created: false };
       const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
-      const execution = await spawnExecution("reviewer", hostId, projectId);
-      const sectionId = await ensureSection();
-      // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
-      // the rules into every reviewer turn, so the spawn prompt does not repeat them.
-      await readRules(projectId);
+      const prepared = await managedSpawn.prepare(projectId, { role: "reviewer", hostId });
       const title = `Review · ${branch}`;
       const prompt = reviewerPrompt({
         // This worktree is cut from the branch itself, so "its base" would be an empty diff.
@@ -2544,27 +2482,15 @@ export default async function plugin(bb: BbPluginApi) {
         focus,
         provenance: [],
       });
-      const thread = await bb.sdk.threads.spawn({
+      const thread = await managedSpawn.launch(prepared, {
         projectId,
         environment: {
           type: "host",
           hostId,
           workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: branch } },
         },
-        sectionId,
-        parentThreadId: chiefThreadId,
-        visibility: "visible",
-        title,
-        ...execution,
-        ...(await lifecycleOwner(chiefThreadId)),
-        prompt,
-        pluginMetadata: { role: "reviewer", chiefThreadId },
-      });
-      insertThread({
-        threadId: thread.id, role: "reviewer", projectId, chiefThreadId, parentThreadId: chiefThreadId, title,
-        state: "starting", status: thread.status, branch, prUrl: pullRequestRef,
-      });
-      await persistBrief(thread.id, prompt);
+        title, prompt,
+      }, { role: "reviewer", chiefThreadId, branch, prUrl: pullRequestRef });
       return { threadId: thread.id, title, workerThreadId: null, created: true };
     })();
     reviewStarts.set(key, start);
@@ -3990,7 +3916,7 @@ export default async function plugin(bb: BbPluginApi) {
   const { research, researchSleep } = createResearch({
     db, bb, managedRow, roleRow: (threadId) => roles.get(threadId), terminal, isActiveChief, researchSettings, readResearchModel,
     environmentHostId, discover, catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError,
-    lastOutput, ensureSection, readRules, insertThread, persistBrief, lifecycleOwner, alertChief, serverPath, clip, execFileAsync,
+    lastOutput, managedSpawn, alertChief, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   });
 

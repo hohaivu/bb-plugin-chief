@@ -1,6 +1,7 @@
 import type { ExecFileOptions } from "node:child_process";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import type { ManagedSpawn } from "./managedSpawn";
 import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from "./roles";
 
 /** How long one chief_research call waits before handing back a runId to resume with. */
@@ -270,14 +271,11 @@ export interface ResearchDeps<Row extends ResearchRow, Catalog> {
   noteCooldown: (threadId: string, failure: { text: string; at: number }) => Promise<unknown>;
   lastProviderError: (threadId: string) => Promise<{ text: string; at: number } | null>;
   lastOutput: (threadId: string) => Promise<string | null | undefined>;
-  ensureSection: () => Promise<string>;
-  readRules: (projectId: string) => Promise<unknown>;
-  insertThread: (input: {
+  /** The shared start-up recipe (section, rules, spawn, row, brief); the cooldown check stays in researchPrepare. */
+  managedSpawn: ManagedSpawn<{
     threadId: string; role: "researcher"; projectId: string; chiefThreadId: string; parentThreadId: string;
     title: string; brief: string; state: "starting"; status: string;
-  }) => void;
-  persistBrief: (threadId: string, prompt: string) => Promise<void>;
-  lifecycleOwner: (chiefThreadId: string | null) => Promise<{ lifecycleOwnerThreadId?: string }>;
+  }>;
   alertChief: (row: Row, key: string, message: string) => Promise<unknown>;
   serverPath: () => string;
   clip: (value: string, limit?: number) => string;
@@ -290,8 +288,8 @@ export interface ResearchDeps<Row extends ResearchRow, Catalog> {
 export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchDeps<Row, Catalog>) {
   const {
     db, bb, managedRow, roleRow, terminal, isActiveChief, researchSettings, readResearchModel, environmentHostId, discover,
-    catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError, lastOutput, ensureSection,
-    readRules, insertThread, persistBrief, lifecycleOwner, alertChief, serverPath, clip, execFileAsync,
+    catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError, lastOutput, managedSpawn,
+    alertChief, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   } = deps;
 
@@ -686,10 +684,8 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
     if (!prepared.environmentId) {
       throw new Error("chief_research did not start: Chief's checkout cannot be shared with a researcher thread (this thread has no reusable environment).");
     }
-    const execution = prepared.child!;
     const mode = params.mode!;
-    const sectionId = await ensureSection();
-    await readRules(chief.project_id);
+    const managed = await managedSpawn.prepare(chief.project_id, { execution: prepared.child! });
     const title = `Research · ${mode} · ${clip(params.question!, 60)}`;
     const { runId: _runId, ...call } = params;
     const prompt = [
@@ -709,26 +705,13 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
       `- Report with chief_report state ready (blocked only when the run could not start or the stop failed): \`result\` is the full report within ${MAX_RESULT_LENGTH} characters, with the runId on its first line, and \`summary\` at most 800 characters. When nothing usable came back, report blocked with the cause as blocker and your recommended next step as recommendation.`,
       "- Do not ask the user directly from this thread.",
     ].join("\n");
-    let thread;
-    try {
-      thread = await bb.sdk.threads.spawn({
-        projectId: chief.project_id,
-        environment: { type: "reuse", environmentId: prepared.environmentId },
-        sectionId,
-        parentThreadId: chief.thread_id,
-        visibility: "visible",
-        title,
-        ...execution,
-        ...(prepared.permissionMode ? { permissionMode: prepared.permissionMode } : {}),
-        ...(await lifecycleOwner(chief.thread_id)),
-        prompt,
-        pluginMetadata: { role: "researcher", chiefThreadId: chief.thread_id },
-      });
-    } catch (error) {
-      throw new Error(`chief_research did not start: BB could not run a researcher thread in Chief's checkout (${clip(error instanceof Error ? error.message : String(error), 200)}). Nothing was started in a fresh worktree.`);
-    }
-    insertThread({ threadId: thread.id, role: "researcher", projectId: chief.project_id, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title, brief: prompt, state: "starting", status: thread.status });
-    await persistBrief(thread.id, prompt);
+    const thread = await managedSpawn.launch(managed, {
+      projectId: chief.project_id,
+      environment: { type: "reuse", environmentId: prepared.environmentId },
+      title, prompt,
+      extra: prepared.permissionMode ? { permissionMode: prepared.permissionMode } : {},
+      onSpawnError: (error) => new Error(`chief_research did not start: BB could not run a researcher thread in Chief's checkout (${clip(error instanceof Error ? error.message : String(error), 200)}). Nothing was started in a fresh worktree.`),
+    }, { role: "researcher", chiefThreadId: chief.thread_id, brief: prompt });
     return { threadId: thread.id, title, prefix: prepared.prefix };
   }
 
