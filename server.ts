@@ -1770,11 +1770,10 @@ export default async function plugin(bb: BbPluginApi) {
     type Stored = FailEntry & { at?: number };
     const parse = (json: string | null) => (json ? JSON.parse(json) as Stored[] : []).reverse();
     const all: Stored[] = [];
-    const visited = new Set<string>();
-    for (let worker = roles.get(threadId); worker && !visited.has(worker.thread_id);
-      worker = worker.replaces_thread_id ? roles.get(worker.replaces_thread_id) : undefined) {
-      visited.add(worker.thread_id);
-      const reviewers = (reviewerFails.all(worker.thread_id) as { fails: string }[]).flatMap((row) => parse(row.fails));
+    for (const id of ledger.taskChain(threadId)) {
+      const worker = roles.get(id);
+      if (!worker) continue;
+      const reviewers = (reviewerFails.all(id) as { fails: string }[]).flatMap((row) => parse(row.fails));
       all.push(...parse(worker.fails), ...reviewers);
     }
     // Newest first across workers and reviewers, before dedup and the cap, so the latest basis wins.
@@ -3444,15 +3443,9 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The last 3 reviewer rows with a verdict for this worker's task, so the
    * advisor sees the review history that led to the consult, across a `replaces`
-   * handoff. ponytail: chains by matching branch across the whole project, so a
-   * branch reused by a later task can surface an earlier task's reviews, and
-   * with no branch only the current worker's own reviews are found. Upgrade to
-   * a `replaces` link column if that ever needs to be precise. */
+   * handoff. */
   function taskReviews(worker: ManagedRow): ManagedRow[] {
-    const chain = worker.branch
-      ? [...roles.values()].filter((row) => row.role === "worker" && row.project_id === worker.project_id && row.chief_thread_id === worker.chief_thread_id && row.branch === worker.branch)
-      : [worker];
-    const workerIds = new Set(chain.map((row) => row.thread_id));
+    const workerIds = new Set(ledger.taskChain(worker.thread_id));
     return [...roles.values()]
       .filter((row) => row.role === "reviewer" && row.verdict && row.worker_thread_id && workerIds.has(row.worker_thread_id))
       .sort((a, b) => b.created_at - a.created_at)
@@ -3570,7 +3563,7 @@ export default async function plugin(bb: BbPluginApi) {
       else counts[alert.dedupe_key.endsWith(":hard") ? "hardStalls" : "stalls"] += 1;
       alerts.set(alert.source_thread_id, counts);
     }
-    // ponytail: the branch fallback is taskReviews' heuristic, so a branch reused by a later unplanned
+    // ponytail: the branch fallback is a heuristic, so a branch reused by a later unplanned
     // task merges into one task; replaces_thread_id makes this precise from stats_since on.
     const keys = new Map<string, string | null>();
     const keyOf = (row: ManagedRow | undefined): string | null => {
