@@ -277,7 +277,6 @@ const inRange = (value: number, max: number) => Number.isInteger(value) && value
 type ResearchMode = keyof ResearchConfiguration["settings"]["timeoutMinutes"];
 const RESEARCH_MODE_SECTIONS: { mode: ResearchMode; label: string }[] = [
   { mode: "survey", label: "Survey" },
-  { mode: "review", label: "Review" },
   { mode: "investigate", label: "Investigate" },
 ];
 
@@ -384,12 +383,12 @@ function ResearchSettings() {
               }}
               className={`h-7 w-20 rounded-md border bg-transparent px-2 text-xs ${valid ? "border-input" : "border-destructive"}`}
             />
-            <span className="text-xs text-muted-foreground">1–100, shared by Chief, planners, and reviewers</span>
+            <span className="text-xs text-muted-foreground">1–100, shared by Chief and planners</span>
           </label>
         );
       })() : null}
       <p className="text-sm text-muted-foreground">
-        One config covers Chief, planners, and reviewers. Each mode picks its own model and thinking level per
+        One config covers Chief and planners. Each mode picks its own model and thinking level per
         machine, and its own timeout; a mode without a pick inherits the calling thread&apos;s model.
       </p>
       {settings ? RESEARCH_MODE_SECTIONS.map(({ mode, label }) => {
@@ -621,7 +620,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "research",
     title: "Chief researcher",
-    description: "Parallel read-only research for Chief, planners, and reviewers: one shared switch and cap, plus per-mode models, thinking levels, and timeouts.",
+    description: "Parallel read-only research for Chief and planners: one shared switch and cap, plus per-mode models, thinking levels, and timeouts.",
     component: ResearchSettings,
   });
   app.slots.experimental_threadHeaderAction({

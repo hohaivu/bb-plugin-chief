@@ -119,17 +119,13 @@ the next worker round or escalates.
 
 ### Researcher
 
-`chief_research` fans a read-only question out to parallel BB workflow agents. A planner or reviewer
+`chief_research` fans a read-only question out to parallel BB workflow agents. A planner
 waits for the result. Chief does not: its call returns at once with the id of a **researcher** child
 thread, which runs the research and reports through `chief_report`; the report arrives as a lifecycle
-alert, so Chief ends its turn instead of polling. It has three modes:
+alert, so Chief ends its turn instead of polling. It has two modes:
 
 - **survey** answers one question for each of a list of items (files, symbols, topics), one row each
   with evidence.
-- **review** runs one agent per concern over `git diff`, then one agent drops findings it cannot
-  confirm in the code, and returns a deduplicated list. By default it reads the committed work since
-  the merge base with `origin/HEAD`, so uncommitted changes are not reviewed. Pass `diffRef` for
-  another range. The findings are advisory: the reviewer still decides the verdict.
 - **investigate** runs one agent per sub-question, then one agent merges the answers into a brief
   with Confirmed and Unconfirmed sections. In a researcher thread the workflow skips this merge: the
   researcher merges the answers itself and reports the brief.
@@ -138,8 +134,7 @@ A failed scan, verify, or combine no longer loses the run: the result carries wh
 missed items, a count line (`verified`, `dropped`), and the first failed worker's reason. `dropped`
 tells a clean "No confirmed findings" apart from a verify that threw everything away.
 
-Chief gets all three modes, a planner gets survey and investigate, and a reviewer gets review and
-survey. Workers and advisors never get it. Settings has one **Researcher** switch, on by default;
+Chief and planners get survey and investigate. Reviewers, workers and advisors never get it; the server refuses a call from any of them. Settings has one **Researcher** switch, on by default;
 while it is off, no role gets the tool or the line about it. Chief is told the tool is optional
 and that it reads no project code itself: it uses research for broad multi-file scans, parallel
 independent questions, or checking doubtful evidence, sends finding a cause to `chief_plan` (only while planning is on), and after
@@ -153,23 +148,23 @@ alert carries the result); one whose run failed, was partial, or timed out says 
 mode's timeout bounds the whole run from the thread's start, after which the run is stopped.
 
 The agents share the caller's checkout and permissions. They are read-only only because the prompt
-tells them to be. A planner's or reviewer's call, and each call a researcher thread makes while resuming, waits up to its mode's timeout (10 minutes by default), and never more than 4 minutes, because BB ends tool calls at
+tells them to be. A planner's call, and each call a researcher thread makes while resuming, waits up to its mode's timeout (10 minutes by default), and never more than 4 minutes, because BB ends tool calls at
 about 5 minutes. A researcher run's timeout is a hard stop, kept by the plugin server from the thread's start: the run is stopped even when the researcher thread is not calling, and the next call returns the answers that had finished. If the run is still going, the call returns its runId, and calling again with that runId keeps waiting
 (the run keeps going in between). If the plugin server can't start the
 workflow, the tool returns the exact script and args so the agent can start it with
 `bb_workflow_run` and then wait on its runId. One cap on agent calls per run (1–100, default 24)
 applies to every role. A run that would need more is refused before it starts.
 
-Settings → **Chief researcher** holds this one config for Chief, planners, and reviewers: the
-**Researcher** switch and the agent-call cap are shared. Then each mode (survey, review,
+Settings → **Chief researcher** holds this one config for Chief and planners: the
+**Researcher** switch and the agent-call cap are shared. Then each mode (survey,
 investigate) has its own section with a timeout (1–60 minutes, default 10) and, per machine, one
 provider + model + reasoning level pick used for every stage (scan, verify, combine) of that mode.
 The timeout only limits how long one call waits, up to the 4-minute per-call ceiling: the run keeps going, and a timeout longer than 4 minutes means resuming by runId, not one longer call. The
 picker offers only models the machine's live catalog serves. A mode without a pick on a machine
 shows **Inherit caller** and runs on the calling thread's model; the **Inherit caller** button
-clears a pick back to that default. An earlier single per-machine pick was copied to every mode.
+clears a pick back to that default. An earlier single per-machine pick was copied to every mode; a per-machine Review pick from an older version is ignored.
 Timeouts can also be set with `bb plugin config chief set researchSurveyTimeoutMinutes 5` (and
-`researchReviewTimeoutMinutes`, `researchInvestigateTimeoutMinutes`).
+`researchInvestigateTimeoutMinutes`).
 
 ### Work list
 
