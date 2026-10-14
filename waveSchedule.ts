@@ -33,6 +33,7 @@ interface WaveRow {
   thread_id: string;
   role: string;
   state: string;
+  last_report_state: string | null;
   created_at: number;
   plan_thread_id: string | null;
   plan_wave: number | null;
@@ -62,11 +63,14 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
       .sort((a, b) => a.created_at - b.created_at);
   }
 
-  /** The waves of a plan whose latest worker is not ready or complete (or does not exist yet). */
+  /** The waves of a plan whose latest worker is not ready or complete (or does not exist yet). An idle worker
+   * whose latest report was ready counts as ready: a later non-report turn moves its row off ready, not its report. */
   function pendingWaves(planThreadId: string, waves: PlanWave[]): number[] {
     return waves.flatMap((_, index) => {
       const latest = waveWorkers(planThreadId, index + 1).at(-1);
-      return latest?.state === "ready" || latest?.state === "complete" ? [] : [index + 1];
+      const ready = latest?.state === "ready" || latest?.state === "complete"
+        || (latest?.state === "idle" && latest.last_report_state === "ready");
+      return ready ? [] : [index + 1];
     });
   }
 

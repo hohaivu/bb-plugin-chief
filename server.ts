@@ -2430,9 +2430,10 @@ export default async function plugin(bb: BbPluginApi) {
     // (whichever tip a replaces: successor or an earlier review left stale), so Pending never drops it.
     const stale = targets.filter((target) => !ledger.isCurrent(target));
     if (!stale.length) return null;
-    if (!forAlert && stale[0]!.thread_id !== row.thread_id) return null;
+    const namer = stale.find((target) => target.state === "ready") ?? stale[0]!;
+    if (!forAlert && namer.thread_id !== row.thread_id) return null;
     const branches = targets.map((target) => `${target.thread_id}${target.branch ? ` (${target.branch})` : ""}`).join(", ");
-    return `${waves.length === 1 ? "The plan's only wave is" : `All ${waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${stale[0]!.thread_id}). It covers every branch (${branches}). Complete each worker only on that reviewer's approve.`;
+    return `${waves.length === 1 ? "The plan's only wave is" : `All ${waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${namer.thread_id}). It covers every branch (${branches}). Complete each worker only on that reviewer's approve.`;
   }
 
   /** A row's single pending call, reused identically in report()'s alert and
@@ -3527,6 +3528,10 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Transient thread filing failure for ${row.thread_id}; will retry: ${String(error)}`);
       }
     }
+    // The reads above may have spanned a report or lifecycle event: decide from the row as it is now.
+    const current = roles.get(row.thread_id);
+    if (!current) return true;
+    row = current;
     const parentChanged = !!thread.parentThreadId && row.parent_thread_id !== thread.parentThreadId;
     if (parentChanged) {
       db.prepare(`UPDATE managed_threads SET parent_thread_id=?, updated_at=? WHERE thread_id=?`).run(thread.parentThreadId, now, row.thread_id);
