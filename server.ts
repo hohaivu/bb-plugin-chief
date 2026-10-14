@@ -12,10 +12,12 @@ import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
+import { createReviewStart } from "./reviewStart";
+import { createThreadStore, type ThreadInsert } from "./threadStore";
 import { createPlanProgress, type SegmentState } from "./planProgress";
-import { chainOf, createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
+import { createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
 import {
-  ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY, REVIEW_ONLY,
+  ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY,
   managedSkills, modelRoleSchema, roleSchema, workerKindSchema,
   type ModelRole, type Role,
 } from "./roles";
@@ -1037,7 +1039,6 @@ export default async function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
 
-  const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC, rowid ASC`);
   const activeChiefForProject = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND project_id=? AND state NOT IN ('failed','deleted','archived','complete') ORDER BY created_at DESC LIMIT 1`,
   );
@@ -1092,9 +1093,18 @@ export default async function plugin(bb: BbPluginApi) {
     `INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(provider_id, model) DO UPDATE SET until_at=MAX(until_at, excluded.until_at), reason=excluded.reason, updated_at=excluded.updated_at`,
   );
-  let roles = new Map<string, ManagedRow>();
-  const ledger = createReviewLedger<ManagedRow>(db, (threadId) => roles.get(threadId));
-  const schedule = createWaveSchedule<ManagedRow>(() => roles);
+  let pendingReady = false; // set once everything pendingSnapshot() touches is initialised
+  // The sweep and the Pending publish follow a reload only once pendingReady, as before the store existed.
+  const store = createThreadStore<ManagedRow>(db, {
+    onReload: () => {
+      if (!pendingReady) return;
+      // ponytail: sweeps on every reload, O(planners × rows); index by plan_thread_id if rosters grow large.
+      void sweep();
+      publishPending();
+    },
+  });
+  const ledger = createReviewLedger<ManagedRow>(db, store.get, store);
+  const schedule = createWaveSchedule<ManagedRow>(store.rows);
   const { planWavesFor, isDesignWave, waveWorkers, reviewTargetsFor } = schedule;
   let plannerActive = false;
   // ponytail: cached for wave 2's synchronous configure(); the chief_research gate reads live settings.
@@ -1103,11 +1113,9 @@ export default async function plugin(bb: BbPluginApi) {
   const alertDeliveries = new Map<string, Promise<boolean>>();
   const reviewStarts = new Map<string, Promise<{ threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[] }>>();
 
-  let pendingReady = false; // set once everything pendingSnapshot() touches is initialised
   let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
-  const load = () => new Map((allRows.all() as ManagedRow[]).map((row) => [row.thread_id, row]));
   const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
-  const progress = createPlanProgress<ManagedRow>(() => roles, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
+  const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
   /** A supporting row whose work was absorbed: a reviewer or advisor of a complete worker,
    * a researcher that reported ready (its report alert carries the result), or a planner once
    * every branch's final wave is complete and every linked worker is terminal. */
@@ -1116,10 +1124,10 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "researcher") return row.state === "ready";
     if (row.role === "reviewer") {
       const covered = ledger.targets(row.thread_id);
-      return covered.length > 0 && covered.every((target) => roles.get(target.worker_thread_id)?.state === "complete");
+      return covered.length > 0 && covered.every((target) => store.get(target.worker_thread_id)?.state === "complete");
     }
     if (row.role === "advisor") {
-      return !!row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete";
+      return !!row.worker_thread_id && store.get(row.worker_thread_id)?.state === "complete";
     }
     if (row.role !== "planner" || !row.plan_waves) return false;
     return progress.plannerAbsorbed(row);
@@ -1128,13 +1136,12 @@ export default async function plugin(bb: BbPluginApi) {
    * A failed or busy read leaves the row alone (fail closed); a later reload retries. */
   async function completeAbsorbed() {
     let completed = 0;
-    for (const id of [...roles.values()].filter(absorbed).map((row) => row.thread_id)) {
+    for (const id of store.all().filter(absorbed).map((row) => row.thread_id)) {
       const live = await bb.sdk.threads.get({ threadId: id }).catch(() => null);
       if (!live || BUSY_STATUSES.has(live.status) || live.deletedAt !== null || live.archivedAt !== null) continue;
-      const row = roles.get(id);
+      const row = store.get(id);
       if (!row || !absorbed(row)) continue; // changed while the read was in flight
-      db.prepare(`UPDATE managed_threads SET state='complete', status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(live.status, Date.now(), id);
-      roles = load();
+      store.completeAbsorbed(id, live.status); // refreshes without the sweep: this runs inside it
       completed += 1;
     }
     return completed;
@@ -1161,15 +1168,6 @@ export default async function plugin(bb: BbPluginApi) {
       bb.realtime.publish("pending", null);
     }
   }
-  function reloadRoles() {
-    roles = load();
-    if (!pendingReady) return;
-    // ponytail: sweeps on every reload, O(planners × rows); index by plan_thread_id if rosters grow large.
-    void sweep();
-    publishPending();
-  }
-  reloadRoles();
-
   function toManaged(row: ManagedRow): ManagedThread {
     return {
       threadId: row.thread_id,
@@ -1186,58 +1184,6 @@ export default async function plugin(bb: BbPluginApi) {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
-  }
-
-  function insertThread(input: {
-    threadId: string;
-    role: ManagedRow["role"];
-    projectId: string;
-    chiefThreadId?: string | null;
-    workerThreadId?: string | null;
-    parentThreadId?: string | null;
-    title: string;
-    state?: ManagedRow["state"];
-    status?: string | null;
-    brief?: string | null;
-    branch?: string | null;
-    issueUrl?: string | null;
-    prUrl?: string | null;
-    planThreadId?: string | null;
-    planWave?: number | null;
-    reviewedReportSeq?: number | null;
-    reviewedHeadSha?: string | null;
-    unplannedReason?: string | null;
-    replacesThreadId?: string | null;
-    kind?: string | null;
-    simple?: boolean | null;
-    plannerOn?: boolean | null;
-  }) {
-    const now = Date.now();
-    db.prepare(`INSERT INTO managed_threads (
-      thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, simple, planner_on, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
-      worker_thread_id=excluded.worker_thread_id,
-      parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
-      title=excluded.title, state=excluded.state, status=excluded.status,
-      brief=excluded.brief, branch=excluded.branch, issue_url=excluded.issue_url, pr_url=excluded.pr_url,
-      plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
-      reviewed_report_seq=excluded.reviewed_report_seq, reviewed_head_sha=excluded.reviewed_head_sha, unplanned_reason=excluded.unplanned_reason,
-      replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
-      kind=excluded.kind, simple=excluded.simple,
-      planner_on=COALESCE(excluded.planner_on, managed_threads.planner_on),
-      updated_at=excluded.updated_at`).run(
-      input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
-      input.workerThreadId ?? null, input.parentThreadId ?? null, input.title, input.state ?? "starting",
-      input.status ?? "starting", input.brief ?? null, input.branch ?? null,
-      input.issueUrl ?? null, input.prUrl ?? null, input.planThreadId ?? null, input.planWave ?? null,
-      input.reviewedReportSeq ?? null, input.reviewedHeadSha ?? null, input.unplannedReason ?? null, input.replacesThreadId ?? null,
-      input.kind ?? null, input.simple ? 1 : null, input.plannerOn == null ? null : input.plannerOn ? 1 : 0,
-      input.state === "active" ? now : null,
-      input.state === "active" ? 1 : 0, now, now,
-    );
-    reloadRoles();
   }
 
   let sectionEnsuring: Promise<string> | null = null;
@@ -1521,7 +1467,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** The Chief a spawn request belongs to: the calling Chief itself, or the active
    * one for the caller's project. Planning and delegation resolve it the same way. */
   async function owningChief(callerThreadId?: string | null) {
-    const caller = callerThreadId ? roles.get(callerThreadId) : undefined;
+    const caller = callerThreadId ? store.get(callerThreadId) : undefined;
     const projectId = caller?.project_id ?? (await settings.get()).chiefProject;
     if (!projectId) throw new Error("No Chief project is configured.");
     const chief = caller?.role === "chief" ? caller : chiefForProject(projectId);
@@ -1581,7 +1527,7 @@ export default async function plugin(bb: BbPluginApi) {
       pluginMetadata: { role: "chief" },
     });
     if (previous && previous.thread_id !== thread.id) handOver(previous.thread_id, thread.id, target);
-    insertThread({
+    store.insert({
       threadId: thread.id, role: "chief", projectId: target, title, state: "starting", status: thread.status,
     });
     void pinPendingTab(thread.id);
@@ -1591,16 +1537,12 @@ export default async function plugin(bb: BbPluginApi) {
   /** Supersedes a Chief: marks it complete and moves its open work and undelivered alerts to its successor. */
   function handOver(previousId: string, nextId: string, projectId: string) {
     const now = Date.now();
-    db.transaction(() => {
-      db.prepare(`UPDATE managed_threads SET state='complete', updated_at=? WHERE thread_id=?`).run(now, previousId);
-      db.prepare(`UPDATE managed_threads SET chief_thread_id=?, updated_at=?
-        WHERE project_id=? AND chief_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(
-        nextId, now, projectId, previousId,
-      );
+    store.batch(() => {
+      store.completeChief(previousId, now);
+      store.moveOpenWork(nextId, now, projectId, previousId);
       db.prepare(`UPDATE alert_outbox SET target_thread_id=?
         WHERE target_thread_id=? AND delivered_at IS NULL`).run(nextId, previousId);
-    })();
-    reloadRoles();
+    });
   }
 
   /** Best-effort: appends the pending panel tab to a Chief thread once. Never throws. */
@@ -1641,7 +1583,7 @@ export default async function plugin(bb: BbPluginApi) {
       const existing = chiefForProject(target);
       if (existing) {
         await reconcileThread(existing, await ensureSection());
-        const reconciled = roles.get(existing.thread_id);
+        const reconciled = store.get(existing.thread_id);
         if (reconciled && !["failed", "deleted", "archived", "complete"].includes(reconciled.state)) {
           return { threadId: existing.thread_id, created: false };
         }
@@ -1657,7 +1599,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  const managedSpawn = createManagedSpawn({ bb, db, spawnExecution, ensureSection, readRules, lifecycleOwner, insertThread, persistBrief });
+  const managedSpawn = createManagedSpawn({ bb, db, spawnExecution, ensureSection, readRules, lifecycleOwner, insertThread: store.insert, persistBrief });
 
   /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
@@ -1696,7 +1638,7 @@ export default async function plugin(bb: BbPluginApi) {
    * one it runs in the project's own checkout, like a plan. */
   async function startConsult(params: z.infer<typeof consultParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
-    const worker = params.workerThreadId ? roles.get(params.workerThreadId) : undefined;
+    const worker = params.workerThreadId ? store.get(params.workerThreadId) : undefined;
     if (params.workerThreadId && (!worker || worker.role !== "worker" || !controlsThread(worker, chief.thread_id))) {
       throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
     }
@@ -1770,11 +1712,10 @@ export default async function plugin(bb: BbPluginApi) {
     type Stored = FailEntry & { at?: number };
     const parse = (json: string | null) => (json ? JSON.parse(json) as Stored[] : []).reverse();
     const all: Stored[] = [];
-    const visited = new Set<string>();
-    for (let worker = roles.get(threadId); worker && !visited.has(worker.thread_id);
-      worker = worker.replaces_thread_id ? roles.get(worker.replaces_thread_id) : undefined) {
-      visited.add(worker.thread_id);
-      const reviewers = (reviewerFails.all(worker.thread_id) as { fails: string }[]).flatMap((row) => parse(row.fails));
+    for (const id of ledger.taskChain(threadId)) {
+      const worker = store.get(id);
+      if (!worker) continue;
+      const reviewers = (reviewerFails.all(id) as { fails: string }[]).flatMap((row) => parse(row.fails));
       all.push(...parse(worker.fails), ...reviewers);
     }
     // Newest first across workers and reviewers, before dedup and the cap, so the latest basis wins.
@@ -1793,7 +1734,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function startWorker(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
-    const prior = params.replaces ? roles.get(params.replaces) : undefined;
+    const prior = params.replaces ? store.get(params.replaces) : undefined;
     if (params.replaces && (!prior || prior.role !== "worker" || !controlsThread(prior, chief.thread_id) || prior.project_id !== projectId)) {
       throw new Error(`No managed worker ${params.replaces} for this Chief.`);
     }
@@ -1855,7 +1796,7 @@ export default async function plugin(bb: BbPluginApi) {
     let implementsDesign: number | null = null;
     let contracts: string | undefined;
     if (planThreadId !== undefined) {
-      const planner = roles.get(planThreadId);
+      const planner = store.get(planThreadId);
       if (!planner || planner.role !== "planner" || !controlsThread(planner, chief.thread_id)) {
         throw new Error(`No managed planner ${planThreadId} for this Chief.`);
       }
@@ -1887,7 +1828,7 @@ export default async function plugin(bb: BbPluginApi) {
     // One task branch carries one active worker: a second worktree cannot check out a
     // branch another one already holds, and the spawn would fail with a raw git error.
     const holder = branch
-      ? [...roles.values()].find((row) => row.role === "worker" && !terminal(row.state)
+      ? store.all().find((row) => row.role === "worker" && !terminal(row.state)
         && row.project_id === projectId && row.branch === branch && row.thread_id !== params.replaces)
       : undefined;
     if (holder) {
@@ -2000,11 +1941,10 @@ export default async function plugin(bb: BbPluginApi) {
     });
     if (prior) {
       const now = Date.now();
-      db.transaction(() => {
-        db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, prior.thread_id);
+      store.batch(() => {
+        store.completeSuperseded(prior.thread_id, now);
         ledger.repoint(prior.thread_id, thread.id, now);
-      })();
-      reloadRoles();
+      });
     }
     return { threadId: thread.id, title: params.title, projectId };
   }
@@ -2012,9 +1952,9 @@ export default async function plugin(bb: BbPluginApi) {
   const stallCapNote = ` Stall clock not reset: ${MAX_STALL_RESETS} nudges since the last report; the hard stall alert keeps its schedule.`;
 
   async function continueThread(threadId: string, instruction: string, callerChiefThreadId?: string | null) {
-    const row = roles.get(threadId);
+    const row = store.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker, planner, reviewer, or advisor ${threadId}.`);
-    const callerChief = callerChiefThreadId ? roles.get(callerChiefThreadId) : undefined;
+    const callerChief = callerChiefThreadId ? store.get(callerChiefThreadId) : undefined;
     const effectiveChiefId = (callerChief && callerChief.role === "chief")
       ? callerChief.thread_id
       : (row.chief_thread_id ?? undefined);
@@ -2041,20 +1981,9 @@ export default async function plugin(bb: BbPluginApi) {
       senderThreadId: effectiveChiefId,
     });
     const now = Date.now();
-    // Decide from the stored counter inside one synchronous transaction, not the pre-send snapshot:
+    // The store decides from the stored counter inside one synchronous transaction, not the pre-send snapshot:
     // overlapping continues and an interleaved report (which zeroes it) must each see the current value.
-    const capped = db.transaction(() => {
-      const stored = db.prepare(`SELECT stall_resets FROM managed_threads WHERE thread_id=?`).get(threadId) as { stall_resets: number } | undefined;
-      const atCap = (stored?.stall_resets ?? 0) >= MAX_STALL_RESETS;
-      // Past the cap the nudge still lands, but active_since, active_cycle and the alerted cycles keep their schedule.
-      db.prepare(`UPDATE managed_threads SET state='active', blocker=NULL, recommendation=NULL, verdict=NULL, owner_approval=NULL, owner_approved_at=NULL,
-        active_since=CASE WHEN ? THEN active_since ELSE ? END, active_cycle=active_cycle+?,
-        stall_alerted_cycle=CASE WHEN ? THEN stall_alerted_cycle ELSE NULL END, stall_resets=stall_resets+?, updated_at=? WHERE thread_id=?`).run(
-        atCap ? 1 : 0, now, atCap ? 0 : 1, atCap ? 1 : 0, atCap ? 0 : 1, now, threadId,
-      );
-      return atCap;
-    })();
-    reloadRoles();
+    const capped = store.markContinued(threadId, now, MAX_STALL_RESETS);
     return capped;
   }
 
@@ -2076,12 +2005,14 @@ export default async function plugin(bb: BbPluginApi) {
         id: number; author_thread_id: string; wave: number | null; kind: string; text: string; scope: string; basis: string;
       }[];
     const shown = unread.slice(0, MAX_LOG_READ);
-    db.transaction(() => {
+    const write = () => {
       if (entries?.length) appendPlanLog(row, entries);
       // Only the cursor moves: never state, report_seq or the alert outbox.
-      if (shown.length) db.prepare(`UPDATE managed_threads SET log_read_id=? WHERE thread_id=?`).run(shown.at(-1)!.id, row.thread_id);
-    })();
-    if (shown.length) reloadRoles();
+      if (shown.length) store.markLogRead(row.thread_id, shown.at(-1)!.id);
+    };
+    // Appended entries alone touch no managed row, so only a moved cursor reloads.
+    if (shown.length) store.batch(write);
+    else db.transaction(write)();
     const more = unread.length > MAX_LOG_READ
       ? (db.prepare(`SELECT COUNT(*) AS n FROM plan_log WHERE plan_thread_id=? AND id>? AND author_thread_id<>?`)
         .get(planThreadId, shown.at(-1)!.id, row.thread_id) as { n: number }).n
@@ -2198,7 +2129,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (!round) return null;
     const { open, plan, stacks, loose } = round;
     // A stacked chain's waves each build on the one before, so they are fixed one at a time, never in parallel.
-    const wave = (target: ReviewTarget) => roles.get(target.worker_thread_id)?.plan_wave;
+    const wave = (target: ReviewTarget) => store.get(target.worker_thread_id)?.plan_wave;
     const workers = open.map((target) => target.worker_thread_id).join(", ");
     if (row.verdict === "approve") {
       if (plan) {
@@ -2241,37 +2172,6 @@ export default async function plugin(bb: BbPluginApi) {
     return row.role === "worker" || BUSY_STATUSES.has(row.state) || nextAction(row) !== null;
   }
 
-  /** Shared reviewer prompt: REVIEW_ONLY and the chief_report/verdict contract are
-   * identical for a worker's reviewer and a branch/PR reviewer. Only the subject
-   * line and provenance section (worker brief/result, or nothing for a branch/PR
-   * with no worker) differ. */
-  function reviewerPrompt(opts: {
-    subject: string;
-    chiefThreadId: string | null;
-    focus?: string;
-    provenance: string[];
-    /** True when the review is pinned to a pull request's head commit instead of a worktree. */
-    pinned?: boolean;
-  }) {
-    return [
-      opts.subject,
-      opts.focus ? `Review focus: ${opts.focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
-      REVIEW_ONLY,
-      opts.pinned
-        ? "Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift."
-        : "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.",
-      "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
-      `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict.`,
-      "Classify every finding as blocking or nit. Blocking means the change cannot ship as it stands. These are always blocking: a bug or incorrect behaviour, an unmet listed contract, a regression, missing or false verification evidence, a designer mismatch the brief does not accept, and scope drift the worker did not state. A nit is style, naming, a minor simplification, or an optional improvement.",
-      "The verdict is request_changes only when at least one blocking finding exists; nits alone mean approve.",
-      "List blocking findings first, then at most 5 nits, then write \"and N more nits\" for the rest. Give every finding a file:line and the concrete fix; mark any finding that needs a design or product decision as such.",
-      "Send a `summary` with the report: verdict, blocking count, nit count, the most important blocking finding with file:line.",
-      "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
-      "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
-      ...opts.provenance,
-    ].join("\n");
-  }
-
   /** Live status of a worker. When its row is already ready, waits up to REVIEW_IDLE_WAIT_MS
    * for its turn to end: the ready alert is sent from inside the worker's chief_report call,
    * so that turn is still ending when Chief acts on it. A worker that has not reported is not waited on. */
@@ -2287,225 +2187,21 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Throws the busy-worker refusal, counting it as a timing race for bb chief stats. */
   function busyRejection(worker: ManagedRow, status: string, before: string): never {
-    db.prepare(`UPDATE managed_threads SET busy_rejections=busy_rejections+1 WHERE thread_id=?`).run(worker.thread_id);
-    reloadRoles();
+    store.countBusyRejection(worker.thread_id);
     throw new Error(`Worker ${worker.thread_id} is ${status}; wait until it is idle before ${before}.`);
   }
 
-  /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
-   * by a fresh one rather than resumed; its reject_streak carries over onto the new
-   * row, so deadlock detection still sees consecutive rejections across the fresh
-   * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
-  async function startReview(caller: ManagedRow | undefined, workerThreadId: string, focus?: string) {
-    requireChiefCaller(caller, "Starting a review");
-    const worker = roles.get(workerThreadId);
-    if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
-    const refusal = reviewRefusal(worker);
-    if (refusal) throw new Error(refusal);
-    // One review of a plan covers the latest worker of every branch; any other worker covers itself.
-    const targets = reviewTargetsFor(worker);
-    for (const target of targets) {
-      if (!controlsThread(target, caller.thread_id) || target.project_id !== caller.project_id) throw new Error(`No managed worker ${target.thread_id} for this Chief.`);
-    }
-    const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && planWavesFor(worker.plan_thread_id).length > 0);
-    const reviewKey = planReview ? `plan:${worker.plan_thread_id}` : workerThreadId;
-    const inFlight = reviewStarts.get(reviewKey);
-    if (inFlight) return inFlight;
-    const start = (async () => {
-      const openReviews = [...new Set(targets.flatMap((target) => ledger.taskChain(target.thread_id)))]
-        .flatMap((id) => { const open = ledger.openReview(id); return open ? [open] : []; })
-        .filter((review, index, all) => all.findIndex((other) => other.thread_id === review.thread_id) === index)
-        .sort((a, b) => b.created_at - a.created_at);
-      const previous = openReviews[0];
-      const busy = openReviews.find((review) => BUSY_STATUSES.has(review.state));
-      if (busy) {
-        return { threadId: busy.thread_id, title: busy.title, workerThreadId, created: false, pinnedSha: busy.reviewed_head_sha, covers: targets.map((target) => target.thread_id) };
-      }
-      const lives = new Map<string, Awaited<ReturnType<typeof bb.sdk.threads.get>>>();
-      for (const target of targets) {
-        const live = await waitIdleAfterReport(target);
-        if (BUSY_STATUSES.has(live.status)) busyRejection(target, live.status, "starting a review");
-        if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${target.thread_id} is not reviewable.`);
-        lives.set(target.thread_id, live);
-      }
-      const live = lives.get(workerThreadId)!;
-      // The forge's head, read now, is the commit each verdict will cover. No PR, or a head the forge will not
-      // tell us, keeps a single-worker review on the worker's own environment exactly as before (reviewed_head_sha stays NULL).
-      const projectDir = await projectPath(worker.project_id);
-      const heads = new Map<string, Awaited<ReturnType<typeof prHead>>>();
-      for (const target of targets) heads.set(target.thread_id, target.pr_url ? await prHead(target.pr_url, projectDir) : null);
-      const head = heads.get(workerThreadId) ?? null;
-      if (!head && !live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
-      for (const target of targets) {
-        if (target !== worker && !heads.get(target.thread_id) && !target.branch) {
-          throw new Error(`Worker ${target.thread_id} has no readable pull request head and no branch, so the plan's one review cannot reach it. Retry once the forge answers.`);
-        }
-      }
-      const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
-      const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
-      const title = `Review · ${worker.title}`;
-      const waves = planWavesFor(worker.plan_thread_id);
-      // A plan review sees every wave; a single worker's reviewer sees only its chain's waves.
-      const chain = worker.plan_wave != null && waves.length && !planReview ? chainOf(waves, worker.plan_wave) : waves.map((_, index) => index + 1);
-      const contractLines = waves.length === 1
-        ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
-        : chain.flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
-      const recorded = head ? null : await recordedCommands(workerThreadId);
-      const pinnedAll = targets.every((target) => heads.get(target.thread_id));
-      const targetLine = (target: ManagedRow) => {
-        const pinned = heads.get(target.thread_id);
-        return pinned
-          ? `- worker ${target.thread_id} “${target.title}”: ${target.pr_url} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch}\`, then review \`git diff origin/${pinned.base}...${pinned.sha}\``
-          : `- worker ${target.thread_id} “${target.title}”: branch ${target.branch}${target.pr_url ? ` (${target.pr_url})` : ""}, head not readable, not pinned: \`git fetch origin ${target.branch}\`, then review \`git diff <the project's default branch>...origin/${target.branch}\`; the verdict binds to its report ${target.report_seq}`;
-      };
-      const prompt = reviewerPrompt({
-        pinned: pinnedAll,
-        subject: targets.length > 1
-          ? `Independently review the whole plan: ${targets.length} branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change. The worker's recorded commands ran against the worker's own tree: rerun the project's build/check at each pinned commit.\n${targets.map(targetLine).join("\n")}`
-          : head
-            ? `Independently review pull request ${worker.pr_url} (worker thread ${workerThreadId}: “${worker.title}”), pinned to its head commit ${head.sha} (branch ${head.branch}, targeting ${head.base}). First run \`git fetch origin ${head.branch} && git checkout --detach ${head.sha}\`. The pull request description is the brief: read it (gh pr view ${worker.pr_url} --json title,body, or glab mr view ${worker.pr_url}), then review the diff of ${head.sha} against origin/${head.base}. Treat nothing outside that commit as part of the change. The worker's recorded commands ran against the worker's own tree, not this commit: rerun the project's build/check at ${head.sha}.`
-            : `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
-        chiefThreadId: worker.chief_thread_id,
-        focus,
-        provenance: [
-          ...(worker.brief && !head && targets.length === 1 ? [
-            "", "## The brief this work was given", clipMiddle(worker.brief, 4_000),
-            "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
-          ] : []),
-          ...(contractLines.length ? [
-            "", "## Contracts to verify", ...contractLines,
-            `Check every item against ${pinnedAll ? "the pinned commit" : "the worktree"}${targets.length > 1 ? "s" : ""}. An unmet item means request_changes naming it; say which items you confirmed.`,
-          ] : []),
-          ...(head || targets.length > 1 ? [] : [
-            "", "## Recorded commands (from the worker's event log)",
-            ...recordedLines(recorded),
-            "Recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
-          ]),
-          ...(worker.kind === "designer" ? [
-            "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
-          ] : []),
-          ...(targets.length > 1
-            ? targets.flatMap((target) => target.result ? [
-              "", `## The report of worker ${target.thread_id}`,
-              ...(target.report_path ? [`Full report: ${target.report_path}`] : []),
-              `Full report and last output: bb chief inspect ${target.thread_id}`,
-              "Read it for its Deviations from plan only; each pull request at its pinned commit is the change.",
-            ] : [])
-            : [
-              ...(worker.result && head ? [
-                "", "## The worker's report file",
-                ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
-                `Full report and last output: bb chief inspect ${workerThreadId}`,
-                "Read it for its Deviations from plan only; the pull request at its pinned commit is the change.",
-              ] : []),
-              ...(worker.result && !head ? [
-                "", "## What the worker reported", worker.summary ?? clip(worker.result, 300),
-                ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
-                `Full report and last output: bb chief inspect ${workerThreadId}`,
-              ] : []),
-            ]),
-          ...(previous?.result ? [
-            "", `## The previous review (${previous.thread_id})`,
-            ...verdictPreview(previous),
-            ...(previous.recommendation ? [`Recommendation: ${clip(previous.recommendation, 600)}`] : []),
-            "", `Check each finding above against ${pinnedAll ? "the pinned commit" : "the current worktree"}${targets.length > 1 ? "s" : ""}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again.`,
-          ] : []),
-          ...(waves.length ? [
-            "", targets.length > 1
-              ? `This plan has ${waves.length} wave${waves.length > 1 ? "s" : ""}, one branch per chain. Review each branch against its base against its waves' plans:`
-              : `This branch carries wave${chain.length > 1 ? "s" : ""} ${chain.join(", ")} of ${waves.length}. Review the whole branch against its base against ${chain.length > 1 ? "these waves' plans" : "this wave's plan"}:`,
-            ...chain.map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}`),
-            "Read each worker's full report (Full report path above, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
-          ] : []),
-        ],
-      });
-      const thread = await managedSpawn.launch(prepared, {
-        projectId: worker.project_id,
-        environment: head
-          ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
-          : { type: "reuse", environmentId: live.environmentId! },
-        title, prompt,
-      }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha },
-      (threadId) => ledger.addTargets(threadId, targets.map((target) => ({
-        threadId: target.thread_id, reportSeq: target.report_seq, headSha: heads.get(target.thread_id)?.sha ?? null, prUrl: target.pr_url, branch: target.branch,
-      }))));
-      // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
-      const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
-      if (openReviews.length || streak) {
-        const now = Date.now();
-        db.transaction(() => {
-          ledger.seedStreak(thread.id, streak, previous, now);
-          for (const old of openReviews) db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, old.thread_id);
-        })();
-        reloadRoles();
-      }
-      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id) };
-    })();
-    reviewStarts.set(reviewKey, start);
-    try {
-      return await start;
-    } finally {
-      reviewStarts.delete(reviewKey);
-    }
-  }
-
-  /** The chief_review counterpart to startReview for a pull request or branch no
-   * managed worker owns: same reviewer contract, but spawned on a fresh managed
-   * worktree (delegate()'s exact shape) instead of the worker's reused environment. */
-  async function startBranchReview(
-    caller: ManagedRow | undefined,
-    branch: string,
-    pullRequestRef: string | null,
-    focus?: string,
-  ) {
-    requireChiefCaller(caller, "Starting a review");
-    const { thread_id: chiefThreadId, project_id: projectId } = caller;
-    // A branch a managed worker still carries is reviewed through that worker, so the review follows its plan and head.
-    const owner = [...roles.values()].find((row) => row.role === "worker" && !terminal(row.state)
-      && row.chief_thread_id === chiefThreadId && row.project_id === projectId && row.branch === branch);
-    if (owner) throw new Error(`Branch ${branch} is owned by worker ${owner.thread_id}: use chief_review (workerThreadId: ${owner.thread_id}).`);
-    const key = JSON.stringify(["branch", chiefThreadId, projectId, branch]);
-    const inFlight = reviewStarts.get(key);
-    if (inFlight) return inFlight;
-    const start = (async () => {
-      const duplicate = existingBranchReview.get(chiefThreadId, projectId, branch) as ManagedRow | undefined;
-      if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId: null, created: false };
-      const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
-      const prepared = await managedSpawn.prepare(projectId, { role: "reviewer", hostId });
-      const title = `Review · ${branch}`;
-      const prompt = reviewerPrompt({
-        // This worktree is cut from the branch itself, so "its base" would be an empty diff.
-        subject: pullRequestRef
-          ? `Independently review pull request ${pullRequestRef} (branch ${branch}). No managed worker owns this change. This worktree is checked out on that branch: diff it against the pull request's target branch (gh pr view ${pullRequestRef} --json baseRefName, or glab mr view ${pullRequestRef}).`
-          : `Independently review branch ${branch}. No managed worker owns this change. This worktree is checked out on that branch: diff it against the project's default branch (origin/HEAD).`,
-        chiefThreadId,
-        focus,
-        provenance: [],
-      });
-      const thread = await managedSpawn.launch(prepared, {
-        projectId,
-        environment: {
-          type: "host",
-          hostId,
-          workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: branch } },
-        },
-        title, prompt,
-      }, { role: "reviewer", chiefThreadId, branch, prUrl: pullRequestRef });
-      return { threadId: thread.id, title, workerThreadId: null, created: true };
-    })();
-    reviewStarts.set(key, start);
-    try {
-      return await start;
-    } finally {
-      reviewStarts.delete(key);
-    }
-  }
+  const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
+    db, store, ledger, managedSpawn, requireChiefCaller, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
+    busyStatuses: BUSY_STATUSES, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
+    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle,
+  });
 
   /** Which path a worker review took, for chief_review's reply. */
   function reviewPathNote(workerThreadId: string, pinnedSha?: string | null, covers?: string[]) {
     if (covers && covers.length > 1) return `One review covers the whole plan: ${covers.join(", ")}, each pull request pinned to its own head commit where the forge answered. Complete each worker only on its approve.`;
     if (pinnedSha) return `It reviews the pull request pinned to head commit ${pinnedSha} in its own worktree.`;
-    return roles.get(workerThreadId)?.pr_url
+    return store.get(workerThreadId)?.pr_url
       ? "The pull request head could not be read, so it reviews the worker's own environment and its verdict is not bound to a commit: chief_complete will need a fresh review once the forge answers, or an override."
       : "It reviews the worker's own environment (no pull request).";
   }
@@ -2539,7 +2235,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** override is the one bypass of a worker's review gate; its reason is recorded in the stored result. */
   async function markComplete(threadId: string, result?: string, override?: string) {
-    const row = roles.get(threadId);
+    const row = store.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker or reviewer ${threadId}.`);
     const live = await bb.sdk.threads.get({ threadId });
     if (BUSY_STATUSES.has(live.status)) throw new Error(`Cannot complete ${threadId} while it is ${live.status}.`);
@@ -2556,15 +2252,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const replacement = result ? clip(result, MAX_RESULT_LENGTH) : null;
     // A replaced result drops the summary and report file that described the old one.
-    db.prepare(`UPDATE managed_threads SET state='complete', status=@status,
-      result=CASE WHEN @note IS NULL THEN COALESCE(@result, result) ELSE COALESCE(@result, result, '') || @note END,
-      summary=CASE WHEN @result IS NULL THEN summary END, report_path=CASE WHEN @result IS NULL THEN report_path END,
-      result_rev=result_rev + (@result IS NOT NULL),
-      blocker=NULL, recommendation=NULL, active_since=NULL, updated_at=@now WHERE thread_id=@threadId`).run(
-      { status: live.status, result: replacement, note: overrideNote, now: Date.now(), threadId },
-    );
-    reloadRoles();
-    return { row: roles.get(threadId)!, overridden: overrideNote !== null };
+    store.markComplete({ status: live.status, result: replacement, note: overrideNote, now: Date.now(), threadId });
+    return { row: store.get(threadId)!, overridden: overrideNote !== null };
   }
 
   /** chief_owner_approval: records the owner's approval on a design-wave worker whose latest report was ready.
@@ -2577,8 +2266,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (BUSY_STATUSES.has(live.status)) busyRejection(row, live.status, "recording the owner's approval");
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`${row.thread_id} is not a live thread.`);
     if (row.last_report_state !== "ready") throw new Error(`${row.thread_id}'s latest report is ${row.last_report_state ?? "missing"}, not ready: wait for its ready report before asking the owner.`);
-    db.prepare(`UPDATE managed_threads SET owner_approval=?, owner_approved_at=? WHERE thread_id=?`).run(approval, Date.now(), row.thread_id);
-    reloadRoles();
+    store.recordOwnerApproval(row.thread_id, approval);
     const { waves, next } = progress.nextWave(row);
     return next !== null
       ? `Recorded the owner's approval of wave ${row.plan_wave}. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); name the approved artboards in its mission.`
@@ -2599,7 +2287,7 @@ export default async function plugin(bb: BbPluginApi) {
    * the row is marked blocked (with a reroute recommendation) rather than complete, so
    * chief_delegate replaces: can hand it to a fresh worker once it is idle. */
   async function stopThread(threadId: string, reason?: string) {
-    const row = roles.get(threadId);
+    const row = store.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed thread ${threadId} to stop.`);
     const live = await bb.sdk.threads.get({ threadId });
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Cannot stop ${threadId} because it is not a live thread.`);
@@ -2607,11 +2295,8 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`${threadId} is ${live.status}; nothing to stop.${row.role === "worker" ? ` Replace it with chief_delegate (replaces: ${threadId}).` : ""}`);
     }
     await bb.sdk.threads.stop({ threadId });
-    db.prepare(`UPDATE managed_threads SET state='blocked', blocker=?, recommendation=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-      clip(`Stopped by Chief${reason ? `: ${reason}` : "."}`, 4_000), rerouteSteps(row), Date.now(), threadId,
-    );
-    reloadRoles();
-    return roles.get(threadId)!;
+    store.markStopped(threadId, clip(`Stopped by Chief${reason ? `: ${reason}` : "."}`, 4_000), rerouteSteps(row));
+    return store.get(threadId)!;
   }
 
   function enqueueAlert(row: ManagedRow, key: string, message: string) {
@@ -2776,11 +2461,11 @@ export default async function plugin(bb: BbPluginApi) {
     return (end ? rest.slice(0, end.index) : rest).trim() || undefined;
   }
 
-  type ThreadInput = Parameters<typeof insertThread>[0];
+  type ThreadInput = ThreadInsert<ManagedRow["role"], ManagedRow["state"]>;
   /** The caller's managed row. While insertThread has not run yet, `pending` holds the row recovered from spawn-seeded
    * metadata and nothing is written: the caller persists it with insertThread once it has decided to proceed. */
   async function lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInput }> {
-    const row = roles.get(threadId);
+    const row = store.get(threadId);
     if (row) return { row };
     // configure() already falls back to pluginMetadata seeded at spawn time
     // because insertThread only runs after threads.spawn resolves; a report can
@@ -2811,8 +2496,8 @@ export default async function plugin(bb: BbPluginApi) {
   async function managedRow(threadId: string, callerProjectId: string) {
     const { row, pending } = await lookupRow(threadId, callerProjectId);
     if (pending) {
-      insertThread(pending);
-      return roles.get(threadId);
+      store.insert(pending);
+      return store.get(threadId);
     }
     return row;
   }
@@ -2979,8 +2664,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const errors = checkReport(candidate, params, plan);
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
-    if (found.pending) insertThread(found.pending);
-    const row = roles.get(threadId)!;
+    if (found.pending) store.insert(found.pending);
+    const row = store.get(threadId)!;
     // checkReport proved the shape: a wave array here is {body, dependsOn?, design?}[], with bodies not yet trimmed if JSON-decoded.
     const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
@@ -3019,18 +2704,15 @@ export default async function plugin(bb: BbPluginApi) {
     // reject_streak counts only consecutive request_changes verdicts, and
     // resets the moment either side breaks the streak with an approve.
     // report_seq is reserved here, so the per-report file names below never collide.
-    const { report_seq: seq, result_rev: resultRev } = db.transaction(() => {
-      const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
-        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
-        last_report_state=?, owner_approval=NULL, owner_approved_at=NULL,
-        active_since = CASE WHEN ?='active' THEN active_since ELSE NULL END, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
-        params.state, params.result ?? null, params.summary ?? null, params.state === "blocked" ? params.blocker ?? null : null,
-        params.recommendation ?? null, verdict,
-        scheduledWaves ? JSON.stringify(scheduledWaves) : null, regressionFlag ? 1 : 0, fails,
-        params.state, params.state, params.state, now, threadId,
-      ) as { report_seq: number; result_rev: number };
+    const { report_seq: seq, result_rev: resultRev } = store.batch(() => {
+      const reserved = store.reserveReport({
+        threadId, state: params.state, result: params.result ?? null, summary: params.summary ?? null,
+        blocker: params.state === "blocked" ? params.blocker ?? null : null,
+        recommendation: params.recommendation ?? null, verdict,
+        planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails, now,
+      });
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
-        db.prepare(`UPDATE managed_threads SET advised_at=COALESCE(advised_at, ?) WHERE thread_id=?`).run(now, threadId);
+        store.markAdvised(threadId, now);
       }
       if (row.role === "advisor" && params.state === "ready" && params.lesson) {
         db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at) VALUES (?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now);
@@ -3041,9 +2723,8 @@ export default async function plugin(bb: BbPluginApi) {
         appendPlanLog(row, params.fails.map((entry) => ({ ...entry, kind: "FAIL" as const })));
       }
       return reserved;
-    })();
-    reloadRoles();
-    const current = roles.get(threadId)!;
+    });
+    const current = store.get(threadId)!;
     const action = nextAction(current, true) ?? waveWaitLine(current)
       ?? (row.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or timeout it reports. Nothing to review or complete." : null)
       ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
@@ -3178,12 +2859,9 @@ export default async function plugin(bb: BbPluginApi) {
     // Guarded by report_seq, and report_path also by result_rev: a slow write never attaches its path to a
     // newer report, nor to a result chief_complete replaced meanwhile (even with identical text). Always runs, so a
     // report without a verdict still clears the previous verdict_path as the main UPDATE used to.
-    db.prepare(`UPDATE managed_threads SET verdict_path=?, report_path=CASE WHEN result_rev=? THEN ? END WHERE thread_id=? AND report_seq=?`).run(
-      verdictPath, resultRev, reportPath, threadId, seq,
-    );
-    reloadRoles();
+    store.attachReportFiles(threadId, seq, resultRev, verdictPath, reportPath);
     const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
-    return alertChief(roles.get(threadId) ?? current, `report:${current.active_cycle}:${contentKey}`, alert);
+    return alertChief(store.get(threadId) ?? current, `report:${current.active_cycle}:${contentKey}`, alert);
   }
 
   function stateFromLive(row: ManagedRow, status: string) {
@@ -3205,14 +2883,12 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const now = Date.now();
     if (thread.deletedAt !== null) {
-      db.prepare(`UPDATE managed_threads SET state='deleted', status=NULL, active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, row.thread_id);
-      reloadRoles();
+      store.markDeleted(row.thread_id, now);
       return true;
     }
     if (thread.archivedAt !== null) {
       if (row.state === "archived") return true;
-      db.prepare(`UPDATE managed_threads SET state='archived', status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(thread.status, now, row.thread_id);
-      reloadRoles();
+      store.markArchived(row.thread_id, thread.status, now);
       return true;
     }
     if (thread.sectionId !== sectionId || thread.visibility !== "visible") {
@@ -3222,36 +2898,34 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Transient thread filing failure for ${row.thread_id}; will retry: ${String(error)}`);
       }
     }
-    // The reads above may have spanned a report or lifecycle event: decide from the row as it is now.
-    const current = roles.get(row.thread_id);
+    // The reads above may have spanned a report or lifecycle event: decide from the row as it is now (#127), never the one captured before them.
+    const current = store.get(row.thread_id);
     if (!current) return true;
     row = current;
     const parentChanged = !!thread.parentThreadId && row.parent_thread_id !== thread.parentThreadId;
-    if (parentChanged) {
-      db.prepare(`UPDATE managed_threads SET parent_thread_id=?, updated_at=? WHERE thread_id=?`).run(thread.parentThreadId, now, row.thread_id);
-    }
     const nextState = stateFromLive(row, thread.status) as ManagedRow["state"];
     // Unchanged: skip the write and the reload, which recomputes every Chief's checklist.
     if (!parentChanged && nextState === row.state && thread.status === row.status && (nextState !== "active" || row.active_since !== null)) return true;
     const enteringActive = nextState === "active" && row.state !== "active";
-    db.prepare(`UPDATE managed_threads SET state=?, status=?, active_since=?,
-      active_cycle=active_cycle+?, stall_alerted_cycle=CASE WHEN ? THEN NULL ELSE stall_alerted_cycle END,
-      updated_at=? WHERE thread_id=?`).run(
-      nextState, thread.status,
-      nextState === "active" ? (row.state === "active" ? row.active_since ?? now : now) : null,
-      enteringActive ? 1 : 0, enteringActive ? 1 : 0, now, row.thread_id,
-    );
-    reloadRoles();
+    // One reload covers the parent write and the state write.
+    store.batch(() => {
+      if (parentChanged) store.setParent(row.thread_id, thread.parentThreadId!, now);
+      store.syncLive({
+        threadId: row.thread_id, state: nextState, status: thread.status,
+        activeSince: nextState === "active" ? (row.state === "active" ? row.active_since ?? now : now) : null,
+        enteringActive, now,
+      });
+    });
     return true;
   }
 
   async function reconcile() {
     const sectionId = await ensureSection();
     // A complete or deleted row never changes state again (stateFromLive), so only open rows cost a read.
-    for (const row of [...roles.values()]) {
+    for (const row of store.all()) {
       if (row.state !== "deleted" && row.state !== "complete") await reconcileThread(row, sectionId);
     }
-    const projects = new Set([...roles.values()].map((row) => row.project_id));
+    const projects = new Set(store.all().map((row) => row.project_id));
     const configured = (await settings.get()).chiefProject;
     if (configured) projects.add(configured);
     for (const projectId of projects) await readRules(projectId);
@@ -3260,7 +2934,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function lifecycle(kind: string, thread: { id: string; status?: string }) {
     // Before the early returns: the blocker may be unmanaged, hidden, or already complete.
     if ((kind === "idle" || kind === "failed") && pendingReady) void sweep();
-    const row = roles.get(thread.id);
+    const row = store.get(thread.id);
     if (!row) return;
     // Complete is final: an archive (often Chief's own auto-archive) keeps the row complete, so a
     // planner waiting on its final-wave worker still sees it complete; only a delete moves it.
@@ -3271,37 +2945,24 @@ export default async function plugin(bb: BbPluginApi) {
         : kind === "idle" ? "idle"
           : kind === "failed" ? "failed"
             : kind === "archived" ? "archived" : "deleted";
-      db.prepare(`UPDATE managed_threads SET state=?, status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-        state, thread.status ?? state, now, thread.id,
-      );
-      reloadRoles();
+      store.recordState(thread.id, state, thread.status ?? state, now);
       return;
     }
     if (kind === "active") {
       const enteringActive = row.state !== "active";
-      db.prepare(`UPDATE managed_threads SET state='active', status=?, active_since=?,
-        active_cycle=active_cycle+?, stall_alerted_cycle=CASE WHEN ? THEN NULL ELSE stall_alerted_cycle END,
-        updated_at=? WHERE thread_id=?`).run(
-        thread.status ?? "active", enteringActive ? now : row.active_since ?? now,
-        enteringActive ? 1 : 0, enteringActive ? 1 : 0, now, thread.id,
-      );
-      reloadRoles();
+      store.markActive(thread.id, thread.status ?? "active", enteringActive ? now : row.active_since ?? now, enteringActive, now);
       return;
     }
     const observed = kind === "idle" ? "idle" : kind === "failed" ? "failed" : kind === "archived" ? "archived" : "deleted";
     const state = observed === "idle" && ["ready", "blocked", "complete"].includes(row.state) ? row.state : observed;
-    db.prepare(`UPDATE managed_threads SET state=?, status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-      state, thread.status ?? observed, now, thread.id,
-    );
-    reloadRoles();
+    store.recordState(thread.id, state, thread.status ?? observed, now);
     if (kind !== "failed" || !row.chief_thread_id) return;
     const failure = await lastProviderError(thread.id);
     const transient = failure && transientFailure(failure.text);
     if (!failure || !transient) {
       // ponytail: a repeated failed event while already failed is the same failure, not a second one.
       if (row.state !== "failed") {
-        db.prepare(`UPDATE managed_threads SET thread_errors=thread_errors+1 WHERE thread_id=?`).run(thread.id);
-        reloadRoles();
+        store.countError(thread.id);
       }
       // `error:` never `failed:`, so chiefStats keeps counting only transient failures as `:failed:`; the outbox dedupes per cycle.
       await alertChief(row, `error:${row.active_cycle}`, [
@@ -3349,7 +3010,7 @@ export default async function plugin(bb: BbPluginApi) {
           const parsed = Number(values.stallMinutes);
           const threshold = (Number.isFinite(parsed) && parsed > 0 ? parsed : 15) * 60_000;
           const now = Date.now();
-          for (const row of [...roles.values()]) {
+          for (const row of store.all()) {
             if (row.role === "chief" || row.state !== "active" || row.active_since === null) continue;
             const elapsed = now - row.active_since;
             if (elapsed < threshold) continue;
@@ -3366,9 +3027,7 @@ export default async function plugin(bb: BbPluginApi) {
               rerouteSteps(row),
             ].join("\n"));
             if (sent) {
-              db.prepare(`UPDATE managed_threads SET stall_alerted_cycle=?, stop_alerted_cycle=?, updated_at=? WHERE thread_id=?`)
-                .run(row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle, Date.now(), row.thread_id);
-              reloadRoles();
+              store.markStallAlerted(row.thread_id, row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle);
             }
           }
           // Hand an archived or deleted Chief's open work to the project's live Chief, starting
@@ -3376,9 +3035,9 @@ export default async function plugin(bb: BbPluginApi) {
           // (touchCallerChief), and its next event returns it to idle or active. Alerts from
           // open work follow the work; an alert whose source is already finished is not worth
           // a new Chief the user just deleted.
-          const orphanedChiefs = [...roles.values()].filter((row) =>
+          const orphanedChiefs = store.all().filter((row) =>
             row.role === "chief" && (row.state === "archived" || row.state === "deleted")
-            && [...roles.values()].some((child) => child.chief_thread_id === row.thread_id && !["failed", "deleted", "archived", "complete"].includes(child.state)));
+            && store.all().some((child) => child.chief_thread_id === row.thread_id && !["failed", "deleted", "archived", "complete"].includes(child.state)));
           for (const orphaned of orphanedChiefs) {
             const next = await ensureChief(orphaned.project_id);
             if (next.threadId !== orphaned.thread_id) handOver(orphaned.thread_id, next.threadId, orphaned.project_id);
@@ -3404,7 +3063,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   function rosterFor(projectId: string, includeComplete = false) {
-    return [...roles.values()].filter((row) => row.project_id === projectId && (includeComplete || row.state !== "complete"));
+    return store.all().filter((row) => row.project_id === projectId && (includeComplete || row.state !== "complete"));
   }
 
   /** Said the same way in chief_stop's reply and both stall alerts. */
@@ -3444,16 +3103,10 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The last 3 reviewer rows with a verdict for this worker's task, so the
    * advisor sees the review history that led to the consult, across a `replaces`
-   * handoff. ponytail: chains by matching branch across the whole project, so a
-   * branch reused by a later task can surface an earlier task's reviews, and
-   * with no branch only the current worker's own reviews are found. Upgrade to
-   * a `replaces` link column if that ever needs to be precise. */
+   * handoff. */
   function taskReviews(worker: ManagedRow): ManagedRow[] {
-    const chain = worker.branch
-      ? [...roles.values()].filter((row) => row.role === "worker" && row.project_id === worker.project_id && row.chief_thread_id === worker.chief_thread_id && row.branch === worker.branch)
-      : [worker];
-    const workerIds = new Set(chain.map((row) => row.thread_id));
-    return [...roles.values()]
+    const workerIds = new Set(ledger.taskChain(worker.thread_id));
+    return store.all()
       .filter((row) => row.role === "reviewer" && row.verdict && row.worker_thread_id && workerIds.has(row.worker_thread_id))
       .sort((a, b) => b.created_at - a.created_at)
       .slice(0, 3);
@@ -3474,11 +3127,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function resolveTarget(threadId: string, chiefThreadId: string): Promise<ManagedRow | undefined> {
-    let target = roles.get(threadId);
+    let target = store.get(threadId);
     if (!target) {
       try {
         const live = await bb.sdk.threads.get({ threadId });
-        const chief = roles.get(chiefThreadId);
+        const chief = store.get(chiefThreadId);
         if (
           live.deletedAt === null && live.archivedAt === null &&
           live.parentThreadId === chiefThreadId && chief && live.projectId === chief.project_id
@@ -3491,7 +3144,7 @@ export default async function plugin(bb: BbPluginApi) {
             ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
             : undefined;
           if (seeded?.success && seeded.data.role !== "chief" && seeded.data.chiefThreadId === chiefThreadId) {
-            insertThread({
+            store.insert({
               threadId: live.id,
               role: seeded.data.role,
               projectId: live.projectId,
@@ -3501,7 +3154,7 @@ export default async function plugin(bb: BbPluginApi) {
               state: live.status === "active" ? "active" : "idle",
               status: live.status,
             });
-            target = roles.get(threadId);
+            target = store.get(threadId);
           }
         }
       } catch {
@@ -3512,7 +3165,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function rosterForChief(chiefThreadId: string, includeComplete = false) {
-    return [...roles.values()].filter(
+    return store.all().filter(
       (row) => belongsToChief(row, chiefThreadId) && (includeComplete || row.state !== "complete"),
     );
   }
@@ -3570,7 +3223,7 @@ export default async function plugin(bb: BbPluginApi) {
       else counts[alert.dedupe_key.endsWith(":hard") ? "hardStalls" : "stalls"] += 1;
       alerts.set(alert.source_thread_id, counts);
     }
-    // ponytail: the branch fallback is taskReviews' heuristic, so a branch reused by a later unplanned
+    // ponytail: the branch fallback is a heuristic, so a branch reused by a later unplanned
     // task merges into one task; replaces_thread_id makes this precise from stats_since on.
     const keys = new Map<string, string | null>();
     const keyOf = (row: ManagedRow | undefined): string | null => {
@@ -3578,7 +3231,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (keys.has(row.thread_id)) return keys.get(row.thread_id)!;
       keys.set(row.thread_id, null);
       const branch = row.branch ? `branch:${row.project_id}:${row.branch}` : null;
-      const viaLink = (id: string | null | undefined) => (id ? keyOf(roles.get(id)) : null);
+      const viaLink = (id: string | null | undefined) => (id ? keyOf(store.get(id)) : null);
       const key = row.role === "planner" ? `plan:${row.thread_id}`
         : row.role === "worker" ? (row.plan_thread_id ? `plan:${row.plan_thread_id}` : viaLink(row.replaces_thread_id) ?? branch ?? `worker:${row.thread_id}`)
         : row.role === "reviewer" ? viaLink(row.worker_thread_id) ?? branch
@@ -3771,7 +3424,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The Pending block exactly as chief_roster prints it. */
   function pendingBlock(chiefThreadId: string, includeWaiting = false) {
-    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(roles.get(chiefThreadId)?.project_id, !includeWaiting)), 6_000);
+    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(store.get(chiefThreadId)?.project_id, !includeWaiting)), 6_000);
   }
 
   /** The panel's checklist: action threads, in-progress threads (newest first), open
@@ -3786,7 +3439,7 @@ export default async function plugin(bb: BbPluginApi) {
       status: todo.state, action: null, done: todo.state !== "open",
     });
     const open = rows.filter(isOpenItem).map((row) => threadItem(row, false));
-    const projectId = roles.get(chiefThreadId)?.project_id;
+    const projectId = store.get(chiefThreadId)?.project_id;
     const doneRows = [
       ...rows.filter((row) => !isOpenItem(row)).map((row) => [row.updated_at, threadItem(row, true)] as const),
       ...(projectId ? closedTodosForProject.all(projectId) as TodoRow[] : []).map((todo) => [todo.updated_at, todoItem(todo)] as const),
@@ -3804,7 +3457,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Every active Chief's checklist, only to detect a change worth a realtime signal. */
   function pendingSnapshot() {
-    return [...roles.values()].filter(isActiveChief).map((chief) => [chief.thread_id, todoItems(chief.thread_id)]);
+    return store.all().filter(isActiveChief).map((chief) => [chief.thread_id, todoItems(chief.thread_id)]);
   }
 
   async function lastOutput(threadId: string) {
@@ -3881,7 +3534,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function inspect(threadId: string, projectId: string) {
-    const row = roles.get(threadId);
+    const row = store.get(threadId);
     if (!row || row.project_id !== projectId) throw new Error(`No managed thread ${threadId} for this Chief project.`);
     let liveStatus = row.status;
     try {
@@ -3914,7 +3567,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const { research, researchSleep } = createResearch({
-    db, bb, managedRow, roleRow: (threadId) => roles.get(threadId), terminal, isActiveChief, researchSettings, readResearchModel,
+    db, bb, managedRow, roleRow: store.get, terminal, isActiveChief, researchSettings, readResearchModel,
     environmentHostId, discover, catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError,
     lastOutput, managedSpawn, alertChief, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
@@ -3935,7 +3588,7 @@ export default async function plugin(bb: BbPluginApi) {
       constraints: z.string().trim().max(12_000).optional().describe("The same constraints you will pass to chief_delegate, as text (one per line)."),
     }),
     async execute({ planThreadId, wave, mission, successCriteria, constraints, ...params }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) {
         throw new Error("chief_forge_init requires an active registered Chief thread.");
       }
@@ -3954,7 +3607,7 @@ export default async function plugin(bb: BbPluginApi) {
       ];
       if (planThreadId === undefined) body = [params.body ?? `Tracking work for ${params.title}.`, "", ...briefSections].join("\n");
       if (planThreadId !== undefined && wave !== undefined) {
-        const planner = roles.get(planThreadId);
+        const planner = store.get(planThreadId);
         if (!planner || planner.role !== "planner" || !controlsThread(planner, caller.thread_id)) {
           throw new Error(`No managed planner ${planThreadId} for this Chief.`);
         }
@@ -4010,7 +3663,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.`,
     parameters: delegateParams,
     async execute(params, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) {
         throw new Error("chief_delegate requires an active registered Chief thread.");
       }
@@ -4024,7 +3677,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Send one unit of work to a read-only planner. It proposes an implementation plan, split into waves; its ready alert names the exact next call.",
     parameters: planParams,
     async execute(params, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) {
         throw new Error("chief_plan requires an active registered Chief thread.");
       }
@@ -4038,7 +3691,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Start a read-only advisor on a hard problem or a change that keeps failing review. It may read code and run commands to reproduce it, never edits, and reports its advice back to you.",
     parameters: consultParams,
     async execute(params, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) {
         throw new Error("chief_consult requires an active registered Chief thread.");
       }
@@ -4052,8 +3705,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   function touchCallerChief(caller?: ManagedRow) {
     if (caller && caller.role === "chief" && caller.state === "failed") {
-      db.prepare(`UPDATE managed_threads SET state='active', updated_at=? WHERE thread_id=?`).run(Date.now(), caller.thread_id);
-      reloadRoles();
+      store.reactivate(caller.thread_id);
     }
   }
 
@@ -4072,7 +3724,7 @@ export default async function plugin(bb: BbPluginApi) {
       }).optional(),
     }),
     async execute({ includeComplete, includeWaiting, todo }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error("chief_roster requires an active registered Chief thread.");
       touchCallerChief(caller);
       if (todo) {
@@ -4086,7 +3738,7 @@ export default async function plugin(bb: BbPluginApi) {
           const after = todo.after === undefined ? existing.after : todo.after || null;
           updateTodo.run(todo.text ?? existing.text, after, todo.state ?? existing.state, now, todo.id, caller.project_id);
         }
-        reloadRoles();
+        store.reload();
       }
       const rows = rosterForChief(caller.thread_id, includeComplete);
       const reversed = [...rows].reverse();
@@ -4110,7 +3762,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Inspect one managed thread's live status, persisted report summary, full-report file path, and bounded last assistant output before deciding what to do.",
     parameters: z.object({ threadId: z.string() }),
     async execute({ threadId }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       const target = await resolveTarget(threadId, caller.thread_id);
       if (!target || !belongsToChief(target, caller.thread_id)) {
@@ -4129,7 +3781,7 @@ export default async function plugin(bb: BbPluginApi) {
       instruction: z.string().trim().min(1).max(MAX_NUDGE_LENGTH).describe(`A short nudge, at most ${MAX_NUDGE_LENGTH} characters.`),
     }),
     async execute({ threadId, instruction }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       await controlledTarget(threadId, caller);
       touchCallerChief(caller);
@@ -4143,7 +3795,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Interrupt a running managed thread that is stuck or looping. Keeps its worktree, branch, and history; the reply names the reroute steps.",
     parameters: stopParams,
     async execute({ threadId, reason }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error("chief_stop requires an active registered Chief thread.");
       await controlledTarget(threadId, caller);
       touchCallerChief(caller);
@@ -4157,7 +3809,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
     parameters: reviewParams,
     async execute(params, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       requireChiefCaller(caller, "chief_review");
       if (params.workerThreadId) {
         await controlledTarget(params.workerThreadId, caller);
@@ -4179,7 +3831,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. It never archives threads or removes worktrees; that cleanup is left to the user. A design-only wave's worker completes only with the owner's approval recorded by chief_owner_approval. Any other worker with a pull request completes only when the newest review is an approve for the pull request's current head commit (a worker without one: for its current report); otherwise it is refused naming the reason. override (a reason) is the only bypass and is recorded in the result. After a worker completes, this call marks its draft pull request ready for review: never run gh pr ready or glab mr update --ready yourself for a worker's pull request.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional(), override: overrideSchema.describe("Complete a worker even though no approve covers its pull request head (or current report). The reason is recorded in its result. Use only when the user or the evidence justifies skipping the review.") }),
     async execute({ threadId, result, override }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       await controlledTarget(threadId, caller);
       touchCallerChief(caller);
@@ -4201,7 +3853,7 @@ export default async function plugin(bb: BbPluginApi) {
       approval: z.string().trim().min(1).max(2_000).describe("The user's own words approving the artboards, verbatim."),
     }),
     async execute({ workerThreadId, approval }, context) {
-      const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed worker ${workerThreadId} for this Chief.`);
       const target = await controlledTarget(workerThreadId, caller);
       touchCallerChief(caller);
@@ -4226,7 +3878,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: "Plan workers only: append FACT/FAIL notes for peer waves, and read unread peer notes plus every wave's current worker and state. Never alerts Chief or changes your state.",
     parameters: logParams,
     async execute({ entries }, context) {
-      const row = context.threadId ? roles.get(context.threadId) : undefined;
+      const row = context.threadId ? store.get(context.threadId) : undefined;
       if (!row || row.role !== "worker" || !row.plan_thread_id) return "Not part of a plan run.";
       return planLog(row, entries);
     },
@@ -4251,7 +3903,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.agents.configure((context) => {
-    const row = roles.get(context.thread.id);
+    const row = store.get(context.thread.id);
     if (row && ["complete", "archived", "deleted"].includes(row.state)) return { tools: [], skills: [] };
     // insertThread only runs after threads.spawn resolves, so the very first
     // configure() call for a brand-new thread can land before that row exists. The
@@ -4314,13 +3966,13 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.rpc.register(rpcContract, {
-    status: () => ({ sectionId: storedSectionId(), threads: [...roles.values()].map(toManaged) }),
+    status: () => ({ sectionId: storedSectionId(), threads: store.all().map(toManaged) }),
     start: ({ projectId }) => ensureChief(projectId ?? undefined),
     create: ({ projectId }) => createChief(projectId),
     // The header badge asks for one thread's role on every thread it renders on: not the roster.
-    role: ({ threadId }) => ({ role: roles.get(threadId)?.role ?? null }),
+    role: ({ threadId }) => ({ role: store.get(threadId)?.role ?? null }),
     pending: ({ threadId }) =>
-      isActiveChief(roles.get(threadId)) ? { chief: true, ...todoItems(threadId) } : { chief: false, items: [], doneOmitted: 0 },
+      isActiveChief(store.get(threadId)) ? { chief: true, ...todoItems(threadId) } : { chief: false, items: [], doneOmitted: 0 },
     modelConfiguration: async () => ({
       hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
         const connected = host.status === "connected";
@@ -4452,7 +4104,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "review") return fail("bb chief review is retired: only the active Chief starts reviews, through its chief_review tool. Ask Chief in its thread.");
         // The agent tools refuse anyone but the active Chief; the CLI is the same door from a
         // shell. A user's own shell or thread (no managed row) stays trusted.
-        const caller = context.threadId ? roles.get(context.threadId) : undefined;
+        const caller = context.threadId ? store.get(context.threadId) : undefined;
         const callerRole = caller?.role;
         if (caller && !isActiveChief(caller) && command !== "status" && command !== "inspect") {
           return fail(`bb chief ${command} is for the active Chief only${callerRole === "chief" ? "" : `; a managed ${callerRole} reports with chief_report`}.`);
@@ -4476,7 +4128,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
         if (command === "stats") {
           const chiefId = readScope ?? args.one("chief");
-          const chief = chiefId ? roles.get(chiefId) : undefined;
+          const chief = chiefId ? store.get(chiefId) : undefined;
           if (chiefId && chief?.role !== "chief") return fail(`No Chief thread ${chiefId}.`);
           const projectId = chief?.project_id ?? args.one("project") ?? context.projectId ?? (await settings.get()).chiefProject;
           if (!projectId) return fail("stats requires --project outside a project thread");
@@ -4499,7 +4151,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (!threadId) return fail("adopt requires --thread <thread-id>");
           // Adoption rewrites the row in place, so re-adopting a worker would
           // discard the branch and forge links its open PR depends on.
-          const registered = roles.get(threadId);
+          const registered = store.get(threadId);
           if (registered && registered.role !== "chief") {
             return fail(`Thread ${threadId} is already a managed ${registered.role} (“${registered.title}”). Adopting it would discard its branch, forge links, and report.`);
           }
@@ -4509,7 +4161,7 @@ export default async function plugin(bb: BbPluginApi) {
           await bb.sdk.threads.update({ threadId, sectionId, visibility: "visible", title });
           const previous = chiefForProject(thread.projectId);
           if (previous && previous.thread_id !== threadId) handOver(previous.thread_id, threadId, thread.projectId);
-          insertThread({ threadId, role: "chief", projectId: thread.projectId, title, state: thread.status === "active" ? "active" : "idle", status: thread.status });
+          store.insert({ threadId, role: "chief", projectId: thread.projectId, title, state: thread.status === "active" ? "active" : "idle", status: thread.status });
           await readRules(thread.projectId);
           return ok({ threadId, projectId: thread.projectId, title }, `Adopted ${threadId} as “${title}”.`);
         }
@@ -4551,7 +4203,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "inspect") {
           const threadId = args.positional[0];
           if (!threadId) return fail("inspect requires <thread-id>");
-          const row = roles.get(threadId);
+          const row = store.get(threadId);
           if (!row) return fail(`No managed thread ${threadId}.`);
           if (readScope && (row.project_id !== readProject || !belongsToChief(row, readScope))) {
             return fail(`No managed thread ${threadId} for this Chief.`);
@@ -4595,11 +4247,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   pendingReady = true;
   try {
-    await reconcile(); // each reconciled row's reloadRoles() sweeps rows absorbed before this version
+    await reconcile(); // each reconciled row's reload sweeps rows absorbed before this version
   } catch (error) {
     bb.log.warn(`Initial reconciliation deferred: ${String(error)}`);
   }
-  reloadRoles();
+  store.reload();
   await sweeping;
   await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
   await researchSettings().catch((error) => bb.log.warn(`Could not read the researcher settings: ${String(error)}`));

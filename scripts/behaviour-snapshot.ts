@@ -140,13 +140,17 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     else realClearTimeout(handle);
   }) as typeof clearTimeout;
 
-  // git, gh and glab never run. `gh pr view` answers prHead with the row's reviewed_head_sha (no pr_url: it fails).
+  // git, gh and glab never run. `gh pr view` answers prHead with the row's reviewed_head_sha (no pr_url: it fails),
+  // or, for a pull request number in `forgePulls`, with that entry (a pull request no managed worker carries).
+  const forgePulls: Record<string, { branch: string; sha: string }> = { "9510": { branch: "feature/fx-rv-free", sha: "9".repeat(40) } };
   const cp = createRequire(import.meta.url)("node:child_process");
   const customPromisify = Symbol.for("nodejs.util.promisify.custom");
   const execStub: any = () => { throw new Error("execFile must be invoked through promisify"); };
   execStub[customPromisify] = async (cmd: string, args: string[] = []) => {
     if (cmd === "gh" && args[0] === "pr" && args[1] === "view") {
       const target = String(args[2]);
+      const forged = forgePulls[target.replace(/^.*\//, "")];
+      if (forged) return { stdout: JSON.stringify({ headRefName: forged.branch, headRefOid: forged.sha, baseRefName: "main" }), stderr: "" };
       const row = database.prepare(`SELECT branch, reviewed_head_sha FROM managed_threads WHERE pr_url LIKE ? ORDER BY thread_id LIMIT 1`).get(`%/pull/${target.replace(/^.*\//, "")}`) as { branch: string | null; reviewed_head_sha: string | null } | undefined;
       if (!row?.reviewed_head_sha) throw new Error("snapshot: no such pull request");
       return { stdout: JSON.stringify({ headRefName: row.branch ?? "feature/x", headRefOid: row.reviewed_head_sha, baseRefName: "main" }), stderr: "" };
@@ -161,6 +165,9 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   const chief = database.prepare(`SELECT thread_id, project_id FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND state='idle' ORDER BY thread_id LIMIT 1`).get() as { thread_id: string; project_id: string } | undefined;
   let seedStacked: (() => void) | undefined;
   let seedStackedFix: (() => void) | undefined;
+  let seedE7: (() => void) | undefined;
+  let seedAbsorbed: (() => void) | undefined;
+  let seedStall: ((agedMs: number) => void) | undefined;
   if (chief) {
     const at = clock - 100_000;
     const insert = (row: Record<string, unknown>, offset: number) => {
@@ -220,6 +227,57 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
           plan_thread_id: "thr_fx_sf_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture stacked fix worker ${id} brief` }, 81 + index);
       }
     };
+    // The e7 fixtures (review start-up, task chain, thread store): seeded by e7 itself, like e1e's, so the earlier
+    // categories read the same rows as before they existed.
+    seedE7 = () => {
+      const worker = (id: string, offset: number, extra: Record<string, unknown> = {}) => insert({ thread_id: id, role: "worker", title: `Fixture ${id}`, state: "ready", result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture ${id} brief`, ...extra }, offset);
+      // Review start-up: a ready worker with a pull request head, one without any, one that turns busy, one that is archived.
+      worker("thr_fx_rv_a", 100, { branch: "feature/fx-rv-a", pr_url: "https://github.com/o/r/pull/9501", reviewed_head_sha: "5".repeat(40) });
+      worker("thr_fx_rv_b", 101, { branch: "feature/fx-rv-b" });
+      worker("thr_fx_rv_c", 102, { branch: "feature/fx-rv-c" });
+      worker("thr_fx_rv_c2", 103, { branch: "feature/fx-rv-c2", state: "idle" });
+      worker("thr_fx_rv_d", 104, { branch: "feature/fx-rv-d" });
+      // Task chain. bc: two branchless workers, the second replacing the first. sb: three workers on one branch, the third replacing the first.
+      const reviewer = (id: string, workerId: string, offset: number, fails?: object[]) => {
+        insert({ thread_id: id, role: "reviewer", title: `Fixture review of ${workerId}`, state: "ready", verdict: "request_changes", worker_thread_id: workerId, result: `Fixture review result of ${workerId}`, summary: `Fixture review summary of ${workerId}`, report_seq: 1, last_report_state: "ready", ...(fails ? { fails: JSON.stringify(fails) } : {}) }, offset);
+        database.prepare(`INSERT OR REPLACE INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq, head_sha, pr_url, branch) VALUES (?, ?, 1, NULL, NULL, NULL)`).run(id, workerId);
+      };
+      worker("thr_fx_bc_a", 110, { fails: JSON.stringify([{ text: "Fixture ruled out by bc_a", scope: "server.ts", basis: "tried it", at: at + 1_000 }]) });
+      reviewer("thr_fx_bc_a_r", "thr_fx_bc_a", 111, [{ text: "Fixture ruled out by bc_a's reviewer", scope: "app.tsx", basis: "read it", at: at + 2_000 }]);
+      worker("thr_fx_bc_b", 112, { replaces_thread_id: "thr_fx_bc_a" });
+      worker("thr_fx_sb_a", 120, { branch: "feature/fx-sb" });
+      reviewer("thr_fx_sb_a_r", "thr_fx_sb_a", 121);
+      worker("thr_fx_sb_b", 122, { branch: "feature/fx-sb" });
+      worker("thr_fx_sb_a2", 123, { branch: "feature/fx-sb", replaces_thread_id: "thr_fx_sb_a" });
+      reviewer("thr_fx_sb_a2_r", "thr_fx_sb_a2", 124);
+      // Thread store. rc: rows reconcileThread moves (live view differs). lc: rows lifecycle events move. stop: a running worker.
+      // lg: a plan worker that reads the log. ab: rows the absorbed sweep completes (and one it must leave, because it is busy).
+      for (const [index, id] of ["del", "arc", "par", "run"].entries()) worker(`thr_fx_rc_${id}`, 130 + index, { state: "idle" });
+      worker("thr_fx_rc_idle", 134, { state: "active", status: "active", active_since: at + 134, active_cycle: 1 });
+      worker("thr_fx_rc_stale", 135, { state: "active", status: "active", active_since: at + 135, active_cycle: 1 });
+      worker("thr_fx_lc_w", 136, { state: "idle" });
+      worker("thr_fx_lc_x", 137);
+      worker("thr_fx_stop_w", 138, { state: "active", status: "active", active_since: at + 138, active_cycle: 1 });
+      worker("thr_fx_lg_w", 139, { plan_thread_id: "thr_fx_wv_planner", plan_wave: 1 });
+      // oa: a design-only wave and its ready designer, for the owner's approval.
+      insert({ thread_id: "thr_fx_oa_planner", role: "planner", title: "Fixture approval planner", state: "ready", result: "Fixture approval plan", summary: "Fixture approval plan summary", plan_waves: JSON.stringify([
+        { path: `${FILES_ROOT}/thr_fx_oa_planner/plan-1.md`, contracts: "Fixture approval design contract", dependsOn: [], design: true },
+        { path: `${FILES_ROOT}/thr_fx_oa_planner/plan-2.md`, contracts: "Fixture approval build contract", dependsOn: [1] },
+      ]), report_seq: 1, last_report_state: "ready", brief: "Fixture approval planner brief" }, 144);
+      worker("thr_fx_oa_w", 145, { kind: "designer", plan_thread_id: "thr_fx_oa_planner", plan_wave: 1 });
+    };
+    // The absorbed-sweep fixtures: a complete worker with two advisors and a ready researcher. Seeded by the store category
+    // itself, because a Chief idle event (the reload) sweeps them at once.
+    seedAbsorbed = () => {
+      insert({ thread_id: "thr_fx_ab_w", role: "worker", title: "Fixture absorbed worker", state: "complete", result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: "Fixture absorbed worker brief" }, 140);
+      insert({ thread_id: "thr_fx_ab_adv", role: "advisor", title: "Fixture absorbed advisor", state: "idle", worker_thread_id: "thr_fx_ab_w", brief: "Fixture absorbed advisor brief" }, 141);
+      insert({ thread_id: "thr_fx_ab_busy", role: "advisor", title: "Fixture busy advisor", state: "idle", worker_thread_id: "thr_fx_ab_w", brief: "Fixture busy advisor brief" }, 142);
+      insert({ thread_id: "thr_fx_ab_res", role: "researcher", title: "Fixture ready researcher", state: "ready", result: "Fixture research result", brief: "Fixture researcher brief" }, 143);
+    };
+    // The stall fixture: a worker whose turn began agedMs ago. Seeded with the clock at seed time, aged again by the caller.
+    seedStall = (agedMs: number) => {
+      insert({ thread_id: "thr_fx_stall_w", role: "worker", title: "Fixture stalled worker", state: "active", status: "active", active_since: clock - agedMs, active_cycle: 1, brief: "Fixture stalled worker brief", branch: "feature/fx-stall" }, 150);
+    };
     // The wave-schedule fixture: a planner that has not reported its plan yet (e1c drives it through tools).
     insert({ thread_id: "thr_fx_wv_planner", role: "planner", title: "Fixture wave planner", state: "active", status: "idle", active_since: clock - 5_000, active_cycle: 1, brief: "Fixture wave planner brief" }, 50);
     ROLES.filter((role) => role !== "chief").forEach((role, index) => insert({
@@ -240,6 +298,9 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   const events: string[] = [];
   const liveThreads = new Map<string, any>();
   const overrides = new Map<string, any>();
+  const commandEvents = new Map<string, any[]>(); // a worker's recorded commands (item/completed events, newest first)
+  const pluginMetadata = new Map<string, object>(); // spawn-seeded metadata of a thread no managed row carries yet
+  const getHooks = new Map<string, () => Promise<unknown>>(); // runs once, while a threads.get is in flight (a stale-row race)
   const files = new Map<string, string>();
   const tabs = new Map<string, { revision: number; tabs: any[] }>();
   let spawnIndex = 0;
@@ -303,7 +364,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         models: async () => ({ modelLoadError: null, providers: [], selectedOnlyModels: [], models: [catalogModel("gpt-6-astra", true), catalogModel("gpt-6-mini")] }),
       },
       threads: {
-        events: { list: async () => [] },
+        events: { list: async ({ threadId, types }: { threadId: string; types?: string[] }) => (types?.includes("item/completed") ? commandEvents.get(threadId) ?? [] : []) },
         defaultExecutionOptions: async () => ({ permissionMode: "auto" }),
         spawn: async (args: any) => {
           spawnIndex += 1;
@@ -319,12 +380,15 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         },
         list: async () => [],
         archive: async ({ threadId }: { threadId: string }) => { events.push(`archive ${threadId}`); return { ok: true }; },
-        getPluginMetadata: async () => ({}),
+        getPluginMetadata: async ({ threadId }: { threadId: string }) => pluginMetadata.get(threadId) ?? {},
         storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_storage", storageRootPath: `${FILES_ROOT}/${threadId}` }),
         get: async ({ threadId }: { threadId: string }) => {
           const found = liveThreads.get(threadId) ?? storedThread(threadId);
           if (!found) throw new Error("not found");
-          return { ...found, ...overrides.get(threadId) };
+          const snapshot = { ...found, ...overrides.get(threadId) };
+          const hook = getHooks.get(threadId);
+          if (hook) { getHooks.delete(threadId); await hook(); }
+          return snapshot;
         },
         update: async ({ threadId, ...changes }: any) => {
           events.push(`update ${threadId} ${stable(changes)}`);
@@ -913,6 +977,154 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       await step("chief_plan", () => asChief("chief_plan", { title: "Snapshot start-site plan", mission: "Snapshot plan mission", context: "Snapshot plan context" }));
       await step("chief_review of a branch no worker carries", () => asChief("chief_review", { branch: "feature/snapshot-branch-review", focus: "Snapshot focus" }));
       await step("chief_review of the same branch again", () => asChief("chief_review", { branch: "feature/snapshot-branch-review" }));
+    }
+
+    // e7. the paths later waves move, one category each. Every step label begins with the server.ts function it covers.
+    // The fixtures are seeded here (seedE7), so the earlier categories read the same rows as before. Each step records its
+    // text, the spawn arguments and alerts, and the rows its fixtures (and any thread it spawned) hold afterwards.
+    const e7 = (prefixes: string[]) => {
+      const spawnedBefore = spawnIndex;
+      const mine = (column: string) => `(${prefixes.map((prefix) => `substr(${column}, 1, ${prefix.length}) = '${prefix}'`).join(" OR ")} OR (${column} LIKE 'thr_snap_%' AND CAST(substr(${column}, 10) AS INTEGER) > ${spawnedBefore}))`;
+      const tables = () => [["managed_threads", "thread_id", "thread_id"], ["review_targets", "reviewer_thread_id", "reviewer_thread_id, worker_thread_id"], ["alert_outbox", "source_thread_id", "rowid"]]
+        .map(([table, column, order]) => `${table}\n${(database.prepare(`SELECT * FROM ${table} WHERE ${mine(column!)} ORDER BY ${order}`).all() as object[]).map(stable).join("\n")}`).join("\n");
+      return (label: string, fn: () => unknown) => step(label, async () => {
+        let outcome: string;
+        try { outcome = show(await fn()); } catch (error) { outcome = `ERR ${error instanceof Error ? error.message : String(error)}`; }
+        return `${outcome}\n${tables()}`;
+      });
+    };
+    const e7Owner = chief ? { id: chief.thread_id, project: chief.project_id } : null;
+    const e7Tool = (name: string, input: unknown, as?: string) => (e7Owner ? tool(name, input, as ?? e7Owner.id, e7Owner.project) : "no chief");
+    // The server caches rows; an idle event on the Chief (already idle) makes it reload, and nothing else changes.
+    const e7Reload = async () => { if (chief) await harness.emitThreadEvent("thread.idle", { thread: storedThread(chief.thread_id)! } as never); };
+
+    begin("e7-review-start");
+    {
+      seedE7?.();
+      await e7Reload();
+      const reviewStep = e7(["thr_fx_rv_"]);
+      commandEvents.set("thr_fx_rv_b", [
+        { type: "item/completed", seq: 3, createdAt: clock, data: { item: { type: "commandExecution", command: "npm run check", exitCode: 1, status: "failed" } } },
+        { type: "item/completed", seq: 2, createdAt: clock, data: { item: { type: "commandExecution", command: "npm run build", exitCode: 0, status: "completed" } } },
+        { type: "item/completed", seq: 1, createdAt: clock, data: { item: { type: "agentMessage", text: "not a command" } } },
+      ]);
+      await reviewStep("startReview: ready worker with a pull request head and a focus", () => e7Tool("chief_review", { workerThreadId: "thr_fx_rv_a", focus: "Snapshot focus: the totals rounding" }));
+      await reviewStep("startReview: single ready worker with no pull request and recorded commands", () => e7Tool("chief_review", { workerThreadId: "thr_fx_rv_b" }));
+      // A ready worker whose turn has not ended waits (the clock pinned: the 60 s deadline passes at once), then is refused.
+      overrides.set("thr_fx_rv_c", { status: "active" });
+      await reviewStep("waitIdleAfterReport, busyRejection: ready worker still busy, busy_rejections counted", () => e7Tool("chief_review", { workerThreadId: "thr_fx_rv_c" }));
+      overrides.delete("thr_fx_rv_c");
+      // Not ready: no wait, refused at once.
+      overrides.set("thr_fx_rv_c2", { status: "active" });
+      await reviewStep("waitIdleAfterReport, busyRejection: idle worker still busy, no wait", () => e7Tool("chief_review", { workerThreadId: "thr_fx_rv_c2" }));
+      overrides.delete("thr_fx_rv_c2");
+      overrides.set("thr_fx_rv_d", { archivedAt: 1 });
+      await reviewStep("startReview: archived worker is not reviewable", () => e7Tool("chief_review", { workerThreadId: "thr_fx_rv_d" }));
+      overrides.delete("thr_fx_rv_d");
+      await reviewStep("startBranchReview: pull request whose branch a live worker owns", () => e7Tool("chief_review", { pullRequest: "https://github.com/o/r/pull/9501" }));
+      await reviewStep("resolvePullRequestBranch, startBranchReview: pull request no managed worker owns (pullRequestRef subject)", () => e7Tool("chief_review", { pullRequest: "https://github.com/o/r/pull/9510", focus: "Snapshot focus: the pull request" }));
+      await reviewStep("startBranchReview: the same pull request again (existingBranchReview)", () => e7Tool("chief_review", { pullRequest: "https://github.com/o/r/pull/9510" }));
+      await reviewStep("resolvePullRequestBranch: a reference the forge cannot answer falls back to the raw value as the branch", () => e7Tool("chief_review", { pullRequest: "feature/fx-raw-ref" }));
+    }
+
+    begin("e7-chain");
+    {
+      const chainStep = e7(["thr_fx_bc_", "thr_fx_sb_"]);
+      const consult = (workerThreadId: string) => e7Tool("chief_consult", { title: `Snapshot chain consult of ${workerThreadId}`, mission: "Snapshot chain question", workerThreadId });
+      await chainStep("taskReviews: branchless replaces chain, consult on the replacement (bc_b)", () => consult("thr_fx_bc_b"));
+      await chainStep("taskReviews: unrelated worker on the same branch, no replaces link (sb_b)", () => consult("thr_fx_sb_b"));
+      await chainStep("taskReviews: a successor's reviewer on the same branch (consult on sb_a, sb_a2 replaces it)", () => consult("thr_fx_sb_a"));
+      await chainStep("chainFails: replacement across a branchless chain, the ruled-out section of the prompt", () => e7Tool("chief_delegate", { title: "Snapshot chain replacement", mission: "Snapshot chain mission", replaces: "thr_fx_bc_b" }));
+    }
+
+    begin("e7-store");
+    {
+      const storeStep = e7(["thr_fx_rc_", "thr_fx_lc_", "thr_fx_stop_", "thr_fx_lg_", "thr_fx_ab_", "thr_fx_ad_", "thr_fx_oa_", "thr_fx_stall_"]);
+      const tick = async () => {
+        const run = harness.runService("supervisor");
+        run.controller.abort(); // the first pass runs to its wait, which the abort ends
+        await run.done;
+        return "supervisor pass done";
+      };
+      const event = async (kind: "thread.active" | "thread.idle" | "thread.failed" | "thread.archived" | "thread.deleted", id: string) => {
+        const status = { "thread.active": "active", "thread.idle": "idle", "thread.failed": "error", "thread.archived": "idle", "thread.deleted": "idle" }[kind];
+        overrides.set(id, { status });
+        const result = await harness.emitThreadEvent(kind, { thread: storedThread(id)! } as never);
+        return `${kind} ${id}: ${result.errors.length} errors`;
+      };
+      const rowOf = (id: string) => stable(database.prepare(`SELECT thread_id, state, status, thread_errors, busy_rejections, owner_approval, log_read_id, active_since, active_cycle, stall_alerted_cycle, stop_alerted_cycle FROM managed_threads WHERE thread_id=?`).get(id));
+      if (!chief) await step("store: no chief in the copy", () => "skipped");
+      else {
+        // a. completeAbsorbed: first through the sweep a Chief idle event starts (a busy advisor is left alone), then the supervisor's own.
+        seedAbsorbed?.();
+        overrides.set("thr_fx_ab_busy", { status: "active" });
+        await e7Reload();
+        for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve)); // the sweep is fire-and-forget: let it finish
+        await storeStep("completeAbsorbed: the sweep after an idle event completes the advisor and the researcher, and leaves the busy advisor", () => "sweep ran");
+        overrides.delete("thr_fx_ab_busy");
+        // b. reconcileThread, through one supervisor pass (the sweep runs in it too, and now finds the advisor idle).
+        overrides.set("thr_fx_rc_del", { deletedAt: 1 });
+        overrides.set("thr_fx_rc_arc", { archivedAt: 1 });
+        overrides.set("thr_fx_rc_par", { parentThreadId: "thr_fx_rc_other" });
+        overrides.set("thr_fx_rc_run", { status: "active" });
+        overrides.set("thr_fx_rc_idle", { status: "idle" });
+        // The #127 race: the worker reports ready while reconcile's threads.get is in flight, so its row is not the one reconcile read.
+        overrides.set("thr_fx_rc_stale", { status: "idle" });
+        getHooks.set("thr_fx_rc_stale", () => tool("chief_report", workerReport(true), "thr_fx_rc_stale", chief.project_id));
+        await storeStep("reconcileThread, completeAbsorbed: one supervisor pass over deleted, archived, re-parented, running, idle, stale rows and the advisor the sweep had left", tick);
+        for (const id of ["thr_fx_rc_del", "thr_fx_rc_arc", "thr_fx_rc_par", "thr_fx_rc_run", "thr_fx_rc_idle", "thr_fx_rc_stale"]) overrides.delete(id);
+        await storeStep("reconcileThread: a second pass with the live views back to the rows", tick);
+        // c. lifecycle
+        await storeStep("lifecycle: thread.active on an idle worker", () => event("thread.active", "thr_fx_lc_w"));
+        await storeStep("lifecycle: thread.idle ends its turn", () => event("thread.idle", "thr_fx_lc_w"));
+        await storeStep("lifecycle: thread.failed counts a thread error and alerts Chief", () => event("thread.failed", "thr_fx_lc_w"));
+        await storeStep("lifecycle: a repeated thread.failed is the same failure, not counted again", () => event("thread.failed", "thr_fx_lc_w"));
+        await storeStep("lifecycle: thread.active on a ready worker leaves ready", () => event("thread.active", "thr_fx_lc_x"));
+        await storeStep("lifecycle: thread.idle after the active turn", () => event("thread.idle", "thr_fx_lc_x"));
+        await storeStep("lifecycle: thread.archived", () => event("thread.archived", "thr_fx_lc_x"));
+        await storeStep("lifecycle: thread.deleted", () => event("thread.deleted", "thr_fx_lc_x"));
+        // d. tool writes
+        await storeStep("stopThread: chief_stop on a running worker", () => e7Tool("chief_stop", { threadId: "thr_fx_stop_w", reason: "Snapshot: looping" }));
+        await storeStep("stopThread: chief_stop on a worker that is no longer running", () => e7Tool("chief_stop", { threadId: "thr_fx_stop_w" }));
+        overrides.set("thr_fx_oa_w", { status: "active" });
+        await storeStep("recordOwnerApproval: design worker still busy, busy_rejections counted", () => e7Tool("chief_owner_approval", { workerThreadId: "thr_fx_oa_w", approval: "Snapshot: approved while busy" }));
+        overrides.delete("thr_fx_oa_w");
+        await storeStep("recordOwnerApproval: design worker idle, approval recorded", () => e7Tool("chief_owner_approval", { workerThreadId: "thr_fx_oa_w", approval: "Snapshot: approved, e7" }));
+        await storeStep("recordOwnerApproval: worker not on a design wave refused", () => e7Tool("chief_owner_approval", { workerThreadId: "thr_fx_lc_w", approval: "Snapshot: approved" }));
+        for (const role of ["reviewer", "advisor", "planner"]) {
+          const id = `thr_fx_${role}_active`;
+          overrides.set(id, { status: "idle" });
+          await storeStep(`markComplete: chief_complete on a ${role} (${id})`, async () => `${await e7Tool("chief_complete", { threadId: id })}\n${rowOf(id)}`);
+          overrides.delete(id);
+        }
+        await storeStep("planLog: chief_log read marks for a plan worker (log_read_id)", async () => `${await e7Tool("chief_log", {}, "thr_fx_lg_w")}\n${rowOf("thr_fx_lg_w")}`);
+        await storeStep("planLog: chief_log again, nothing unread", async () => `${await e7Tool("chief_log", {}, "thr_fx_lg_w")}\n${rowOf("thr_fx_lg_w")}`);
+        // e. touchCallerChief: a failed Chief that calls a tool returns to active.
+        await storeStep("touchCallerChief: thread.failed on the Chief", async () => `${await event("thread.failed", chief.thread_id)}\n${rowOf(chief.thread_id)}`);
+        await storeStep("touchCallerChief: the failed Chief calls a tool, which returns it to active", async () => `${await e7Tool("chief_continue", { threadId: "thr_fx_lc_w", instruction: "Snapshot nudge" })}\n${rowOf(chief.thread_id)}`);
+        await storeStep("lifecycle: thread.idle on the Chief restores it", async () => `${await event("thread.idle", chief.thread_id)}\n${rowOf(chief.thread_id)}`);
+        overrides.delete(chief.thread_id);
+        // f. resolveTarget, insertThread: a thread no row carries is adopted only when this plugin spawned it under this Chief.
+        const adoptable = (id: string, extra: object, metadata: object) => {
+          liveThreads.set(id, thread({ id, projectId: chief.project_id, environmentId: `env_${id}`, title: `Fixture ${id}`, sectionId: "sec_snap", visibility: "visible", status: "idle", parentThreadId: chief.thread_id, originPluginId: "chief", ...extra }));
+          pluginMetadata.set(id, metadata);
+        };
+        adoptable("thr_fx_ad_user", { originPluginId: null }, { role: "worker", chiefThreadId: chief.thread_id });
+        adoptable("thr_fx_ad_foreign", {}, { role: "worker", chiefThreadId: "thr_fx_other_chief" });
+        adoptable("thr_fx_ad_chief", {}, { role: "chief", chiefThreadId: chief.thread_id });
+        adoptable("thr_fx_ad_ok", {}, { role: "worker", chiefThreadId: chief.thread_id });
+        for (const id of ["thr_fx_ad_user", "thr_fx_ad_foreign", "thr_fx_ad_chief", "thr_fx_ad_ok"]) {
+          await storeStep(`resolveTarget, insertThread: chief_inspect on an unmanaged thread (${id})`, () => e7Tool("chief_inspect", { threadId: id }));
+        }
+        // g. the supervisor's stall alert, soft then hard, on a worker whose turn began long ago.
+        seedStall?.(20 * 60_000);
+        await e7Reload();
+        await storeStep("supervisor stall alert: a worker active for 20 minutes (soft)", tick);
+        database.prepare(`UPDATE managed_threads SET active_since=? WHERE thread_id='thr_fx_stall_w'`).run(clock - 40 * 60_000);
+        await e7Reload();
+        await storeStep("supervisor stall alert: the same turn at 40 minutes (hard)", tick);
+        await storeStep("supervisor stall alert: a third pass sends nothing new", tick);
+      }
     }
 
     // f. final state of every table the scenarios touch
