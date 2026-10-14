@@ -39,11 +39,25 @@ export function createPlanProgress<Row extends ProgressRow>(
 ) {
   const { planWavesFor, isDesignWave, waveWorkers, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
 
+  /** A same-wave fix worker's later wave to restack, or null. Set only when the worker replaces a worker of its own
+   * wave (a fix round, not a first-time hand-off between waves) and the wave that builds on it has a live worker.
+   * restacked: that worker was created after this one, so it was already restacked on this fix. */
+  function restackOf(worker: Row, waves: PlanWave[]): { next: number; successor: Row; restacked: boolean } | null {
+    if (!worker.plan_thread_id || worker.plan_wave == null || waves[worker.plan_wave - 1]?.design) return null;
+    const next = successorOf(waves, worker.plan_wave);
+    const prior = worker.replaces_thread_id ? rows().get(worker.replaces_thread_id) : undefined;
+    if (next === null || !prior || prior.plan_thread_id !== worker.plan_thread_id || prior.plan_wave !== worker.plan_wave) return null;
+    const successor = waveWorkers(worker.plan_thread_id, next).at(-1);
+    if (!successor || states.terminal(successor.state)) return null;
+    return { next, successor, restacked: successor.created_at >= worker.created_at };
+  }
+
   /** Why a worker may not start a review now, or null (a plan's one review runs once, after every wave is ready). */
   function reviewBlock(worker: Row):
     | null
     | { kind: "design" }
     | { kind: "superseded"; latest: Row }
+    | { kind: "restack" | "restacked"; waves: PlanWave[]; next: number; successor: Row }
     | { kind: "betweenWaves"; waves: PlanWave[]; next: number }
     | { kind: "pending"; waves: PlanWave[]; pending: number[] } {
     if (isDesignWave(worker)) return { kind: "design" };
@@ -52,6 +66,8 @@ export function createPlanProgress<Row extends ProgressRow>(
     const planThreadId = worker.plan_thread_id!;
     const latest = waveWorkers(planThreadId, worker.plan_wave).at(-1);
     if (latest && latest.thread_id !== worker.thread_id) return { kind: "superseded", latest };
+    const stack = restackOf(worker, waves);
+    if (stack) return { kind: stack.restacked ? "restacked" : "restack", waves, next: stack.next, successor: stack.successor };
     const next = successorOf(waves, worker.plan_wave);
     if (next !== null) return { kind: "betweenWaves", waves, next };
     const pending = pendingWaves(planThreadId, waves);
@@ -73,6 +89,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     | null
     | { kind: "designNext"; waves: PlanWave[]; next: number }
     | { kind: "designDone"; waves: PlanWave[] }
+    | { kind: "restack"; waves: PlanWave[]; next: number; successor: Row }
     | { kind: "nextWave"; waves: PlanWave[]; next: number }
     | { kind: "unplanned" }
     | { kind: "review"; waves: PlanWave[]; namer: Row; targets: Row[] } {
@@ -81,6 +98,8 @@ export function createPlanProgress<Row extends ProgressRow>(
     const design = !!waves[row.plan_wave! - 1]?.design;
     if (next !== null && design) return { kind: "designNext", waves, next };
     if (design) return { kind: "designDone", waves };
+    const stack = restackOf(row, waves);
+    if (stack) return stack.restacked ? null : { kind: "restack", waves, next: stack.next, successor: stack.successor };
     if (next !== null) return { kind: "nextWave", waves, next };
     if (!row.plan_thread_id || row.plan_wave == null || !waves.length) return { kind: "unplanned" };
     if (waitingOn(row)) return null;
@@ -96,15 +115,26 @@ export function createPlanProgress<Row extends ProgressRow>(
   }
 
   /** A reviewer verdict's open branches: the covered targets, those whose worker is not complete yet, and whether
-   * the review spans a plan. Null when a covered target was re-pointed to a fresh worker (its findings were handed off)
+   * the review spans a plan. stacks groups the open targets of one chain (two or more, each in wave order): they build
+   * on each other, so they are fixed one at a time. loose is every other open target. Null when a covered target was re-pointed to a fresh worker (its findings were handed off)
    * or every covered worker is already complete. */
-  function fixRound(reviewer: { thread_id: string }): { covered: ReviewTarget[]; open: ReviewTarget[]; plan: boolean } | null {
+  function fixRound(reviewer: { thread_id: string }): { covered: ReviewTarget[]; open: ReviewTarget[]; plan: boolean; stacks: ReviewTarget[][]; loose: ReviewTarget[] } | null {
     const covered = ledger.targets(reviewer.thread_id);
     if (covered.some((target) => target.report_seq === null)) return null;
     // Workers independently marked complete already absorbed this reviewer's verdict; only the rest still need a call.
     const open = covered.filter((target) => rows().get(target.worker_thread_id)?.state !== "complete");
     if (covered.length && !open.length) return null;
-    return { covered, open, plan: covered.length > 1 };
+    const chains = new Map<string, { target: ReviewTarget; wave: number }[]>();
+    for (const target of open) {
+      const worker = rows().get(target.worker_thread_id);
+      if (!worker?.plan_thread_id || worker.plan_wave == null) continue;
+      const key = `${worker.plan_thread_id}:${chainOf(planWavesFor(worker.plan_thread_id), worker.plan_wave)[0]}`;
+      chains.set(key, [...(chains.get(key) ?? []), { target, wave: worker.plan_wave }]);
+    }
+    const stacks = [...chains.values()].filter((chain) => chain.length > 1)
+      .map((chain) => chain.sort((a, b) => a.wave - b.wave).map((entry) => entry.target));
+    const stacked = new Set(stacks.flat());
+    return { covered, open, plan: covered.length > 1, stacks, loose: open.filter((target) => !stacked.has(target)) };
   }
 
   /** A planner's progress: one segment per chain, and how many waves are done. */
