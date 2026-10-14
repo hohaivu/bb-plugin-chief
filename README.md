@@ -24,7 +24,7 @@ The plugin never treats a generic SDK error as proof that a thread was deleted. 
 
 ## Project rules
 
-Put `chief.md` at the project root. Chief reads it through BB's project file API and periodically refreshes its cache. Missing, empty, or unreadable files use conservative built-in rules. Chief's core rules (evidence only, fresh worker via `replaces:`, one review per branch) are always appended to Chief's rules, so `chief.md` cannot drop them.
+Put `chief.md` at the project root. Chief reads it through BB's project file API and periodically refreshes its cache. Missing, empty, or unreadable files use conservative built-in rules. Chief's core rules (`CHIEF_CORE_RULES` in server.ts) are always appended to Chief's rules, so `chief.md` cannot drop them.
 
 Every managed thread loads the shared `chief-worker` skill (brief, scope, `chief_report`, the report contract reviewers check) plus its role's skill: `chief-role-worker` (workers; designers also get `chief-role-designer`), `chief-role-reviewer`, or `chief-role-read-only` (planners and advisors); researchers get the core only.
 
@@ -114,7 +114,7 @@ It is pull-only: it never alerts Chief or changes any thread's state, and no wor
 
 When a reviewer and worker stop converging (two straight `request_changes` verdicts, or one that
 reports a regression), Chief gains `chief_consult`: a read-only advisor that reads code and runs
-commands to reproduce the problem (a filtered test or build whose only side effects are untracked build or cache output), but never changes a tracked file, commits, or pushes. With a worker it runs in
+the reproduction commands its brief allows, but never changes a tracked file, commits, or pushes. With a worker it runs in
 that worker's own worktree, briefed on the mission, the reviewer verdicts, and the branch; without
 one it runs in the project's own checkout, like a plan. Its advice goes back to Chief, which decides
 the next worker round or escalates.
@@ -138,9 +138,7 @@ tells a clean "No confirmed findings" apart from a verify that threw everything 
 
 Chief and planners get survey and investigate. Reviewers, workers and advisors never get it; the server refuses a call from any of them. Settings has one **Researcher** switch, on by default;
 while it is off, no role gets the tool or the line about it. Chief is told the tool is optional
-and that it reads no project code itself: it uses research for broad multi-file scans, parallel
-independent questions, or checking doubtful evidence, sends finding a cause to `chief_plan` (only while planning is on), and after
-a failed or partial run sends the open question to `chief_plan` (`chief_consult` when planning is off) or the doubtful evidence to `chief_review` instead of rerunning it.
+and that it reads no project code itself: `researchChiefInstructions` in server.ts owns when it uses research and what it does after a failed or partial run (it does not rerun).
 
 The researcher thread reuses Chief's own environment and permission mode, so it reads Chief's
 checkout. If that checkout cannot be shared, the call fails with a clear error; it never falls back
@@ -203,7 +201,7 @@ bb chief stop thr_... [--reason "..."] [--json]
 bb chief complete thr_... [--result "..."] [--json]
 ```
 
-`bb chief review` is retired for every caller: only the active Chief starts reviews, through its `chief_review` tool, because the CLI cannot prove who is calling.
+`bb chief review` is retired for every caller, because the CLI cannot prove who is calling. Only the active Chief starts reviews, through its `chief_review` tool; the review rule is in its core rules (`CHIEF_CORE_RULES` in server.ts).
 
 Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, and worker/reviewer/advisor `chief_report`.
 
