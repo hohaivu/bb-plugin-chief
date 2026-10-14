@@ -159,6 +159,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   // ----- fixtures: the copy has no live designer, planner with a design wave, or active child of each role.
   const notes: string[] = [];
   const chief = database.prepare(`SELECT thread_id, project_id FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND state='idle' ORDER BY thread_id LIMIT 1`).get() as { thread_id: string; project_id: string } | undefined;
+  let seedStacked: (() => void) | undefined;
   if (chief) {
     const at = clock - 100_000;
     const insert = (row: Record<string, unknown>, offset: number) => {
@@ -192,6 +193,19 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       insert({ thread_id: `thr_fx_id_${id}`, role: "worker", title: `Fixture idle-ready worker ${id}`, state: "ready", branch: `feature/fx-id-${id}`, pr_url: `https://github.com/o/r/pull/${9201 + index}`, reviewed_head_sha: String(index + 5).repeat(40),
         plan_thread_id: "thr_fx_id_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture idle-ready worker ${id} brief` }, 61 + index);
     }
+    // The stacked-plan fixture: a chain of three waves, each on its own branch and pull request (no replaces:), all ready.
+    // Seeded by e1e itself, so the earlier categories read the same rows as before it existed.
+    seedStacked = () => {
+      insert({ thread_id: "thr_fx_st_planner", role: "planner", title: "Fixture stacked planner", state: "ready", result: "Fixture stacked plan", summary: "Fixture stacked plan summary", plan_waves: JSON.stringify([
+        { path: `${FILES_ROOT}/thr_fx_st_planner/plan-1.md`, contracts: "Fixture stacked contract 1", dependsOn: [] },
+        { path: `${FILES_ROOT}/thr_fx_st_planner/plan-2.md`, contracts: "Fixture stacked contract 2", dependsOn: [1] },
+        { path: `${FILES_ROOT}/thr_fx_st_planner/plan-3.md`, contracts: "Fixture stacked contract 3", dependsOn: [2] },
+      ]), report_seq: 1, last_report_state: "ready", brief: "Fixture stacked planner brief" }, 70);
+      for (const [index, id] of ["a", "b", "c"].entries()) {
+        insert({ thread_id: `thr_fx_st_${id}`, role: "worker", title: `Fixture stacked worker ${id}`, state: "ready", branch: `feature/fx-st-${id}`, pr_url: `https://github.com/o/r/pull/${9301 + index}`, reviewed_head_sha: String(index + 7).repeat(40),
+          plan_thread_id: "thr_fx_st_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture stacked worker ${id} brief` }, 71 + index);
+      }
+    };
     // The wave-schedule fixture: a planner that has not reported its plan yet (e1c drives it through tools).
     insert({ thread_id: "thr_fx_wv_planner", role: "planner", title: "Fixture wave planner", state: "active", status: "idle", active_since: clock - 5_000, active_cycle: 1, brief: "Fixture wave planner brief" }, 50);
     ROLES.filter((role) => role !== "chief").forEach((role, index) => insert({
@@ -646,6 +660,51 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         for (const id of ["thr_fx_id_a", "thr_fx_id_b"]) {
           await idleStep(`chief_complete ${id}`, () => tool("chief_complete", { threadId: id }, owner, project));
           await idleStep(`planner state after ${id}`, () => one(`SELECT state FROM managed_threads WHERE thread_id=?`, planner)?.state);
+        }
+      }
+    }
+    // e1e. a stacked plan: three waves on their own branches and pull requests, none delegated with replaces:. The tip's one
+    // review must record an approve for every wave (each at its own head), so each earlier wave completes without an override;
+    // a moved head on one wave must still refuse it. The last step completes any leftover with an override, so both builds
+    // leave the same live rows for e2 onward.
+    begin("e1e-stacked-review");
+    seedStacked?.();
+    {
+      const planner = "thr_fx_st_planner";
+      const start = one(`SELECT chief_thread_id, project_id FROM managed_threads WHERE thread_id=?`, planner);
+      // The server caches rows; an idle event on the Chief (already idle) makes it reload, and nothing else changes.
+      if (start) await harness.emitThreadEvent("thread.idle", { thread: storedThread(start.chief_thread_id as string)! } as never);
+      if (!start) { await step("stacked: no planner fixture in the copy", () => "skipped"); }
+      else {
+        const owner = start.chief_thread_id as string;
+        const project = start.project_id as string;
+        const spawnedBeforeStacked = spawnIndex;
+        const mineStacked = (column: string) => `(${column} LIKE 'thr_fx_st_%' OR (${column} LIKE 'thr_snap_%' AND CAST(substr(${column}, 10) AS INTEGER) > ${spawnedBeforeStacked}))`;
+        const stackedTables = () => [["managed_threads", "thread_id", "thread_id"], ["reviewer_verdicts", "reviewer_thread_id", "id"], ["review_targets", "reviewer_thread_id", "reviewer_thread_id, worker_thread_id"]]
+          .map(([table, column, order]) => `${table}\n${(database.prepare(`SELECT * FROM ${table} WHERE ${mineStacked(column!)} ORDER BY ${order}`).all() as object[]).map(stable).join("\n")}`).join("\n");
+        const stackedStep = (label: string, fn: () => unknown) => step(`stacked: ${label}`, async () => {
+          let outcome: string;
+          try { outcome = show(await fn()); } catch (error) { outcome = `ERR ${error instanceof Error ? error.message : String(error)}`; }
+          return `${outcome}\n${stackedTables()}`;
+        });
+        const reviewerOfStacked = (workerId: string) => one(`SELECT r.thread_id FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
+        const setHead = (id: string, head: string) => database.prepare(`UPDATE managed_threads SET reviewed_head_sha=? WHERE thread_id=?`).run(head.repeat(40), id);
+        await stackedStep("chief_roster before", () => tool("chief_roster", { includeComplete: true }, owner, project));
+        await stackedStep("chief_review the first wave", () => tool("chief_review", { workerThreadId: "thr_fx_st_a" }, owner, project));
+        await stackedStep("chief_review the tip", () => tool("chief_review", { workerThreadId: "thr_fx_st_c" }, owner, project));
+        await stackedStep("reviewer approves", () => { const id = reviewerOfStacked("thr_fx_st_c"); return id ? tool("chief_report", { state: "ready", verdict: "approve", summary: "Snapshot stacked approve", result: "Snapshot stacked review: approve." }, id, project) : "no reviewer"; });
+        await stackedStep("chief_complete thr_fx_st_a", () => tool("chief_complete", { threadId: "thr_fx_st_a" }, owner, project));
+        setHead("thr_fx_st_b", "e");
+        await stackedStep("chief_complete thr_fx_st_b with its head moved", () => tool("chief_complete", { threadId: "thr_fx_st_b" }, owner, project));
+        setHead("thr_fx_st_b", "8");
+        for (const id of ["thr_fx_st_b", "thr_fx_st_c"]) {
+          await stackedStep(`chief_complete ${id}`, () => tool("chief_complete", { threadId: id }, owner, project));
+          await stackedStep(`planner state after ${id}`, () => one(`SELECT state FROM managed_threads WHERE thread_id=?`, planner)?.state);
+        }
+        for (const id of ["thr_fx_st_a", "thr_fx_st_b", "thr_fx_st_c"]) {
+          if (one(`SELECT state FROM managed_threads WHERE thread_id=?`, id)?.state !== "complete") {
+            await stackedStep(`converge ${id}`, () => tool("chief_complete", { threadId: id, override: "Snapshot: converge stacked fixture" }, owner, project));
+          }
         }
       }
     }
