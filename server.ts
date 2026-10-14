@@ -177,6 +177,14 @@ async function markPrReady(pullRequest: string, cwd: string | null): Promise<{ r
 
 /** `researcher` is a support role like the advisor: the child a Chief's chief_research runs in. */
 const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "researcher"]);
+/** The role skill each managed role loads next to the shared chief-worker core. */
+const ROLE_SKILLS: Record<Exclude<z.infer<typeof roleSchema>, "chief">, string[]> = {
+  planner: ["chief-role-read-only"],
+  advisor: ["chief-role-read-only"],
+  worker: ["chief-role-worker"],
+  reviewer: ["chief-role-reviewer"],
+  researcher: [],
+};
 /** What a spawn seeds into a thread's pluginMetadata, read back in bb.agents.configure.
  * insertThread runs only after threads.spawn resolves, so the very first configure()
  * call for a brand-new thread can land before that row exists; pluginMetadata is
@@ -185,6 +193,7 @@ const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", 
 const spawnMetadataSchema = z.object({
   role: roleSchema,
   chiefThreadId: z.string().nullable().optional(),
+  kind: z.enum(["worker", "designer"]).optional(),
 });
 /** A reviewer's structured judgement. Chief routes on this field instead of
  * parsing a ship-or-fix opinion out of the report prose. */
@@ -2349,7 +2358,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...execution,
       ...(await lifecycleOwner(chief.thread_id)),
       prompt,
-      pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id },
+      pluginMetadata: { role: "worker", chiefThreadId: chief.thread_id, ...(kind === "designer" ? { kind } : {}) },
     });
     insertThread({
       threadId: thread.id, role: "worker", projectId, chiefThreadId: chief.thread_id, parentThreadId: chief.thread_id, title: params.title,
@@ -5263,10 +5272,15 @@ export default async function plugin(bb: BbPluginApi) {
     // The newest 10 lessons, shown oldest first and clipped; better-sqlite3 is synchronous, so configure stays so.
     const lessons = (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
-    // gets only a project's chief.md; its brief and the chief-worker skill cover the rest.
+    // gets only a project's chief.md; its brief and the chief-worker skills cover the rest.
     return {
       tools: ["chief_report", ...(role === "worker" && row?.plan_thread_id ? ["chief_log"] : []), ...(researchTool ? ["chief_research"] : [])],
-      skills: ["chief-worker"],
+      skills: [
+        "chief-worker",
+        ...ROLE_SKILLS[role],
+        // A designer is a worker row with kind "designer"; seeded metadata covers the pre-insertThread race.
+        ...(role === "worker" && (row?.kind ?? (seeded?.success ? seeded.data.kind : undefined)) === "designer" ? ["chief-role-designer"] : []),
+      ],
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: short \`summary\`, full \`result\`; after reporting, end with one line.`,
         "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",

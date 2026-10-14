@@ -26,6 +26,8 @@ The plugin never treats a generic SDK error as proof that a thread was deleted. 
 
 Put `chief.md` at the project root. Chief reads it through BB's project file API and periodically refreshes its cache. Missing, empty, or unreadable files use conservative built-in rules. Chief's core rules (evidence only, fresh worker via `replaces:`, one review per branch) are always appended to Chief's rules, so `chief.md` cannot drop them.
 
+Every managed thread loads the shared `chief-worker` skill (brief, scope, `chief_report`, the report contract reviewers check) plus its role's skill: `chief-role-worker` (workers; designers also get `chief-role-designer`), `chief-role-reviewer`, or `chief-role-read-only` (planners and advisors); researchers get the core only.
+
 ## Configuration
 
 ```sh
