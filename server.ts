@@ -11,6 +11,7 @@ import {
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger } from "./reviewLedger";
+import { chainOf, createWaveSchedule, heads as waveHeads, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
 import {
   ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY, READ_ONLY, RESEARCH_ONLY, REVIEW_ONLY,
   managedSkills, modelRoleSchema, researchRoleSchema, roleSchema, workerKindSchema,
@@ -551,30 +552,6 @@ const waveShape = z.object({
     "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
   ),
 });
-type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean };
-type WaveLink = { dependsOn?: number[] };
-/** Wave n's parent (1-based): its dependsOn, else the previous wave; null for a chain head. */
-function parentOf(waves: WaveLink[], n: number): number | null {
-  const dependsOn = waves[n - 1]?.dependsOn;
-  return dependsOn ? dependsOn[0] ?? null : n > 1 ? n - 1 : null;
-}
-/** The wave that builds on wave n, or null for a chain tip. */
-function successorOf(waves: WaveLink[], n: number): number | null {
-  const index = waves.findIndex((_, i) => parentOf(waves, i + 1) === n);
-  return index < 0 ? null : index + 1;
-}
-/** Wave n's whole chain, head to tip. */
-function chainOf(waves: WaveLink[], n: number): number[] {
-  let head = n;
-  for (let parent = parentOf(waves, head); parent !== null; parent = parentOf(waves, head)) head = parent;
-  const chain = [head];
-  for (let next = successorOf(waves, head); next !== null; next = successorOf(waves, next)) chain.push(next);
-  return chain;
-}
-/** Every chain's tip. */
-function tips(waves: WaveLink[]): number[] {
-  return waves.flatMap((_, index) => successorOf(waves, index + 1) === null ? [index + 1] : []);
-}
 const REPORT_TEXT_MAX = 4_000;
 const LESSON_MAX = 400;
 // One flat object, published without length limits: the validator's own errors cannot be customised, so checkReport()
@@ -1339,6 +1316,8 @@ export default async function plugin(bb: BbPluginApi) {
   );
   let roles = new Map<string, ManagedRow>();
   const ledger = createReviewLedger<ManagedRow>(db, (threadId) => roles.get(threadId));
+  const schedule = createWaveSchedule<ManagedRow>(() => roles);
+  const { planWavesFor, isDesignWave, waveWorkers, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
   let plannerActive = false;
   // ponytail: cached for wave 2's synchronous configure(); the chief_research gate reads live settings.
   let researchActive: ResearchSettings | null = null;
@@ -2347,25 +2326,6 @@ export default async function plugin(bb: BbPluginApi) {
     return capped;
   }
 
-  /** A worker's linked planner's persisted wave schedule, or [] when unlinked. */
-  function planWavesFor(planThreadId: string | null): PlanWave[] {
-    if (!planThreadId) return [];
-    const planner = roles.get(planThreadId);
-    return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as PlanWave[]) : [];
-  }
-
-  /** True for a worker delegated on a plan wave marked design: true. */
-  function isDesignWave(row: ManagedRow): boolean {
-    return row.role === "worker" && !!row.plan_thread_id && row.plan_wave != null && !!planWavesFor(row.plan_thread_id)[row.plan_wave - 1]?.design;
-  }
-
-  /** Linked workers of a planner, optionally for one wave, oldest first. */
-  function waveWorkers(planThreadId: string, wave?: number) {
-    return [...roles.values()]
-      .filter((other) => other.role === "worker" && other.plan_thread_id === planThreadId && (wave === undefined || other.plan_wave === wave))
-      .sort((a, b) => a.created_at - b.created_at);
-  }
-
   const insertPlanLog = db.prepare<[string, string, number | null, string, string, string, string, string]>(
     `INSERT INTO plan_log (plan_thread_id, author_thread_id, wave, kind, text, scope, basis, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
@@ -2410,26 +2370,6 @@ export default async function plugin(bb: BbPluginApi) {
         return `- wave ${index + 1}: @thread:${current.thread_id} ${current.state}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
       }),
     ].filter((line) => line !== null).join("\n");
-  }
-
-  /** The waves of a plan whose latest worker is not ready or complete (or does not exist yet). */
-  function pendingWaves(planThreadId: string, waves: PlanWave[]): number[] {
-    return waves.flatMap((_, index) => {
-      const latest = waveWorkers(planThreadId, index + 1).at(-1);
-      return latest?.state === "ready" || latest?.state === "complete" ? [] : [index + 1];
-    });
-  }
-
-  /** The workers one review of this chain tip covers, in tip order: the latest worker of every chain,
-   * minus design waves and workers already complete (the one passed in always stays). A worker with no
-   * plan link (or #simple) covers only itself. Assumes reviewRefusal passed. */
-  function reviewTargetsFor(worker: ManagedRow): ManagedRow[] {
-    const waves = planWavesFor(worker.plan_thread_id);
-    if (!waves.length || worker.plan_wave == null) return [worker];
-    return tips(waves).flatMap((tip) => {
-      const latest = waveWorkers(worker.plan_thread_id!, tip).at(-1);
-      return latest && !isDesignWave(latest) && (latest.thread_id === worker.thread_id || latest.state !== "complete") ? [latest] : [];
-    });
   }
 
   /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready. */
@@ -2504,11 +2444,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "planner") {
       if (!row.plan_waves) return null;
       const waves = planWavesFor(row.thread_id);
-      const heads = waves.flatMap((_, index) => parentOf(waves, index + 1) === null ? [index + 1] : []);
-      // One chain: any linked worker counts as delegated, as before parallel waves existed.
-      const undelegated = heads.length === 1
-        ? (waveWorkers(row.thread_id).length ? [] : heads)
-        : heads.filter((head) => !waveWorkers(row.thread_id, head).length);
+      const { heads, undelegated } = schedule.undelegatedHeads(row.thread_id, waves);
       if (!undelegated.length) return null;
       if (heads.length === 1) {
         return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${row.thread_id}, wave: 1), then chief_delegate (planThreadId: ${row.thread_id}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`;
@@ -3887,14 +3823,14 @@ export default async function plugin(bb: BbPluginApi) {
   function waveLines(row: ManagedRow): string[] {
     if (row.role === "planner" && row.plan_waves) {
       const waves = planWavesFor(row.thread_id);
-      const heads = waves.flatMap((_, index) => parentOf(waves, index + 1) === null ? [index + 1] : []);
+      const chainHeads = waveHeads(waves);
       let done = 0;
-      const segments = heads.map((head) => {
+      const segments = chainHeads.map((head) => {
         const chain = chainOf(waves, head);
         // The chain's current worker: its highest plan_wave linked to this planner,
         // breaking ties (a same-wave fix worker) by the newest.
         const current = waveWorkers(row.thread_id)
-          .filter((other) => chain.includes(other.plan_wave ?? 0) || (heads.length === 1 && other.plan_wave == null))
+          .filter((other) => chain.includes(other.plan_wave ?? 0) || (chainHeads.length === 1 && other.plan_wave == null))
           .reduce<ManagedRow | undefined>((best, other) => (
             !best || (other.plan_wave ?? 0) > (best.plan_wave ?? 0)
               || ((other.plan_wave ?? 0) === (best.plan_wave ?? 0) && other.created_at >= best.created_at)
@@ -3945,15 +3881,6 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.recommendation ? [`recommendation: ${clip(row.recommendation, 200)}`] : []),
       ...(row.verdict ? [`verdict: ${row.verdict}`] : []),
     ];
-  }
-
-  /** Whether a worker ends its plan (always, unplanned): its wave is a chain tip and every
-   * chain's tip has a ready or complete latest worker. */
-  function onFinalWave(worker: ManagedRow): boolean {
-    if (!worker.plan_thread_id) return true;
-    const waves = planWavesFor(worker.plan_thread_id);
-    if (worker.plan_wave == null || !waves.length || successorOf(waves, worker.plan_wave) !== null) return false;
-    return tips(waves).every((tip) => ["ready", "complete"].includes(waveWorkers(worker.plan_thread_id!, tip).at(-1)?.state ?? ""));
   }
 
   /** bb chief stats: a read-only summary of the given rows, their alert rows and todos. */
