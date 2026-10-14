@@ -12,10 +12,11 @@ import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
+import { createReviewStart } from "./reviewStart";
 import { createPlanProgress, type SegmentState } from "./planProgress";
-import { chainOf, createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
+import { createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
 import {
-  ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY, REVIEW_ONLY,
+  ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY,
   managedSkills, modelRoleSchema, roleSchema, workerKindSchema,
   type ModelRole, type Role,
 } from "./roles";
@@ -2240,37 +2241,6 @@ export default async function plugin(bb: BbPluginApi) {
     return row.role === "worker" || BUSY_STATUSES.has(row.state) || nextAction(row) !== null;
   }
 
-  /** Shared reviewer prompt: REVIEW_ONLY and the chief_report/verdict contract are
-   * identical for a worker's reviewer and a branch/PR reviewer. Only the subject
-   * line and provenance section (worker brief/result, or nothing for a branch/PR
-   * with no worker) differ. */
-  function reviewerPrompt(opts: {
-    subject: string;
-    chiefThreadId: string | null;
-    focus?: string;
-    provenance: string[];
-    /** True when the review is pinned to a pull request's head commit instead of a worktree. */
-    pinned?: boolean;
-  }) {
-    return [
-      opts.subject,
-      opts.focus ? `Review focus: ${opts.focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
-      REVIEW_ONLY,
-      opts.pinned
-        ? "Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift."
-        : "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.",
-      "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
-      `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict.`,
-      "Classify every finding as blocking or nit. Blocking means the change cannot ship as it stands. These are always blocking: a bug or incorrect behaviour, an unmet listed contract, a regression, missing or false verification evidence, a designer mismatch the brief does not accept, and scope drift the worker did not state. A nit is style, naming, a minor simplification, or an optional improvement.",
-      "The verdict is request_changes only when at least one blocking finding exists; nits alone mean approve.",
-      "List blocking findings first, then at most 5 nits, then write \"and N more nits\" for the rest. Give every finding a file:line and the concrete fix; mark any finding that needs a design or product decision as such.",
-      "Send a `summary` with the report: verdict, blocking count, nit count, the most important blocking finding with file:line.",
-      "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
-      "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
-      ...opts.provenance,
-    ].join("\n");
-  }
-
   /** Live status of a worker. When its row is already ready, waits up to REVIEW_IDLE_WAIT_MS
    * for its turn to end: the ready alert is sent from inside the worker's chief_report call,
    * so that turn is still ending when Chief acts on it. A worker that has not reported is not waited on. */
@@ -2291,214 +2261,11 @@ export default async function plugin(bb: BbPluginApi) {
     throw new Error(`Worker ${worker.thread_id} is ${status}; wait until it is idle before ${before}.`);
   }
 
-  /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
-   * by a fresh one rather than resumed; its reject_streak carries over onto the new
-   * row, so deadlock detection still sees consecutive rejections across the fresh
-   * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
-  async function startReview(caller: ManagedRow | undefined, workerThreadId: string, focus?: string) {
-    requireChiefCaller(caller, "Starting a review");
-    const worker = roles.get(workerThreadId);
-    if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
-    const refusal = reviewRefusal(worker);
-    if (refusal) throw new Error(refusal);
-    // One review of a plan covers the latest worker of every branch; any other worker covers itself.
-    const targets = reviewTargetsFor(worker);
-    for (const target of targets) {
-      if (!controlsThread(target, caller.thread_id) || target.project_id !== caller.project_id) throw new Error(`No managed worker ${target.thread_id} for this Chief.`);
-    }
-    const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && planWavesFor(worker.plan_thread_id).length > 0);
-    const reviewKey = planReview ? `plan:${worker.plan_thread_id}` : workerThreadId;
-    const inFlight = reviewStarts.get(reviewKey);
-    if (inFlight) return inFlight;
-    const start = (async () => {
-      const openReviews = [...new Set(targets.flatMap((target) => ledger.taskChain(target.thread_id)))]
-        .flatMap((id) => { const open = ledger.openReview(id); return open ? [open] : []; })
-        .filter((review, index, all) => all.findIndex((other) => other.thread_id === review.thread_id) === index)
-        .sort((a, b) => b.created_at - a.created_at);
-      const previous = openReviews[0];
-      const busy = openReviews.find((review) => BUSY_STATUSES.has(review.state));
-      if (busy) {
-        return { threadId: busy.thread_id, title: busy.title, workerThreadId, created: false, pinnedSha: busy.reviewed_head_sha, covers: targets.map((target) => target.thread_id) };
-      }
-      const lives = new Map<string, Awaited<ReturnType<typeof bb.sdk.threads.get>>>();
-      for (const target of targets) {
-        const live = await waitIdleAfterReport(target);
-        if (BUSY_STATUSES.has(live.status)) busyRejection(target, live.status, "starting a review");
-        if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${target.thread_id} is not reviewable.`);
-        lives.set(target.thread_id, live);
-      }
-      const live = lives.get(workerThreadId)!;
-      // The forge's head, read now, is the commit each verdict will cover. No PR, or a head the forge will not
-      // tell us, keeps a single-worker review on the worker's own environment exactly as before (reviewed_head_sha stays NULL).
-      const projectDir = await projectPath(worker.project_id);
-      const heads = new Map<string, Awaited<ReturnType<typeof prHead>>>();
-      for (const target of targets) heads.set(target.thread_id, target.pr_url ? await prHead(target.pr_url, projectDir) : null);
-      const head = heads.get(workerThreadId) ?? null;
-      if (!head && !live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
-      for (const target of targets) {
-        if (target !== worker && !heads.get(target.thread_id) && !target.branch) {
-          throw new Error(`Worker ${target.thread_id} has no readable pull request head and no branch, so the plan's one review cannot reach it. Retry once the forge answers.`);
-        }
-      }
-      const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
-      const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
-      const title = `Review · ${worker.title}`;
-      const waves = planWavesFor(worker.plan_thread_id);
-      // A plan review sees every wave; a single worker's reviewer sees only its chain's waves.
-      const chain = worker.plan_wave != null && waves.length && !planReview ? chainOf(waves, worker.plan_wave) : waves.map((_, index) => index + 1);
-      const contractLines = waves.length === 1
-        ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
-        : chain.flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
-      const recorded = head ? null : await recordedCommands(workerThreadId);
-      const pinnedAll = targets.every((target) => heads.get(target.thread_id));
-      const targetLine = (target: ManagedRow) => {
-        const pinned = heads.get(target.thread_id);
-        return pinned
-          ? `- worker ${target.thread_id} “${target.title}”: ${target.pr_url} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch}\`, then review \`git diff origin/${pinned.base}...${pinned.sha}\``
-          : `- worker ${target.thread_id} “${target.title}”: branch ${target.branch}${target.pr_url ? ` (${target.pr_url})` : ""}, head not readable, not pinned: \`git fetch origin ${target.branch}\`, then review \`git diff <the project's default branch>...origin/${target.branch}\`; the verdict binds to its report ${target.report_seq}`;
-      };
-      const prompt = reviewerPrompt({
-        pinned: pinnedAll,
-        subject: targets.length > 1
-          ? `Independently review the whole plan: ${targets.length} branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change. The worker's recorded commands ran against the worker's own tree: rerun the project's build/check at each pinned commit.\n${targets.map(targetLine).join("\n")}`
-          : head
-            ? `Independently review pull request ${worker.pr_url} (worker thread ${workerThreadId}: “${worker.title}”), pinned to its head commit ${head.sha} (branch ${head.branch}, targeting ${head.base}). First run \`git fetch origin ${head.branch} && git checkout --detach ${head.sha}\`. The pull request description is the brief: read it (gh pr view ${worker.pr_url} --json title,body, or glab mr view ${worker.pr_url}), then review the diff of ${head.sha} against origin/${head.base}. Treat nothing outside that commit as part of the change. The worker's recorded commands ran against the worker's own tree, not this commit: rerun the project's build/check at ${head.sha}.`
-            : `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
-        chiefThreadId: worker.chief_thread_id,
-        focus,
-        provenance: [
-          ...(worker.brief && !head && targets.length === 1 ? [
-            "", "## The brief this work was given", clipMiddle(worker.brief, 4_000),
-            "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
-          ] : []),
-          ...(contractLines.length ? [
-            "", "## Contracts to verify", ...contractLines,
-            `Check every item against ${pinnedAll ? "the pinned commit" : "the worktree"}${targets.length > 1 ? "s" : ""}. An unmet item means request_changes naming it; say which items you confirmed.`,
-          ] : []),
-          ...(head || targets.length > 1 ? [] : [
-            "", "## Recorded commands (from the worker's event log)",
-            ...recordedLines(recorded),
-            "Recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
-          ]),
-          ...(worker.kind === "designer" ? [
-            "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
-          ] : []),
-          ...(targets.length > 1
-            ? targets.flatMap((target) => target.result ? [
-              "", `## The report of worker ${target.thread_id}`,
-              ...(target.report_path ? [`Full report: ${target.report_path}`] : []),
-              `Full report and last output: bb chief inspect ${target.thread_id}`,
-              "Read it for its Deviations from plan only; each pull request at its pinned commit is the change.",
-            ] : [])
-            : [
-              ...(worker.result && head ? [
-                "", "## The worker's report file",
-                ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
-                `Full report and last output: bb chief inspect ${workerThreadId}`,
-                "Read it for its Deviations from plan only; the pull request at its pinned commit is the change.",
-              ] : []),
-              ...(worker.result && !head ? [
-                "", "## What the worker reported", worker.summary ?? clip(worker.result, 300),
-                ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
-                `Full report and last output: bb chief inspect ${workerThreadId}`,
-              ] : []),
-            ]),
-          ...(previous?.result ? [
-            "", `## The previous review (${previous.thread_id})`,
-            ...verdictPreview(previous),
-            ...(previous.recommendation ? [`Recommendation: ${clip(previous.recommendation, 600)}`] : []),
-            "", `Check each finding above against ${pinnedAll ? "the pinned commit" : "the current worktree"}${targets.length > 1 ? "s" : ""}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again.`,
-          ] : []),
-          ...(waves.length ? [
-            "", targets.length > 1
-              ? `This plan has ${waves.length} wave${waves.length > 1 ? "s" : ""}, one branch per chain. Review each branch against its base against its waves' plans:`
-              : `This branch carries wave${chain.length > 1 ? "s" : ""} ${chain.join(", ")} of ${waves.length}. Review the whole branch against its base against ${chain.length > 1 ? "these waves' plans" : "this wave's plan"}:`,
-            ...chain.map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}`),
-            "Read each worker's full report (Full report path above, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
-          ] : []),
-        ],
-      });
-      const thread = await managedSpawn.launch(prepared, {
-        projectId: worker.project_id,
-        environment: head
-          ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
-          : { type: "reuse", environmentId: live.environmentId! },
-        title, prompt,
-      }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha },
-      (threadId) => ledger.addTargets(threadId, targets.map((target) => ({
-        threadId: target.thread_id, reportSeq: target.report_seq, headSha: heads.get(target.thread_id)?.sha ?? null, prUrl: target.pr_url, branch: target.branch,
-      }))));
-      // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
-      const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
-      if (openReviews.length || streak) {
-        const now = Date.now();
-        db.transaction(() => {
-          ledger.seedStreak(thread.id, streak, previous, now);
-          for (const old of openReviews) db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, old.thread_id);
-        })();
-        reloadRoles();
-      }
-      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id) };
-    })();
-    reviewStarts.set(reviewKey, start);
-    try {
-      return await start;
-    } finally {
-      reviewStarts.delete(reviewKey);
-    }
-  }
-
-  /** The chief_review counterpart to startReview for a pull request or branch no
-   * managed worker owns: same reviewer contract, but spawned on a fresh managed
-   * worktree (delegate()'s exact shape) instead of the worker's reused environment. */
-  async function startBranchReview(
-    caller: ManagedRow | undefined,
-    branch: string,
-    pullRequestRef: string | null,
-    focus?: string,
-  ) {
-    requireChiefCaller(caller, "Starting a review");
-    const { thread_id: chiefThreadId, project_id: projectId } = caller;
-    // A branch a managed worker still carries is reviewed through that worker, so the review follows its plan and head.
-    const owner = [...roles.values()].find((row) => row.role === "worker" && !terminal(row.state)
-      && row.chief_thread_id === chiefThreadId && row.project_id === projectId && row.branch === branch);
-    if (owner) throw new Error(`Branch ${branch} is owned by worker ${owner.thread_id}: use chief_review (workerThreadId: ${owner.thread_id}).`);
-    const key = JSON.stringify(["branch", chiefThreadId, projectId, branch]);
-    const inFlight = reviewStarts.get(key);
-    if (inFlight) return inFlight;
-    const start = (async () => {
-      const duplicate = existingBranchReview.get(chiefThreadId, projectId, branch) as ManagedRow | undefined;
-      if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId: null, created: false };
-      const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
-      const prepared = await managedSpawn.prepare(projectId, { role: "reviewer", hostId });
-      const title = `Review · ${branch}`;
-      const prompt = reviewerPrompt({
-        // This worktree is cut from the branch itself, so "its base" would be an empty diff.
-        subject: pullRequestRef
-          ? `Independently review pull request ${pullRequestRef} (branch ${branch}). No managed worker owns this change. This worktree is checked out on that branch: diff it against the pull request's target branch (gh pr view ${pullRequestRef} --json baseRefName, or glab mr view ${pullRequestRef}).`
-          : `Independently review branch ${branch}. No managed worker owns this change. This worktree is checked out on that branch: diff it against the project's default branch (origin/HEAD).`,
-        chiefThreadId,
-        focus,
-        provenance: [],
-      });
-      const thread = await managedSpawn.launch(prepared, {
-        projectId,
-        environment: {
-          type: "host",
-          hostId,
-          workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: branch } },
-        },
-        title, prompt,
-      }, { role: "reviewer", chiefThreadId, branch, prUrl: pullRequestRef });
-      return { threadId: thread.id, title, workerThreadId: null, created: true };
-    })();
-    reviewStarts.set(key, start);
-    try {
-      return await start;
-    } finally {
-      reviewStarts.delete(key);
-    }
-  }
+  const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
+    db, roles: () => roles, ledger, managedSpawn, requireChiefCaller, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
+    busyStatuses: BUSY_STATUSES, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
+    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, reloadRoles,
+  });
 
   /** Which path a worker review took, for chief_review's reply. */
   function reviewPathNote(workerThreadId: string, pinnedSha?: string | null, covers?: string[]) {
