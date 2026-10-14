@@ -715,6 +715,70 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     await step("rpc setRoleModel designer cleared", () => rpc("setRoleModel", { hostId: HOST, role: "designer", selection: null }));
     await step("rpc modelConfiguration designer cleared", () => rpc("modelConfiguration", null));
 
+    // e2-research: chief_research. Every `bb workflows` call throws "snapshot: … is stubbed", so the failure paths are
+    // deterministic. The one stop timer armed here (the spawned researcher's hard deadline, about 10 minutes out) is
+    // longer than 10 s, so the clock stub leaves it a real, unref'd timer that cannot fire during a capture.
+    begin("e2-research");
+    {
+      const callsBefore = (database.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM chief_research_calls`).get() as { m: number }).m;
+      const owner = chief ? { id: chief.thread_id, project: chief.project_id } : null;
+      const askedAs = (id: string | undefined, project: string | undefined, params: unknown) => (id && project ? tool("chief_research", params, id, project) : "no such thread");
+      const survey = { mode: "survey", question: "Snapshot question", items: ["a.ts", "b.ts"], batchSize: 1 };
+      const investigate = { mode: "investigate", question: "Snapshot question", questions: ["Snapshot sub-question one", "Snapshot sub-question two"] };
+      const live = (role: string) => rows().find((row) => row.role === role && row.thread_id.startsWith(`thr_fx_${role}_`));
+      // 1. Refusals by role: worker, reviewer and advisor, and a thread that has no managed row.
+      for (const role of ["worker", "reviewer", "advisor"]) {
+        const row = live(role);
+        await step(`chief_research as a ${role} (${row?.thread_id ?? "none"}, ${row?.state ?? "-"})`, () => askedAs(row?.thread_id, row?.project_id, survey));
+      }
+      await step("chief_research as an unmanaged thread", () => askedAs("thr_unmanaged", owner?.project ?? "proj_snap", survey));
+      const planner = live("planner");
+      await step(`planner ${planner?.thread_id ?? "none"} state before research`, () => planner && `${planner.state}/${planner.status}`);
+      // 2. A planner starts a survey, then an investigate; the server cannot start either, so each says to run it by hand.
+      await step("planner survey: start_failed fallback", () => askedAs(planner?.thread_id, planner?.project_id, survey));
+      await step("planner investigate: start_failed fallback (Combine kept)", () => askedAs(planner?.thread_id, planner?.project_id, investigate));
+      await step("planner call with an invalid mode", () => askedAs(planner?.thread_id, planner?.project_id, { ...survey, mode: "nonsense" }));
+      // 3. Over the agent-call cap: 40 scan agents and a verify agent.
+      await step("planner survey over the cap", () => askedAs(planner?.thread_id, planner?.project_id, { ...survey, items: Array.from({ length: 40 }, (_, i) => `file${i}.ts`) }));
+      // 5a. A planner resumes a run that does not exist: three status reads fail, and the call says so at once.
+      await step("planner resumes a fabricated runId: status read fails", () => askedAs(planner?.thread_id, planner?.project_id, { mode: "survey", runId: "run_fabricated" }));
+      // 4. Chief starts a survey. It needs a researcher pick (else Chief's own model, which the stub cannot read).
+      await step("rpc setResearchModel survey", () => rpc("setResearchModel", { hostId: HOST, mode: "survey", selection: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "high" } }));
+      await step("chief survey: researcher thread spawned", () => askedAs(owner?.id, owner?.project, survey));
+      await step("chief investigate: no investigate pick, so Chief's own model is needed and refused", () => askedAs(owner?.id, owner?.project, investigate));
+      const researcher = () => database.prepare(`SELECT thread_id, project_id FROM managed_threads WHERE role='researcher' AND title LIKE 'Research · survey%' AND thread_id LIKE 'thr_snap_%' ORDER BY created_at DESC, rowid DESC LIMIT 1`).get() as { thread_id: string; project_id: string } | undefined;
+      const spawned = researcher();
+      // The researcher's own calls: investigate (Combine stripped, because the researcher merges), a resume of a run that
+      // does not exist (the hard deadline is its spawn plus 10 minutes, so it waits 4 minutes and says it is still running),
+      // and a resume with no mode.
+      await step("researcher investigate: start_failed fallback (Combine stripped)", () => askedAs(spawned?.thread_id, spawned?.project_id, investigate));
+      await step("researcher resumes a fabricated runId: reads retry, then still running", () => askedAs(spawned?.thread_id, spawned?.project_id, { mode: "survey", runId: "run_fabricated" }));
+      await step("researcher resumes with no mode", () => askedAs(spawned?.thread_id, spawned?.project_id, { runId: "run_fabricated" }));
+      await step("rpc setResearchModel survey cleared", () => rpc("setResearchModel", { hostId: HOST, mode: "survey", selection: null }));
+      // 7. Research off, then on again with the original settings: no research line or tool while it is off.
+      let original: any;
+      await step("rpc researchConfiguration settings", async () => (original = ((await rpc("researchConfiguration", null)) as any).settings));
+      const researchConfigured = async (id: string | undefined, project: string | undefined) => {
+        if (!id || !project) return "no such thread";
+        const resolved = await configure(id, project);
+        return `tools=${stable(resolved.tools.map((record: any) => record.name))} research lines=${stable((resolved.instructions ?? "").split("\n").filter((line: string) => line.includes("chief_research")))}`;
+      };
+      const configureAll = async () => {
+        await step("configure Chief", () => researchConfigured(owner?.id, owner?.project));
+        await step("configure the planner", () => researchConfigured(planner?.thread_id, planner?.project_id));
+        await step("configure the researcher", () => researchConfigured(spawned?.thread_id, spawned?.project_id));
+      };
+      await configureAll();
+      await step("rpc setResearchSettings off", () => rpc("setResearchSettings", { enabled: false }));
+      await step("chief_research with research off", () => askedAs(planner?.thread_id, planner?.project_id, survey));
+      await configureAll();
+      await step("rpc setResearchSettings restore", () => rpc("setResearchSettings", { enabled: original.enabled, maxAgentCalls: original.maxAgentCalls, timeoutMinutes: original.timeoutMinutes }));
+      await configureAll();
+      // 6. One chief_research_calls row per call that reached the tool (the invalid-mode call fails the schema first).
+      await step("chief_research_calls rows added by this category", async () => (database.prepare(`SELECT * FROM chief_research_calls WHERE id > ? ORDER BY id`).all(callsBefore) as object[]).map(stable).join("\n"));
+      await step("bb chief stats --json after the research calls", () => (owner ? cli(["stats", "--json"], { threadId: owner.id, projectId: owner.project }) : "no chief"));
+    }
+
     // f. final state of every table the scenarios touch
     begin("f-final-state");
     const dump = (table: string, order: string) => async () => (database.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all() as object[]).map(stable).join("\n");
