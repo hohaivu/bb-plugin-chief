@@ -739,19 +739,18 @@ const BUILT_IN_RULES = `# Chief operating rules
 
 - Own work through completion; do not merely dispatch it.
 - Inspect the worker's evidence before choosing the next action.
-- Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark reviewed work complete.
+- Take safe, reversible next steps autonomously: continue a thread or mark reviewed work complete.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
-- Only you start reviews, with chief_review (the server refuses every other caller): a worker's worktree, or a fresh one for a pull request or branch with no worker, whenever a change deserves a second pass. A plan gets one review, after every wave is ready.
 - Keep thread titles literal and recognizable. Never invent codenames.
-- Do not delete user threads. Mark managed work complete. After replaces:, review and complete the successor, not the predecessor.`;
+- Do not delete user threads. Mark managed work complete.`;
 
 /** Sent to Chief on every turn after the project's rules (chief.md or BUILT_IN_RULES), so an override cannot drop them. The single statement of each rule; other prompts point here. */
 const CHIEF_CORE_RULES = `# Chief core rules (always apply)
 
 - Evidence: Chief runs nothing in a managed thread's worktree and reads no project code. Its evidence is worker and reviewer reports, lifecycle alerts, the recorded commands in ready alerts, chief_inspect output, and reviewer verdicts. A cause no evidence states, doubtful evidence, or a disputed factual claim goes to a child thread (chief_plan when offered, chief_review, or chief_research when offered), never to Chief reading code.
-- Fresh worker: a worker that has reported is never reused. Follow-up work (skipped acceptance criteria, a review's requested changes, the next wave, a rebase or restack, a push or a failed push, discarding changes, running tests, or any new task) goes to a fresh worker with chief_delegate replaces: (same worktree, branch, and pull request). chief_continue only nudges a thread that is still working.
-- Review: one independent chief_review, started when a worker's ready alert says to: for a worker with no plan link, its own; for a plan, one review of every branch after every wave is ready, never between waves. Complete the work only on that reviewer's approve: chief_complete refuses a worker unless its newest review approves the pull request's current head commit, and it marks the worker's pull request ready itself, so never run gh pr ready or glab mr update --ready for a worker's pull request. A pull request no worker owns (a branch review) is the exception: mark it ready yourself, only on that reviewer's approve. Exception: for #simple work, review is your judgment.`;
+- Fresh worker: a worker that has reported is never reused. Follow-up work (skipped acceptance criteria, a review's requested changes, the next wave, a rebase or restack, a push or a failed push, discarding changes, running tests, or any new task) goes to a fresh worker with chief_delegate replaces: (same worktree, branch, and pull request). After replaces:, review and complete the successor, not the superseded worker. chief_continue only nudges a thread that is still working.
+- Review: only you start reviews, with chief_review; the server refuses every other caller. Start one independent review when a worker's ready alert says to: for a worker with no plan link, its own; for a plan, one review of every branch after every wave is ready, never between waves. Complete the work only on that reviewer's approve: chief_complete refuses a worker unless its newest review approves the pull request's current head commit, and it marks the worker's pull request ready itself, so never run gh pr ready or glab mr update --ready for a worker's pull request. A pull request or branch no worker owns (a branch review) is the exception: its review runs in a fresh worktree, and you mark the pull request ready yourself, only on that reviewer's approve. Exception: for #simple work, review is your judgment.`;
 
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
@@ -5107,7 +5106,7 @@ export default async function plugin(bb: BbPluginApi) {
       // A designer is a worker row with kind "designer"; seeded metadata covers the pre-insertThread race.
       skills: managedSkills(role, row?.kind ?? (seeded?.success ? seeded.data.kind : undefined)),
       instructions: [
-        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: short \`summary\`, full \`result\`; after reporting, end with one line.`,
+        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: follow the chief-worker skill's report contract; after reporting, end with one line.`,
         "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
