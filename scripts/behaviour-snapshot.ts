@@ -183,6 +183,15 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         plan_thread_id: "thr_fx_lad_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture ladder worker ${id} brief` }, 41 + index);
     }
     insert({ thread_id: "thr_fx_lad_c", role: "worker", title: "Fixture ladder worker c", state: "ready", branch: "feature/fx-lad-c", pr_url: "https://github.com/o/r/pull/9005", reviewed_head_sha: "3".repeat(40), result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: "Fixture ladder worker c brief" }, 43);
+    // The idle-ready fixture: a plan of two independent waves whose workers both reported ready (e1d idles the first).
+    insert({ thread_id: "thr_fx_id_planner", role: "planner", title: "Fixture idle-ready planner", state: "ready", result: "Fixture idle-ready plan", summary: "Fixture idle-ready plan summary", plan_waves: JSON.stringify([
+      { path: `${FILES_ROOT}/thr_fx_id_planner/plan-1.md`, contracts: "Fixture idle-ready contract 1", dependsOn: [] },
+      { path: `${FILES_ROOT}/thr_fx_id_planner/plan-2.md`, contracts: "Fixture idle-ready contract 2", dependsOn: [] },
+    ]), report_seq: 1, last_report_state: "ready", brief: "Fixture idle-ready planner brief" }, 60);
+    for (const [index, id] of ["a", "b"].entries()) {
+      insert({ thread_id: `thr_fx_id_${id}`, role: "worker", title: `Fixture idle-ready worker ${id}`, state: "ready", branch: `feature/fx-id-${id}`, pr_url: `https://github.com/o/r/pull/${9201 + index}`, reviewed_head_sha: String(index + 5).repeat(40),
+        plan_thread_id: "thr_fx_id_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture idle-ready worker ${id} brief` }, 61 + index);
+    }
     // The wave-schedule fixture: a planner that has not reported its plan yet (e1c drives it through tools).
     insert({ thread_id: "thr_fx_wv_planner", role: "planner", title: "Fixture wave planner", state: "active", status: "idle", active_since: clock - 5_000, active_cycle: 1, brief: "Fixture wave planner brief" }, 50);
     ROLES.filter((role) => role !== "chief").forEach((role, index) => insert({
@@ -599,6 +608,45 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
           await waveStep(`planner state after ${id}`, () => one(`SELECT state FROM managed_threads WHERE thread_id=?`, planner)?.state);
         }
         await roster("complete");
+      }
+    }
+    // e1d. an idle worker whose last report was ready, driven through lifecycle events: the first tip of a two-branch
+    // plan goes active and idle again without a report (its row leaves ready, its last report stays ready), while the
+    // later tip is ready. The plan's one review must still start, and must be named on the ready tip.
+    begin("e1d-idle-ready");
+    {
+      const planner = "thr_fx_id_planner";
+      const start = one(`SELECT chief_thread_id, project_id FROM managed_threads WHERE thread_id=?`, planner);
+      if (!start) { await step("idle-ready: no planner fixture in the copy", () => "skipped"); }
+      else {
+        const owner = start.chief_thread_id as string;
+        const project = start.project_id as string;
+        const spawnedBeforeIdle = spawnIndex;
+        const mineIdle = (column: string) => `(${column} LIKE 'thr_fx_id_%' OR (${column} LIKE 'thr_snap_%' AND CAST(substr(${column}, 10) AS INTEGER) > ${spawnedBeforeIdle}))`;
+        const idleTables = () => [["managed_threads", "thread_id", "thread_id"], ["reviewer_verdicts", "reviewer_thread_id", "id"], ["review_targets", "reviewer_thread_id", "reviewer_thread_id, worker_thread_id"]]
+          .map(([table, column, order]) => `${table}\n${(database.prepare(`SELECT * FROM ${table} WHERE ${mineIdle(column!)} ORDER BY ${order}`).all() as object[]).map(stable).join("\n")}`).join("\n");
+        const idleStep = (label: string, fn: () => unknown) => step(`idle-ready: ${label}`, async () => {
+          let outcome: string;
+          try { outcome = show(await fn()); } catch (error) { outcome = `ERR ${error instanceof Error ? error.message : String(error)}`; }
+          return `${outcome}\n${idleTables()}`;
+        });
+        const lifecycle = async (event: "thread.active" | "thread.idle", id: string) => {
+          overrides.set(id, { status: event === "thread.active" ? "active" : "idle" });
+          const result = await harness.emitThreadEvent(event, { thread: storedThread(id)! } as never);
+          return `${event} ${id}: ${result.errors.length} errors`;
+        };
+        const reviewerOfIdle = (workerId: string) => one(`SELECT r.thread_id FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
+        await idleStep("chief_roster before", () => tool("chief_roster", { includeComplete: true }, owner, project));
+        await idleStep("worker a turn starts", () => lifecycle("thread.active", "thr_fx_id_a"));
+        await idleStep("worker a turn ends without a report", () => lifecycle("thread.idle", "thr_fx_id_a"));
+        await idleStep("chief_roster with the first tip idle", () => tool("chief_roster", { includeComplete: true }, owner, project));
+        await idleStep("chief_review the first tip", () => tool("chief_review", { workerThreadId: "thr_fx_id_a" }, owner, project));
+        await idleStep("chief_review the ready tip", () => tool("chief_review", { workerThreadId: "thr_fx_id_b" }, owner, project));
+        await idleStep("reviewer approves", () => { const id = reviewerOfIdle("thr_fx_id_b"); return id ? tool("chief_report", { state: "ready", verdict: "approve", summary: "Snapshot idle-ready approve", result: "Snapshot idle-ready review: approve." }, id, project) : "no reviewer"; });
+        for (const id of ["thr_fx_id_a", "thr_fx_id_b"]) {
+          await idleStep(`chief_complete ${id}`, () => tool("chief_complete", { threadId: id }, owner, project));
+          await idleStep(`planner state after ${id}`, () => one(`SELECT state FROM managed_threads WHERE thread_id=?`, planner)?.state);
+        }
       }
     }
     begin("e-mutations (continued)");
