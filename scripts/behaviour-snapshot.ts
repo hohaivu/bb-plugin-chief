@@ -173,6 +173,15 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     insert({ thread_id: "thr_fx_planner", role: "planner", title: "Fixture planner", state: "ready", result: "Fixture plan", summary: "Fixture plan summary", plan_waves: JSON.stringify(waves), report_seq: 1, last_report_state: "ready", brief: "Fixture planner brief" }, 1);
     insert({ thread_id: "thr_fx_designer", role: "worker", kind: "designer", title: "Fixture designer", state: "ready", branch: "feature/fx-designer", pr_url: "https://github.com/o/r/pull/9001", plan_thread_id: "thr_fx_planner", plan_wave: 1, result: "Fixture designer result", summary: "Fixture designer summary", report_seq: 1, last_report_state: "ready", brief: "Fixture designer brief" }, 2);
     insert({ thread_id: "thr_fx_plain", role: "worker", title: "Fixture plain worker", state: "ready", branch: "feature/fx-plain", pr_url: "https://github.com/o/r/pull/9002", reviewed_head_sha: "a".repeat(40), result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: "Fixture worker brief" }, 3);
+    // The reject-ladder fixtures: a plan of two independent branches (one review covers both) and its two ready workers, each with a pull request head.
+    insert({ thread_id: "thr_fx_lad_planner", role: "planner", title: "Fixture ladder planner", state: "ready", result: "Fixture ladder plan", summary: "Fixture ladder plan summary", plan_waves: JSON.stringify([
+      { path: `${FILES_ROOT}/thr_fx_lad_planner/plan-1.md`, contracts: "Fixture ladder contract 1", dependsOn: [] },
+      { path: `${FILES_ROOT}/thr_fx_lad_planner/plan-2.md`, contracts: "Fixture ladder contract 2", dependsOn: [] },
+    ]), report_seq: 1, last_report_state: "ready", brief: "Fixture ladder planner brief" }, 40);
+    for (const [index, id] of ["a", "b"].entries()) {
+      insert({ thread_id: `thr_fx_lad_${id}`, role: "worker", title: `Fixture ladder worker ${id}`, state: "ready", branch: `feature/fx-lad-${id}`, pr_url: `https://github.com/o/r/pull/${9003 + index}`, reviewed_head_sha: String(index + 1).repeat(40),
+        plan_thread_id: "thr_fx_lad_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture ladder worker ${id} brief` }, 41 + index);
+    }
     ROLES.filter((role) => role !== "chief").forEach((role, index) => insert({
       thread_id: `thr_fx_${role}_active`, role, title: `Fixture active ${role}`, state: "active", status: "active", active_since: clock - 5_000, active_cycle: 1,
       brief: `Fixture ${role} brief`, branch: role === "worker" ? "feature/fx-active" : null,
@@ -430,6 +439,76 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     for (const row of all) {
       await step(`chief_continue ${row.thread_id} ${row.role}/${row.state}`, () => tool("chief_continue", { threadId: row.thread_id, instruction: "Snapshot nudge" }, row.chief_thread_id ?? row.thread_id, row.project_id));
     }
+    // e1b. the reject ladder, driven only through tools: a single branch (the plain fixture with its pull request),
+    // then a plan review that covers two branches. Round 1 is fixed freely, round 2 needs a consult, round 3 needs
+    // the user, and only an approve ends it. Every step records its text, alerts, and the three tables.
+    begin("e1b-reject-ladder");
+    const one = (sql: string, ...bind: unknown[]) => database.prepare(sql).get(...bind) as any;
+    // Only this scenario's rows: the fixture workers, and every thread the ladder spawned (the copy's own rows are in section f).
+    const spawnedBefore = spawnIndex;
+    const mine = (column: string) => `(${column} LIKE 'thr_fx_lad_%' OR ${column}='thr_fx_plain' OR (${column} LIKE 'thr_snap_%' AND CAST(substr(${column}, 10) AS INTEGER) > ${spawnedBefore}))`;
+    const tables = () => [["managed_threads", "thread_id", "thread_id"], ["reviewer_verdicts", "reviewer_thread_id", "id"], ["review_targets", "reviewer_thread_id", "reviewer_thread_id, worker_thread_id"]]
+      .map(([table, column, order]) => `${table}\n${(database.prepare(`SELECT * FROM ${table} WHERE ${mine(column!)} ORDER BY ${order}`).all() as object[]).map(stable).join("\n")}`).join("\n");
+    // Like step, but the three tables follow the outcome, a refusal included.
+    const ladderStep = (label: string, fn: () => unknown) => step(label, async () => {
+      let outcome: string;
+      try { outcome = `OK ${show(await fn())}`; } catch (error) { outcome = `ERR ${error instanceof Error ? error.message : String(error)}`; }
+      return `${outcome}\n${tables()}`;
+    });
+    const reviewerOf = (workerId: string) => one(`SELECT r.thread_id FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
+    const successorOf = (workerId: string) => one(`SELECT thread_id FROM managed_threads WHERE role='worker' AND replaces_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
+    const advisorOf = (workerId: string) => one(`SELECT thread_id FROM managed_threads WHERE role='advisor' AND worker_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
+    const ladderReport = (id: string | undefined, params: unknown, project: string) => (id ? tool("chief_report", params, id, project) : "no such thread");
+    const ladder = async (name: string, firstWorker: string, extraBranchWorker?: string) => {
+      const start = one(`SELECT chief_thread_id, project_id FROM managed_threads WHERE thread_id=?`, firstWorker);
+      if (!start) { await step(`ladder ${name}: no ${firstWorker} in the copy`, () => "skipped"); return; }
+      const owner = start.chief_thread_id as string;
+      const project = start.project_id as string;
+      const verdict = (kind: string) => ({ state: "ready", verdict: kind, summary: `Snapshot ladder ${kind}`, result: `Snapshot ladder review: ${kind}.` });
+      const replace = (id: string, extra: object = {}) => tool("chief_delegate", { title: "Snapshot ladder successor", mission: "Snapshot ladder mission", replaces: id, ...extra }, owner, project);
+      // One review round: chief_review on the tip, then the reviewer's verdict.
+      const round = async (tag: string, tip: string, kind: string) => {
+        await ladderStep(`ladder ${name} ${tag} chief_review ${tip}`, () => tool("chief_review", { workerThreadId: tip }, owner, project));
+        await ladderStep(`ladder ${name} ${tag} reviewer ${kind}`, () => ladderReport(reviewerOf(tip), verdict(kind), project));
+      };
+      // The workers send their ready reports once a successor exists, so the next review may start.
+      const ready = async (tag: string, ...ids: (string | undefined)[]) => {
+        for (const id of ids) await ladderStep(`ladder ${name} ${tag} worker ready ${id}`, () => ladderReport(id, { state: "ready", summary: "Snapshot ladder worker summary", result: "Changed server.ts:1.\n\n## Deviations from plan\nNone\n\n## Verification\nAutomated: npm test; echo=0\nManual: none" }, project));
+      };
+      let tip = firstWorker;
+      let other = extraBranchWorker;
+      await round("round 1", tip, "request_changes");
+      await ladderStep(`ladder ${name} round 1 replaces ${tip}`, () => replace(tip));
+      tip = successorOf(tip) ?? tip;
+      await ready("round 1", tip);
+      await round("round 2", tip, "request_changes");
+      await ladderStep(`ladder ${name} round 2 replaces ${tip} refused for consult`, () => replace(tip));
+      await ladderStep(`ladder ${name} chief_consult ${tip}`, () => tool("chief_consult", { title: "Snapshot ladder consult", mission: "Snapshot ladder question", workerThreadId: tip }, owner, project));
+      await ladderStep(`ladder ${name} advisor ready`, () => ladderReport(advisorOf(tip), { state: "ready", summary: "Snapshot ladder advice", result: "Snapshot ladder advice result" }, project));
+      await ladderStep(`ladder ${name} round 2 replaces ${tip} after the consult`, () => replace(tip));
+      if (other) {
+        // One consult on the anchor worker unlocks every branch of the review.
+        await ladderStep(`ladder ${name} round 2 replaces ${other} on the anchor's consult`, () => replace(other!));
+        other = successorOf(other) ?? other;
+      }
+      tip = successorOf(tip) ?? tip;
+      await ready("round 2", tip, other);
+      await round("round 3", tip, "request_changes");
+      await ladderStep(`ladder ${name} round 3 replaces ${tip} refused for stop`, () => replace(tip));
+      if (other) await ladderStep(`ladder ${name} round 3 replaces ${other} refused for stop`, () => replace(other!));
+      await ladderStep(`ladder ${name} round 3 replaces ${tip} userApprovedRound`, () => replace(tip, { userApprovedRound: true }));
+      if (other) {
+        await ladderStep(`ladder ${name} round 3 replaces ${other} userApprovedRound`, () => replace(other!, { userApprovedRound: true }));
+      }
+      const last = [successorOf(tip) ?? tip, ...(other ? [successorOf(other) ?? other] : [])];
+      await ready("round 3", ...last);
+      await round("final", last[0]!, "approve");
+      for (const id of last) await ladderStep(`ladder ${name} chief_complete ${id}`, () => tool("chief_complete", { threadId: id }, owner, project));
+    };
+    await ladder("single", "thr_fx_plain");
+    await ladder("two-branch", "thr_fx_lad_a", "thr_fx_lad_b");
+    begin("e-mutations (continued)");
+
     // e2. every live worker: review, both replaces: calls, complete
     for (const row of rows().filter((item) => isLive(item) && item.role === "worker")) {
       const owner = row.chief_thread_id;
