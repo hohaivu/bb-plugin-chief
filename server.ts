@@ -762,6 +762,16 @@ interface ManagedRow {
   updated_at: number;
 }
 
+/** One worker a reviewer covers: the report and PR head its verdict is bound to. */
+interface ReviewTarget {
+  reviewer_thread_id: string;
+  worker_thread_id: string;
+  report_seq: number | null;
+  head_sha: string | null;
+  pr_url: string | null;
+  branch: string | null;
+}
+
 interface AlertRow {
   dedupe_key: string;
   target_thread_id: string;
@@ -780,7 +790,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Take safe, reversible next steps autonomously: continue a thread, request a focused review, or mark reviewed work complete.
 - Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
 - When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
-- Start extra reviews with chief_review — a worker's worktree, or a fresh one for a pull request or branch with no worker — whenever a change deserves a second pass.
+- Only you start reviews, with chief_review (the server refuses every other caller): a worker's worktree, or a fresh one for a pull request or branch with no worker, whenever a change deserves a second pass. A plan gets one review, after every wave is ready.
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete. After replaces:, review and complete the successor, not the predecessor.`;
 
@@ -789,7 +799,7 @@ const CHIEF_CORE_RULES = `# Chief core rules (always apply)
 
 - Evidence: Chief runs nothing in a managed thread's worktree and reads no project code. Its evidence is worker and reviewer reports, lifecycle alerts, the recorded commands in ready alerts, chief_inspect output, and reviewer verdicts. A cause no evidence states, doubtful evidence, or a disputed factual claim goes to a child thread (chief_plan when offered, chief_review, or chief_research when offered), never to Chief reading code.
 - Fresh worker: a worker that has reported is never reused. Follow-up work (skipped acceptance criteria, a review's requested changes, the next wave, a rebase or restack, a push or a failed push, discarding changes, running tests, or any new task) goes to a fresh worker with chief_delegate replaces: (same worktree, branch, and pull request). chief_continue only nudges a thread that is still working.
-- Review: one independent chief_review per branch, started when the worker's ready alert says to (after every wave on that branch is ready, or for a worker with no plan link). Complete the work only on that reviewer's approve: chief_complete refuses a worker unless its newest review approves the pull request's current head commit, and it marks the worker's pull request ready itself, so never run gh pr ready or glab mr update --ready for a worker's pull request. A pull request no worker owns (a branch review) is the exception: mark it ready yourself, only on that reviewer's approve. Exception: for #simple work, review is your judgment.`;
+- Review: one independent chief_review, started when a worker's ready alert says to: for a worker with no plan link, its own; for a plan, one review of every branch after every wave is ready, never between waves. Complete the work only on that reviewer's approve: chief_complete refuses a worker unless its newest review approves the pull request's current head commit, and it marks the worker's pull request ready itself, so never run gh pr ready or glab mr update --ready for a worker's pull request. A pull request no worker owns (a branch review) is the exception: mark it ready yourself, only on that reviewer's approve. Exception: for #simple work, review is your judgment.`;
 
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
@@ -1254,6 +1264,11 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN last_report_state TEXT`,
     // Rows from before the column: a ready row that has reported provably last reported ready. Active/blocked/idle rows stay NULL (unknown).
     `UPDATE managed_threads SET last_report_state='ready' WHERE state='ready' AND report_seq > 0 AND last_report_state IS NULL`,
+    // One review covers every branch of a plan: one row per worker a reviewer covers, with the report and PR head it was bound to. Reviewers from before are backfilled from their own row.
+    `CREATE TABLE IF NOT EXISTS review_targets (reviewer_thread_id TEXT NOT NULL, worker_thread_id TEXT NOT NULL, report_seq INTEGER, head_sha TEXT, pr_url TEXT, branch TEXT, PRIMARY KEY (reviewer_thread_id, worker_thread_id))`,
+    `INSERT OR IGNORE INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq, head_sha, pr_url, branch) SELECT thread_id, worker_thread_id, reviewed_report_seq, reviewed_head_sha, NULL, branch FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NOT NULL`,
+    // The covered worker's report a verdict row was given for (-1: re-pointed before the verdict); NULL on rows from before, which read the reviewer's reviewed_report_seq.
+    `ALTER TABLE reviewer_verdicts ADD COLUMN worker_report_seq INTEGER`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1302,19 +1317,21 @@ export default async function plugin(bb: BbPluginApi) {
   const chiefCountForProject = db.prepare<[string]>(
     `SELECT COUNT(*) AS count FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND project_id=?`,
   );
-  const existingReview = db.prepare<[string]>(
-    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  // A worker's reviewers are found through review_targets: one plan review covers the latest worker of every branch.
+  const openReviewOf = db.prepare<[string]>(
+    `SELECT r.* FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? AND r.state NOT IN ('complete','archived','deleted') ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`,
   );
-  // Unlike existingReview, this is not filtered by state: nextAction's dedup must
+  // Unlike openReviewOf, this is not filtered by state: nextAction's dedup must
   // still find a reviewer that has since completed, so a completed reviewer that
   // already covered the worker's latest report does not bring back a spurious
-  // chief_review recommendation.
-  const latestReviewForWorker = db.prepare<[string]>(
-    `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  // chief_review recommendation. target_seq is the report of this worker it covered.
+  const coveringReviewer = db.prepare<[string]>(
+    `SELECT r.*, t.report_seq AS target_seq FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`,
   );
+  const targetsOf = db.prepare<[string]>(`SELECT * FROM review_targets WHERE reviewer_thread_id=? ORDER BY rowid`);
   // Every reviewer of a worker, whatever its state: chainFails reads completed reviewers too.
   const reviewerFails = db.prepare<[string]>(
-    `SELECT fails FROM managed_threads WHERE role='reviewer' AND worker_thread_id=? AND fails IS NOT NULL ORDER BY created_at DESC, rowid DESC`,
+    `SELECT r.fails FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id=? AND r.fails IS NOT NULL ORDER BY r.created_at DESC, r.rowid DESC`,
   );
   const existingBranchReview = db.prepare<[string, string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND chief_thread_id=? AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
@@ -1363,7 +1380,7 @@ export default async function plugin(bb: BbPluginApi) {
   let researchActive: ResearchSettings | null = null;
   const rulesCache = new Map<string, string>();
   const alertDeliveries = new Map<string, Promise<boolean>>();
-  const reviewStarts = new Map<string, Promise<{ threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null }>>();
+  const reviewStarts = new Map<string, Promise<{ threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[] }>>();
 
   let pendingReady = false; // set once everything pendingSnapshot() touches is initialised
   let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
@@ -1375,7 +1392,11 @@ export default async function plugin(bb: BbPluginApi) {
   function absorbed(row: ManagedRow) {
     if (terminal(row.state) || BUSY_STATUSES.has(row.state)) return false;
     if (row.role === "researcher") return row.state === "ready";
-    if (row.role === "reviewer" || row.role === "advisor") {
+    if (row.role === "reviewer") {
+      const covered = targetsOf.all(row.thread_id) as ReviewTarget[];
+      return covered.length > 0 && covered.every((target) => roles.get(target.worker_thread_id)?.state === "complete");
+    }
+    if (row.role === "advisor") {
       return !!row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete";
     }
     if (row.role !== "planner" || !row.plan_waves) return false;
@@ -2100,7 +2121,7 @@ export default async function plugin(bb: BbPluginApi) {
     const marks = chain.map(() => "?").join(",");
     const verdicts = db.prepare(`SELECT verdict, at FROM reviewer_verdicts WHERE worker_thread_id IN (${marks}) ORDER BY id DESC`).all(...chain) as { verdict: string; at: number }[];
     const end = verdicts.findIndex((entry) => entry.verdict !== "request_changes");
-    const carried = db.prepare(`SELECT reject_streak FROM managed_threads WHERE role='reviewer' AND worker_thread_id IN (${marks}) ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(...chain) as { reject_streak: number } | undefined;
+    const carried = db.prepare(`SELECT r.reject_streak FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND t.worker_thread_id IN (${marks}) ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`).get(...chain) as { reject_streak: number } | undefined;
     return { chain, streak: Math.max(end === -1 ? verdicts.length : end, carried?.reject_streak ?? 0), lastAt: verdicts[0]?.at ?? 0 };
   }
 
@@ -2122,8 +2143,14 @@ export default async function plugin(bb: BbPluginApi) {
         // A consult counts once: it must have sent its advice (a ready or blocked report, recorded in advised_at; a
         // status-only, stopped or completed-unreported consult has none), and started after the latest rejection and
         // after the worker being replaced, so a worker already sent on the one more round cannot be replaced on the same consult.
-        const consulted = db.prepare(`SELECT 1 FROM managed_threads WHERE role='advisor' AND worker_thread_id IN (${chain.map(() => "?").join(",")})
-          AND advised_at IS NOT NULL AND created_at >= ? LIMIT 1`).get(...chain, Math.max(lastAt, prior.created_at));
+        // One plan review has one ladder: a consult on any branch of the review that wrote the newest verdict counts for every branch.
+        const group = new Set(chain);
+        const newestReviewer = db.prepare(`SELECT reviewer_thread_id FROM reviewer_verdicts WHERE worker_thread_id IN (${chain.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`).get(...chain) as { reviewer_thread_id: string } | undefined;
+        for (const target of newestReviewer ? targetsOf.all(newestReviewer.reviewer_thread_id) as ReviewTarget[] : []) {
+          for (const id of taskChain(target.worker_thread_id)) group.add(id);
+        }
+        const consulted = db.prepare(`SELECT 1 FROM managed_threads WHERE role='advisor' AND worker_thread_id IN (${[...group].map(() => "?").join(",")})
+          AND advised_at IS NOT NULL AND created_at >= ? LIMIT 1`).get(...group, Math.max(lastAt, prior.created_at));
         if (!consulted) {
           throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.`);
         }
@@ -2232,7 +2259,7 @@ export default async function plugin(bb: BbPluginApi) {
     const reviewerBrief = render(clip(params.mission, 1_500), context && clipMiddle(context, 1_500));
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
     // hands the fresh worker the review that prompted the handoff.
-    const findings = prior ? existingReview.get(prior.thread_id) as ManagedRow | undefined : undefined;
+    const findings = prior ? openReviewOf.get(prior.thread_id) as ManagedRow | undefined : undefined;
     const ruledOut = prior ? chainFails(prior.thread_id) : [];
     const prompt = [
       `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
@@ -2251,7 +2278,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...(wave !== undefined && waveTotal !== undefined ? [
         "", "## Wave",
         `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
-        waveNext !== null ? "No review runs after this wave." : "Your ready report leads to the one review of the whole run.",
+        waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
         ...(waveIndependent ? ["This wave is independent: it has its own branch and PR from the default base; do not build on another wave's branch."] : []),
         ...(implementsDesign !== null ? [`This wave implements the artboards that wave ${implementsDesign} drew and the owner approved. Read them through the design tool's MCP (read-only; never edit the design) and match them; the artboard names are in your mission or wave ${implementsDesign}'s report.`] : []),
         ...(designWave ? ["This is a design-only wave: the next wave implements it once the owner approves your artboards."] : []),
@@ -2339,6 +2366,8 @@ export default async function plugin(bb: BbPluginApi) {
         // fresh worker restarts its own count from 0, so a stale value here could
         // coincidentally match a future report and wrongly suppress its review.
         db.prepare(`UPDATE managed_threads SET worker_thread_id=?, reviewed_report_seq=NULL, updated_at=? WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(thread.id, now, prior.thread_id);
+        // The same re-point for every worker an open review covers, so a plan review's other branches follow their fresh workers too.
+        db.prepare(`UPDATE review_targets SET worker_thread_id=?, report_seq=NULL WHERE worker_thread_id=? AND reviewer_thread_id IN (SELECT thread_id FROM managed_threads WHERE role='reviewer' AND state NOT IN ('complete','archived','deleted'))`).run(thread.id, prior.thread_id);
       })();
       reloadRoles();
     }
@@ -2459,25 +2488,63 @@ export default async function plugin(bb: BbPluginApi) {
     ].filter((line) => line !== null).join("\n");
   }
 
+  /** The waves of a plan whose latest worker is not ready or complete (or does not exist yet). */
+  function pendingWaves(planThreadId: string, waves: PlanWave[]): number[] {
+    return waves.flatMap((_, index) => {
+      const latest = waveWorkers(planThreadId, index + 1).at(-1);
+      return latest?.state === "ready" || latest?.state === "complete" ? [] : [index + 1];
+    });
+  }
+
+  /** The workers one review of this chain tip covers, in tip order: the latest worker of every chain,
+   * minus design waves and workers already complete (the one passed in always stays). A worker with no
+   * plan link (or #simple) covers only itself. Assumes reviewRefusal passed. */
+  function reviewTargetsFor(worker: ManagedRow): ManagedRow[] {
+    const waves = planWavesFor(worker.plan_thread_id);
+    if (!waves.length || worker.plan_wave == null) return [worker];
+    return tips(waves).flatMap((tip) => {
+      const latest = waveWorkers(worker.plan_thread_id!, tip).at(-1);
+      return latest && !isDesignWave(latest) && (latest.thread_id === worker.thread_id || latest.state !== "complete") ? [latest] : [];
+    });
+  }
+
+  /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready. */
+  function reviewRefusal(worker: ManagedRow): string | null {
+    if (isDesignWave(worker)) return DESIGN_REVIEW_REFUSAL;
+    const waves = planWavesFor(worker.plan_thread_id);
+    if (!waves.length || worker.plan_wave == null) return null;
+    const planThreadId = worker.plan_thread_id!;
+    const latest = waveWorkers(planThreadId, worker.plan_wave).at(-1);
+    if (latest && latest.thread_id !== worker.thread_id) {
+      return `${worker.thread_id} is superseded by ${latest.thread_id}. The plan's one review starts from the latest workers: chief_review (workerThreadId: ${latest.thread_id}) once every wave is ready.`;
+    }
+    const next = successorOf(waves, worker.plan_wave);
+    if (next !== null) {
+      return `Wave ${worker.plan_wave} of ${waves.length}: no review runs between waves. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${planThreadId}, wave: ${next}, replaces: ${worker.thread_id}).`;
+    }
+    const pending = pendingWaves(planThreadId, waves);
+    return pending.length
+      ? `One review covers the whole plan once every wave is ready; wave(s) ${pending.join(", ")} of ${waves.length} are not ready yet. Wait for their ready reports (delegate any wave not delegated yet), then start the review.`
+      : null;
+  }
+
   /** A ready chain-tip worker's waiting line while other waves of its plan are not ready yet, else null. */
   function waveWaitLine(row: ManagedRow): string | null {
     if (row.role !== "worker" || row.state !== "ready" || !row.plan_thread_id || row.plan_wave == null) return null;
     const waves = planWavesFor(row.plan_thread_id);
-    if (successorOf(waves, row.plan_wave) !== null || tips(waves).length < 2) return null;
-    const pending = waves.flatMap((_, index) => {
-      const latest = waveWorkers(row.plan_thread_id!, index + 1).at(-1);
-      return latest?.state === "ready" || latest?.state === "complete" ? [] : [index + 1];
-    });
+    if (successorOf(waves, row.plan_wave) !== null) return null;
+    const pending = pendingWaves(row.plan_thread_id, waves);
     return pending.length
-      ? `Wave ${row.plan_wave} of ${waves.length} is ready; its review waits until wave(s) ${pending.join(", ")} are ready. Do not review yet.`
+      ? `Wave ${row.plan_wave} of ${waves.length} is ready; the one review of the whole plan waits until wave(s) ${pending.join(", ")} are ready. Do not review yet.`
       : null;
   }
 
   /** A ready worker's exact next call: the wave that builds on it (no review runs between
    * waves; a design-only wave first asks the owner to approve its artboards), nothing while
-   * other waves are still unready (waveWaitLine), or one review per
-   * branch once every wave is ready — or, with no plan link at all, the same review call. */
-  function workerReadyNextStep(row: ManagedRow): string | null {
+   * other waves are still unready (waveWaitLine), the one review of the whole plan once every
+   * wave is ready (named once, on the plan's first reviewable tip, unless forAlert) — or, with no
+   * plan link at all, its own review call. */
+  function workerReadyNextStep(row: ManagedRow, forAlert = false): string | null {
     if (row.simple) return `#simple work: review is optional, at your judgment. If the report and recorded commands satisfy you, complete it with chief_complete (threadId: ${row.thread_id}; it marks the pull request ready) without a review; otherwise start one: chief_review (workerThreadId: ${row.thread_id}).`;
     const waves = planWavesFor(row.plan_thread_id);
     const next = row.plan_thread_id && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
@@ -2490,24 +2557,24 @@ export default async function plugin(bb: BbPluginApi) {
     if (next !== null) {
       return `Wave ${row.plan_wave} of ${waves.length} is ready. Once it is idle, delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}). Do not review between waves.`;
     }
-    if (waveWaitLine(row)) return null;
-    const ends = tips(waves);
-    if (row.plan_thread_id && ends.length > 1) {
-      const calls = ends.flatMap((tip) => {
-        const latest = waveWorkers(row.plan_thread_id!, tip).at(-1);
-        const reviewer = latest ? latestReviewForWorker.get(latest.thread_id) as ManagedRow | undefined : undefined;
-        return latest && !isDesignWave(latest) && !(reviewer && reviewer.reviewed_report_seq === latest.report_seq) ? [`chief_review (workerThreadId: ${latest.thread_id})`] : [];
-      });
-      const start = calls.length ? `Start one review per branch now: ${calls.join("; ")}.` : "Every branch already has its review; wait for the verdicts.";
-      return `All ${waves.length} waves are ready. ${start} Complete each branch only on its reviewer's approve.`;
+    if (!row.plan_thread_id || row.plan_wave == null || !waves.length) {
+      return `Start its review now: chief_review (workerThreadId: ${row.thread_id}). Complete the work only on the reviewer's approve.`;
     }
-    return `Start its review now: chief_review (workerThreadId: ${row.thread_id}). Complete the work only on the reviewer's approve.`;
+    if (waveWaitLine(row)) return null;
+    const targets = reviewTargetsFor(row);
+    // The tips whose current report no review covers yet. The plan's one call is named on the first of them
+    // (whichever tip a replaces: successor or an earlier review left stale), so Pending never drops it.
+    const stale = targets.filter((target) => (coveringReviewer.get(target.thread_id) as { target_seq: number | null } | undefined)?.target_seq !== target.report_seq);
+    if (!stale.length) return null;
+    if (!forAlert && stale[0]!.thread_id !== row.thread_id) return null;
+    const branches = targets.map((target) => `${target.thread_id}${target.branch ? ` (${target.branch})` : ""}`).join(", ");
+    return `${waves.length === 1 ? "The plan's only wave is" : `All ${waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${stale[0]!.thread_id}). It covers every branch (${branches}). Complete each worker only on that reviewer's approve.`;
   }
 
   /** A row's single pending call, reused identically in report()'s alert and
    * chief_roster's Pending block so the two surfaces never disagree. Purely a
    * function of already-persisted row state — no new columns, no new tracking. */
-  function nextAction(row: ManagedRow): string | null {
+  function nextAction(row: ManagedRow, forAlert = false): string | null {
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.`;
     if (row.state !== "ready") return null;
     if (row.role === "planner") {
@@ -2533,9 +2600,9 @@ export default async function plugin(bb: BbPluginApi) {
       // reviewer that later completes (state moves to complete) must still count.
       // A re-pointed stale reviewer (delegate's `replaces:`) has its snapshot reset
       // to null, so it no longer matches and this still recommends chief_review.
-      const reviewer = latestReviewForWorker.get(row.thread_id) as ManagedRow | undefined;
-      if (reviewer && reviewer.reviewed_report_seq === row.report_seq) return null;
-      return workerReadyNextStep(row);
+      const covering = coveringReviewer.get(row.thread_id) as { target_seq: number | null } | undefined;
+      if (covering && covering.target_seq === row.report_seq) return null;
+      return workerReadyNextStep(row, forAlert);
     }
     if (row.role === "advisor") {
       if (row.worker_thread_id && taskRejections(row.worker_thread_id).streak >= STOP_AFTER_REJECTIONS) {
@@ -2544,11 +2611,18 @@ export default async function plugin(bb: BbPluginApi) {
       return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${row.worker_thread_id ? ` (replaces: ${row.worker_thread_id})` : " (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
     }
     if (row.role !== "reviewer" || !row.verdict) return null;
-    // replaces: re-pointed this reviewer to a fresh worker (snapshot reset to null): its findings were handed off.
-    if (row.worker_thread_id && row.reviewed_report_seq === null) return null;
-    // A worker independently marked complete already absorbed this reviewer's verdict.
-    if (row.worker_thread_id && roles.get(row.worker_thread_id)?.state === "complete") return null;
+    const covered = targetsOf.all(row.thread_id) as ReviewTarget[];
+    // replaces: re-pointed a covered worker to a fresh one (its report reset to null): that branch's findings were handed off.
+    if (covered.some((target) => target.report_seq === null)) return null;
+    // Workers independently marked complete already absorbed this reviewer's verdict; only the rest still need a call.
+    const open = covered.filter((target) => roles.get(target.worker_thread_id)?.state !== "complete");
+    if (covered.length && !open.length) return null;
+    const plan = covered.length > 1;
+    const workers = open.map((target) => target.worker_thread_id).join(", ");
     if (row.verdict === "approve") {
+      if (plan) {
+        return `The reviewer approves the whole plan. ${open.map((target) => `chief_complete (threadId: ${target.worker_thread_id})`).join("; ")}; each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.`;
+      }
       const complete = row.worker_thread_id
         ? `chief_complete (threadId: ${row.worker_thread_id}); it marks the pull request ready`
         : `chief_complete (threadId: ${row.thread_id}), then mark the pull request ready yourself (no worker owns it)`;
@@ -2559,7 +2633,13 @@ export default async function plugin(bb: BbPluginApi) {
       return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.${flagged}`;
     }
     if (row.reject_streak >= CONSULT_AFTER_REJECTIONS) {
+      if (plan) {
+        return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult (workerThreadId: ${open[0]!.worker_thread_id}) now, before any further delegation, with every branch of the review (${workers}) in its context — one consult unlocks the fix for each. Then hand its advice to one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review. If that review still requires changes, stop and escalate to the user.${flagged}`;
+      }
       return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with ${row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : `chief_delegate (branch: ${row.branch})`} and run exactly one more review. If that review still requires changes, stop and escalate to the user.${flagged}`;
+    }
+    if (plan) {
+      return `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map((target) => `chief_delegate (replaces: ${target.worker_thread_id})`).join(" / ")}; their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`;
     }
     return row.worker_thread_id
       ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`
@@ -2629,24 +2709,51 @@ export default async function plugin(bb: BbPluginApi) {
    * by a fresh one rather than resumed; its reject_streak carries over onto the new
    * row, so deadlock detection still sees consecutive rejections across the fresh
    * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
-  async function startReview(workerThreadId: string, focus?: string) {
-    const inFlight = reviewStarts.get(workerThreadId);
+  async function startReview(caller: ManagedRow | undefined, workerThreadId: string, focus?: string) {
+    requireChiefCaller(caller, "Starting a review");
+    const worker = roles.get(workerThreadId);
+    if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
+    const refusal = reviewRefusal(worker);
+    if (refusal) throw new Error(refusal);
+    // One review of a plan covers the latest worker of every branch; any other worker covers itself.
+    const targets = reviewTargetsFor(worker);
+    for (const target of targets) {
+      if (!controlsThread(target, caller.thread_id) || target.project_id !== caller.project_id) throw new Error(`No managed worker ${target.thread_id} for this Chief.`);
+    }
+    const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && planWavesFor(worker.plan_thread_id).length > 0);
+    const reviewKey = planReview ? `plan:${worker.plan_thread_id}` : workerThreadId;
+    const inFlight = reviewStarts.get(reviewKey);
     if (inFlight) return inFlight;
     const start = (async () => {
-      const worker = roles.get(workerThreadId);
-      if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
-      if (isDesignWave(worker)) throw new Error(DESIGN_REVIEW_REFUSAL);
-      const previous = existingReview.get(workerThreadId) as ManagedRow | undefined;
-      if (previous && BUSY_STATUSES.has(previous.state)) {
-        return { threadId: previous.thread_id, title: previous.title, workerThreadId, created: false, pinnedSha: previous.reviewed_head_sha };
+      const openReviews = [...new Set(targets.flatMap((target) => taskChain(target.thread_id)))]
+        .flatMap((id) => { const open = openReviewOf.get(id) as ManagedRow | undefined; return open ? [open] : []; })
+        .filter((review, index, all) => all.findIndex((other) => other.thread_id === review.thread_id) === index)
+        .sort((a, b) => b.created_at - a.created_at);
+      const previous = openReviews[0];
+      const busy = openReviews.find((review) => BUSY_STATUSES.has(review.state));
+      if (busy) {
+        return { threadId: busy.thread_id, title: busy.title, workerThreadId, created: false, pinnedSha: busy.reviewed_head_sha, covers: targets.map((target) => target.thread_id) };
       }
-      const live = await waitIdleAfterReport(worker);
-      if (BUSY_STATUSES.has(live.status)) busyRejection(worker, live.status, "starting a review");
-      if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${workerThreadId} is not reviewable.`);
-      // The forge's head, read now, is the commit the verdict will cover. No PR, or a head the forge will not
-      // tell us, keeps the review on the worker's own environment exactly as before (reviewed_head_sha stays NULL).
-      const head = worker.pr_url ? await prHead(worker.pr_url, await projectPath(worker.project_id)) : null;
+      const lives = new Map<string, Awaited<ReturnType<typeof bb.sdk.threads.get>>>();
+      for (const target of targets) {
+        const live = await waitIdleAfterReport(target);
+        if (BUSY_STATUSES.has(live.status)) busyRejection(target, live.status, "starting a review");
+        if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${target.thread_id} is not reviewable.`);
+        lives.set(target.thread_id, live);
+      }
+      const live = lives.get(workerThreadId)!;
+      // The forge's head, read now, is the commit each verdict will cover. No PR, or a head the forge will not
+      // tell us, keeps a single-worker review on the worker's own environment exactly as before (reviewed_head_sha stays NULL).
+      const projectDir = await projectPath(worker.project_id);
+      const heads = new Map<string, Awaited<ReturnType<typeof prHead>>>();
+      for (const target of targets) heads.set(target.thread_id, target.pr_url ? await prHead(target.pr_url, projectDir) : null);
+      const head = heads.get(workerThreadId) ?? null;
       if (!head && !live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
+      for (const target of targets) {
+        if (target !== worker && !heads.get(target.thread_id) && !target.branch) {
+          throw new Error(`Worker ${target.thread_id} has no readable pull request head and no branch, so the plan's one review cannot reach it. Retry once the forge answers.`);
+        }
+      }
       const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
       const execution = await spawnExecution("reviewer", hostId, worker.project_id);
       const sectionId = await ensureSection();
@@ -2655,29 +2762,38 @@ export default async function plugin(bb: BbPluginApi) {
       await readRules(worker.project_id);
       const title = `Review · ${worker.title}`;
       const waves = planWavesFor(worker.plan_thread_id);
-      // A reviewer of a chain tip sees only that chain's waves.
-      const chain = worker.plan_wave != null && waves.length ? chainOf(waves, worker.plan_wave) : waves.map((_, index) => index + 1);
+      // A plan review sees every wave; a single worker's reviewer sees only its chain's waves.
+      const chain = worker.plan_wave != null && waves.length && !planReview ? chainOf(waves, worker.plan_wave) : waves.map((_, index) => index + 1);
       const contractLines = waves.length === 1
         ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
         : chain.flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
       const recorded = head ? null : await recordedCommands(workerThreadId);
+      const pinnedAll = targets.every((target) => heads.get(target.thread_id));
+      const targetLine = (target: ManagedRow) => {
+        const pinned = heads.get(target.thread_id);
+        return pinned
+          ? `- worker ${target.thread_id} “${target.title}”: ${target.pr_url} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch}\`, then review \`git diff origin/${pinned.base}...${pinned.sha}\``
+          : `- worker ${target.thread_id} “${target.title}”: branch ${target.branch}${target.pr_url ? ` (${target.pr_url})` : ""}, head not readable, not pinned: \`git fetch origin ${target.branch}\`, then review \`git diff <the project's default branch>...origin/${target.branch}\`; the verdict binds to its report ${target.report_seq}`;
+      };
       const prompt = reviewerPrompt({
-        pinned: !!head,
-        subject: head
-          ? `Independently review pull request ${worker.pr_url} (worker thread ${workerThreadId}: “${worker.title}”), pinned to its head commit ${head.sha} (branch ${head.branch}, targeting ${head.base}). First run \`git fetch origin ${head.branch} && git checkout --detach ${head.sha}\`. The pull request description is the brief: read it (gh pr view ${worker.pr_url} --json title,body, or glab mr view ${worker.pr_url}), then review the diff of ${head.sha} against origin/${head.base}. Treat nothing outside that commit as part of the change. The worker's recorded commands ran against the worker's own tree, not this commit: rerun the project's build/check at ${head.sha}.`
-          : `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
+        pinned: pinnedAll,
+        subject: targets.length > 1
+          ? `Independently review the whole plan: ${targets.length} branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change. The worker's recorded commands ran against the worker's own tree: rerun the project's build/check at each pinned commit.\n${targets.map(targetLine).join("\n")}`
+          : head
+            ? `Independently review pull request ${worker.pr_url} (worker thread ${workerThreadId}: “${worker.title}”), pinned to its head commit ${head.sha} (branch ${head.branch}, targeting ${head.base}). First run \`git fetch origin ${head.branch} && git checkout --detach ${head.sha}\`. The pull request description is the brief: read it (gh pr view ${worker.pr_url} --json title,body, or glab mr view ${worker.pr_url}), then review the diff of ${head.sha} against origin/${head.base}. Treat nothing outside that commit as part of the change. The worker's recorded commands ran against the worker's own tree, not this commit: rerun the project's build/check at ${head.sha}.`
+            : `Independently review the work owned by worker thread ${workerThreadId}: “${worker.title}”.`,
         chiefThreadId: worker.chief_thread_id,
         focus,
         provenance: [
-          ...(worker.brief && !head ? [
+          ...(worker.brief && !head && targets.length === 1 ? [
             "", "## The brief this work was given", clipMiddle(worker.brief, 4_000),
             "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
           ] : []),
           ...(contractLines.length ? [
             "", "## Contracts to verify", ...contractLines,
-            `Check every item against ${head ? "the pinned commit" : "the worktree"}. An unmet item means request_changes naming it; say which items you confirmed.`,
+            `Check every item against ${pinnedAll ? "the pinned commit" : "the worktree"}${targets.length > 1 ? "s" : ""}. An unmet item means request_changes naming it; say which items you confirmed.`,
           ] : []),
-          ...(head ? [] : [
+          ...(head || targets.length > 1 ? [] : [
             "", "## Recorded commands (from the worker's event log)",
             ...recordedLines(recorded),
             "Recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
@@ -2685,27 +2801,38 @@ export default async function plugin(bb: BbPluginApi) {
           ...(worker.kind === "designer" ? [
             "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
           ] : []),
-          ...(worker.result && head ? [
-            "", "## The worker's report file",
-            ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
-            `Full report and last output: bb chief inspect ${workerThreadId}`,
-            "Read it for its Deviations from plan only; the pull request at its pinned commit is the change.",
-          ] : []),
-          ...(worker.result && !head ? [
-            "", "## What the worker reported", worker.summary ?? clip(worker.result, 300),
-            ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
-            `Full report and last output: bb chief inspect ${workerThreadId}`,
-          ] : []),
+          ...(targets.length > 1
+            ? targets.flatMap((target) => target.result ? [
+              "", `## The report of worker ${target.thread_id}`,
+              ...(target.report_path ? [`Full report: ${target.report_path}`] : []),
+              `Full report and last output: bb chief inspect ${target.thread_id}`,
+              "Read it for its Deviations from plan only; each pull request at its pinned commit is the change.",
+            ] : [])
+            : [
+              ...(worker.result && head ? [
+                "", "## The worker's report file",
+                ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
+                `Full report and last output: bb chief inspect ${workerThreadId}`,
+                "Read it for its Deviations from plan only; the pull request at its pinned commit is the change.",
+              ] : []),
+              ...(worker.result && !head ? [
+                "", "## What the worker reported", worker.summary ?? clip(worker.result, 300),
+                ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
+                `Full report and last output: bb chief inspect ${workerThreadId}`,
+              ] : []),
+            ]),
           ...(previous?.result ? [
             "", `## The previous review (${previous.thread_id})`,
             ...verdictPreview(previous),
             ...(previous.recommendation ? [`Recommendation: ${clip(previous.recommendation, 600)}`] : []),
-            "", `Check each finding above against ${head ? "the pinned commit" : "the current worktree"}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again.`,
+            "", `Check each finding above against ${pinnedAll ? "the pinned commit" : "the current worktree"}${targets.length > 1 ? "s" : ""}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again.`,
           ] : []),
           ...(waves.length ? [
-            "", `This branch carries wave${chain.length > 1 ? "s" : ""} ${chain.join(", ")} of ${waves.length}. Review the whole branch against its base against ${chain.length > 1 ? "these waves' plans" : "this wave's plan"}:`,
+            "", targets.length > 1
+              ? `This plan has ${waves.length} wave${waves.length > 1 ? "s" : ""}, one branch per chain. Review each branch against its base against its waves' plans:`
+              : `This branch carries wave${chain.length > 1 ? "s" : ""} ${chain.join(", ")} of ${waves.length}. Review the whole branch against its base against ${chain.length > 1 ? "these waves' plans" : "this wave's plan"}:`,
             ...chain.map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}`),
-            "Read the worker's full report (Full report path above, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
+            "Read each worker's full report (Full report path above, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
           ] : []),
         ],
       });
@@ -2723,25 +2850,31 @@ export default async function plugin(bb: BbPluginApi) {
         prompt,
         pluginMetadata: { role: "reviewer", chiefThreadId: worker.chief_thread_id },
       });
-      insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha });
+      db.transaction(() => {
+        insertThread({ threadId: thread.id, role: "reviewer", projectId: worker.project_id, chiefThreadId: worker.chief_thread_id, parentThreadId: worker.chief_thread_id, workerThreadId, title, state: "starting", status: thread.status, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha });
+        for (const target of targets) {
+          db.prepare(`INSERT OR REPLACE INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq, head_sha, pr_url, branch) VALUES (?, ?, ?, ?, ?, ?)`)
+            .run(thread.id, target.thread_id, target.report_seq, heads.get(target.thread_id)?.sha ?? null, target.pr_url, target.branch);
+        }
+      })();
       await persistBrief(thread.id, prompt);
       // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
-      const streak = taskRejections(workerThreadId).streak;
-      if (previous || streak) {
+      const streak = Math.max(0, ...targets.map((target) => taskRejections(target.thread_id).streak));
+      if (openReviews.length || streak) {
         const now = Date.now();
         db.transaction(() => {
           db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(Math.max(previous?.reject_streak ?? 0, streak), now, thread.id);
-          if (previous) db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, previous.thread_id);
+          for (const old of openReviews) db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, old.thread_id);
         })();
         reloadRoles();
       }
-      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null };
+      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id) };
     })();
-    reviewStarts.set(workerThreadId, start);
+    reviewStarts.set(reviewKey, start);
     try {
       return await start;
     } finally {
-      reviewStarts.delete(workerThreadId);
+      reviewStarts.delete(reviewKey);
     }
   }
 
@@ -2749,12 +2882,17 @@ export default async function plugin(bb: BbPluginApi) {
    * managed worker owns: same reviewer contract, but spawned on a fresh managed
    * worktree (delegate()'s exact shape) instead of the worker's reused environment. */
   async function startBranchReview(
-    chiefThreadId: string,
-    projectId: string,
+    caller: ManagedRow | undefined,
     branch: string,
     pullRequestRef: string | null,
     focus?: string,
   ) {
+    requireChiefCaller(caller, "Starting a review");
+    const { thread_id: chiefThreadId, project_id: projectId } = caller;
+    // A branch a managed worker still carries is reviewed through that worker, so the review follows its plan and head.
+    const owner = [...roles.values()].find((row) => row.role === "worker" && !terminal(row.state)
+      && row.chief_thread_id === chiefThreadId && row.project_id === projectId && row.branch === branch);
+    if (owner) throw new Error(`Branch ${branch} is owned by worker ${owner.thread_id}: use chief_review (workerThreadId: ${owner.thread_id}).`);
     const key = JSON.stringify(["branch", chiefThreadId, projectId, branch]);
     const inFlight = reviewStarts.get(key);
     if (inFlight) return inFlight;
@@ -2809,7 +2947,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Which path a worker review took, for chief_review's reply. */
-  function reviewPathNote(workerThreadId: string, pinnedSha?: string | null) {
+  function reviewPathNote(workerThreadId: string, pinnedSha?: string | null, covers?: string[]) {
+    if (covers && covers.length > 1) return `One review covers the whole plan: ${covers.join(", ")}, each pull request pinned to its own head commit where the forge answered. Complete each worker only on its approve.`;
     if (pinnedSha) return `It reviews the pull request pinned to head commit ${pinnedSha} in its own worktree.`;
     return roles.get(workerThreadId)?.pr_url
       ? "The pull request head could not be read, so it reviews the worker's own environment and its verdict is not bound to a commit: chief_complete will need a fresh review once the forge answers, or an override."
@@ -2825,12 +2964,12 @@ export default async function plugin(bb: BbPluginApi) {
       return row.owner_approval ? null : `${row.thread_id} is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: ${row.thread_id}), or pass override with a reason to complete anyway.`;
     }
     const chain = taskChain(row.thread_id);
-    const newest = db.prepare(`SELECT v.verdict, v.head_sha, v.worker_thread_id, r.reviewed_report_seq
+    const newest = db.prepare(`SELECT v.verdict, v.head_sha, v.worker_thread_id, COALESCE(v.worker_report_seq, r.reviewed_report_seq) AS reviewed_report_seq
       FROM reviewer_verdicts v LEFT JOIN managed_threads r ON r.thread_id = v.reviewer_thread_id
       WHERE v.worker_thread_id IN (${chain.map(() => "?").join(",")}) ORDER BY v.id DESC LIMIT 1`).get(...chain) as
       { verdict: string; head_sha: string | null; worker_thread_id: string | null; reviewed_report_seq: number | null } | undefined;
     if (!newest && row.simple) return null;
-    const next = `Start a fresh review with chief_review (workerThreadId: ${row.thread_id}), or pass override with a reason to complete anyway.`;
+    const next = `Start a fresh review with chief_review (workerThreadId: ${row.thread_id}${row.plan_thread_id ? "; on a plan it covers every branch, once every wave is ready" : ""}), or pass override with a reason to complete anyway.`;
     if (!newest) return `${row.thread_id} has no review verdict. ${next}`;
     if (newest.verdict !== "approve") return `The newest review of ${row.thread_id} is ${newest.verdict}, not an approve. ${next}`;
     if (row.pr_url) {
@@ -3349,7 +3488,16 @@ export default async function plugin(bb: BbPluginApi) {
         db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at) VALUES (?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now);
       }
       if (row.role === "reviewer" && verdict) {
-        db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha) SELECT thread_id, worker_thread_id, ?, report_seq, ?, reviewed_head_sha FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
+        // One verdict row per covered worker, each with the head and report it was bound to; -1 marks a target re-pointed to a fresh worker, which no report matches.
+        const covered = targetsOf.all(threadId) as ReviewTarget[];
+        if (covered.length) {
+          for (const target of covered) {
+            db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+              .run(threadId, target.worker_thread_id, verdict, reserved.report_seq, now, target.head_sha, target.report_seq ?? -1);
+          }
+        } else {
+          db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha) SELECT thread_id, worker_thread_id, ?, report_seq, ?, reviewed_head_sha FROM managed_threads WHERE thread_id=?`).run(verdict, now, threadId);
+        }
       }
       // A plan worker's fails also reach its peer waves through chief_log, so it need not post them twice.
       if (row.role === "worker" && row.plan_thread_id && params.fails?.length) {
@@ -3359,7 +3507,7 @@ export default async function plugin(bb: BbPluginApi) {
     })();
     reloadRoles();
     const current = roles.get(threadId)!;
-    const action = nextAction(current) ?? waveWaitLine(current)
+    const action = nextAction(current, true) ?? waveWaitLine(current)
       ?? (row.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or timeout it reports. Nothing to review or complete." : null)
       ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.";
     const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
@@ -3368,13 +3516,15 @@ export default async function plugin(bb: BbPluginApi) {
     const reviewerVerdict = row.role === "reviewer" && !!verdict;
     // Best-effort: the verdict is in the DB either way, so a failed write only loses the file.
     let verdictPath: string | null = null;
+    const reviewedTargets = reviewerVerdict ? targetsOf.all(threadId) as ReviewTarget[] : [];
     if (reviewerVerdict) {
       try {
         verdictPath = await writeArtifact(threadId, row.project_id, verdictName, [
           `# Review verdict (${threadId})`, "",
           `Verdict: ${verdict}`, ...(regressionFlag ? ["Regression: yes"] : []),
-          `Reviewed worker: ${row.worker_thread_id ?? "none"}`,
-          ...(row.reviewed_head_sha ? [`Reviewed head: ${row.reviewed_head_sha}`] : []),
+          ...(reviewedTargets.length > 1
+            ? reviewedTargets.map((target) => `Reviewed worker: ${target.worker_thread_id}${target.head_sha ? ` at head ${target.head_sha}` : ""}`)
+            : [`Reviewed worker: ${row.worker_thread_id ?? "none"}`, ...(row.reviewed_head_sha ? [`Reviewed head: ${row.reviewed_head_sha}`] : [])]),
           "", "## Findings", "", params.result ?? "",
           ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
         ].join("\n") + "\n");
@@ -3775,6 +3925,13 @@ export default async function plugin(bb: BbPluginApi) {
     return !!caller && caller.role === "chief" && !INACTIVE_CHIEF_STATES.includes(caller.state);
   }
 
+  /** The one guard in front of every way to start a reviewer: only the active Chief may. */
+  function requireChiefCaller(caller: ManagedRow | undefined, what: string): asserts caller is ManagedRow {
+    if (isActiveChief(caller)) return;
+    const role = (caller as ManagedRow | undefined)?.role;
+    throw new Error(`${what} is for the active Chief only: ${role && role !== "chief" ? `a managed ${role} reports ready with chief_report, and Chief starts the review` : "ask the active Chief to start it"}.`);
+  }
+
   async function resolveTarget(threadId: string, chiefThreadId: string): Promise<ManagedRow | undefined> {
     let target = roles.get(threadId);
     if (!target) {
@@ -3838,12 +3995,12 @@ export default async function plugin(bb: BbPluginApi) {
           ) ? other : best, undefined);
         const currentWave = current?.plan_wave ?? head;
         const isFinalWave = currentWave === chain.at(-1);
-        const reviewer = current ? latestReviewForWorker.get(current.thread_id) as ManagedRow | undefined : undefined;
+        const reviewer = current ? coveringReviewer.get(current.thread_id) as (ManagedRow & { target_seq: number | null }) | undefined : undefined;
         // Only trust the reviewer's verdict/busy-ness for the wave's state when it
         // still covers the current worker's latest report — the same report_seq tie
         // nextAction uses, so a stale (re-pointed but not-yet-reported) reviewer
         // does not show an approval or rejection that predates the current attempt.
-        const reviewerCovers = reviewer != null && reviewer.reviewed_report_seq === current?.report_seq;
+        const reviewerCovers = reviewer != null && reviewer.target_seq === current?.report_seq;
         const approved = isFinalWave && reviewerCovers && reviewer!.verdict === "approve";
         const state = !current ? "not delegated"
           : approved ? "approved"
@@ -3943,7 +4100,7 @@ export default async function plugin(bb: BbPluginApi) {
     // Verdict history is the source for approve/request_changes counts; a reviewer from before reviewer_verdicts
     // existed has no rows, so its row's current verdict stands in for the one it gave.
     const verdictsBy = new Map<string, string[]>();
-    for (const entry of db.prepare(`SELECT reviewer_thread_id, verdict FROM reviewer_verdicts ORDER BY id`).all() as { reviewer_thread_id: string; verdict: string }[]) {
+    for (const entry of db.prepare(`SELECT reviewer_thread_id, verdict FROM reviewer_verdicts GROUP BY reviewer_thread_id, report_seq ORDER BY MIN(id)`).all() as { reviewer_thread_id: string; verdict: string }[]) {
       if (ids.has(entry.reviewer_thread_id)) verdictsBy.set(entry.reviewer_thread_id, [...(verdictsBy.get(entry.reviewer_thread_id) ?? []), entry.verdict]);
     }
     const verdictsOf = (list: ManagedRow[]) => list.filter((row) => row.role === "reviewer")
@@ -4962,25 +5119,22 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_review",
     presentation: { label: { pending: "Starting review…", completed: "Started review" } },
-    description: "Start or return an independent read-only review: in an idle worker's existing worktree, or in a fresh worktree for a pull request or branch no managed worker owns.",
+    description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
     parameters: reviewParams,
     async execute(params, context) {
       const caller = context.threadId ? roles.get(context.threadId) : undefined;
+      requireChiefCaller(caller, "chief_review");
       if (params.workerThreadId) {
-        if (!isActiveChief(caller)) throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
         await controlledTarget(params.workerThreadId, caller);
         touchCallerChief(caller);
-        const review = await startReview(params.workerThreadId, params.focus);
-        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha)}`;
-      }
-      if (!isActiveChief(caller)) {
-        throw new Error("chief_review requires a registered Chief thread.");
+        const review = await startReview(caller, params.workerThreadId, params.focus);
+        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}`;
       }
       touchCallerChief(caller);
       const branch = params.branch
         ?? (await resolvePullRequestBranch(params.pullRequest!, await projectPath(caller.project_id)))
         ?? params.pullRequest!;
-      const review = await startBranchReview(caller.thread_id, caller.project_id, branch, params.pullRequest ?? null, params.focus);
+      const review = await startBranchReview(caller, branch, params.pullRequest ?? null, params.focus);
       return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}.`;
     },
   });
@@ -5229,7 +5383,6 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
-    "  bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]",
     "  bb chief complete <thread-id> [--result \"…\"] [--override \"reason\"] [--json]",
   ].join("\n");
 
@@ -5249,7 +5402,6 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
-      { name: "review", summary: "Start or return a read-only review for a worker, pull request, or branch", usage: "bb chief review [<worker-thread-id>] [--branch feature/… | --pull-request 123] [--focus \"…\"] [--json]" },
       { name: "complete", summary: "Mark verified, non-running managed work complete", usage: "bb chief complete <thread-id> [--result \"…\"] [--override \"reason\"] [--json]" },
     ],
     async run(argv: string[], context: PluginCliContext): Promise<PluginCliResult> {
@@ -5260,6 +5412,8 @@ export default async function plugin(bb: BbPluginApi) {
       const fail = (message: string) => ({ exitCode: 1, stderr: `${message}\n\n${usage}\n` });
       try {
         if (!command || command === "help" || command === "--help") return ok({}, usage);
+        // The CLI cannot prove who is calling (BB_THREAD_ID is only forwarded), so no caller may start a review from it.
+        if (command === "review") return fail("bb chief review is retired: only the active Chief starts reviews, through its chief_review tool. Ask Chief in its thread.");
         // The agent tools refuse anyone but the active Chief; the CLI is the same door from a
         // shell. A user's own shell or thread (no managed row) stays trusted.
         const caller = context.threadId ? roles.get(context.threadId) : undefined;
@@ -5382,26 +5536,6 @@ export default async function plugin(bb: BbPluginApi) {
           await scoped(parsed.data.threadId);
           const row = await stopThread(parsed.data.threadId, parsed.data.reason);
           return ok(toManaged(row), `Stopped “${row.title}”. ${row.recommendation}`);
-        }
-        if (command === "review") {
-          const parsed = reviewParams.safeParse({
-            workerThreadId: args.positional[0],
-            pullRequest: args.one("pull-request"),
-            branch: args.one("branch"),
-            focus: args.one("focus"),
-          });
-          if (!parsed.success) return fail(`Invalid review target: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
-          if (parsed.data.workerThreadId) {
-            await scoped(parsed.data.workerThreadId);
-            const result = await startReview(parsed.data.workerThreadId, parsed.data.focus);
-            return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}. ${reviewPathNote(parsed.data.workerThreadId, result.pinnedSha)}`);
-          }
-          const { chief, projectId } = await owningChief(context.threadId);
-          const branch = parsed.data.branch
-            ?? (await resolvePullRequestBranch(parsed.data.pullRequest!, await projectPath(projectId)))
-            ?? parsed.data.pullRequest!;
-          const result = await startBranchReview(chief.thread_id, projectId, branch, parsed.data.pullRequest ?? null, parsed.data.focus);
-          return ok(result, `${result.created ? "Started" : "Using existing"} “${result.title}” in ${result.threadId}.`);
         }
         if (command === "complete") {
           const threadId = args.positional[0];
