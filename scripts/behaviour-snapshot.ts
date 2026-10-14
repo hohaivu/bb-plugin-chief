@@ -182,6 +182,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       insert({ thread_id: `thr_fx_lad_${id}`, role: "worker", title: `Fixture ladder worker ${id}`, state: "ready", branch: `feature/fx-lad-${id}`, pr_url: `https://github.com/o/r/pull/${9003 + index}`, reviewed_head_sha: String(index + 1).repeat(40),
         plan_thread_id: "thr_fx_lad_planner", plan_wave: index + 1, result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: `Fixture ladder worker ${id} brief` }, 41 + index);
     }
+    insert({ thread_id: "thr_fx_lad_c", role: "worker", title: "Fixture ladder worker c", state: "ready", branch: "feature/fx-lad-c", pr_url: "https://github.com/o/r/pull/9005", reviewed_head_sha: "3".repeat(40), result: "Fixture result", summary: "Fixture summary", report_seq: 1, last_report_state: "ready", brief: "Fixture ladder worker c brief" }, 43);
     ROLES.filter((role) => role !== "chief").forEach((role, index) => insert({
       thread_id: `thr_fx_${role}_active`, role, title: `Fixture active ${role}`, state: "active", status: "active", active_since: clock - 5_000, active_cycle: 1,
       brief: `Fixture ${role} brief`, branch: role === "worker" ? "feature/fx-active" : null,
@@ -459,7 +460,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     const successorOf = (workerId: string) => one(`SELECT thread_id FROM managed_threads WHERE role='worker' AND replaces_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
     const advisorOf = (workerId: string) => one(`SELECT thread_id FROM managed_threads WHERE role='advisor' AND worker_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
     const ladderReport = (id: string | undefined, params: unknown, project: string) => (id ? tool("chief_report", params, id, project) : "no such thread");
-    const ladder = async (name: string, firstWorker: string, extraBranchWorker?: string) => {
+    const ladder = async (name: string, firstWorker: string, extraBranchWorker?: string, repointedOnly = false) => {
       const start = one(`SELECT chief_thread_id, project_id FROM managed_threads WHERE thread_id=?`, firstWorker);
       if (!start) { await step(`ladder ${name}: no ${firstWorker} in the copy`, () => "skipped"); return; }
       const owner = start.chief_thread_id as string;
@@ -480,6 +481,13 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       await round("round 1", tip, "request_changes");
       await ladderStep(`ladder ${name} round 1 replaces ${tip}`, () => replace(tip));
       tip = successorOf(tip) ?? tip;
+      if (repointedOnly) {
+        // The reviewer is still open and now points at the fresh worker (report_seq NULL): its next verdict row binds report -1.
+        await ladderStep(`ladder ${name} reviewer approves after the re-point`, () => ladderReport(reviewerOf(tip), verdict("approve"), project));
+        await ready("round 1", tip);
+        await ladderStep(`ladder ${name} chief_complete ${tip}`, () => tool("chief_complete", { threadId: tip }, owner, project));
+        return;
+      }
       await ready("round 1", tip);
       await round("round 2", tip, "request_changes");
       await ladderStep(`ladder ${name} round 2 replaces ${tip} refused for consult`, () => replace(tip));
@@ -507,6 +515,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     };
     await ladder("single", "thr_fx_plain");
     await ladder("two-branch", "thr_fx_lad_a", "thr_fx_lad_b");
+    await ladder("re-pointed", "thr_fx_lad_c", undefined, true);
     begin("e-mutations (continued)");
 
     // e2. every live worker: review, both replaces: calls, complete
