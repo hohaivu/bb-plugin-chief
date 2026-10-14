@@ -10,6 +10,11 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
+import {
+  ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY, READ_ONLY, RESEARCH_ONLY, REVIEW_ONLY,
+  managedSkills, modelRoleSchema, researchRoleSchema, roleSchema, workerKindSchema,
+  type ModelRole, type ResearchRole,
+} from "./roles";
 
 const SECTION_NAME = "Chief";
 const RULES_FILE = "chief.md";
@@ -33,17 +38,6 @@ const MAX_STALL_RESETS = 2;
 const FORGE_CLI_TIMEOUT_MS = 10_000;
 /** Longest mission, success criteria or constraints text chief_forge_init puts in a pull request body. */
 const FORGE_BRIEF_SECTION_MAX = 1_500;
-/** The one read-only rule every non-implementing role shares. Untracked build/test output is not a change. */
-const READ_ONLY = "do not create, modify, or delete any file the repository tracks, and do not commit or push";
-/** One wording for the reviewer's read-only rule, said when the review starts and
- * again on every continuation — the two places an edit instruction could arrive. */
-const REVIEW_ONLY = `Remain review-only: ${READ_ONLY}. A repair goes back to the worker, which then earns its own review.`;
-/** Same for a planner: said when the plan starts and again on every continuation. */
-const PLAN_ONLY = `Remain read-only: ${READ_ONLY}. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.`;
-/** Same for an advisor: said when the consult starts and again on every continuation. */
-const ADVISE_ONLY = `Remain advisory: ${READ_ONLY}. You may read code and run commands to reproduce the problem (a filtered test or build whose only side effects are untracked build or cache output). Report your advice to Chief; a worker makes the change.`;
-/** Same for a researcher: said when it starts and again on every continuation. It shares Chief's checkout. */
-const RESEARCH_ONLY = `Remain read-only: ${READ_ONLY}, and run no command that changes tracked files or git state; you share Chief's checkout. Report the findings through chief_report; a worker makes any change.`;
 /** Consecutive request_changes verdicts on one task before Chief must consult the advisor. */
 const CONSULT_AFTER_REJECTIONS = 2;
 /** Consecutive request_changes verdicts on one task before Chief stops and escalates to the user. */
@@ -175,16 +169,6 @@ async function markPrReady(pullRequest: string, cwd: string | null): Promise<{ r
   return { ready: false, error };
 }
 
-/** `researcher` is a support role like the advisor: the child a Chief's chief_research runs in. */
-const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "researcher"]);
-/** The role skill each managed role loads next to the shared chief-worker core. */
-const ROLE_SKILLS: Record<Exclude<z.infer<typeof roleSchema>, "chief">, string[]> = {
-  planner: ["chief-role-read-only"],
-  advisor: ["chief-role-read-only"],
-  worker: ["chief-role-worker"],
-  reviewer: ["chief-role-reviewer"],
-  researcher: [],
-};
 /** What a spawn seeds into a thread's pluginMetadata, read back in bb.agents.configure.
  * insertThread runs only after threads.spawn resolves, so the very first configure()
  * call for a brand-new thread can land before that row exists; pluginMetadata is
@@ -193,15 +177,11 @@ const ROLE_SKILLS: Record<Exclude<z.infer<typeof roleSchema>, "chief">, string[]
 const spawnMetadataSchema = z.object({
   role: roleSchema,
   chiefThreadId: z.string().nullable().optional(),
-  kind: z.enum(["worker", "designer"]).optional(),
+  kind: workerKindSchema.optional(),
 });
 /** A reviewer's structured judgement. Chief routes on this field instead of
  * parsing a ship-or-fix opinion out of the report prose. */
 const verdictSchema = z.enum(["approve", "request_changes"]);
-/** The role key chief_models stores a per-machine model pick under: the lifecycle roles plus
- * `designer` (a worker kind, not a thread role). Explicit, not derived from roleSchema: the researcher's
- * model is the mode's research pick, and chief_models' CHECK would refuse it. */
-const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer"]);
 const stateSchema = z.enum([
   "starting",
   "pending",
@@ -232,10 +212,8 @@ const modelSelectionSchema = z.object({
 });
 export type ModelSelection = z.infer<typeof modelSelectionSchema>;
 
-const researchRoleSchema = z.enum(["chief", "planner", "researcher"]);
 const stageSchema = z.enum(["scan", "verify", "combine"]);
 const researchModeSchema = z.enum(["survey", "investigate"]);
-type ResearchRole = z.infer<typeof researchRoleSchema>;
 type Stage = z.infer<typeof stageSchema>;
 /** Which modes each role may run. */
 const RESEARCH_MODES: Record<ResearchRole, z.infer<typeof researchModeSchema>[]> = {
@@ -502,7 +480,7 @@ const delegateShape = z.object({
   planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
   unplannedReason: z.string().trim().min(1).max(300).optional().describe("Required when planning is on and this work skips chief_plan: a short reason why. Allowed only when evidence already states the cause (see the core rules); otherwise call chief_plan. Not needed with planThreadId/wave, replaces, or simple."),
-  kind: z.enum(["worker", "designer"]).optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker."),
+  kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker."),
   userApprovedRound: z.boolean().optional().describe("Set only with replaces: and only after the user explicitly approved another review round in this thread: a replaced worker whose reviewer has requested changes 3 times in a row is refused without it."),
   simple: z.boolean().optional().describe("Set only when the user's message contains #simple. Skips chief_plan (no unplannedReason needed). Pass the user's request verbatim as mission and add no diagnosis of your own: the worker finds the cause itself. Review is at your judgment (see the core rules). Cannot be combined with planThreadId. A replaces: successor keeps it."),
 });
@@ -754,7 +732,7 @@ interface ManagedRow {
   /** Incremented when chief_complete replaces the result; guards the report_path publication in report(). */
   result_rev: number;
   /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. */
-  kind: string | null;
+  kind: "designer" | null;
   /** Worker row only: 1 when delegated with simple (#simple); null/0 means a normal worker. */
   simple: number | null;
   /** Worker row only: 1/0 for planning on/off at delegation; null for rows from before the column. */
@@ -1571,8 +1549,6 @@ export default async function plugin(bb: BbPluginApi) {
     catch { return projectId; }
   }
 
-  type ModelRole = z.infer<typeof modelRoleSchema>;
-
   function parseSelectionRow(row: unknown): ModelSelection | null {
     const value = row as { provider_id: string; model: string; reasoning_level: string } | undefined;
     if (!value) return null;
@@ -1729,10 +1705,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function execution(role: ModelRole, hostId: string | null) {
+    const fallback = MODEL_FALLBACK[role];
     const selection = hostId === null
       ? null
       // No Designer row inherits the Worker pick; a stored but unservable one goes to BB default.
-      : readRoleModel(hostId, role) ?? (role === "designer" ? readRoleModel(hostId, "worker") : null);
+      : readRoleModel(hostId, role) ?? (fallback ? readRoleModel(hostId, fallback) : null);
     if (!hostId || !selection) return {};
     return (await usableSelection(hostId, selection)) ?? {};
   }
@@ -2406,7 +2383,7 @@ export default async function plugin(bb: BbPluginApi) {
     // edits. The instruction leads so the child reads what it says first, ahead of
     // the read-only reminder. steer-if-active steers a running turn instead of
     // waiting in BB's queue, and starts a turn when the thread is idle.
-    const reminder = ({ reviewer: REVIEW_ONLY, planner: PLAN_ONLY, advisor: ADVISE_ONLY, researcher: RESEARCH_ONLY } as Partial<Record<ManagedRow["role"], string>>)[row.role] ?? null;
+    const reminder = CONTINUE_REMINDERS[row.role] ?? null;
     const text = reminder ? `${instruction}\n\n${reminder}` : instruction;
     await bb.sdk.threads.send({
       threadId,
@@ -5275,12 +5252,8 @@ export default async function plugin(bb: BbPluginApi) {
     // gets only a project's chief.md; its brief and the chief-worker skills cover the rest.
     return {
       tools: ["chief_report", ...(role === "worker" && row?.plan_thread_id ? ["chief_log"] : []), ...(researchTool ? ["chief_research"] : [])],
-      skills: [
-        "chief-worker",
-        ...ROLE_SKILLS[role],
-        // A designer is a worker row with kind "designer"; seeded metadata covers the pre-insertThread race.
-        ...(role === "worker" && (row?.kind ?? (seeded?.success ? seeded.data.kind : undefined)) === "designer" ? ["chief-role-designer"] : []),
-      ],
+      // A designer is a worker row with kind "designer"; seeded metadata covers the pre-insertThread race.
+      skills: managedSkills(role, row?.kind ?? (seeded?.success ? seeded.data.kind : undefined)),
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: short \`summary\`, full \`result\`; after reporting, end with one line.`,
         "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
