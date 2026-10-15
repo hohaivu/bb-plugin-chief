@@ -178,6 +178,7 @@ const spawnMetadataSchema = z.object({
   role: roleSchema,
   chiefThreadId: z.string().nullable().optional(),
   kind: workerKindSchema.optional(),
+  planThreadId: z.string().optional(),
 });
 /** A reviewer's structured judgement. Chief routes on this field instead of
  * parsing a ship-or-fix opinion out of the report prose. */
@@ -314,7 +315,8 @@ const reportFailEntry = z.object({
   scope: z.string().trim().describe("at most 120 characters"),
   basis: z.string().trim().describe("at most 200 characters: the command, test or input that reproduces it"),
 });
-const failsParam = z.array(reportFailEntry).optional().describe(
+// A string is a JSON-encoded array some callers send; report() decodes it and checkReport refuses anything else.
+const failsParam = z.union([z.string().trim(), z.array(reportFailEntry)]).optional().describe(
   `Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most ${MAX_REPORT_FAILS} per report.`,
 );
 const MAX_LOG_READ = 30;
@@ -1058,8 +1060,9 @@ export default async function plugin(bb: BbPluginApi) {
   // An alert to a Chief that is complete, archived or deleted can never land (handOver
   // retargets a superseded Chief's alerts), so it must not hold one of the 100 retry slots.
   // A live Chief's alerts retry until they land: the worker was told not to report again.
-  const pendingAlerts = db.prepare(
-    `SELECT * FROM alert_outbox WHERE delivered_at IS NULL AND NOT EXISTS (
+  // A row never attempted waits 60 s: report() writes a fallback row in its transaction and replaces it with the full alert, so a retry must not race that.
+  const pendingAlerts = db.prepare<[number]>(
+    `SELECT * FROM alert_outbox WHERE delivered_at IS NULL AND (attempts > 0 OR created_at <= ?) AND NOT EXISTS (
       SELECT 1 FROM managed_threads WHERE thread_id=alert_outbox.target_thread_id AND state IN ('complete','archived','deleted')
     ) ORDER BY created_at ASC LIMIT 100`,
   );
@@ -1962,7 +1965,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "worker" && (row.state === "ready" || row.state === "complete")) {
       throw new Error(`Worker ${threadId} already reported ${row.state}. chief_continue never reuses a finished worker for more work — deferred acceptance criteria, a rebase or restack, or a new task. ${handoff}`);
     }
-    if (row.role === "reviewer" && (row.state === "ready" || row.state === "complete")) {
+    if (row.role !== "worker" && (row.state === "ready" || row.state === "complete")) {
       throw new Error(`${threadId} already reported; chief_continue is only a nudge to a thread still working. ${rerouteSteps(row)}`);
     }
     if (instruction.trim().length > MAX_NUDGE_LENGTH) {
@@ -2299,25 +2302,28 @@ export default async function plugin(bb: BbPluginApi) {
     return store.get(threadId)!;
   }
 
-  function enqueueAlert(row: ManagedRow, key: string, message: string) {
-    if (!row.chief_thread_id) throw new Error(`Managed thread ${row.thread_id} has no Chief to notify.`);
+  /** The outbox write itself, in no transaction of its own: report() calls it inside its store.batch. The row needs a Chief. */
+  function writeAlert(row: ManagedRow, key: string, message: string) {
     const dedupeKey = `${row.thread_id}:${key}`;
     // Only an alert of the same kind (the segment before the first ":") is stale
     // once this one lands — a newer report supersedes an older undelivered report,
     // but generic lifecycle noise (idle, active, stall, ...) must never evict a
     // pending report/verdict alert Chief has not received yet.
     const kind = key.slice(0, key.indexOf(":"));
-    db.transaction(() => {
-      db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>? AND dedupe_key LIKE ?`)
-        .run(row.thread_id, dedupeKey, `${row.thread_id}:${kind}:%`);
-      db.prepare(`INSERT OR IGNORE INTO alert_outbox
-        (dedupe_key, target_thread_id, source_thread_id, message, created_at)
-        VALUES (?, ?, ?, ?, ?)`).run(
-        dedupeKey, row.chief_thread_id, row.thread_id,
-        clip(`[Chief lifecycle alert]\n${message}`), Date.now(),
-      );
-    })();
+    db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>? AND dedupe_key LIKE ?`)
+      .run(row.thread_id, dedupeKey, `${row.thread_id}:${kind}:%`);
+    db.prepare(`INSERT OR IGNORE INTO alert_outbox
+      (dedupe_key, target_thread_id, source_thread_id, message, created_at)
+      VALUES (?, ?, ?, ?, ?)`).run(
+      dedupeKey, row.chief_thread_id, row.thread_id,
+      clip(`[Chief lifecycle alert]\n${message}`), Date.now(),
+    );
     return dedupeKey;
+  }
+
+  function enqueueAlert(row: ManagedRow, key: string, message: string) {
+    if (!row.chief_thread_id) throw new Error(`Managed thread ${row.thread_id} has no Chief to notify.`);
+    return db.transaction(() => writeAlert(row, key, message))();
   }
 
   async function deliverAlert(key: string) {
@@ -2326,14 +2332,19 @@ export default async function plugin(bb: BbPluginApi) {
     const delivery = (async () => {
       const alert = db.prepare<[string]>(`SELECT * FROM alert_outbox WHERE dedupe_key=?`).get(key) as AlertRow | undefined;
       if (!alert || alert.delivered_at !== null) return true;
-      // ponytail: only catches sends BB left queued; a send that reached an
-      // idle Chief and then threw has no idempotency key to detect it by.
+      // ponytail: no idempotency key, so a retry matches the text: a message BB left queued, or one already
+      // in Chief's last 50 completed items. A rewritten or older-than-50 message misses and may duplicate.
       if (alert.attempts > 0) {
         try {
+          const text = clip(alert.message);
           const queued = await bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id });
           const alreadyQueued = queued.some((message) =>
-            message.content.some((part) => part.type === "text" && part.text === clip(alert.message)));
-          if (alreadyQueued) {
+            message.content.some((part) => part.type === "text" && part.text === text));
+          const alreadySent = alreadyQueued || (await bb.sdk.threads.events.list({
+            threadId: alert.target_thread_id, types: ["item/completed"], order: "desc", limit: "50",
+          })).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
+            && event.data.item.content.some((part) => part.type === "text" && part.text === text));
+          if (alreadySent) {
             db.prepare(`UPDATE alert_outbox SET delivered_at=?, attempts=attempts+1, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
             return true;
           }
@@ -2371,7 +2382,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function retryAlerts() {
-    for (const alert of pendingAlerts.all() as AlertRow[]) await deliverAlert(alert.dedupe_key);
+    for (const alert of pendingAlerts.all(Date.now() - 60_000) as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
 
   /** The server, not the planner, owns writing the plan: the planner submits it
@@ -2549,13 +2560,16 @@ export default async function plugin(bb: BbPluginApi) {
       errors.push('result lacks a "## Deviations from plan" Markdown heading; a plan worker\'s ready report must list each departure from the plan and why, or "None".');
     }
 
-    if (params.fails?.length) {
+    // report() decodes a JSON string first, so a string left here is not an array.
+    if (params.fails !== undefined && !Array.isArray(params.fails)) {
+      errors.push("fails: send an array of {text, scope, basis}.");
+    } else if (params.fails?.length) {
       if (row.role !== "worker" && row.role !== "reviewer") errors.push(`fails is only for a worker's or reviewer's report (role is ${row.role}); remove it.`);
       if (params.fails.length > MAX_REPORT_FAILS) errors.push(`fails has ${params.fails.length} entries; max ${MAX_REPORT_FAILS}. Keep the ${MAX_REPORT_FAILS} most useful dead ends.`);
       params.fails.forEach((entry, index) => {
         for (const [field, max] of [["text", 400], ["scope", 120], ["basis", 200]] as const) {
           const name = `fails[${index}].${field}`;
-          if (!entry[field]) errors.push(`${name} is empty; send text or drop the entry.`);
+          if (typeof entry?.[field] !== "string" || !entry[field]) errors.push(`${name} is empty; send text or drop the entry.`);
           else tooLong(name, entry[field], max, "Shorten it.");
         }
       });
@@ -2662,7 +2676,11 @@ export default async function plugin(bb: BbPluginApi) {
       try { decoded = JSON.parse(plan); } catch { decoded = undefined; }
       if (Array.isArray(decoded)) plan = decoded;
     }
-    const errors = checkReport(candidate, params, plan);
+    let reportFails = params.fails;
+    if (typeof reportFails === "string") {
+      try { reportFails = JSON.parse(reportFails); } catch { /* checkReport refuses the string */ }
+    }
+    const errors = checkReport(candidate, { ...params, fails: reportFails }, plan);
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
     if (found.pending) store.insert(found.pending);
     const row = store.get(threadId)!;
@@ -2687,13 +2705,15 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Could not mirror ${threadId}'s plan into Chief's storage: ${String(error)}`);
       }
     }
+    // checkReport proved the shape: reportFails is an array of {text, scope, basis} or unset.
+    const failList = reportFails as z.infer<typeof reportFailEntry>[] | undefined;
     let fails: string | null = null;
-    if (params.fails?.length) {
+    if (failList?.length) {
       const key = (entry: FailEntry) => `${entry.scope}\u0000${entry.text}`;
-      const fresh = new Set(params.fails.map(key));
+      const fresh = new Set(failList.map(key));
       const kept = (row.fails ? JSON.parse(row.fails) as FailEntry[] : []).filter((entry) => !fresh.has(key(entry)));
       const at = Date.now();
-      const incoming = params.fails.filter((entry, index) => params.fails!.findIndex((other) => key(other) === key(entry)) === index)
+      const incoming = failList.filter((entry, index) => failList.findIndex((other) => key(other) === key(entry)) === index)
         .map((entry) => ({ ...entry, at }));
       fails = JSON.stringify([...kept, ...incoming].slice(-MAX_CARRIED_FAILS));
     }
@@ -2718,9 +2738,19 @@ export default async function plugin(bb: BbPluginApi) {
         db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at) VALUES (?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now);
       }
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
+      // Same transaction as the state commit: a crash before the full alert below still leaves Chief a pointer.
+      // The final alert's key shares the report: kind, so it evicts this row while undelivered.
+      if (row.chief_thread_id) {
+        const body = clip(params.summary ?? params.result ?? "", 300);
+        writeAlert(row, `report:${row.active_cycle}:pending-${reserved.report_seq}`, [
+          `${row.title} (${threadId}) reported ${params.state} (report ${reserved.report_seq}).`,
+          ...(body ? [body] : []),
+          `The full alert could not be built; run chief_inspect ${threadId}.`,
+        ].join("\n"));
+      }
       // A plan worker's fails also reach its peer waves through chief_log, so it need not post them twice.
-      if (row.role === "worker" && row.plan_thread_id && params.fails?.length) {
-        appendPlanLog(row, params.fails.map((entry) => ({ ...entry, kind: "FAIL" as const })));
+      if (row.role === "worker" && row.plan_thread_id && failList?.length) {
+        appendPlanLog(row, failList.map((entry) => ({ ...entry, kind: "FAIL" as const })));
       }
       return reserved;
     });
@@ -2785,7 +2815,7 @@ export default async function plugin(bb: BbPluginApi) {
         clip(`${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, 200),
         `State: ${params.state}`,
         ...(pointer ? [pointer.line] : []),
-        ...(params.fails?.length ? [`Fails: ${params.fails.length} ruled out (carried to any replaces: successor)`] : []),
+        ...(failList?.length ? [`Fails: ${failList.length} ruled out (carried to any replaces: successor)`] : []),
       ];
       const planHead = waveLines.length ? [`Plan: ${waveLines.length} wave(s)`] : [];
       const verdictLines = [...(verdict ? [`Verdict: ${verdict}`] : []), ...(verdictPath ? [`Verdict file: ${verdictPath}`] : [])];
@@ -3775,7 +3805,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_continue",
     presentation: { label: { pending: "Nudging thread…", completed: "Nudged thread" } },
-    description: `Send a short nudge (at most ${MAX_NUDGE_LENGTH} characters) to a managed thread that is still working. Refused for a worker or reviewer that has reported; follow-up work goes to a fresh worker (see the core rules).`,
+    description: `Send a short nudge (at most ${MAX_NUDGE_LENGTH} characters) to a managed thread that is still working. Refused for any thread that has reported (ready or complete); follow-up work goes to a fresh worker, planner, reviewer, advisor or researcher (see the core rules).`,
     parameters: z.object({
       threadId: z.string(),
       instruction: z.string().trim().min(1).max(MAX_NUDGE_LENGTH).describe(`A short nudge, at most ${MAX_NUDGE_LENGTH} characters.`),
@@ -3890,7 +3920,7 @@ export default async function plugin(bb: BbPluginApi) {
     description: [
       "Fan a read-only question out to parallel BB workflow agents. survey: answer `question` for each of `items` (files, symbols, topics), one verified row each with evidence.",
       "investigate: one agent per `questions` entry, then one merges the answers into a brief with Confirmed and Unconfirmed sections.",
-      "Chief may use survey, investigate; a planner survey, investigate. Reviewers, workers and advisors cannot use it.",
+      "Chief, planners and researchers may use survey and investigate. Reviewers, workers and advisors cannot use it.",
       "Read-only by prompt only: the agents share your checkout and permissions, and are told not to edit, commit, or push.",
       "From Chief the call returns at once with the id of a researcher thread that runs the research in your checkout and reports through chief_report; its report arrives as a lifecycle alert, so end your turn instead of polling.",
       "From a planner, each call waits up to the mode's timeout (10 minutes unless set in Chief researcher settings), and never more than 4 minutes, because BB ends tool calls at about 5 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting; the run keeps going in between.",
@@ -3952,7 +3982,7 @@ export default async function plugin(bb: BbPluginApi) {
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skills cover the rest.
     return {
-      tools: ["chief_report", ...(role === "worker" && row?.plan_thread_id ? ["chief_log"] : []), ...(researchTool ? ["chief_research"] : [])],
+      tools: ["chief_report", ...(role === "worker" && (row?.plan_thread_id ?? (seeded?.success ? seeded.data.planThreadId : undefined)) ? ["chief_log"] : []), ...(researchTool ? ["chief_research"] : [])],
       // A designer is a worker row with kind "designer"; seeded metadata covers the pre-insertThread race.
       skills: managedSkills(role, row?.kind ?? (seeded?.success ? seeded.data.kind : undefined)),
       instructions: [

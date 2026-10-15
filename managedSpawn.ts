@@ -14,6 +14,7 @@ interface InsertBase {
   parentThreadId?: string | null;
   title: string;
   kind?: string | null;
+  planThreadId?: string | null;
   state?: string;
   status?: string | null;
 }
@@ -86,7 +87,7 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
       ...extra,
       ...(await lifecycleOwner(chiefThreadId)),
       prompt,
-      pluginMetadata: { role: row.role, chiefThreadId, ...(row.kind ? { kind: row.kind } : {}) },
+      pluginMetadata: { role: row.role, chiefThreadId, ...(row.kind ? { kind: row.kind } : {}), ...(row.planThreadId ? { planThreadId: row.planThreadId } : {}) },
     });
     let thread: Awaited<ReturnType<typeof spawnThread>>;
     try {
