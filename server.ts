@@ -550,7 +550,7 @@ function researchChiefInstructions(planning: boolean) {
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
 const ROSTER_CHIEF_INSTRUCTIONS =
-  "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list. Track every todo — including work the user queued that nobody has delegated yet — with chief_roster's `todo` field; never use Memory files, TodoWrite, or Task tools for Chief work. When work a todo tracks is finished, close that todo in the same turn with chief_roster todo { id, state: \"done\" }.";
+  "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list. Track every todo — including work the user queued that nobody has delegated yet — with chief_roster's `todo` field; never use Memory files, TodoWrite, or Task tools for Chief work. When work a todo tracks is finished, close that todo in the same turn with chief_roster todo { id, state: \"done\" }. Each todo belongs to the Chief thread that added it. The Pending block lists other Chiefs' and unowned todos apart, tagged with their owner: know they exist, but they are not your work — do not act on, edit, or close one unless the user asks.";
 
 /** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
 const WAIT_CHIEF_INSTRUCTIONS =
@@ -1072,18 +1072,19 @@ export default async function plugin(bb: BbPluginApi) {
   const researchModelRow = db.prepare<[string, string]>(
     `SELECT provider_id, model, reasoning_level FROM research_mode_models WHERE host_id=? AND mode=?`,
   );
+  // chief_todos.chief_thread_id is the owning Chief (NULL = legacy, from before ownership).
   const todosForProject = db.prepare<[string]>(
-    `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND state='open' ORDER BY id ASC`,
+    `SELECT * FROM chief_todos WHERE project_id=? AND state='open' ORDER BY id ASC`,
   );
   const closedTodosForProject = db.prepare<[string]>(
-    `SELECT * FROM chief_todos WHERE project_id=? AND chief_thread_id IS NULL AND state<>'open' ORDER BY id ASC`,
+    `SELECT * FROM chief_todos WHERE project_id=? AND state<>'open' ORDER BY id ASC`,
   );
-  const todoById = db.prepare<[number, string]>(`SELECT * FROM chief_todos WHERE id=? AND project_id=? AND chief_thread_id IS NULL`);
-  const insertTodo = db.prepare<[string, string, string | null, number, number]>(
-    `INSERT INTO chief_todos (project_id, text, after, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+  const todoById = db.prepare<[number, string]>(`SELECT * FROM chief_todos WHERE id=? AND project_id=?`);
+  const insertTodo = db.prepare<[string, string, string, string | null, number, number]>(
+    `INSERT INTO chief_todos (project_id, chief_thread_id, text, after, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
   );
   const updateTodo = db.prepare<[string, string | null, string, number, number, string]>(
-    `UPDATE chief_todos SET text=?, after=?, state=?, updated_at=? WHERE id=? AND project_id=? AND chief_thread_id IS NULL`,
+    `UPDATE chief_todos SET text=?, after=?, state=?, updated_at=? WHERE id=? AND project_id=?`,
   );
   // ponytail: global, not per host: usage limits are account-level; key by host if a provider id ever maps to different accounts per machine.
   // ponytail: cooldowns are per provider+model; legacy model='' rows (provider-wide, from before this) are never matched, so they are inert.
@@ -1537,7 +1538,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { threadId: thread.id, created: true as const };
   }
 
-  /** Supersedes a Chief: marks it complete and moves its open work and undelivered alerts to its successor. */
+  /** Supersedes a Chief: marks it complete and moves its open work, todos and undelivered alerts to its successor. */
   function handOver(previousId: string, nextId: string, projectId: string) {
     const now = Date.now();
     store.batch(() => {
@@ -1545,6 +1546,7 @@ export default async function plugin(bb: BbPluginApi) {
       store.moveOpenWork(nextId, now, projectId, previousId);
       db.prepare(`UPDATE alert_outbox SET target_thread_id=?
         WHERE target_thread_id=? AND delivered_at IS NULL`).run(nextId, previousId);
+      db.prepare(`UPDATE chief_todos SET chief_thread_id=? WHERE chief_thread_id=?`).run(nextId, previousId);
     });
   }
 
@@ -3412,21 +3414,40 @@ export default async function plugin(bb: BbPluginApi) {
     return pending.length || todos.length ? ["Pending:", ...pending, ...todos] : ["Pending: none."];
   }
 
-  function todoLine(todo: TodoRow) {
+  /** Who owns a todo, seen by `viewer` (none = operator shell): "" for the viewer's own. */
+  function todoOwnerLabel(todo: TodoRow, viewer?: string) {
+    const owner = todo.chief_thread_id;
+    if (!owner) return "unowned";
+    if (owner === viewer) return "";
+    return viewer && !isActiveChief(store.get(owner)) ? `ended Chief ${owner}` : `Chief ${owner}`;
+  }
+
+  function todoLine(todo: TodoRow, viewer?: string) {
     const state = todo.state === "open" ? "" : ` [${todo.state}]`;
-    return `- todo #${todo.id}${state}: ${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`;
+    const label = todoOwnerLabel(todo, viewer);
+    return `- todo #${todo.id}${label ? ` (${label})` : ""}${state}: ${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`;
   }
 
   /** A project's open todos as Pending lines — after thread lines, so clipping drops them first.
-   * With `collapseWaiting`, todos that wait on an `after:` condition fold into one count line. */
-  function todoLines(projectId: string | undefined, collapseWaiting = false) {
+   * With `viewer`, the viewer's own todos come first and the rest follow under a header; without
+   * one (operator shell) everything is one tagged list. With `collapseWaiting`, todos that wait
+   * on an `after:` condition fold into one count line per group. */
+  function todoLines(projectId: string | undefined, collapseWaiting = false, viewer?: string) {
     const todos = projectId ? (todosForProject.all(projectId) as TodoRow[]) : [];
-    if (!collapseWaiting) return todos.map(todoLine);
-    const waiting = todos.filter((todo) => todo.after);
-    const lines = todos.filter((todo) => !todo.after).map(todoLine);
-    const n = waiting.length;
-    if (n) lines.push(`- ${n} waiting todo${n === 1 ? "" : "s"} (#${waiting.map((todo) => todo.id).join(", #")}) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.`);
-    return lines;
+    const group = (list: TodoRow[], noun: string) => {
+      if (!collapseWaiting) return list.map((todo) => todoLine(todo, viewer));
+      const waiting = list.filter((todo) => todo.after);
+      const lines = list.filter((todo) => !todo.after).map((todo) => todoLine(todo, viewer));
+      const n = waiting.length;
+      if (n) lines.push(`- ${n} waiting ${noun}${n === 1 ? "" : "s"} (#${waiting.map((todo) => todo.id).join(", #")}) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.`);
+      return lines;
+    };
+    if (!viewer) return group(todos, "todo");
+    const others = group(todos.filter((todo) => todo.chief_thread_id !== viewer), "other-Chief todo");
+    return [
+      ...group(todos.filter((todo) => todo.chief_thread_id === viewer), "todo"),
+      ...(others.length ? ["Other Chiefs' todos (not your work; act on one only when the user asks):", ...others] : []),
+    ];
   }
 
   /** Clips a rendered Pending block to `limit` by whole lines — never mid-action —
@@ -3453,8 +3474,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** The Pending block exactly as chief_roster prints it. */
-  function pendingBlock(chiefThreadId: string, includeWaiting = false) {
-    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(store.get(chiefThreadId)?.project_id, !includeWaiting)), 6_000);
+  function pendingBlock(chiefThreadId: string, includeWaiting = false, limit = 6_000) {
+    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(store.get(chiefThreadId)?.project_id, !includeWaiting, chiefThreadId)), limit);
   }
 
   /** The panel's checklist: action threads, in-progress threads (newest first), open
@@ -3464,21 +3485,28 @@ export default async function plugin(bb: BbPluginApi) {
     const threadItem = (row: ManagedRow, done: boolean) => ({
       id: row.thread_id, label: `${row.role} “${row.title}”`, status: row.state, action: done ? null : nextAction(row), done,
     });
-    const todoItem = (todo: TodoRow) => ({
-      id: `todo #${todo.id}`, label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}`,
-      status: todo.state, action: null, done: todo.state !== "open",
-    });
-    const open = rows.filter(isOpenItem).map((row) => threadItem(row, false));
     const projectId = store.get(chiefThreadId)?.project_id;
+    const todoItem = (todo: TodoRow) => {
+      const owner = todoOwnerLabel(todo, chiefThreadId);
+      return {
+        id: `todo #${todo.id}`,
+        label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}${owner ? ` — ${todo.chief_thread_id ? "from " : ""}${owner}` : ""}`,
+        status: owner ? (todo.chief_thread_id ? "other Chief" : "unowned") : todo.state,
+        action: null, done: todo.state !== "open",
+      };
+    };
+    const openTodos = (projectId ? todosForProject.all(projectId) as TodoRow[] : []);
+    const open = rows.filter(isOpenItem).map((row) => threadItem(row, false));
     const doneRows = [
       ...rows.filter((row) => !isOpenItem(row)).map((row) => [row.updated_at, threadItem(row, true)] as const),
-      ...(projectId ? closedTodosForProject.all(projectId) as TodoRow[] : []).map((todo) => [todo.updated_at, todoItem(todo)] as const),
+      ...(projectId ? closedTodosForProject.all(projectId) as TodoRow[] : []).filter((todo) => todo.chief_thread_id === chiefThreadId).map((todo) => [todo.updated_at, todoItem(todo)] as const),
     ].sort((a, b) => b[0] - a[0]);
     return {
       items: [
         ...open.filter((item) => item.action),
         ...open.filter((item) => !item.action),
-        ...(projectId ? todosForProject.all(projectId) as TodoRow[] : []).map(todoItem),
+        ...openTodos.filter((todo) => todo.chief_thread_id === chiefThreadId).map(todoItem),
+        ...openTodos.filter((todo) => todo.chief_thread_id !== chiefThreadId).map(todoItem),
         ...doneRows.slice(0, MAX_DONE_ITEMS).map(([, item]) => item),
       ],
       doneOmitted: Math.max(0, doneRows.length - MAX_DONE_ITEMS),
@@ -3742,7 +3770,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_roster",
     presentation: { label: { pending: "Reading roster…", completed: "Read roster" } },
-    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert. Add a todo with `todo.text` (and optional `after`, e.g. 'PR #42 merges'); change one by `todo.id`; close it with `state: done|dropped`. Track all Chief work here — including queued work nobody has delegated yet. Todos with an after: condition are summarised as one line; pass includeWaiting: true to list them.",
+    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert. Add a todo with `todo.text` (and optional `after`, e.g. 'PR #42 merges'); change one by `todo.id`; close it with `state: done|dropped`. Track all Chief work here — including queued work nobody has delegated yet. Todos with an after: condition are summarised as one line; pass includeWaiting: true to list them. Each todo belongs to the Chief that added it; others' todos are listed apart and tagged — leave them unless the user asks.",
     parameters: z.object({
       includeComplete: z.boolean().optional(),
       includeWaiting: z.boolean().optional().describe("List todos that wait on an after: condition in full; by default the Pending block shows them as one count line."),
@@ -3757,16 +3785,20 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error("chief_roster requires an active registered Chief thread.");
       touchCallerChief(caller);
+      let note = "";
       if (todo) {
         const now = Date.now();
         if (todo.id === undefined) {
           if (!todo.text) throw new Error("chief_roster todo needs text to add, or an id to change.");
-          insertTodo.run(caller.project_id, todo.text, todo.after || null, now, now);
+          insertTodo.run(caller.project_id, caller.thread_id, todo.text, todo.after || null, now, now);
         } else {
           const existing = todoById.get(todo.id, caller.project_id) as TodoRow | undefined;
           if (!existing) throw new Error(`No todo #${todo.id} in this project.`);
           const after = todo.after === undefined ? existing.after : todo.after || null;
           updateTodo.run(todo.text ?? existing.text, after, todo.state ?? existing.state, now, todo.id, caller.project_id);
+          if (existing.chief_thread_id && existing.chief_thread_id !== caller.thread_id && isActiveChief(store.get(existing.chief_thread_id))) {
+            note = `Note: todo #${existing.id} belongs to Chief ${existing.chief_thread_id}; change it only when the user asks.\n`;
+          }
         }
         store.reload();
       }
@@ -3775,13 +3807,13 @@ export default async function plugin(bb: BbPluginApi) {
       // The Pending block is clipped on its own so it always survives whole (or
       // ends with "…and N more pending"), then the rest gets whatever budget is
       // left — otherwise one clip() across both could cut a pending action off mid-line.
-      const pending = pendingBlock(caller.thread_id, includeWaiting);
+      const pending = note + pendingBlock(caller.thread_id, includeWaiting, 6_000 - note.length);
       const room = 6_000 - pending.length - 1;
       // clip() with a limit of 0 or less returns the whole string, so a full Pending block drops the rest.
       if (room <= 0) return pending;
       const rest = clip([
         ...reversed.map((row) => rosterRowLines(row).join("\n  ")),
-        ...(includeComplete ? (closedTodosForProject.all(caller.project_id) as TodoRow[]).map(todoLine) : []),
+        ...(includeComplete ? (closedTodosForProject.all(caller.project_id) as TodoRow[]).map((todo) => todoLine(todo, caller.thread_id)) : []),
       ].join("\n"), room);
       return `${pending}\n${rest}`;
     },
@@ -3867,7 +3899,7 @@ export default async function plugin(bb: BbPluginApi) {
       touchCallerChief(caller);
       const { row, overridden } = await markComplete(threadId, result, override);
       const ready = await readyPullRequest(row);
-      const todos = row.role === "worker" ? todosForProject.all(caller.project_id) as TodoRow[] : [];
+      const todos = row.role === "worker" ? (todosForProject.all(caller.project_id) as TodoRow[]).filter((todo) => todo.chief_thread_id === caller.thread_id) : [];
       const todoLine = todos.length
         ? `\n${clip(`Open todos: ${todos.map((todo) => `#${todo.id} ${clip(todo.text, 80)}`).join(", ")} — close any this work finished with chief_roster todo { id, state: "done" }.`, 1_000)}`
         : "";
@@ -4151,7 +4183,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (!projectId) return fail("status requires --project outside a project thread");
           const managedRows = readScope ? rosterForChief(readScope, true) : rosterFor(projectId, true);
           const text = [
-            ...pendingLines(readScope ? managedRows.filter((row) => row.thread_id !== readScope) : managedRows, todoLines(projectId)),
+            ...pendingLines(readScope ? managedRows.filter((row) => row.thread_id !== readScope) : managedRows, todoLines(projectId, false, readScope)),
             ...managedRows.map((row) => rosterRowLines(row).join("\n  ")),
           ].join("\n");
           return ok({ sectionId: storedSectionId(), threads: managedRows.map(toManaged) }, text);
@@ -4162,7 +4194,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (chiefId && chief?.role !== "chief") return fail(`No Chief thread ${chiefId}.`);
           const projectId = chief?.project_id ?? args.one("project") ?? context.projectId ?? (await settings.get()).chiefProject;
           if (!projectId) return fail("stats requires --project outside a project thread");
-          const todos = [...todosForProject.all(projectId), ...closedTodosForProject.all(projectId)] as TodoRow[];
+          const todos = ([...todosForProject.all(projectId), ...closedTodosForProject.all(projectId)] as TodoRow[]).filter((todo) => !chiefId || todo.chief_thread_id === chiefId);
           const stats = chiefStats({ projectId, chiefThreadId: chiefId ?? null }, chiefId ? rosterForChief(chiefId, true) : rosterFor(projectId, true), todos);
           return ok(stats, statsText(stats));
         }
