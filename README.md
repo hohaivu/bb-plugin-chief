@@ -180,8 +180,12 @@ threads close with their worker. It updates
 live as managed threads change (and refetches after the realtime connection reconnects).
 Chief's own todos — including queued work nobody has delegated yet — live there too as
 `todo #N` lines: `chief_roster` with `todo: { text, after? }` adds one, `todo: { id, text?, after?, state? }`
-changes or closes it (`done`/`dropped`). Todos persist per project, so a new or replacement Chief
-sees them; Chief is told to use them instead of Memory files, TodoWrite, or Task tools.
+changes or closes it (`done`/`dropped`); Chief is told to use them instead of Memory files, TodoWrite,
+or Task tools. Each todo records the Chief thread that added it. Every Chief still sees all the
+project's open todos, but others' (`(Chief thr_…)`, `(ended Chief thr_…)`) and legacy unowned ones
+(`(unowned)`) are tagged and listed after its own, under an "Other Chiefs' todos" header; editing one
+owned by another live Chief works but starts with a warning. When a Chief is superseded (replacement,
+orphan sweep, `bb chief adopt`) its todos move to the successor.
 Open todos with an `after:` condition show in Pending as one count line; `chief_roster includeWaiting: true` lists them.
 
 ## CLI
