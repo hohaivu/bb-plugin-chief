@@ -1923,7 +1923,8 @@ export default async function plugin(bb: BbPluginApi) {
       ] : []),
       ...(verifyCommand !== null ? [
         "", "## Verify command",
-        "```sh", verifyCommand, "```",
+        // Fence longer than any backtick run so a ``` line in the command cannot close it.
+        ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
         "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. Chief runs the same command on your pushed commit before any reviewer starts; a non-zero exit there sends the work back without a review. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
       ] : []),
       ...(branch || issueUrl || prUrl ? [
