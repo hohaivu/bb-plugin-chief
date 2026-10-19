@@ -9,9 +9,8 @@ type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 type LiveThread = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["get"]>>;
 
 /** Shared reviewer prompt: REVIEW_ONLY and the chief_report/verdict contract are
- * identical for a worker's reviewer and a branch/PR reviewer. Only the subject
- * line and provenance section (worker brief/result, or nothing for a branch/PR
- * with no worker) differ. */
+ * identical for a worker's reviewer and a branch/PR reviewer. Invariant rules come
+ * first so the prefix caches; every per-run line sits under `## This review`. */
 export function reviewerPrompt(opts: {
   subject: string;
   chiefThreadId: string | null;
@@ -21,20 +20,24 @@ export function reviewerPrompt(opts: {
   pinned?: boolean;
 }) {
   return [
-    opts.subject,
-    opts.focus ? `Review focus: ${opts.focus}` : "Review for correctness, regressions, validation quality, and unnecessary complexity.",
     REVIEW_ONLY,
-    opts.pinned
-      ? "Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift."
-      : "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.",
     "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
-    `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict.`,
-    "Classify every finding as blocking or nit. Blocking means the change cannot ship as it stands. These are always blocking: a bug or incorrect behaviour, an unmet listed contract, a regression, missing or false verification evidence, a designer mismatch the brief does not accept, and scope drift the worker did not state. A nit is style, naming, a minor simplification, or an optional improvement.",
+    "Classify the change, then check it by type: a bug fix fixes the root cause, not the symptom, and has a regression test or a reproducing check; a refactor leaves behaviour unchanged; a feature aligns with the contract and spec in the brief; a mixed change is checked part by part by each part's type.",
+    "Evidence rules: a blocking finding needs a traced input → code path → failure; never reject on speculation. Never approve only because tests pass; read the change. Report only problems this diff introduced; a pre-existing problem is at most a nit, unless the diff makes it reachable. When a signature or exported contract changed, inspect its callers.",
+    "Classify every finding as blocking or nit. Blocking means the change cannot ship as it stands. These are always blocking: a bug or incorrect behaviour, an unmet listed contract, a regression, missing or false verification evidence, a designer mismatch the brief does not accept, scope drift the worker did not state, and functional code replaced by a comment, TODO or placeholder. A nit is style, naming, a minor simplification, or an optional improvement.",
+    "State the assumptions your verdict rests on. Write a finding that needs a product or architecture answer as `[AMBIGUOUS: <question>]`; it is neither a blocker nor a nit, and alone it never sets request_changes. Drop doubts that would not change the verdict.",
     "The verdict is request_changes only when at least one blocking finding exists; nits alone mean approve.",
-    "List blocking findings first, then at most 5 nits, then write \"and N more nits\" for the rest. Give every finding a file:line and the concrete fix; mark any finding that needs a design or product decision as such.",
+    "List blocking findings first, then at most 5 nits, then write \"and N more nits\" for the rest. Give every finding a file:line and the concrete fix.",
     "Send a `summary` with the report: verdict, blocking count, nit count, the most important blocking finding with file:line.",
     "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
     "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
+    "## This review",
+    opts.subject,
+    `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict.`,
+    ...(opts.focus ? [`Review focus: ${opts.focus}`] : []),
+    opts.pinned
+      ? "Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift."
+      : "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.",
     ...opts.provenance,
   ].join("\n");
 }
