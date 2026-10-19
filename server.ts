@@ -2240,6 +2240,21 @@ export default async function plugin(bb: BbPluginApi) {
     recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext, runGate,
   });
 
+  /** Why the project's checkout path cannot be used here, or null when it is on the server's primary host.
+   * The path names a checkout on the source's own host; only the server's primary host may read it. Never throws. */
+  async function checkoutHostSkip(projectId: string): Promise<string | null> {
+    let lookupError: unknown = "no source host recorded";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const project = await bb.sdk.projects.get({ projectId });
+        const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+        if (!source?.hostId) break;
+        return source.hostId === (await bb.sdk.system.config()).primaryHostId ? null : "the project checkout is on a remote host, not the plugin server";
+      } catch (error) { lookupError = error; }
+    }
+    return `could not confirm which host holds the project checkout (${clip(String(lookupError), 200)})`;
+  }
+
   /** The pre-review gate: runs the worker's verify command in a detached temporary worktree of the commit under review.
    * Only a non-zero exit of the command fails it; anything that keeps it from running is a skip with the reason, and the review proceeds.
    * Never throws: every step, cleanup included, runs inside this boundary, and cleanup trouble is added to the result, never replaces it. */
@@ -2251,19 +2266,8 @@ export default async function plugin(bb: BbPluginApi) {
     let result: GateResult;
     try {
       result = await (async (): Promise<GateResult> => {
-        // The path names a checkout on the source's own host; only the server's primary host may run it here.
-        let local: boolean | null = null;
-        let lookupError: unknown = "no source host recorded";
-        for (let attempt = 0; attempt < 2 && local === null; attempt += 1) {
-          try {
-            const project = await bb.sdk.projects.get({ projectId: row.project_id });
-            const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
-            if (!source?.hostId) break;
-            local = source.hostId === (await bb.sdk.system.config()).primaryHostId;
-          } catch (error) { lookupError = error; }
-        }
-        if (local === null) return { skipped: `could not confirm which host holds the project checkout (${clip(String(lookupError), 200)})` };
-        if (!local) return { skipped: "the project checkout is on a remote host, not the plugin server" };
+        const hostSkip = await checkoutHostSkip(row.project_id);
+        if (hostSkip) return { skipped: hostSkip };
         const git = async (args: string[]) => {
           let lastError: unknown;
           for (let attempt = 0; attempt < 2; attempt += 1) {
