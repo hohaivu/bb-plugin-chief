@@ -2227,7 +2227,7 @@ export default async function plugin(bb: BbPluginApi) {
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn, requireChiefCaller, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
     busyStatuses: BUSY_STATUSES, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
-    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle,
+    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext,
   });
 
   /** Which path a worker review took, for chief_review's reply. */
@@ -2480,6 +2480,23 @@ export default async function plugin(bb: BbPluginApi) {
   /** Best-effort: keeps the exact spawn prompt in the thread's own storage so it can re-read its brief after a compaction. Never throws. */
   async function persistBrief(threadId: string, prompt: string) {
     await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
+  }
+
+  /** Writes a reviewer's review-context.md: 3 attempts (1s, 2s backoff), then alerts Chief so it stops or nudges the reviewer. Never throws. */
+  async function writeReviewContext(threadId: string, content: string, workerThreadId: string) {
+    let error: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+      try {
+        await writeStorageFile(threadId, "review-context.md", `${content}\n`);
+        return;
+      } catch (caught) { error = caught; }
+    }
+    // The worker's row names the same Chief, for when the reviewer's own row cannot be read.
+    const row = [store.get(threadId), store.get(workerThreadId)].find((candidate) => candidate?.chief_thread_id);
+    const message = `Could not write review-context.md for reviewer ${threadId} after 3 attempts: ${String(error)}. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.`;
+    if (row) await alertChief(row, `review-context:${threadId}`, message);
+    else bb.log.error(message);
   }
 
   /** A reviewer's verdict for another thread's prompt: the clipped findings plus where to read them in full. */

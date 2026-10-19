@@ -37,8 +37,8 @@ export function reviewerPrompt(opts: {
     `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict.`,
     ...(opts.focus ? [`Review focus: ${opts.focus}`] : []),
     opts.pinned
-      ? "Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift."
-      : "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When plan files are listed below, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.",
+      ? "Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When review-context.md lists plan files, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift."
+      : "Inspect the actual worktree and evidence; do not rely only on the worker's claims. When review-context.md lists plan files, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.",
     ...opts.provenance,
   ].join("\n");
 }
@@ -82,8 +82,9 @@ export interface ReviewBriefInput {
   chiefThreadId: string | null;
 }
 
-/** The prompt a worker's reviewer starts from. Pure: it renders what startReview gathered and reads nothing else. */
-export function reviewBrief(input: ReviewBriefInput): string {
+/** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
+ * Pure: it renders what startReview gathered and reads nothing else. */
+export function reviewBrief(input: ReviewBriefInput): { prompt: string; context: string } {
   const { worker, targets, wavePaths, chain, contractLines, previous } = input;
   const head = worker.head;
   const many = targets.length > 1;
@@ -95,7 +96,43 @@ export function reviewBrief(input: ReviewBriefInput): string {
       ? `- worker ${target.threadId} “${target.title}”: ${target.prUrl} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch}\`, then review \`git diff origin/${pinned.base}...${pinned.sha}\``
       : `- worker ${target.threadId} “${target.title}”: branch ${target.branch}${target.prUrl ? ` (${target.prUrl})` : ""}, head not readable, not pinned: \`git fetch origin ${target.branch}\`, then review \`git diff <the project's default branch>...origin/${target.branch}\`; the verdict binds to its report ${target.reportSeq}`;
   };
-  return reviewerPrompt({
+  const briefSection = worker.brief && !head && !many ? ["## The brief this work was given", worker.brief] : [];
+  const recordedSection = head || many ? [] : ["## Recorded commands (from the worker's event log)", ...input.recordedLines];
+  const reportSection = many
+    ? targets.flatMap((target) => target.hasResult ? [
+      `## The report of worker ${target.threadId}`,
+      ...(target.reportPath ? [`Full report: ${target.reportPath}`] : []),
+      `Full report and last output: bb chief inspect ${target.threadId}`, "",
+    ] : [])
+    : worker.hasResult ? [
+      head ? "## The worker's report file" : "## What the worker reported",
+      ...(head ? [] : [worker.reported]),
+      ...(worker.reportPath ? [`Full report: ${worker.reportPath}`] : []),
+      `Full report and last output: bb chief inspect ${worker.threadId}`,
+    ] : [];
+  const previousSection = previous ? [
+    `## The previous review (${previous.threadId})`,
+    ...previous.preview,
+    ...(previous.recommendation ? [`Recommendation: ${previous.recommendation}`] : []),
+  ] : [];
+  const planSection = wavePaths.length ? [
+    many
+      ? `## Plan: ${wavePaths.length} wave${wavePaths.length > 1 ? "s" : ""}, one branch per chain`
+      : `## Plan: this branch carries wave${chain.length > 1 ? "s" : ""} ${chain.join(", ")} of ${wavePaths.length}`,
+    ...chain.map((n) => `Wave ${n} of ${wavePaths.length}: ${wavePaths[n - 1]}`),
+  ] : [];
+  const sections = [briefSection, recordedSection, reportSection, previousSection, planSection].filter((lines) => lines.length);
+  const context = sections.map((lines) => lines.join("\n")).join("\n\n");
+  const summary = sections.length ? [
+    "", "## Context",
+    ...(briefSection.length ? ["- The brief this work was given."] : []),
+    ...(recordedSection.length ? [`- ${input.recordedLines[0] ?? "Recorded commands"} (the worker's event log).`] : []),
+    ...(reportSection.length ? [`- Where to read the worker report${plural}.`] : []),
+    ...(previousSection.length ? [`- The previous review (${previous!.threadId}) with its findings.`] : []),
+    ...(planSection.length ? [`- The plan wave file${chain.length > 1 ? "s" : ""} this review covers.`] : []),
+    "Read `$BB_THREAD_STORAGE/review-context.md` in full before reviewing. If it is missing, wait 10 seconds and read again; if still missing, report blocked naming it.",
+  ] : [];
+  const prompt = reviewerPrompt({
     pinned: pinnedAll,
     subject: many
       ? `Independently review the whole plan: ${targets.length} branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change. The worker's recorded commands ran against the worker's own tree: rerun the project's build/check at each pinned commit.\n${targets.map(targetLine).join("\n")}`
@@ -105,57 +142,33 @@ export function reviewBrief(input: ReviewBriefInput): string {
     chiefThreadId: input.chiefThreadId,
     focus: input.focus,
     provenance: [
-      ...(worker.brief && !head && !many ? [
-        "", "## The brief this work was given", worker.brief,
+      ...summary,
+      ...(briefSection.length ? [
         "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
       ] : []),
       ...(contractLines.length ? [
         "", "## Contracts to verify", ...contractLines,
         `Check every item against ${pinnedAll ? "the pinned commit" : "the worktree"}${plural}. An unmet item means request_changes naming it; say which items you confirmed.`,
       ] : []),
-      ...(head || many ? [] : [
-        "", "## Recorded commands (from the worker's event log)",
-        ...input.recordedLines,
-        "Recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
-      ]),
+      ...(recordedSection.length ? [
+        "Recorded commands are recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
+      ] : []),
       ...(worker.kind === "designer" ? [
         "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
       ] : []),
-      ...(many
-        ? targets.flatMap((target) => target.hasResult ? [
-          "", `## The report of worker ${target.threadId}`,
-          ...(target.reportPath ? [`Full report: ${target.reportPath}`] : []),
-          `Full report and last output: bb chief inspect ${target.threadId}`,
-          "Read it for its Deviations from plan only; each pull request at its pinned commit is the change.",
-        ] : [])
-        : [
-          ...(worker.hasResult && head ? [
-            "", "## The worker's report file",
-            ...(worker.reportPath ? [`Full report: ${worker.reportPath}`] : []),
-            `Full report and last output: bb chief inspect ${worker.threadId}`,
-            "Read it for its Deviations from plan only; the pull request at its pinned commit is the change.",
-          ] : []),
-          ...(worker.hasResult && !head ? [
-            "", "## What the worker reported", worker.reported,
-            ...(worker.reportPath ? [`Full report: ${worker.reportPath}`] : []),
-            `Full report and last output: bb chief inspect ${worker.threadId}`,
-          ] : []),
-        ]),
+      ...(reportSection.length && (head || many) ? [
+        `Read each worker report for its Deviations from plan only; each pull request at its pinned commit is the change.`,
+      ] : []),
       ...(previous ? [
-        "", `## The previous review (${previous.threadId})`,
-        ...previous.preview,
-        ...(previous.recommendation ? [`Recommendation: ${previous.recommendation}`] : []),
-        "", `Check each finding above against ${pinnedAll ? "the pinned commit" : "the current worktree"}${plural}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again. Weigh every item under the worker's \`## Disputed findings\`. Drop a finding the evidence refutes. Keep it blocking only with a traced failure.`,
+        "", `Check each finding of the previous review against ${pinnedAll ? "the pinned commit" : "the current worktree"}${plural}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again. Weigh every item under the worker's \`## Disputed findings\`. Drop a finding the evidence refutes. Keep it blocking only with a traced failure.`,
       ] : []),
       ...(wavePaths.length ? [
-        "", many
-          ? `This plan has ${wavePaths.length} wave${wavePaths.length > 1 ? "s" : ""}, one branch per chain. Review each branch against its base against its waves' plans:`
-          : `This branch carries wave${chain.length > 1 ? "s" : ""} ${chain.join(", ")} of ${wavePaths.length}. Review the whole branch against its base against ${chain.length > 1 ? "these waves' plans" : "this wave's plan"}:`,
-        ...chain.map((n) => `Wave ${n} of ${wavePaths.length}: ${wavePaths[n - 1]}`),
-        "Read each worker's full report (Full report path above, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
+        "", `Review ${many ? "each branch" : "the whole branch"} against its base against the plan wave files in review-context.md.`,
+        "Read each worker's full report (its Full report path in review-context.md, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
       ] : []),
     ],
   });
+  return { prompt, context };
 }
 
 /** The prompt of a branch or pull-request reviewer no managed worker owns. Pure. */
@@ -230,6 +243,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   verdictPreview: (review: Row) => string[];
   clip: (value: string, limit?: number) => string;
   clipMiddle: (value: string, limit: number) => string;
+  /** Writes the reviewer's review-context.md; owns its retries and alerting Chief on final failure. */
+  writeReviewContext: (threadId: string, content: string, workerThreadId: string) => Promise<void>;
 }
 
 /** One module owns starting a reviewer: the owner and duplicate checks, the in-flight dedupe, the pinned heads,
@@ -319,7 +334,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         threadId: row.thread_id, title: row.title, prUrl: row.pr_url, branch: row.branch, reportSeq: row.report_seq,
         hasResult: !!row.result, reportPath: row.report_path, head: heads.get(row.thread_id) ?? null,
       });
-      const prompt = reviewBrief({
+      const { prompt, context } = reviewBrief({
         worker: {
           ...briefTarget(worker), kind: worker.kind,
           brief: worker.brief ? clipMiddle(worker.brief, 4_000) : null,
@@ -348,6 +363,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       (threadId) => ledger.addTargets(threadId, targets.map((target) => ({
         threadId: target.thread_id, reportSeq: target.report_seq, headSha: heads.get(target.thread_id)?.sha ?? null, prUrl: target.pr_url, branch: target.branch,
       }))));
+      if (context) await deps.writeReviewContext(thread.id, context, workerThreadId);
       // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
       const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
       if (openReviews.length || streak) {
