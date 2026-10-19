@@ -1864,7 +1864,10 @@ export default async function plugin(bb: BbPluginApi) {
         "", `## Review findings to fix (${findings.thread_id})`,
         ...verdictPreview(findings),
         ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
-        "Fix every blocking finding. Nits are optional: fix one only when it is trivial and inside this task's scope.",
+        "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
+        "Do not apply a finding that is wrong, or that contradicts the brief or plan. List it in your ready result under `## Disputed findings`, with evidence: file:line, command output, or the brief or plan text it contradicts.",
+        "Nits are optional: fix one only when it is trivial and inside this task's scope.",
+        "An `[AMBIGUOUS: …]` item is a question for Chief, not a finding to fix.",
       ] : []),
       ...(ruledOut.length ? [
         "", "## Already ruled out",

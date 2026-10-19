@@ -144,7 +144,7 @@ export function reviewBrief(input: ReviewBriefInput): string {
         "", `## The previous review (${previous.threadId})`,
         ...previous.preview,
         ...(previous.recommendation ? [`Recommendation: ${previous.recommendation}`] : []),
-        "", `Check each finding above against ${pinnedAll ? "the pinned commit" : "the current worktree"}${plural}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again.`,
+        "", `Check each finding above against ${pinnedAll ? "the pinned commit" : "the current worktree"}${plural}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again. Weigh every item under the worker's \`## Disputed findings\`. Drop a finding the evidence refutes. Keep it blocking only with a traced failure.`,
       ] : []),
       ...(wavePaths.length ? [
         "", many
