@@ -267,7 +267,7 @@ const delegateShape = z.object({
   kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker."),
   userApprovedRound: z.boolean().optional().describe(`Set only with replaces: and only after the user explicitly approved another review round in this thread: a replaced worker whose reviewer has requested changes ${STOP_AFTER_REJECTIONS} times in a row is refused without it.`),
   simple: z.boolean().optional().describe("Set only when the user's message contains #simple. Skips chief_plan (no unplannedReason needed). Pass the user's request verbatim as mission and add no diagnosis of your own: the worker finds the cause itself. Review is at your judgment (see the core rules). Cannot be combined with planThreadId. A replaces: successor keeps it."),
-  verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command that must exit 0 before a reviewer is spawned, e.g. `npx tsc --noEmit && bb plugin build`. Inherited through replaces:."),
+  verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command the worker's brief tells it to run and get exit 0 from before reporting ready; the same command must exit 0 before a reviewer is spawned, e.g. `npx tsc --noEmit && bb plugin build`. Inherited through replaces:."),
 });
 
 const delegateParams = delegateShape.superRefine((value, ctx) => {
@@ -1656,7 +1656,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- When the task mixes UI that no approved design or explicit visual spec fixes with non-UI code (DB, notifications, OCR, …), split it: a design-only wave marked `design: true` (a Designer draws the artboards in the design tool, no app code), then the wave that builds on it with all the code, UI included, against the approved artboards. Never put both in one wave. Pure-UI work, pure non-UI work, and work whose look an approved design or spec already fixes stay as they are, with no `design` flag.",
       "- Submit the plan through chief_report's `plan` field: one Markdown string for a single wave, or an array of `{body, dependsOn, design?}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
       "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
-      "- Give every wave a `## Contracts to verify` Markdown heading: a checklist of the invariants, edge cases and existing behaviour that wave must keep — what a reviewer would otherwise catch only after the fact. The worker and the reviewer both receive this exact list.",
+      "- Give every wave a `## Contracts to verify` Markdown heading: a checklist that states contracts as falsifiable properties where they apply: round-trip (decode(encode(x)) == x, save then load), idempotency (running twice equals running once), invariants and state bounds (what holds after every step, value or count limits), equivalence (new path equals old path or a reference on the same inputs), and what must never happen; state each with the edge cases and existing behaviour the wave must keep — what a reviewer would otherwise catch only after the fact. Do not force a class that does not fit. The worker and the reviewer both receive this exact list.",
       ...(researchLine("planner", await researchSettings()) ? ["- When the root cause is unclear, or before planning you need a broad multi-file scan or several independent questions (scoping a large issue, mapping many similar call sites or files), use chief_research instead of reading it all yourself: investigate (one sub-question per hypothesis or independent question); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings against the code before relying on them."] : []),
       "- A genuine product or scope decision is Chief's, not yours. If it blocks a sound plan, report blocked with the question as blocker and your recommended answer as recommendation. If the plan holds under a stated assumption, report ready and list the question and the assumption under `## Open questions` in the wave it affects. Never ask the user directly from this thread.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
@@ -1921,6 +1921,11 @@ export default async function plugin(bb: BbPluginApi) {
         "", "## Contracts to verify", clip(contracts, 3_000),
         "Keep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.",
       ] : []),
+      ...(verifyCommand !== null ? [
+        "", "## Verify command",
+        "```sh", verifyCommand, "```",
+        "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. Chief runs the same command on your pushed commit before any reviewer starts; a non-zero exit there sends the work back without a review. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
+      ] : []),
       ...(branch || issueUrl || prUrl ? [
         "", "## Git workflow",
         ...(branch ? [`Your worktree is based on ${branch}. Check that branch out and commit your work there.`] : []),
@@ -1943,6 +1948,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
       ...(planPath !== undefined ? ["- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`."] : []),
+      "- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, run the old and new code on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -3938,7 +3944,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. verifyCommand sets a pre-review gate. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.`,
+    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. verifyCommand goes into the worker's brief as its own check and sets a pre-review gate. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.`,
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
