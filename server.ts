@@ -14,7 +14,8 @@ import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
-import { createReviewStart, type GateResult } from "./reviewStart";
+import { computeImpactSlice } from "./impactSlice";
+import { createReviewStart, type GateResult, type PinnedHead } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import { createPlanProgress, type SegmentState } from "./planProgress";
 import { createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
@@ -2244,7 +2245,7 @@ export default async function plugin(bb: BbPluginApi) {
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn, requireChiefCaller, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
     busyStatuses: BUSY_STATUSES, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
-    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext, runGate,
+    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext, runGate, impactSlice,
   });
 
   /** Why the project's checkout path cannot be used here, or null when it is on the server's primary host.
@@ -2335,6 +2336,32 @@ export default async function plugin(bb: BbPluginApi) {
     if (!cleanup) return result;
     if ("failed" in result) return { failed: { ...result.failed, issues: [...(result.failed.issues ?? []), cleanup] } };
     return { skipped: "skipped" in result ? `${result.skipped}; ${cleanup}` : cleanup };
+  }
+
+  /** The impact slice of the commit under review, read from the project checkout with git only (no worktree is created). */
+  async function impactSlice(row: ManagedRow, head: PinnedHead | null, projectDir: string | null, maxEntries: number): Promise<{ lines: string[] } | { skipped: string }> {
+    try {
+      if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
+      // follow-up: runGate could share this check
+      const local = await bb.sdk.projects.get({ projectId: row.project_id }).then(async (project) => {
+        const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+        return !!source?.hostId && source.hostId === (await bb.sdk.system.config()).primaryHostId;
+      }, () => null);
+      if (local === null) return { skipped: "could not confirm which host holds the project checkout" };
+      if (!local) return { skipped: "the project checkout is on a remote host, not the plugin server" };
+      const options = { cwd: projectDir, env: forgeEnv(), maxEntries, deadlineMs: 30_000 };
+      if (head) return await computeImpactSlice({ ...options, sha: head.sha, baseRef: `origin/${head.base}`, fetchRef: head.branch });
+      if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
+      const git = (args: string[]) => execFileAsync("git", args, { cwd: projectDir, timeout: 10_000, env: forgeEnv() }).then((out) => out.stdout.trim(), () => null);
+      const sha = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${row.branch}^{commit}`])
+        ?? await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${row.branch}^{commit}`]);
+      if (!sha) return { skipped: `branch ${row.branch} not found locally` };
+      const baseRef = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+      if (!baseRef) return { skipped: "origin/HEAD not set" };
+      return await computeImpactSlice({ ...options, sha, baseRef, fetchRef: row.branch });
+    } catch (error) {
+      return { skipped: clip(String(error), 200) };
+    }
   }
 
   /** Bounded cleanup of a gate-owned worktree: unlock, force-remove, delete, prune, then confirm both registration
@@ -4108,7 +4135,8 @@ export default async function plugin(bb: BbPluginApi) {
           return `Pre-review gate failed: \`${review.command}\` exited ${review.exitCode} on ${review.sha}. No reviewer was spawned. Output tail:\n${review.tail}\n(full: ${review.outputPath ?? "not saved"}).${review.issues?.length ? ` Gate issues: ${review.issues.join("; ")}.` : ""} Delegate a replacement worker with replaces: and pass that path in context.`;
         }
         const skipped = review.gateSkipped?.length ? ` Gate skipped: ${review.gateSkipped.join("; ")}.` : "";
-        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}${skipped}`;
+        const sliceNote = review.sliceSkipped?.length ? ` Impact slice skipped: ${review.sliceSkipped.join("; ")}.` : "";
+        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}${skipped}${sliceNote}`;
       }
       touchCallerChief(caller);
       const branch = params.branch

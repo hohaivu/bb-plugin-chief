@@ -82,6 +82,8 @@ export interface ReviewBriefInput {
   previous: { threadId: string; preview: string[]; recommendation: string | null } | null;
   focus?: string;
   chiefThreadId: string | null;
+  /** Per target: file:line pointers outside its diff, or why they could not be computed. Optional: older callers omit it. */
+  impactSlices?: { threadId: string; branch: string | null; lines?: string[]; skipped?: string }[];
 }
 
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
@@ -123,7 +125,15 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       : `## Plan: this branch carries wave${chain.length > 1 ? "s" : ""} ${chain.join(", ")} of ${wavePaths.length}`,
     ...chain.map((n) => `Wave ${n} of ${wavePaths.length}: ${wavePaths[n - 1]}`),
   ] : [];
-  const sections = [briefSection, recordedSection, reportSection, previousSection, planSection].filter((lines) => lines.length);
+  const slices = input.impactSlices ?? [];
+  const sliceSection = slices.length ? [
+    "## Impact slice",
+    ...slices.flatMap((slice) => [
+      ...(many ? [`### ${slice.branch ?? "no branch"} (worker ${slice.threadId})`] : []),
+      ...(slice.lines ?? [`Skipped: ${slice.skipped}.`]),
+    ]),
+  ] : [];
+  const sections = [briefSection, recordedSection, reportSection, previousSection, planSection, sliceSection].filter((lines) => lines.length);
   const context = sections.map((lines) => lines.join("\n")).join("\n\n");
   const summary = sections.length ? [
     "", "## Context",
@@ -132,6 +142,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     ...(reportSection.length ? [`- Where to read the worker report${plural}.`] : []),
     ...(previousSection.length ? [`- The previous review (${previous!.threadId}) with its findings.`] : []),
     ...(planSection.length ? [`- The plan wave file${chain.length > 1 ? "s" : ""} this review covers.`] : []),
+    ...(sliceSection.length ? ["- The impact slice: pointers to code outside the diff that the change calls or that calls it."] : []),
     "Read `$BB_THREAD_STORAGE/review-context.md` in full before reviewing. If it is missing, wait 10 seconds and read again; if still missing, report blocked naming it.",
   ] : [];
   const prompt = reviewerPrompt({
@@ -151,6 +162,9 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ...(contractLines.length ? [
         "", "## Contracts to verify", ...contractLines,
         `Check every item against ${pinnedAll ? "the pinned commit" : "the worktree"}${plural}. An unmet item means request_changes naming it; say which items you confirmed.`,
+      ] : []),
+      ...(slices.some((slice) => slice.lines) ? [
+        "Use the impact slice in review-context.md only as reference for contract mismatches (a callee's real signature or contract, a caller's expectations); report findings only on lines this diff introduced, never on slice lines.",
       ] : []),
       ...(recordedSection.length ? [
         "Recorded commands are recorded by BB, not reported by the worker; a claimed check with no matching command is unverified.",
@@ -213,7 +227,7 @@ interface ReviewRow {
   created_at: number;
 }
 
-export type ReviewStarted = { gated?: false; threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; gateSkipped?: string[] };
+export type ReviewStarted = { gated?: false; threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; gateSkipped?: string[]; sliceSkipped?: string[] };
 /** A pre-review gate failed: no reviewer was spawned, no ledger row written, no open review superseded. */
 export type ReviewGated = { gated: true; workerThreadId: string; command: string; sha: string; exitCode: number; outputPath: string | null; tail: string; issues?: string[] };
 export type GateResult = { passed: true } | { skipped: string } | { failed: Omit<ReviewGated, "gated"> };
@@ -253,6 +267,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   writeReviewContext: (threadId: string, content: string, workerThreadId: string) => Promise<void>;
   /** Runs row.verify_command on the pinned sha (or the branch tip when null) in a temporary checkout. */
   runGate: (row: Row, command: string, pinnedSha: string | null, projectDir: string | null) => Promise<GateResult>;
+  /** Git-only file:line pointers outside the commit's diff; never blocks a review, a failure is `{ skipped }`. */
+  impactSlice: (row: Row, head: PinnedHead | null, projectDir: string | null, maxEntries: number) => Promise<{ lines: string[] } | { skipped: string }>;
 }
 
 /** One module owns starting a reviewer: the owner and duplicate checks, the in-flight dedupe, the pinned heads,
@@ -341,6 +357,15 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         if ("failed" in gate) return { gated: true as const, ...gate.failed };
         if ("skipped" in gate) gateSkipped.push(`${target.thread_id}: ${gate.skipped}`);
       }
+      // After the gate, so a failed gate computes nothing; sequential, each bounded by its own deadline.
+      const impactSlices: NonNullable<ReviewBriefInput["impactSlices"]> = [];
+      const sliceSkipped: string[] = [];
+      for (const target of targets) {
+        const slice = await deps.impactSlice(target, heads.get(target.thread_id) ?? null, projectDir, Math.max(5, Math.floor(30 / targets.length)))
+          .catch((error): { skipped: string } => ({ skipped: clip(String(error), 200) }));
+        impactSlices.push({ threadId: target.thread_id, branch: heads.get(target.thread_id)?.branch ?? target.branch, ...slice });
+        if ("skipped" in slice) sliceSkipped.push(`${target.thread_id}: ${slice.skipped}`);
+      }
       const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
       const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
       const title = `Review · ${worker.title}`;
@@ -373,6 +398,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         } : null,
         focus,
         chiefThreadId: worker.chief_thread_id,
+        impactSlices,
       });
       const thread = await managedSpawn.launch(prepared, {
         projectId: worker.project_id,
@@ -394,7 +420,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           for (const old of openReviews) store.completeSuperseded(old.thread_id, now);
         });
       }
-      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id), gateSkipped };
+      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id), gateSkipped, sliceSkipped };
     });
   }
 
