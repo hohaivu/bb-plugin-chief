@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -2244,6 +2244,13 @@ export default async function plugin(bb: BbPluginApi) {
    * Only a non-zero exit fails it; anything that keeps it from running is a skip with the reason, and the review proceeds. */
   async function runGate(row: ManagedRow, command: string, pinnedSha: string | null, projectDir: string | null): Promise<GateResult> {
     if (!projectDir) return { skipped: "no local checkout of the project on the plugin server (remote host or unknown path)" };
+    // The path names a checkout on the source's own host; only the server's primary host may run it here.
+    const local = await bb.sdk.projects.get({ projectId: row.project_id }).then(async (project) => {
+      const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+      return !!source?.hostId && source.hostId === (await bb.sdk.system.config()).primaryHostId;
+    }, () => null);
+    if (local === null) return { skipped: "could not confirm which host holds the project checkout" };
+    if (!local) return { skipped: "the project checkout is on a remote host, not the plugin server" };
     const git = async (args: string[]) => {
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -2269,7 +2276,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     let dir: string | null = null;
     try {
-      dir = await mkdtemp(join(tmpdir(), "chief-gate-"));
+      dir = await realpath(await mkdtemp(join(tmpdir(), "chief-gate-")));
       await git(["worktree", "add", "--detach", dir, sha]);
       try {
         await execFileAsync("sh", ["-c", command], { cwd: dir, timeout: GATE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: serverPath() } });
@@ -2285,11 +2292,28 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) {
       return { skipped: `git could not check out ${sha} (${clip(String(error), 200)})` };
     } finally {
-      if (dir) {
-        await git(["worktree", "remove", "--force", dir]).catch(() => git(["worktree", "prune"]).catch(() => undefined));
-        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-      }
+      if (dir) await removeGateWorktree(row, projectDir, dir);
     }
+  }
+
+  /** Bounded cleanup of a gate-owned worktree: unlock, force-remove, delete, prune, then confirm both registration
+   * and directory are gone. A command may lock or delete its own checkout, so none of these steps alone is proof. */
+  async function removeGateWorktree(row: ManagedRow, projectDir: string, dir: string) {
+    const git = (args: string[]) => execFileAsync("git", args, { cwd: projectDir, timeout: 60_000, env: forgeEnv() }).then((out) => out.stdout, () => null);
+    let lastState = "";
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await git(["worktree", "unlock", dir]);
+      await git(["worktree", "remove", "--force", "--force", dir]);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      await git(["worktree", "prune"]);
+      const list = await git(["worktree", "list", "--porcelain"]);
+      const registered = list === null || list.split("\n").includes(`worktree ${dir}`);
+      const exists = await stat(dir).then(() => true, () => false);
+      if (!registered && !exists) return;
+      lastState = `${registered ? (list === null ? "worktree list failed" : "still registered") : "unregistered"}, ${exists ? "directory present" : "directory gone"}`;
+      await new Promise((resolve) => setTimeout(resolve, 1_000 * (attempt + 1)));
+    }
+    await alertChief(row, `gate-cleanup:${dir}`, `Pre-review gate for ${row.thread_id} could not remove its temporary worktree ${dir} in ${projectDir} after 3 attempts (${lastState}). Run \`git worktree unlock ${dir}; git worktree remove --force --force ${dir}; git worktree prune\` there.`);
   }
 
   /** Which path a worker review took, for chief_review's reply. */
