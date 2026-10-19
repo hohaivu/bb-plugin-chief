@@ -2346,13 +2346,8 @@ export default async function plugin(bb: BbPluginApi) {
     const expired = new Promise<ImpactSlice>((resolve) => { timer = setTimeout(() => resolve({ skipped: "deadline (30 s) passed" }), 30_000); });
     const work = async (): Promise<ImpactSlice> => {
       if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
-      // follow-up: runGate could share this check
-      const local = await bb.sdk.projects.get({ projectId: row.project_id }).then(async (project) => {
-        const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
-        return !!source?.hostId && source.hostId === (await bb.sdk.system.config()).primaryHostId;
-      }).catch(() => null);
-      if (local === null) return { skipped: "could not confirm which host holds the project checkout" };
-      if (!local) return { skipped: "the project checkout is on a remote host, not the plugin server" };
+      const hostSkip = await checkoutHostSkip(row.project_id);
+      if (hostSkip) return { skipped: hostSkip };
       const options = () => ({ cwd: projectDir, env: forgeEnv(), maxEntries, deadlineMs: deadline - Date.now() });
       if (head) return await computeImpactSlice({ ...options(), sha: head.sha, baseRef: `origin/${head.base}`, fetchRef: head.branch });
       if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
