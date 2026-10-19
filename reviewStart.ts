@@ -213,7 +213,7 @@ interface ReviewRow {
 
 export type ReviewStarted = { gated?: false; threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; gateSkipped?: string[] };
 /** A pre-review gate failed: no reviewer was spawned, no ledger row written, no open review superseded. */
-export type ReviewGated = { gated: true; workerThreadId: string; command: string; sha: string; exitCode: number; outputPath: string | null; tail: string };
+export type ReviewGated = { gated: true; workerThreadId: string; command: string; sha: string; exitCode: number; outputPath: string | null; tail: string; issues?: string[] };
 export type GateResult = { passed: true } | { skipped: string } | { failed: Omit<ReviewGated, "gated"> };
 
 /** The row fields launch writes for a reviewer. */
@@ -330,7 +330,12 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const gateSkipped: string[] = [];
       for (const target of targets) {
         if (!target.verify_command) continue;
-        const gate = await deps.runGate(target, target.verify_command, heads.get(target.thread_id)?.sha ?? null, projectDir);
+        let gate: GateResult;
+        try {
+          gate = await deps.runGate(target, target.verify_command, heads.get(target.thread_id)?.sha ?? null, projectDir);
+        } catch (error) {
+          gate = { skipped: `the gate failed unexpectedly (${clip(String(error), 200)})` };
+        }
         if ("failed" in gate) return { gated: true as const, ...gate.failed };
         if ("skipped" in gate) gateSkipped.push(`${target.thread_id}: ${gate.skipped}`);
       }

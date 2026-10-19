@@ -2241,79 +2241,116 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   /** The pre-review gate: runs the worker's verify command in a detached temporary worktree of the commit under review.
-   * Only a non-zero exit fails it; anything that keeps it from running is a skip with the reason, and the review proceeds. */
+   * Only a non-zero exit of the command fails it; anything that keeps it from running is a skip with the reason, and the review proceeds.
+   * Never throws: every step, cleanup included, runs inside this boundary, and cleanup trouble is added to the result, never replaces it. */
   async function runGate(row: ManagedRow, command: string, pinnedSha: string | null, projectDir: string | null): Promise<GateResult> {
     if (!projectDir) return { skipped: "no local checkout of the project on the plugin server (remote host or unknown path)" };
-    // The path names a checkout on the source's own host; only the server's primary host may run it here.
-    const local = await bb.sdk.projects.get({ projectId: row.project_id }).then(async (project) => {
-      const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
-      return !!source?.hostId && source.hostId === (await bb.sdk.system.config()).primaryHostId;
-    }, () => null);
-    if (local === null) return { skipped: "could not confirm which host holds the project checkout" };
-    if (!local) return { skipped: "the project checkout is on a remote host, not the plugin server" };
-    const git = async (args: string[]) => {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          return (await execFileAsync("git", args, { cwd: projectDir, timeout: 60_000, env: forgeEnv() })).stdout.trim();
-        } catch (error) {
-          lastError = error;
-        }
-      }
-      throw lastError;
-    };
-    let sha = pinnedSha;
-    try {
-      if (!sha) {
-        if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
-        sha = await git(["rev-parse", "--verify", `refs/heads/${row.branch}^{commit}`]);
-      } else {
-        const known = await execFileAsync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: projectDir, env: forgeEnv() }).then(() => true, () => false);
-        if (!known && row.branch) await git(["fetch", "origin", row.branch]);
-      }
-    } catch (error) {
-      return { skipped: `commit not found (${clip(String(error), 200)})` };
-    }
+    let phase = "host lookup";
+    let raw: string | null = null;
     let dir: string | null = null;
+    let result: GateResult;
     try {
-      dir = await realpath(await mkdtemp(join(tmpdir(), "chief-gate-")));
-      await git(["worktree", "add", "--detach", dir, sha]);
-      try {
-        await execFileAsync("sh", ["-c", command], { cwd: dir, timeout: GATE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: serverPath() } });
-        return { passed: true };
-      } catch (error) {
-        const failure = error as { code?: unknown; killed?: boolean; signal?: string | null; stdout?: string; stderr?: string };
+      result = await (async (): Promise<GateResult> => {
+        // The path names a checkout on the source's own host; only the server's primary host may run it here.
+        let local: boolean | null = null;
+        let lookupError: unknown = "no source host recorded";
+        for (let attempt = 0; attempt < 2 && local === null; attempt += 1) {
+          try {
+            const project = await bb.sdk.projects.get({ projectId: row.project_id });
+            const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+            if (!source?.hostId) break;
+            local = source.hostId === (await bb.sdk.system.config()).primaryHostId;
+          } catch (error) { lookupError = error; }
+        }
+        if (local === null) return { skipped: `could not confirm which host holds the project checkout (${clip(String(lookupError), 200)})` };
+        if (!local) return { skipped: "the project checkout is on a remote host, not the plugin server" };
+        const git = async (args: string[]) => {
+          let lastError: unknown;
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+              return (await execFileAsync("git", args, { cwd: projectDir, timeout: 60_000, env: forgeEnv() })).stdout.trim();
+            } catch (error) {
+              lastError = error;
+            }
+          }
+          throw lastError;
+        };
+        phase = "commit lookup";
+        let sha = pinnedSha;
+        if (!sha) {
+          if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
+          sha = await git(["rev-parse", "--verify", `refs/heads/${row.branch}^{commit}`]);
+        } else {
+          const known = await execFileAsync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: projectDir, timeout: 60_000, env: forgeEnv() }).then(() => true, () => false);
+          if (!known && row.branch) await git(["fetch", "origin", row.branch]);
+        }
+        phase = "temporary directory";
+        raw = await mkdtemp(join(tmpdir(), "chief-gate-"));
+        dir = await realpath(raw);
+        phase = `git checkout of ${sha}`;
+        await git(["worktree", "add", "--detach", dir, sha]);
+        phase = "verify command";
+        let failure: { code?: unknown; killed?: boolean; signal?: string | null; stdout?: string; stderr?: string };
+        try {
+          await execFileAsync("sh", ["-c", command], { cwd: dir, timeout: GATE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: serverPath() } });
+          return { passed: true };
+        } catch (error) {
+          failure = (error ?? {}) as typeof failure;
+        }
         if (failure.killed || typeof failure.code !== "number") return { skipped: `the command did not finish (${failure.signal ?? "timeout or spawn error"})` };
+        // The command's own non-zero exit is the only failure; it stands whatever happens to the artifact or cleanup.
         const output = `${failure.stdout ?? ""}${failure.stderr ? `\n${failure.stderr}` : ""}`.trim();
-        const outputPath = await writeArtifact(row.thread_id, row.project_id, `gate-${Date.now()}.md`,
-          `# Pre-review gate failed\n\nCommand: \`${command}\`\nCommit: ${sha}\nExit: ${failure.code}\n\n\`\`\`\n${output}\n\`\`\`\n`).catch(() => null);
-        return { failed: { workerThreadId: row.thread_id, command, sha, exitCode: failure.code, outputPath, tail: output.slice(-1_500) } };
-      }
+        const failed = { workerThreadId: row.thread_id, command, sha, exitCode: failure.code, outputPath: null as string | null, tail: output.slice(-1_500), issues: [] as string[] };
+        let artifactError: unknown;
+        for (let attempt = 0; attempt < 3 && !failed.outputPath; attempt += 1) {
+          try {
+            failed.outputPath = await writeArtifact(row.thread_id, row.project_id, `gate-${Date.now()}.md`,
+              `# Pre-review gate failed\n\nCommand: \`${command}\`\nCommit: ${sha}\nExit: ${failure.code}\n\n\`\`\`\n${output}\n\`\`\`\n`);
+          } catch (error) { artifactError = error; }
+        }
+        if (!failed.outputPath) failed.issues.push(`full output not saved (${clip(String(artifactError), 200)}); the tail above is all that is available`);
+        return { failed };
+      })();
     } catch (error) {
-      return { skipped: `git could not check out ${sha} (${clip(String(error), 200)})` };
-    } finally {
-      if (dir) await removeGateWorktree(row, projectDir, dir);
+      result = { skipped: `${phase} failed (${clip(String(error), 200)})` };
     }
+    let cleanup: string | null = null;
+    try {
+      if (dir) cleanup = await removeGateWorktree(projectDir, dir);
+      else if (raw) await rm(raw, { recursive: true, force: true });
+    } catch (error) {
+      cleanup = `cleanup of ${dir ?? raw} failed (${clip(String(error), 200)})`;
+    }
+    if (!cleanup) return result;
+    if ("failed" in result) return { failed: { ...result.failed, issues: [...(result.failed.issues ?? []), cleanup] } };
+    return { skipped: "skipped" in result ? `${result.skipped}; ${cleanup}` : cleanup };
   }
 
   /** Bounded cleanup of a gate-owned worktree: unlock, force-remove, delete, prune, then confirm both registration
-   * and directory are gone. A command may lock or delete its own checkout, so none of these steps alone is proof. */
-  async function removeGateWorktree(row: ManagedRow, projectDir: string, dir: string) {
-    const git = (args: string[]) => execFileAsync("git", args, { cwd: projectDir, timeout: 60_000, env: forgeEnv() }).then((out) => out.stdout, () => null);
+   * and directory are gone. A command may lock or delete its own checkout, so none of these steps alone is proof.
+   * Returns null when both are confirmed gone, otherwise what is left and how to remove it. Never throws. */
+  async function removeGateWorktree(projectDir: string, dir: string): Promise<string | null> {
+    const git = (args: string[]) => execFileAsync("git", args, { cwd: projectDir, timeout: 30_000, env: forgeEnv() }).then((out) => out.stdout);
     let lastState = "";
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      await git(["worktree", "unlock", dir]);
-      await git(["worktree", "remove", "--force", "--force", dir]);
-      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-      await git(["worktree", "prune"]);
-      const list = await git(["worktree", "list", "--porcelain"]);
-      const registered = list === null || list.split("\n").includes(`worktree ${dir}`);
-      const exists = await stat(dir).then(() => true, () => false);
-      if (!registered && !exists) return;
-      lastState = `${registered ? (list === null ? "worktree list failed" : "still registered") : "unregistered"}, ${exists ? "directory present" : "directory gone"}`;
-      await new Promise((resolve) => setTimeout(resolve, 1_000 * (attempt + 1)));
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+      try {
+        await git(["worktree", "unlock", dir]).catch(() => null);
+        await git(["worktree", "remove", "--force", "--force", dir]).catch(() => null);
+        let rmError = "";
+        await rm(dir, { recursive: true, force: true }).catch((error) => { rmError = `, rm: ${String(error)}`; });
+        await git(["worktree", "prune"]).catch(() => null);
+        const list = await git(["worktree", "list", "--porcelain"]).catch(() => null);
+        const registered = list === null ? "worktree list failed" : list.split("\n").includes(`worktree ${dir}`) ? "still registered" : null;
+        // Only ENOENT proves the directory is gone; any other error leaves its state unknown.
+        const present = await stat(dir).then(() => "directory present", (error) => (error as { code?: string })?.code === "ENOENT" ? null : `directory could not be checked (${String(error)})`);
+        if (!registered && !present) return null;
+        lastState = `${registered ?? "unregistered"}, ${present ?? "directory gone"}${rmError}`;
+      } catch (error) {
+        lastState = `cleanup attempt failed (${String(error)})`;
+      }
     }
-    await alertChief(row, `gate-cleanup:${dir}`, `Pre-review gate for ${row.thread_id} could not remove its temporary worktree ${dir} in ${projectDir} after 3 attempts (${lastState}). Run \`git worktree unlock ${dir}; git worktree remove --force --force ${dir}; git worktree prune\` there.`);
+    return `could not remove temporary worktree ${dir} in ${projectDir} after 3 attempts (${clip(lastState, 300)}); run \`git worktree unlock ${dir}; git worktree remove --force --force ${dir}; git worktree prune\` there`;
   }
 
   /** Which path a worker review took, for chief_review's reply. */
@@ -2581,7 +2618,8 @@ export default async function plugin(bb: BbPluginApi) {
     // The worker's row names the same Chief, for when the reviewer's own row cannot be read.
     const row = [store.get(threadId), store.get(workerThreadId)].find((candidate) => candidate?.chief_thread_id);
     const message = `Could not write review-context.md for reviewer ${threadId} after 3 attempts: ${String(error)}. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.`;
-    if (row) await alertChief(row, `review-context:${threadId}`, message);
+    // The alert is the last resort; its own failure is logged rather than thrown after the reviewer has launched.
+    if (row) await Promise.resolve().then(() => alertChief(row, `review-context:${threadId}`, message)).catch((alertError) => bb.log.error(`${message} The Chief alert also failed: ${String(alertError)}`));
     else bb.log.error(message);
   }
 
@@ -4056,7 +4094,7 @@ export default async function plugin(bb: BbPluginApi) {
         touchCallerChief(caller);
         const review = await startReview(caller, params.workerThreadId, params.focus);
         if (review.gated) {
-          return `Pre-review gate failed: \`${review.command}\` exited ${review.exitCode} on ${review.sha}. No reviewer was spawned. Output tail:\n${review.tail}\n(full: ${review.outputPath ?? "not saved"}). Delegate a replacement worker with replaces: and pass that path in context.`;
+          return `Pre-review gate failed: \`${review.command}\` exited ${review.exitCode} on ${review.sha}. No reviewer was spawned. Output tail:\n${review.tail}\n(full: ${review.outputPath ?? "not saved"}).${review.issues?.length ? ` Gate issues: ${review.issues.join("; ")}.` : ""} Delegate a replacement worker with replaces: and pass that path in context.`;
         }
         const skipped = review.gateSkipped?.length ? ` Gate skipped: ${review.gateSkipped.join("; ")}.` : "";
         return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}${skipped}`;
