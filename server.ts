@@ -3038,6 +3038,7 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           await reconcile();
           await sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
+          await checkUnreported(store.all());
           const values = await settings.get();
           const parsed = Number(values.stallMinutes);
           const threshold = (Number.isFinite(parsed) && parsed > 0 ? parsed : 15) * 60_000;
@@ -3624,10 +3625,10 @@ export default async function plugin(bb: BbPluginApi) {
     ].join("\n");
   }
 
-  const { research, researchSleep } = createResearch({
+  const { research, researchSleep, checkUnreported } = createResearch({
     db, bb, managedRow, roleRow: store.get, terminal, isActiveChief, researchSettings, readResearchModel,
     environmentHostId, discover, catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError,
-    lastOutput, managedSpawn, alertChief, serverPath, clip, execFileAsync,
+    lastOutput, managedSpawn, alertChief, writeArtifact, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   });
 
@@ -3955,7 +3956,7 @@ export default async function plugin(bb: BbPluginApi) {
       "Chief, planners and researchers may use survey and investigate. Reviewers, workers and advisors cannot use it.",
       "Read-only by prompt only: the agents share your checkout and permissions, and are told not to edit, commit, or push.",
       "From Chief the call returns at once with the id of a researcher thread that runs the research in your checkout and reports through chief_report; its report arrives as a lifecycle alert, so end your turn instead of polling.",
-      "From a planner, each call waits up to the mode's timeout (10 minutes unless set in Chief researcher settings), and never more than 4 minutes, because BB ends tool calls at about 5 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting; the run keeps going in between.",
+      "From a planner, each call waits up to the mode's timeout (10 minutes unless set in Chief researcher settings), and never more than 2.5 minutes, because some providers end tool calls at 3 minutes. If the run is still going it returns its runId: call chief_research again with the same mode and that runId to keep waiting; the run keeps going in between.",
     ].join(" "),
     parameters: researchParams,
     async execute(params, context) {

@@ -7,10 +7,15 @@ import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from 
 /** How long one chief_research call waits before handing back a runId to resume with. */
 export const RESEARCH_DEFAULT_TIMEOUT_MINUTES = 10;
 /** Hard ceiling on one chief_research call's wait, whatever the configured timeout.
+ * acp-antigravity ends MCP tool calls at 180 s, and BB ends them at about 5 minutes.
  * ponytail: BB's daemon-to-server tool-call fetch dies at undici's 300 s body timeout and then stops the run; the 1-minute margin
  * covers the final status, history and failureNote CLI calls (up to 30 s each) that can run after the deadline.
  * Drop the cap once BB streams keepalive bytes or the daemon disables the body timeout. */
-const RESEARCH_CALL_WAIT_CAP_MS = 4 * 60_000;
+const RESEARCH_CALL_WAIT_CAP_MS = 150_000;
+/** How long a researcher has to report after its run ended before the server alerts Chief with the result. */
+const RESEARCH_REPORT_GRACE_MS = 3 * 60_000;
+/** Consecutive status-read failures before checkUnreported alerts Chief that it cannot read a run. */
+const RESEARCH_UNREAD_LIMIT = 5;
 const RESEARCH_POLL_MS = 3_000;
 const MAX_RESEARCH_OUTPUT = 32_000;
 const RESEARCH_PREAMBLE = `READ-ONLY: ${READ_ONLY}, and run no command that changes tracked files or git state; you share the caller's checkout.`;
@@ -277,6 +282,8 @@ export interface ResearchDeps<Row extends ResearchRow, Catalog> {
     title: string; brief: string; state: "starting"; status: string;
   }>;
   alertChief: (row: Row, key: string, message: string) => Promise<unknown>;
+  /** Writes one of Chief's artifacts and returns its absolute path. */
+  writeArtifact: (threadId: string, projectId: string, name: string, content: string) => Promise<string>;
   serverPath: () => string;
   clip: (value: string, limit?: number) => string;
   execFileAsync: (file: string, args: string[], options: ExecFileOptions) => Promise<{ stdout: string; stderr: string }>;
@@ -289,7 +296,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
   const {
     db, bb, managedRow, roleRow, terminal, isActiveChief, researchSettings, readResearchModel, environmentHostId, discover,
     catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError, lastOutput, managedSpawn,
-    alertChief, serverPath, clip, execFileAsync,
+    alertChief, writeArtifact, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   } = deps;
 
@@ -547,12 +554,42 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
   /** What a chief_research call ended as, mutated by research()'s paths and written once to chief_research_calls. */
   type ResearchCall = { role: string | null; runId: string | null; outcome: "succeeded" | "partial" | "failed" | "still_running" | "timed_out" | "spawned" | "start_failed" | "error" };
 
+  type RunStatus = { status: string; result?: unknown; resultOmitted?: boolean; error?: unknown; calls?: unknown; finishedAt?: number };
+
+  /** The unclipped text of a finished run: succeeded (or partial) with its result, else failed with its error. */
+  async function resultText(runId: string, run: RunStatus, context: { threadId: string; projectId: string }): Promise<{ outcome: "succeeded" | "partial" | "failed"; text: string }> {
+    if (run.status === "succeeded") {
+      let result = run.result;
+      if (run.resultOmitted) {
+        const history: unknown = await workflowRead("history", [runId, "--cursor", "0", "--limit", "1"], context).catch(() => null);
+        const record = (Array.isArray(history) ? history : [history]).find((line) => line?.type === "run");
+        result = record?.result ?? "(result omitted; read it with bb workflows history)";
+      }
+      // survey's table or investigate's brief, shown above the raw result.
+      const shown = result as { table?: unknown; brief?: unknown } | null;
+      const summary = [shown?.table, shown?.brief].find((value) => typeof value === "string");
+      const failures = (result as { failures?: unknown } | null)?.failures;
+      const partial = Array.isArray(failures) && failures.length > 0;
+      const note = partial ? await failureNote(runId, context) : null;
+      return {
+        outcome: partial ? "partial" : "succeeded",
+        text: [
+          `runId: ${runId}`, `status: ${partial ? "partial" : run.status}`, ...(note ? [note] : []),
+          ...(summary ? ["", summary as string] : []),
+          "", "result:", JSON.stringify(result, null, 2),
+        ].join("\n"),
+      };
+    }
+    const note = await failureNote(runId, context);
+    return { outcome: "failed", text: `runId: ${runId}\nstatus: ${run.status}\nerror: ${JSON.stringify(run.error)}\n${note ? `${note}\n` : ""}calls: ${JSON.stringify(run.calls)}` };
+  }
+
   async function awaitResearch(runId: string, context: { threadId: string; projectId: string; signal?: AbortSignal }, deadline: number, call: ResearchCall, hard?: { at: number; mode: string }) {
     call.runId = runId;
     if (hard) armResearchStop(runId, hard.at, context);
     try {
       for (;;) {
-        let run: { status: string; result?: unknown; resultOmitted?: boolean; error?: unknown; calls?: unknown };
+        let run: RunStatus;
         try {
           run = await workflowRead("status", [runId], context);
         } catch (error) {
@@ -566,24 +603,9 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
         }
         if (!RUNNING_WORKFLOW.has(run.status)) disarmResearchStop(runId);
         if (run.status === "succeeded") {
-          let result = run.result;
-          if (run.resultOmitted) {
-            const history: unknown = await workflowRead("history", [runId, "--cursor", "0", "--limit", "1"], context).catch(() => null);
-            const record = (Array.isArray(history) ? history : [history]).find((line) => line?.type === "run");
-            result = record?.result ?? "(result omitted; read it with bb workflows history)";
-          }
-          // survey's table or investigate's brief, shown above the raw result.
-          const shown = result as { table?: unknown; brief?: unknown } | null;
-          const summary = [shown?.table, shown?.brief].find((value) => typeof value === "string");
-          const failures = (result as { failures?: unknown } | null)?.failures;
-          const partial = Array.isArray(failures) && failures.length > 0;
-          const note = partial ? await failureNote(runId, context) : null;
-          call.outcome = partial ? "partial" : "succeeded";
-          return researchOutput([
-            `runId: ${runId}`, `status: ${partial ? "partial" : run.status}`, ...(note ? [note] : []),
-            ...(summary ? ["", summary as string] : []),
-            "", "result:", JSON.stringify(result, null, 2),
-          ].join("\n"));
+          const { outcome, text } = await resultText(runId, run, context);
+          call.outcome = outcome;
+          return researchOutput(text);
         }
         // Cancelled past the deadline is the hard stop (the server's timer or an earlier call), not a failure.
         if (hard && run.status === "cancelled" && Date.now() >= hard.at) {
@@ -591,9 +613,9 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
           return timedOutReport(runId, hard.mode, null, context);
         }
         if (!RUNNING_WORKFLOW.has(run.status)) {
-          const note = await failureNote(runId, context);
-          call.outcome = "failed";
-          return researchOutput(`runId: ${runId}\nstatus: ${run.status}\nerror: ${JSON.stringify(run.error)}\n${note ? `${note}\n` : ""}calls: ${JSON.stringify(run.calls)}`);
+          const { outcome, text } = await resultText(runId, run, context);
+          call.outcome = outcome;
+          return researchOutput(text);
         }
         context.signal?.throwIfAborted();
         // The hard deadline comes first: when both have passed, the run is over, not "still running".
@@ -696,6 +718,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
       "- Call chief_research once with exactly these parameters:",
       "```json", JSON.stringify(call), "```",
       `- If it answers "Still running", call chief_research again with mode: ${mode} and the runId it gave; repeat until it returns the result, fails, or reports timed_out. Never start a second run for the same question.`,
+      "- If chief_research fails with a tool error, call it again with mode and runId; do not poll with bb workflows commands.",
       "- timed_out means the run was stopped at its time limit: the response lists the answers that finished. Report those as a partial result, saying it timed out. If the response says the stop failed, report blocked with that as the blocker.",
       ...({
         survey: ["- Merge: one table with every row and its evidence."],
@@ -757,5 +780,71 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
     return prefix + await awaitResearch(runId, context, deadline, call, hard);
   }
 
-  return { research, researchSleep };
+  const unreadCounts = new Map<string, number>();
+  const firstSeenEnded = new Map<string, number>();
+  const IDLE_STATES = new Set(["ready", "blocked", "complete", "archived", "deleted"]);
+
+  /** The researcher's current row, or undefined once it has reported or ended: rows passed in may be stale after an await. */
+  const liveResearcher = (threadId: string) => {
+    const row = roleRow(threadId);
+    return row && row.role === "researcher" && !IDLE_STATES.has(row.state) ? row : undefined;
+  };
+  const alerted = (key: string) => !!db.prepare<[string]>(`SELECT 1 FROM alert_outbox WHERE dedupe_key=?`).get(key);
+
+  /** Supervisor check: a researcher whose run ended without a report gets its result saved and Chief alerted, once per run. */
+  async function checkUnreported(rows: Row[]) {
+    for (const row of rows) {
+      if (row.role !== "researcher" || IDLE_STATES.has(row.state)) continue;
+      try {
+        const last = db.prepare<[string]>(`SELECT run_id FROM chief_research_calls WHERE caller_thread_id=? AND run_id IS NOT NULL ORDER BY id DESC LIMIT 1`)
+          .get(row.thread_id) as { run_id: string } | undefined;
+        if (!last) continue;
+        const runId = last.run_id;
+        // The outbox row survives a reload, so it is the once-per-run marker.
+        if (alerted(`${row.thread_id}:research-unreported:${runId}`)) continue;
+        const context = { threadId: row.thread_id, projectId: row.project_id };
+        let run: RunStatus;
+        try {
+          run = await runWorkflowCli("status", [runId], context); // one try: the next supervisor tick is the retry
+          unreadCounts.delete(runId);
+        } catch (error) {
+          const failures = (unreadCounts.get(runId) ?? 0) + 1;
+          unreadCounts.set(runId, failures);
+          // >= so a failed enqueue retries next tick; the outbox key stops repeats once one lands.
+          const live = failures >= RESEARCH_UNREAD_LIMIT && !alerted(`${row.thread_id}:research-unread:${runId}`) ? liveResearcher(row.thread_id) : undefined;
+          if (live) {
+            await alertChief(live, `research-unread:${runId}`, [
+              `Researcher "${row.title}" (${row.thread_id}): the plugin server could not read its run ${runId} ${failures} times in a row: ${clip(error instanceof Error ? error.message : String(error), 300)}`,
+              `Check it with \`bb workflows status ${runId}\`.`,
+            ].join("\n"));
+          }
+          continue;
+        }
+        if (RUNNING_WORKFLOW.has(run.status)) continue;
+        if (!firstSeenEnded.has(runId)) firstSeenEnded.set(runId, Date.now());
+        const finishedAt = typeof run.finishedAt === "number" ? run.finishedAt : firstSeenEnded.get(runId)!;
+        if (Date.now() - finishedAt < RESEARCH_REPORT_GRACE_MS) continue;
+        const { text } = await resultText(runId, run, context);
+        if (!liveResearcher(row.thread_id)) continue;
+        const path = await writeArtifact(row.thread_id, row.project_id, `research-${runId}.md`, `${text}\n`).catch((error) => {
+          bb.log.warn(`checkUnreported could not save ${runId}: ${clip(String(error), 200)}`);
+          return null;
+        });
+        const output = await lastOutput(row.thread_id).catch(() => null);
+        const live = liveResearcher(row.thread_id);
+        if (!live) continue;
+        await alertChief(live, `research-unreported:${runId}`, [
+          `Researcher "${row.title}" (${row.thread_id}): run ${runId} is ${run.status}; it finished ${Math.round((Date.now() - finishedAt) / 60_000)} min ago and the researcher has not reported.`,
+          path ? `Result saved to ${path}` : `The result could not be saved; read it with \`bb workflows history ${runId} --cursor 0 --limit 1\`.`,
+          `Last assistant output:\n${output ? clip(output, 2_000) : "(none available)"}`,
+          "If that output shows it writing its report, wait; otherwise chief_stop it and use the result.",
+        ].join("\n"));
+      } catch (error) {
+        // alertChief threw before its outbox row landed, or a DB read failed: the next tick retries this row.
+        bb.log.warn(`checkUnreported failed for ${row.thread_id}: ${clip(String(error), 200)}`);
+      }
+    }
+  }
+
+  return { research, researchSleep, checkUnreported };
 }
