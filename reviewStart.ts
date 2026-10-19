@@ -207,10 +207,14 @@ interface ReviewRow {
   replaces_thread_id: string | null;
   reject_streak: number;
   reviewed_head_sha: string | null;
+  verify_command?: string | null;
   created_at: number;
 }
 
-export type ReviewStarted = { threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[] };
+export type ReviewStarted = { gated?: false; threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; gateSkipped?: string[] };
+/** A pre-review gate failed: no reviewer was spawned, no ledger row written, no open review superseded. */
+export type ReviewGated = { gated: true; workerThreadId: string; command: string; sha: string; exitCode: number; outputPath: string | null; tail: string };
+export type GateResult = { passed: true } | { skipped: string } | { failed: Omit<ReviewGated, "gated"> };
 
 /** The row fields launch writes for a reviewer. */
 interface ReviewInsert {
@@ -245,6 +249,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   clipMiddle: (value: string, limit: number) => string;
   /** Writes the reviewer's review-context.md; owns its retries and alerting Chief on final failure. */
   writeReviewContext: (threadId: string, content: string, workerThreadId: string) => Promise<void>;
+  /** Runs row.verify_command on the pinned sha (or the branch tip when null) in a temporary checkout. */
+  runGate: (row: Row, command: string, pinnedSha: string | null, projectDir: string | null) => Promise<GateResult>;
 }
 
 /** One module owns starting a reviewer: the owner and duplicate checks, the in-flight dedupe, the pinned heads,
@@ -258,12 +264,12 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
   const existingBranchReview = db.prepare<[string, string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND chief_thread_id=? AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
-  const reviewStarts = new Map<string, Promise<ReviewStarted>>();
+  const reviewStarts = new Map<string, Promise<ReviewStarted | ReviewGated>>();
 
   /** Runs one start under its key: a second call with the same key joins the first, and the entry goes once it settles. */
-  async function dedupe(key: string, run: () => Promise<ReviewStarted>) {
+  async function dedupe<T extends ReviewStarted | ReviewGated>(key: string, run: () => Promise<T>): Promise<T> {
     const inFlight = reviewStarts.get(key);
-    if (inFlight) return inFlight;
+    if (inFlight) return inFlight as Promise<T>;
     const start = run();
     reviewStarts.set(key, start);
     try {
@@ -290,7 +296,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     }
     const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && planWavesFor(worker.plan_thread_id).length > 0);
     const reviewKey = planReview ? `plan:${worker.plan_thread_id}` : workerThreadId;
-    return dedupe(reviewKey, async () => {
+    return dedupe<ReviewStarted | ReviewGated>(reviewKey, async () => {
       const openReviews = [...new Set(targets.flatMap((target) => ledger.taskChain(target.thread_id)))]
         .flatMap((id) => { const open = ledger.openReview(id); return open ? [open] : []; })
         .filter((review, index, all) => all.findIndex((other) => other.thread_id === review.thread_id) === index)
@@ -319,6 +325,14 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         if (target !== worker && !heads.get(target.thread_id) && !target.branch) {
           throw new Error(`Worker ${target.thread_id} has no readable pull request head and no branch, so the plan's one review cannot reach it. Retry once the forge answers.`);
         }
+      }
+      // Deterministic gate before any reviewer exists: a failure spawns nothing and writes no ledger row.
+      const gateSkipped: string[] = [];
+      for (const target of targets) {
+        if (!target.verify_command) continue;
+        const gate = await deps.runGate(target, target.verify_command, heads.get(target.thread_id)?.sha ?? null, projectDir);
+        if ("failed" in gate) return { gated: true as const, ...gate.failed };
+        if ("skipped" in gate) gateSkipped.push(`${target.thread_id}: ${gate.skipped}`);
       }
       const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
       const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
@@ -373,7 +387,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           for (const old of openReviews) store.completeSuperseded(old.thread_id, now);
         });
       }
-      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id) };
+      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id), gateSkipped };
     });
   }
 

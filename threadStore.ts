@@ -26,6 +26,7 @@ export interface ThreadInsert<Role extends string = string, State extends string
   kind?: string | null;
   simple?: boolean | null;
   plannerOn?: boolean | null;
+  verifyCommand?: string | null;
 }
 
 /** The columns a report writes to its row; reserveReport maps them onto the UPDATE's parameters. */
@@ -107,8 +108,8 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, simple, planner_on, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, simple, planner_on, verify_command, active_since, active_cycle, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -117,7 +118,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
       reviewed_report_seq=excluded.reviewed_report_seq, reviewed_head_sha=excluded.reviewed_head_sha, unplanned_reason=excluded.unplanned_reason,
       replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
-      kind=excluded.kind, simple=excluded.simple,
+      kind=excluded.kind, simple=excluded.simple, verify_command=excluded.verify_command,
       planner_on=COALESCE(excluded.planner_on, managed_threads.planner_on),
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
@@ -125,7 +126,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       input.status ?? "starting", input.brief ?? null, input.branch ?? null,
       input.issueUrl ?? null, input.prUrl ?? null, input.planThreadId ?? null, input.planWave ?? null,
       input.reviewedReportSeq ?? null, input.reviewedHeadSha ?? null, input.unplannedReason ?? null, input.replacesThreadId ?? null,
-      input.kind ?? null, input.simple ? 1 : null, input.plannerOn == null ? null : input.plannerOn ? 1 : 0,
+      input.kind ?? null, input.simple ? 1 : null, input.plannerOn == null ? null : input.plannerOn ? 1 : 0, input.verifyCommand ?? null,
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now,
     );

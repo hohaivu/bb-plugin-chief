@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -12,7 +14,7 @@ import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
-import { createReviewStart } from "./reviewStart";
+import { createReviewStart, type GateResult } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import { createPlanProgress, type SegmentState } from "./planProgress";
 import { createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
@@ -50,6 +52,8 @@ const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 /** chief_continue calls per stall episode that re-arm the stall clock; later ones still deliver the nudge but leave the alert schedule alone. A report resets the count. */
 const MAX_STALL_RESETS = 2;
 const FORGE_CLI_TIMEOUT_MS = 10_000;
+/** The pre-review gate's command budget: under BB's ~5-minute tool-call limit. */
+const GATE_TIMEOUT_MS = 180_000;
 /** Longest mission, success criteria or constraints text chief_forge_init puts in a pull request body. */
 const FORGE_BRIEF_SECTION_MAX = 1_500;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
@@ -263,6 +267,7 @@ const delegateShape = z.object({
   kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker."),
   userApprovedRound: z.boolean().optional().describe(`Set only with replaces: and only after the user explicitly approved another review round in this thread: a replaced worker whose reviewer has requested changes ${STOP_AFTER_REJECTIONS} times in a row is refused without it.`),
   simple: z.boolean().optional().describe("Set only when the user's message contains #simple. Skips chief_plan (no unplannedReason needed). Pass the user's request verbatim as mission and add no diagnosis of your own: the worker finds the cause itself. Review is at your judgment (see the core rules). Cannot be combined with planThreadId. A replaces: successor keeps it."),
+  verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command that must exit 0 before a reviewer is spawned, e.g. `npx tsc --noEmit && bb plugin build`. Inherited through replaces:."),
 });
 
 const delegateParams = delegateShape.superRefine((value, ctx) => {
@@ -506,6 +511,8 @@ interface ManagedRow {
   kind: "designer" | null;
   /** Worker row only: 1 when delegated with simple (#simple); null/0 means a normal worker. */
   simple: number | null;
+  /** Worker row only: the pre-review gate command, or null for no gate. */
+  verify_command: string | null;
   /** Worker row only: 1/0 for planning on/off at delegation; null for rows from before the column. */
   planner_on: number | null;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
@@ -1022,6 +1029,8 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN findings TEXT`,
     // Who recorded a lesson: 'reviewer' lessons go to later reviewers only; NULL (older rows) or 'advisor' go to every managed thread.
     `ALTER TABLE chief_lessons ADD COLUMN role TEXT`,
+    // Worker row only: the shell command a pre-review gate runs on the commit under review; inherited through replaces:.
+    `ALTER TABLE managed_threads ADD COLUMN verify_command TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1798,6 +1807,7 @@ export default async function plugin(bb: BbPluginApi) {
     let kind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
     // A fix successor of a #simple worker stays simple; a plan-linked successor never is, and an explicit false clears it.
     const simple = params.simple ?? (!!prior && planThreadId === undefined && prior.simple === 1);
+    const verifyCommand = params.verifyCommand ?? prior?.verify_command ?? null;
     // The schema only sees params.planThreadId; a replaces: inherited one must be checked here too.
     if (planThreadId !== undefined && params.unplannedReason) {
       throw new Error("unplannedReason cannot be combined with planThreadId.");
@@ -1970,7 +1980,7 @@ export default async function plugin(bb: BbPluginApi) {
     }, {
       role: "worker", chiefThreadId: chief.thread_id, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
-      kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn,
+      kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn, verifyCommand,
     });
     if (prior) {
       const now = Date.now();
@@ -2227,8 +2237,60 @@ export default async function plugin(bb: BbPluginApi) {
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn, requireChiefCaller, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
     busyStatuses: BUSY_STATUSES, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
-    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext,
+    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext, runGate,
   });
+
+  /** The pre-review gate: runs the worker's verify command in a detached temporary worktree of the commit under review.
+   * Only a non-zero exit fails it; anything that keeps it from running is a skip with the reason, and the review proceeds. */
+  async function runGate(row: ManagedRow, command: string, pinnedSha: string | null, projectDir: string | null): Promise<GateResult> {
+    if (!projectDir) return { skipped: "no local checkout of the project on the plugin server (remote host or unknown path)" };
+    const git = async (args: string[]) => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          return (await execFileAsync("git", args, { cwd: projectDir, timeout: 60_000, env: forgeEnv() })).stdout.trim();
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError;
+    };
+    let sha = pinnedSha;
+    try {
+      if (!sha) {
+        if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
+        sha = await git(["rev-parse", "--verify", `refs/heads/${row.branch}^{commit}`]);
+      } else {
+        const known = await execFileAsync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: projectDir, env: forgeEnv() }).then(() => true, () => false);
+        if (!known && row.branch) await git(["fetch", "origin", row.branch]);
+      }
+    } catch (error) {
+      return { skipped: `commit not found (${clip(String(error), 200)})` };
+    }
+    let dir: string | null = null;
+    try {
+      dir = await mkdtemp(join(tmpdir(), "chief-gate-"));
+      await git(["worktree", "add", "--detach", dir, sha]);
+      try {
+        await execFileAsync("sh", ["-c", command], { cwd: dir, timeout: GATE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: serverPath() } });
+        return { passed: true };
+      } catch (error) {
+        const failure = error as { code?: unknown; killed?: boolean; signal?: string | null; stdout?: string; stderr?: string };
+        if (failure.killed || typeof failure.code !== "number") return { skipped: `the command did not finish (${failure.signal ?? "timeout or spawn error"})` };
+        const output = `${failure.stdout ?? ""}${failure.stderr ? `\n${failure.stderr}` : ""}`.trim();
+        const outputPath = await writeArtifact(row.thread_id, row.project_id, `gate-${Date.now()}.md`,
+          `# Pre-review gate failed\n\nCommand: \`${command}\`\nCommit: ${sha}\nExit: ${failure.code}\n\n\`\`\`\n${output}\n\`\`\`\n`).catch(() => null);
+        return { failed: { workerThreadId: row.thread_id, command, sha, exitCode: failure.code, outputPath, tail: output.slice(-1_500) } };
+      }
+    } catch (error) {
+      return { skipped: `git could not check out ${sha} (${clip(String(error), 200)})` };
+    } finally {
+      if (dir) {
+        await git(["worktree", "remove", "--force", dir]).catch(() => git(["worktree", "prune"]).catch(() => undefined));
+        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }
 
   /** Which path a worker review took, for chief_review's reply. */
   function reviewPathNote(workerThreadId: string, pinnedSha?: string | null, covers?: string[]) {
@@ -3810,7 +3872,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.`,
+    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. verifyCommand sets a pre-review gate. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.`,
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
@@ -3960,7 +4022,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_review",
     presentation: { label: { pending: "Starting review…", completed: "Started review" } },
-    description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
+    description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. A worker delegated with verifyCommand is gated first: the command runs in a temporary checkout of the commit under review, and a non-zero exit spawns no reviewer and returns the output instead (a gate that cannot run is skipped with the reason). With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
     parameters: reviewParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
@@ -3969,7 +4031,11 @@ export default async function plugin(bb: BbPluginApi) {
         await controlledTarget(params.workerThreadId, caller);
         touchCallerChief(caller);
         const review = await startReview(caller, params.workerThreadId, params.focus);
-        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}`;
+        if (review.gated) {
+          return `Pre-review gate failed: \`${review.command}\` exited ${review.exitCode} on ${review.sha}. No reviewer was spawned. Output tail:\n${review.tail}\n(full: ${review.outputPath ?? "not saved"}). Delegate a replacement worker with replaces: and pass that path in context.`;
+        }
+        const skipped = review.gateSkipped?.length ? ` Gate skipped: ${review.gateSkipped.join("; ")}.` : "";
+        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}${skipped}`;
       }
       touchCallerChief(caller);
       const branch = params.branch
@@ -4224,7 +4290,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
     "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id] [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--kind worker|designer] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--verify \"cmd\"] [--kind worker|designer] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
@@ -4243,7 +4309,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
       { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id] [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--kind worker|designer] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--verify \"cmd\"] [--kind worker|designer] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
@@ -4352,6 +4418,7 @@ export default async function plugin(bb: BbPluginApi) {
             userApprovedRound: args.bool("user-approved-round") || undefined,
             // undefined, not false: an absent flag must not override replaces: inheritance.
             simple: args.bool("simple") || undefined,
+            verifyCommand: args.one("verify"),
           });
           if (!parsed.success) return fail(`Invalid delegate brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await delegate(parsed.data, context.threadId);
