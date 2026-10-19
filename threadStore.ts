@@ -43,6 +43,8 @@ export interface ReportReservation {
   regression: 0 | 1;
   /** The merged fails JSON, or null to keep the stored one. */
   fails: string | null;
+  /** A reviewer's findings JSON; every report replaces it (null clears). */
+  findings: string | null;
   now: number;
 }
 
@@ -222,12 +224,12 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     /** chief_report: reserves the next report_seq and stores the report's columns; returns the reserved seq and result_rev. */
     reserveReport(report: ReportReservation) {
       const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
-        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
+        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), findings=?, report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
         last_report_state=?, owner_approval=NULL, owner_approved_at=NULL,
         active_since = CASE WHEN ?='active' THEN active_since ELSE NULL END, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
         report.state, report.result, report.summary, report.blocker,
         report.recommendation, report.verdict,
-        report.planWaves, report.regression, report.fails,
+        report.planWaves, report.regression, report.fails, report.findings,
         report.state, report.state, report.state, report.now, report.threadId,
       ) as { report_seq: number; result_rev: number };
       wrote();

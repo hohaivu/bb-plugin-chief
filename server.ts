@@ -319,6 +319,19 @@ const reportFailEntry = z.object({
 const failsParam = z.union([z.string().trim(), z.array(reportFailEntry)]).optional().describe(
   `Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most ${MAX_REPORT_FAILS} per report.`,
 );
+/** A reviewer's structured finding, published without limits; checkReport enforces them. */
+const reportFinding = z.object({
+  file: z.string().trim().describe("1-300 characters"),
+  line: z.number().int().optional().describe("1-based line"),
+  severity: z.enum(["blocking", "nit"]),
+  message: z.string().trim().describe("1-1000 characters"),
+  fix: z.string().trim().optional().describe("at most 1000 characters"),
+});
+type ReportFinding = z.infer<typeof reportFinding>;
+const MAX_FINDINGS = 40;
+const findingsParam = z.union([z.string().trim(), z.array(reportFinding)]).optional().describe(
+  `Ready only, reviewer only. Required on a reviewer's ready report ([] allowed for an approve with nothing to note). One entry per finding, at most ${MAX_FINDINGS}. request_changes iff at least one blocking. \`[AMBIGUOUS: …]\` items stay in result, not here.`,
+);
 const MAX_LOG_READ = 30;
 const logParams = z.object({
   entries: z.array(failEntry.extend({ kind: z.enum(["FACT", "FAIL"]) })).max(5).optional().describe(
@@ -365,6 +378,7 @@ const reportParams = z.object({
   blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
   recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
   fails: failsParam,
+  findings: findingsParam,
 });
 
 export const rpcContract = defineRpcContract({
@@ -496,6 +510,7 @@ interface ManagedRow {
   planner_on: number | null;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
   fails: string | null;
+  findings: string | null;
   /** Worker row on a plan: the highest plan_log id chief_log has shown it, or null. */
   log_read_id: number | null;
   /** Non-transient failed events counted for bb chief stats (since stats_since). */
@@ -1003,6 +1018,8 @@ export const MIGRATIONS = [
     `INSERT OR IGNORE INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq, head_sha, pr_url, branch) SELECT thread_id, worker_thread_id, reviewed_report_seq, reviewed_head_sha, NULL, branch FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NOT NULL`,
     // The covered worker's report a verdict row was given for (-1: re-pointed before the verdict); NULL on rows from before, which read the reviewer's reviewed_report_seq.
     `ALTER TABLE reviewer_verdicts ADD COLUMN worker_report_seq INTEGER`,
+    // A reviewer's latest structured findings (JSON array of {file, line?, severity, message, fix?}); replaced by each report.
+    `ALTER TABLE managed_threads ADD COLUMN findings TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1857,12 +1874,18 @@ export default async function plugin(bb: BbPluginApi) {
     // hands the fresh worker the review that prompted the handoff.
     const findings = prior ? ledger.openReview(prior.thread_id) : undefined;
     const ruledOut = prior ? chainFails(prior.thread_id) : [];
+    let structured: ReportFinding[] | undefined;
+    try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
     const prompt = [
       `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
       "", brief,
       ...(findings?.result ? [
         "", `## Review findings to fix (${findings.thread_id})`,
-        ...verdictPreview(findings),
+        ...(structured ? [
+          ...(findings.verdict_path ? [`Verdict file: ${findings.verdict_path}`] : []),
+          ...findingLines(structured, "blocking"),
+          ...(structured.some((entry) => entry.severity === "nit") ? ["Optional nits:", ...findingLines(structured, "nit")] : []),
+        ] : verdictPreview(findings)),
         ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
         "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
         "Do not apply a finding that is wrong, or that contradicts the brief or plan. List it in your ready result under `## Disputed findings`, with evidence: file:line, command output, or the brief or plan text it contradicts.",
@@ -2467,6 +2490,12 @@ export default async function plugin(bb: BbPluginApi) {
     ];
   }
 
+  /** One Markdown bullet per finding of the given severity, never clipped. */
+  function findingLines(list: ReportFinding[], severity: ReportFinding["severity"]) {
+    return list.filter((entry) => entry.severity === severity)
+      .map((entry) => `- ${entry.file}${entry.line ? `:${entry.line}` : ""} — ${entry.message}${entry.fix ? ` (fix: ${entry.fix})` : ""}`);
+  }
+
   /** A wave body's `Contracts to verify` section, up to the next heading of the same or higher level. */
   function contractsOf(body: string): string | undefined {
     // ponytail: headings inside code blocks are deliberately out of scope, as for the NOT-doing check.
@@ -2551,6 +2580,7 @@ export default async function plugin(bb: BbPluginApi) {
     onlyWhenReady("lesson", params.lesson);
     onlyWhenReady("regression", params.regression);
     onlyWhenReady("plan", params.plan);
+    onlyWhenReady("findings", params.findings);
     // Emptiness, length and role are independent of each other and of state: each failing one gets its own line.
     if (params.lesson !== undefined) {
       if (!params.lesson) errors.push("lesson is empty; send text or omit it.");
@@ -2578,6 +2608,36 @@ export default async function plugin(bb: BbPluginApi) {
           else tooLong(name, entry[field], max, "Shorten it.");
         }
       });
+    }
+
+    // report() decodes a JSON string first, so a string left here is not an array.
+    if (params.findings !== undefined) {
+      if (row.role !== "reviewer") errors.push(`findings is only for a reviewer's ready report (role is ${row.role}); remove it.`);
+      if (!Array.isArray(params.findings)) errors.push("findings: send an array of {file, line?, severity, message, fix?}.");
+      else {
+        const list = params.findings as unknown[];
+        if (list.length > MAX_FINDINGS) errors.push(`findings has ${list.length} entries; max ${MAX_FINDINGS}. Keep the blocking ones and the most useful nits.`);
+        list.forEach((item, index) => {
+          const entry = (typeof item === "object" && item !== null ? item : {}) as Record<string, unknown>;
+          const text = (field: string, min: number, max: number) => {
+            const value = entry[field];
+            const name = `findings[${index}].${field}`;
+            if (value === undefined && min === 0) return;
+            if (typeof value !== "string" || value.trim().length < min) errors.push(`${name} is missing or empty; send text.`);
+            else tooLong(name, value.trim(), max, "Shorten it.");
+          };
+          text("file", 1, 300);
+          text("message", 1, 1000);
+          text("fix", 0, 1000);
+          if (entry.line !== undefined && !(Number.isInteger(entry.line) && (entry.line as number) >= 1)) errors.push(`findings[${index}].line is ${JSON.stringify(entry.line)}; send a 1-based integer or omit it.`);
+          if (entry.severity !== "blocking" && entry.severity !== "nit") errors.push(`findings[${index}].severity is ${JSON.stringify(entry.severity)}; allowed "blocking" or "nit".`);
+        });
+        const blocking = list.filter((item) => (item as { severity?: unknown } | null)?.severity === "blocking").length;
+        if (params.verdict === "request_changes" && !blocking) errors.push('verdict is request_changes but findings has no "blocking" entry; add the blocking finding or send approve.');
+        if (params.verdict === "approve" && blocking) errors.push(`verdict is approve but findings has ${blocking} "blocking" ${blocking > 1 ? "entries" : "entry"}; send request_changes or mark them "nit".`);
+      }
+    } else if (row.role === "reviewer" && ready) {
+      errors.push("findings is missing; send [] when there are none.");
     }
 
     // The plan's own shape and rules are checked whatever the state and role; those two have their own lines.
@@ -2685,7 +2745,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (typeof reportFails === "string") {
       try { reportFails = JSON.parse(reportFails); } catch { /* checkReport refuses the string */ }
     }
-    const errors = checkReport(candidate, { ...params, fails: reportFails }, plan);
+    let reportFindings = params.findings;
+    if (typeof reportFindings === "string") {
+      try { reportFindings = JSON.parse(reportFindings); } catch { /* checkReport refuses the string */ }
+    }
+    const errors = checkReport(candidate, { ...params, fails: reportFails, findings: reportFindings }, plan);
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
     if (found.pending) store.insert(found.pending);
     const row = store.get(threadId)!;
@@ -2722,6 +2786,8 @@ export default async function plugin(bb: BbPluginApi) {
         .map((entry) => ({ ...entry, at }));
       fails = JSON.stringify([...kept, ...incoming].slice(-MAX_CARRIED_FAILS));
     }
+    // checkReport proved the shape; only a reviewer's ready report carries findings.
+    const findingList = (reportFindings as ReportFinding[] | undefined)?.map((entry) => ({ ...entry, file: entry.file.trim(), message: entry.message.trim(), ...(entry.fix !== undefined ? { fix: entry.fix.trim() } : {}) }));
     const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, not rejection rounds — a
@@ -2734,7 +2800,8 @@ export default async function plugin(bb: BbPluginApi) {
         threadId, state: params.state, result: params.result ?? null, summary: params.summary ?? null,
         blocker: params.state === "blocked" ? params.blocker ?? null : null,
         recommendation: params.recommendation ?? null, verdict,
-        planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails, now,
+        planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails,
+        findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null, now,
       });
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         store.markAdvised(threadId, now);
@@ -2778,6 +2845,8 @@ export default async function plugin(bb: BbPluginApi) {
           ...(reviewedTargets.length > 1
             ? reviewedTargets.map((target) => `Reviewed worker: ${target.worker_thread_id}${target.head_sha ? ` at head ${target.head_sha}` : ""}`)
             : [`Reviewed worker: ${row.worker_thread_id ?? "none"}`, ...(row.reviewed_head_sha ? [`Reviewed head: ${row.reviewed_head_sha}`] : [])]),
+          ...(findingList?.some((entry) => entry.severity === "blocking") ? ["", "## Blocking findings", "", ...findingLines(findingList, "blocking")] : []),
+          ...(findingList?.some((entry) => entry.severity === "nit") ? ["", "## Nits", "", ...findingLines(findingList, "nit")] : []),
           "", "## Findings", "", params.result ?? "",
           ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
         ].join("\n") + "\n");
@@ -3929,7 +3998,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_report",
     presentation: { label: { pending: "Reporting to Chief…", completed: "Reported to Chief" } },
-    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
+    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict and findings; a planner's ready report requires plan (the full plan body), which Chief receives as a file. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
