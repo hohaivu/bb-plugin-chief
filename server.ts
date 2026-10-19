@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -12,7 +14,8 @@ import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
-import { createReviewStart } from "./reviewStart";
+import { computeImpactSlice, gitWithin, type ImpactSlice } from "./impactSlice";
+import { createReviewStart, type GateResult, type PinnedHead } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import { createPlanProgress, type SegmentState } from "./planProgress";
 import { createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
@@ -50,6 +53,8 @@ const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 /** chief_continue calls per stall episode that re-arm the stall clock; later ones still deliver the nudge but leave the alert schedule alone. A report resets the count. */
 const MAX_STALL_RESETS = 2;
 const FORGE_CLI_TIMEOUT_MS = 10_000;
+/** The pre-review gate's command budget: under BB's ~5-minute tool-call limit. */
+const GATE_TIMEOUT_MS = 180_000;
 /** Longest mission, success criteria or constraints text chief_forge_init puts in a pull request body. */
 const FORGE_BRIEF_SECTION_MAX = 1_500;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
@@ -263,6 +268,7 @@ const delegateShape = z.object({
   kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker."),
   userApprovedRound: z.boolean().optional().describe(`Set only with replaces: and only after the user explicitly approved another review round in this thread: a replaced worker whose reviewer has requested changes ${STOP_AFTER_REJECTIONS} times in a row is refused without it.`),
   simple: z.boolean().optional().describe("Set only when the user's message contains #simple. Skips chief_plan (no unplannedReason needed). Pass the user's request verbatim as mission and add no diagnosis of your own: the worker finds the cause itself. Review is at your judgment (see the core rules). Cannot be combined with planThreadId. A replaces: successor keeps it."),
+  verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command the worker's brief tells it to run and get exit 0 from before reporting ready; the same command must exit 0 before a reviewer is spawned, e.g. `npx tsc --noEmit && bb plugin build`. Inherited through replaces:."),
 });
 
 const delegateParams = delegateShape.superRefine((value, ctx) => {
@@ -319,6 +325,19 @@ const reportFailEntry = z.object({
 const failsParam = z.union([z.string().trim(), z.array(reportFailEntry)]).optional().describe(
   `Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most ${MAX_REPORT_FAILS} per report.`,
 );
+/** A reviewer's structured finding, published without limits; checkReport enforces them. */
+const reportFinding = z.object({
+  file: z.string().trim().describe("1-300 characters"),
+  line: z.number().int().optional().describe("1-based line"),
+  severity: z.enum(["blocking", "nit"]),
+  message: z.string().trim().describe("1-1000 characters"),
+  fix: z.string().trim().optional().describe("at most 1000 characters"),
+});
+type ReportFinding = z.infer<typeof reportFinding>;
+const MAX_FINDINGS = 40;
+const findingsParam = z.union([z.string().trim(), z.array(reportFinding)]).optional().describe(
+  `Ready only, reviewer only. Required on a reviewer's ready report ([] allowed for an approve with nothing to note). One entry per finding, at most ${MAX_FINDINGS}. request_changes iff at least one blocking. \`[AMBIGUOUS: …]\` items stay in result, not here.`,
+);
 const MAX_LOG_READ = 30;
 const logParams = z.object({
   entries: z.array(failEntry.extend({ kind: z.enum(["FACT", "FAIL"]) })).max(5).optional().describe(
@@ -351,7 +370,7 @@ const reportParams = z.object({
     "Ready only. Required in a review thread: approve when the change can ship as it stands, request_changes only when at least one blocking finding exists; nits alone never reject. Workers leave this unset.",
   ),
   lesson: z.string().trim().optional().describe(
-    `Ready only, advisor only, at most ${LESSON_MAX} characters: one durable, project-level rule future workers should follow so this class of rejection does not recur. Omit when the cause is task-specific.`,
+    `Ready only, advisor or reviewer, at most ${LESSON_MAX} characters. An advisor records one durable, project-level rule future workers should follow so this class of rejection does not recur; a reviewer records a durable review rule or known false positive, shown to future reviewers only. Omit when the cause is task-specific.`,
   ),
   regression: z.boolean().optional().describe(
     "Ready only, reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
@@ -365,6 +384,7 @@ const reportParams = z.object({
   blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
   recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
   fails: failsParam,
+  findings: findingsParam,
 });
 
 export const rpcContract = defineRpcContract({
@@ -492,10 +512,13 @@ interface ManagedRow {
   kind: "designer" | null;
   /** Worker row only: 1 when delegated with simple (#simple); null/0 means a normal worker. */
   simple: number | null;
+  /** Worker row only: the pre-review gate command, or null for no gate. */
+  verify_command: string | null;
   /** Worker row only: 1/0 for planning on/off at delegation; null for rows from before the column. */
   planner_on: number | null;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
   fails: string | null;
+  findings: string | null;
   /** Worker row on a plan: the highest plan_log id chief_log has shown it, or null. */
   log_read_id: number | null;
   /** Non-transient failed events counted for bb chief stats (since stats_since). */
@@ -1003,6 +1026,12 @@ export const MIGRATIONS = [
     `INSERT OR IGNORE INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq, head_sha, pr_url, branch) SELECT thread_id, worker_thread_id, reviewed_report_seq, reviewed_head_sha, NULL, branch FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NOT NULL`,
     // The covered worker's report a verdict row was given for (-1: re-pointed before the verdict); NULL on rows from before, which read the reviewer's reviewed_report_seq.
     `ALTER TABLE reviewer_verdicts ADD COLUMN worker_report_seq INTEGER`,
+    // A reviewer's latest structured findings (JSON array of {file, line?, severity, message, fix?}); replaced by each report.
+    `ALTER TABLE managed_threads ADD COLUMN findings TEXT`,
+    // Who recorded a lesson: 'reviewer' lessons go to later reviewers only; NULL (older rows) or 'advisor' go to every managed thread.
+    `ALTER TABLE chief_lessons ADD COLUMN role TEXT`,
+    // Worker row only: the shell command a pre-review gate runs on the commit under review; inherited through replaces:.
+    `ALTER TABLE managed_threads ADD COLUMN verify_command TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1628,7 +1657,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- When the task mixes UI that no approved design or explicit visual spec fixes with non-UI code (DB, notifications, OCR, …), split it: a design-only wave marked `design: true` (a Designer draws the artboards in the design tool, no app code), then the wave that builds on it with all the code, UI included, against the approved artboards. Never put both in one wave. Pure-UI work, pure non-UI work, and work whose look an approved design or spec already fixes stay as they are, with no `design` flag.",
       "- Submit the plan through chief_report's `plan` field: one Markdown string for a single wave, or an array of `{body, dependsOn, design?}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
       "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
-      "- Give every wave a `## Contracts to verify` Markdown heading: a checklist of the invariants, edge cases and existing behaviour that wave must keep — what a reviewer would otherwise catch only after the fact. The worker and the reviewer both receive this exact list.",
+      "- Give every wave a `## Contracts to verify` Markdown heading: a checklist that states contracts as falsifiable properties where they apply: round-trip (decode(encode(x)) == x, save then load), idempotency (running twice equals running once), invariants and state bounds (what holds after every step, value or count limits), equivalence (new path equals old path or a reference on the same inputs), and what must never happen; state each with the edge cases and existing behaviour the wave must keep — what a reviewer would otherwise catch only after the fact. Do not force a class that does not fit. The worker and the reviewer both receive this exact list.",
       ...(researchLine("planner", await researchSettings()) ? ["- When the root cause is unclear, or before planning you need a broad multi-file scan or several independent questions (scoping a large issue, mapping many similar call sites or files), use chief_research instead of reading it all yourself: investigate (one sub-question per hypothesis or independent question); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings against the code before relying on them."] : []),
       "- A genuine product or scope decision is Chief's, not yours. If it blocks a sound plan, report blocked with the question as blocker and your recommended answer as recommendation. If the plan holds under a stated assumption, report ready and list the question and the assumption under `## Open questions` in the wave it affects. Never ask the user directly from this thread.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
@@ -1779,6 +1808,7 @@ export default async function plugin(bb: BbPluginApi) {
     let kind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
     // A fix successor of a #simple worker stays simple; a plan-linked successor never is, and an explicit false clears it.
     const simple = params.simple ?? (!!prior && planThreadId === undefined && prior.simple === 1);
+    const verifyCommand = params.verifyCommand ?? prior?.verify_command ?? null;
     // The schema only sees params.planThreadId; a replaces: inherited one must be checked here too.
     if (planThreadId !== undefined && params.unplannedReason) {
       throw new Error("unplannedReason cannot be combined with planThreadId.");
@@ -1857,14 +1887,23 @@ export default async function plugin(bb: BbPluginApi) {
     // hands the fresh worker the review that prompted the handoff.
     const findings = prior ? ledger.openReview(prior.thread_id) : undefined;
     const ruledOut = prior ? chainFails(prior.thread_id) : [];
+    let structured: ReportFinding[] | undefined;
+    try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
     const prompt = [
       `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
       "", brief,
       ...(findings?.result ? [
         "", `## Review findings to fix (${findings.thread_id})`,
-        ...verdictPreview(findings),
+        ...(structured ? [
+          ...(findings.verdict_path ? [`Verdict file: ${findings.verdict_path}`] : []),
+          ...findingLines(structured, "blocking"),
+          ...(structured.some((entry) => entry.severity === "nit") ? ["Optional nits:", ...findingLines(structured, "nit")] : []),
+        ] : verdictPreview(findings)),
         ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
-        "Fix every blocking finding. Nits are optional: fix one only when it is trivial and inside this task's scope.",
+        "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
+        "Do not apply a finding that is wrong, or that contradicts the brief or plan. List it in your ready result under `## Disputed findings`, with evidence: file:line, command output, or the brief or plan text it contradicts.",
+        "Nits are optional: fix one only when it is trivial and inside this task's scope.",
+        "An `[AMBIGUOUS: …]` item is a question for Chief, not a finding to fix.",
       ] : []),
       ...(ruledOut.length ? [
         "", "## Already ruled out",
@@ -1882,6 +1921,12 @@ export default async function plugin(bb: BbPluginApi) {
       ...(contracts ? [
         "", "## Contracts to verify", clip(contracts, 3_000),
         "Keep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.",
+      ] : []),
+      ...(verifyCommand !== null ? [
+        "", "## Verify command",
+        // Fence longer than any backtick run so a ``` line in the command cannot close it.
+        ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
+        "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. Chief runs the same command on your pushed commit before any reviewer starts; a non-zero exit there sends the work back without a review. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
       ] : []),
       ...(branch || issueUrl || prUrl ? [
         "", "## Git workflow",
@@ -1905,6 +1950,7 @@ export default async function plugin(bb: BbPluginApi) {
       "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
       "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
       ...(planPath !== undefined ? ["- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`."] : []),
+      "- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, run the old and new code on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression.",
       "- A blocked report must include the blocker and your recommended decision or next action.",
       "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
       "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
@@ -1942,7 +1988,7 @@ export default async function plugin(bb: BbPluginApi) {
     }, {
       role: "worker", chiefThreadId: chief.thread_id, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
-      kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn,
+      kind: kind === "designer" ? kind : null, simple: simple || null, plannerOn, verifyCommand,
     });
     if (prior) {
       const now = Date.now();
@@ -2199,8 +2245,156 @@ export default async function plugin(bb: BbPluginApi) {
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn, requireChiefCaller, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
     busyStatuses: BUSY_STATUSES, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
-    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle,
+    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext, runGate, impactSlice,
   });
+
+  /** Why the project's checkout path cannot be used here, or null when it is on the server's primary host.
+   * The path names a checkout on the source's own host; only the server's primary host may read it. Never throws. */
+  async function checkoutHostSkip(projectId: string): Promise<string | null> {
+    let lookupError: unknown = "no source host recorded";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const project = await bb.sdk.projects.get({ projectId });
+        const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+        if (!source?.hostId) break;
+        return source.hostId === (await bb.sdk.system.config()).primaryHostId ? null : "the project checkout is on a remote host, not the plugin server";
+      } catch (error) { lookupError = error; }
+    }
+    return `could not confirm which host holds the project checkout (${clip(String(lookupError), 200)})`;
+  }
+
+  /** The pre-review gate: runs the worker's verify command in a detached temporary worktree of the commit under review.
+   * Only a non-zero exit of the command fails it; anything that keeps it from running is a skip with the reason, and the review proceeds.
+   * Never throws: every step, cleanup included, runs inside this boundary, and cleanup trouble is added to the result, never replaces it. */
+  async function runGate(row: ManagedRow, command: string, pinnedSha: string | null, projectDir: string | null): Promise<GateResult> {
+    if (!projectDir) return { skipped: "no local checkout of the project on the plugin server (remote host or unknown path)" };
+    let phase = "host lookup";
+    let raw: string | null = null;
+    let dir: string | null = null;
+    let result: GateResult;
+    try {
+      result = await (async (): Promise<GateResult> => {
+        const hostSkip = await checkoutHostSkip(row.project_id);
+        if (hostSkip) return { skipped: hostSkip };
+        const git = async (args: string[]) => {
+          let lastError: unknown;
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+              return (await execFileAsync("git", args, { cwd: projectDir, timeout: 60_000, env: forgeEnv() })).stdout.trim();
+            } catch (error) {
+              lastError = error;
+            }
+          }
+          throw lastError;
+        };
+        phase = "commit lookup";
+        let sha = pinnedSha;
+        if (!sha) {
+          if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
+          sha = await git(["rev-parse", "--verify", `refs/heads/${row.branch}^{commit}`]);
+        } else {
+          const known = await execFileAsync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: projectDir, timeout: 60_000, env: forgeEnv() }).then(() => true, () => false);
+          if (!known && row.branch) await git(["fetch", "origin", row.branch]);
+        }
+        phase = "temporary directory";
+        raw = await mkdtemp(join(tmpdir(), "chief-gate-"));
+        dir = await realpath(raw);
+        phase = `git checkout of ${sha}`;
+        await git(["worktree", "add", "--detach", dir, sha]);
+        phase = "verify command";
+        let failure: { code?: unknown; killed?: boolean; signal?: string | null; stdout?: string; stderr?: string };
+        try {
+          await execFileAsync("sh", ["-c", command], { cwd: dir, timeout: GATE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: serverPath() } });
+          return { passed: true };
+        } catch (error) {
+          failure = (error ?? {}) as typeof failure;
+        }
+        if (failure.killed || typeof failure.code !== "number") return { skipped: `the command did not finish (${failure.signal ?? "timeout or spawn error"})` };
+        // The command's own non-zero exit is the only failure; it stands whatever happens to the artifact or cleanup.
+        const output = `${failure.stdout ?? ""}${failure.stderr ? `\n${failure.stderr}` : ""}`.trim();
+        const failed = { workerThreadId: row.thread_id, command, sha, exitCode: failure.code, outputPath: null as string | null, tail: output.slice(-1_500), issues: [] as string[] };
+        let artifactError: unknown;
+        for (let attempt = 0; attempt < 3 && !failed.outputPath; attempt += 1) {
+          try {
+            failed.outputPath = await writeArtifact(row.thread_id, row.project_id, `gate-${Date.now()}.md`,
+              `# Pre-review gate failed\n\nCommand: \`${command}\`\nCommit: ${sha}\nExit: ${failure.code}\n\n\`\`\`\n${output}\n\`\`\`\n`);
+          } catch (error) { artifactError = error; }
+        }
+        if (!failed.outputPath) failed.issues.push(`full output not saved (${clip(String(artifactError), 200)}); the tail above is all that is available`);
+        return { failed };
+      })();
+    } catch (error) {
+      result = { skipped: `${phase} failed (${clip(String(error), 200)})` };
+    }
+    let cleanup: string | null = null;
+    try {
+      if (dir) cleanup = await removeGateWorktree(projectDir, dir);
+      else if (raw) await rm(raw, { recursive: true, force: true });
+    } catch (error) {
+      cleanup = `cleanup of ${dir ?? raw} failed (${clip(String(error), 200)})`;
+    }
+    if (!cleanup) return result;
+    if ("failed" in result) return { failed: { ...result.failed, issues: [...(result.failed.issues ?? []), cleanup] } };
+    return { skipped: "skipped" in result ? `${result.skipped}; ${cleanup}` : cleanup };
+  }
+
+  /** The impact slice of the commit under review, read from the project checkout with git only (no worktree is created). */
+  async function impactSlice(row: ManagedRow, head: PinnedHead | null, projectDir: string | null, maxEntries: number): Promise<ImpactSlice> {
+    // One 30 s deadline covers the host lookup, the branch resolution and the slice itself.
+    const deadline = Date.now() + 30_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<ImpactSlice>((resolve) => { timer = setTimeout(() => resolve({ skipped: "deadline (30 s) passed" }), 30_000); });
+    const work = async (): Promise<ImpactSlice> => {
+      if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
+      const hostSkip = await checkoutHostSkip(row.project_id);
+      if (hostSkip) return { skipped: hostSkip };
+      const options = () => ({ cwd: projectDir, env: forgeEnv(), maxEntries, deadlineMs: deadline - Date.now() });
+      if (head) return await computeImpactSlice({ ...options(), sha: head.sha, baseRef: `origin/${head.base}`, fetchRef: head.branch });
+      if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
+      const run = gitWithin(projectDir, forgeEnv(), deadline);
+      const git = (args: string[]) => run(args).then((out) => out.trim() || null, (error: Error) => { if (error.message === "deadline") throw error; return null; });
+      const sha = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${row.branch}^{commit}`])
+        ?? await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${row.branch}^{commit}`]);
+      if (!sha) return { skipped: `branch ${row.branch} not found locally` };
+      const baseRef = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+      if (!baseRef) return { skipped: "origin/HEAD not set" };
+      return await computeImpactSlice({ ...options(), sha, baseRef, fetchRef: row.branch });
+    };
+    try {
+      return await Promise.race([work(), expired]);
+    } catch (error) {
+      return { skipped: clip(String(error), 200) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Bounded cleanup of a gate-owned worktree: unlock, force-remove, delete, prune, then confirm both registration
+   * and directory are gone. A command may lock or delete its own checkout, so none of these steps alone is proof.
+   * Returns null when both are confirmed gone, otherwise what is left and how to remove it. Never throws. */
+  async function removeGateWorktree(projectDir: string, dir: string): Promise<string | null> {
+    const git = (args: string[]) => execFileAsync("git", args, { cwd: projectDir, timeout: 30_000, env: forgeEnv() }).then((out) => out.stdout);
+    let lastState = "";
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+      try {
+        await git(["worktree", "unlock", dir]).catch(() => null);
+        await git(["worktree", "remove", "--force", "--force", dir]).catch(() => null);
+        let rmError = "";
+        await rm(dir, { recursive: true, force: true }).catch((error) => { rmError = `, rm: ${String(error)}`; });
+        await git(["worktree", "prune"]).catch(() => null);
+        const list = await git(["worktree", "list", "--porcelain"]).catch(() => null);
+        const registered = list === null ? "worktree list failed" : list.split("\n").includes(`worktree ${dir}`) ? "still registered" : null;
+        // Only ENOENT proves the directory is gone; any other error leaves its state unknown.
+        const present = await stat(dir).then(() => "directory present", (error) => (error as { code?: string })?.code === "ENOENT" ? null : `directory could not be checked (${String(error)})`);
+        if (!registered && !present) return null;
+        lastState = `${registered ?? "unregistered"}, ${present ?? "directory gone"}${rmError}`;
+      } catch (error) {
+        lastState = `cleanup attempt failed (${String(error)})`;
+      }
+    }
+    return `could not remove temporary worktree ${dir} in ${projectDir} after 3 attempts (${clip(lastState, 300)}); run \`git worktree unlock ${dir}; git worktree remove --force --force ${dir}; git worktree prune\` there`;
+  }
 
   /** Which path a worker review took, for chief_review's reply. */
   function reviewPathNote(workerThreadId: string, pinnedSha?: string | null, covers?: string[]) {
@@ -2454,6 +2648,24 @@ export default async function plugin(bb: BbPluginApi) {
     await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
   }
 
+  /** Writes a reviewer's review-context.md: 3 attempts (1s, 2s backoff), then alerts Chief so it stops or nudges the reviewer. Never throws. */
+  async function writeReviewContext(threadId: string, content: string, workerThreadId: string) {
+    let error: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+      try {
+        await writeStorageFile(threadId, "review-context.md", `${content}\n`);
+        return;
+      } catch (caught) { error = caught; }
+    }
+    // The worker's row names the same Chief, for when the reviewer's own row cannot be read.
+    const row = [store.get(threadId), store.get(workerThreadId)].find((candidate) => candidate?.chief_thread_id);
+    const message = `Could not write review-context.md for reviewer ${threadId} after 3 attempts: ${String(error)}. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.`;
+    // The alert is the last resort; its own failure is logged rather than thrown after the reviewer has launched.
+    if (row) await Promise.resolve().then(() => alertChief(row, `review-context:${threadId}`, message)).catch((alertError) => bb.log.error(`${message} The Chief alert also failed: ${String(alertError)}`));
+    else bb.log.error(message);
+  }
+
   /** A reviewer's verdict for another thread's prompt: the clipped findings plus where to read them in full. */
   function verdictPreview(review: ManagedRow, suffix = "") {
     return [
@@ -2462,6 +2674,12 @@ export default async function plugin(bb: BbPluginApi) {
       review.summary ?? clip(review.result ?? "", 300),
       `Full report and last output: bb chief inspect ${review.thread_id}`,
     ];
+  }
+
+  /** One Markdown bullet per finding of the given severity, never clipped. */
+  function findingLines(list: ReportFinding[], severity: ReportFinding["severity"]) {
+    return list.filter((entry) => entry.severity === severity)
+      .map((entry) => `- ${entry.file}${entry.line ? `:${entry.line}` : ""} — ${entry.message}${entry.fix ? ` (fix: ${entry.fix})` : ""}`);
   }
 
   /** A wave body's `Contracts to verify` section, up to the next heading of the same or higher level. */
@@ -2548,11 +2766,12 @@ export default async function plugin(bb: BbPluginApi) {
     onlyWhenReady("lesson", params.lesson);
     onlyWhenReady("regression", params.regression);
     onlyWhenReady("plan", params.plan);
+    onlyWhenReady("findings", params.findings);
     // Emptiness, length and role are independent of each other and of state: each failing one gets its own line.
     if (params.lesson !== undefined) {
       if (!params.lesson) errors.push("lesson is empty; send text or omit it.");
       else tooLong("lesson", params.lesson, LESSON_MAX, "Shorten it to one durable rule.");
-      if (row.role !== "advisor") errors.push(`lesson is only for an advisor's ready report (role is ${row.role}); remove it.`);
+      if (row.role !== "advisor" && row.role !== "reviewer") errors.push(`lesson is only for an advisor or reviewer's ready report (role is ${row.role}); remove it.`);
     }
     if (row.role === "reviewer" && ready && !params.verdict) {
       errors.push('verdict is missing; a reviewer\'s ready report must carry "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
@@ -2575,6 +2794,36 @@ export default async function plugin(bb: BbPluginApi) {
           else tooLong(name, entry[field], max, "Shorten it.");
         }
       });
+    }
+
+    // report() decodes a JSON string first, so a string left here is not an array.
+    if (params.findings !== undefined) {
+      if (row.role !== "reviewer") errors.push(`findings is only for a reviewer's ready report (role is ${row.role}); remove it.`);
+      if (!Array.isArray(params.findings)) errors.push("findings: send an array of {file, line?, severity, message, fix?}.");
+      else {
+        const list = params.findings as unknown[];
+        if (list.length > MAX_FINDINGS) errors.push(`findings has ${list.length} entries; max ${MAX_FINDINGS}. Keep the blocking ones and the most useful nits.`);
+        list.forEach((item, index) => {
+          const entry = (typeof item === "object" && item !== null ? item : {}) as Record<string, unknown>;
+          const text = (field: string, min: number, max: number) => {
+            const value = entry[field];
+            const name = `findings[${index}].${field}`;
+            if (value === undefined && min === 0) return;
+            if (typeof value !== "string" || value.trim().length < min) errors.push(`${name} is missing or empty; send text.`);
+            else tooLong(name, value.trim(), max, "Shorten it.");
+          };
+          text("file", 1, 300);
+          text("message", 1, 1000);
+          text("fix", 0, 1000);
+          if (entry.line !== undefined && !(Number.isInteger(entry.line) && (entry.line as number) >= 1)) errors.push(`findings[${index}].line is ${JSON.stringify(entry.line)}; send a 1-based integer or omit it.`);
+          if (entry.severity !== "blocking" && entry.severity !== "nit") errors.push(`findings[${index}].severity is ${JSON.stringify(entry.severity)}; allowed "blocking" or "nit".`);
+        });
+        const blocking = list.filter((item) => (item as { severity?: unknown } | null)?.severity === "blocking").length;
+        if (params.verdict === "request_changes" && !blocking) errors.push('verdict is request_changes but findings has no "blocking" entry; add the blocking finding or send approve.');
+        if (params.verdict === "approve" && blocking) errors.push(`verdict is approve but findings has ${blocking} "blocking" ${blocking > 1 ? "entries" : "entry"}; send request_changes or mark them "nit".`);
+      }
+    } else if (row.role === "reviewer" && ready) {
+      errors.push("findings is missing; send [] when there are none.");
     }
 
     // The plan's own shape and rules are checked whatever the state and role; those two have their own lines.
@@ -2682,7 +2931,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (typeof reportFails === "string") {
       try { reportFails = JSON.parse(reportFails); } catch { /* checkReport refuses the string */ }
     }
-    const errors = checkReport(candidate, { ...params, fails: reportFails }, plan);
+    let reportFindings = params.findings;
+    if (typeof reportFindings === "string") {
+      try { reportFindings = JSON.parse(reportFindings); } catch { /* checkReport refuses the string */ }
+    }
+    const errors = checkReport(candidate, { ...params, fails: reportFails, findings: reportFindings }, plan);
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
     if (found.pending) store.insert(found.pending);
     const row = store.get(threadId)!;
@@ -2719,6 +2972,8 @@ export default async function plugin(bb: BbPluginApi) {
         .map((entry) => ({ ...entry, at }));
       fails = JSON.stringify([...kept, ...incoming].slice(-MAX_CARRIED_FAILS));
     }
+    // checkReport proved the shape; only a reviewer's ready report carries findings.
+    const findingList = (reportFindings as ReportFinding[] | undefined)?.map((entry) => ({ ...entry, file: entry.file.trim(), message: entry.message.trim(), ...(entry.fix !== undefined ? { fix: entry.fix.trim() } : {}) }));
     const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, not rejection rounds — a
@@ -2731,13 +2986,14 @@ export default async function plugin(bb: BbPluginApi) {
         threadId, state: params.state, result: params.result ?? null, summary: params.summary ?? null,
         blocker: params.state === "blocked" ? params.blocker ?? null : null,
         recommendation: params.recommendation ?? null, verdict,
-        planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails, now,
+        planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails,
+        findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null, now,
       });
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         store.markAdvised(threadId, now);
       }
-      if (row.role === "advisor" && params.state === "ready" && params.lesson) {
-        db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at) VALUES (?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now);
+      if ((row.role === "advisor" || row.role === "reviewer") && params.state === "ready" && params.lesson) {
+        db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role) VALUES (?, ?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role);
       }
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
       // Same transaction as the state commit: a crash before the full alert below still leaves Chief a pointer.
@@ -2775,6 +3031,8 @@ export default async function plugin(bb: BbPluginApi) {
           ...(reviewedTargets.length > 1
             ? reviewedTargets.map((target) => `Reviewed worker: ${target.worker_thread_id}${target.head_sha ? ` at head ${target.head_sha}` : ""}`)
             : [`Reviewed worker: ${row.worker_thread_id ?? "none"}`, ...(row.reviewed_head_sha ? [`Reviewed head: ${row.reviewed_head_sha}`] : [])]),
+          ...(findingList?.some((entry) => entry.severity === "blocking") ? ["", "## Blocking findings", "", ...findingLines(findingList, "blocking")] : []),
+          ...(findingList?.some((entry) => entry.severity === "nit") ? ["", "## Nits", "", ...findingLines(findingList, "nit")] : []),
           "", "## Findings", "", params.result ?? "",
           ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
         ].join("\n") + "\n");
@@ -3719,7 +3977,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.`,
+    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. verifyCommand goes into the worker's brief as its own check and sets a pre-review gate. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.`,
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
@@ -3869,7 +4127,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_review",
     presentation: { label: { pending: "Starting review…", completed: "Started review" } },
-    description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
+    description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. A worker delegated with verifyCommand is gated first: the command runs in a temporary checkout of the commit under review, and a non-zero exit spawns no reviewer and returns the output instead (a gate that cannot run is skipped with the reason). With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
     parameters: reviewParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
@@ -3878,7 +4136,12 @@ export default async function plugin(bb: BbPluginApi) {
         await controlledTarget(params.workerThreadId, caller);
         touchCallerChief(caller);
         const review = await startReview(caller, params.workerThreadId, params.focus);
-        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}`;
+        if (review.gated) {
+          return `Pre-review gate failed: \`${review.command}\` exited ${review.exitCode} on ${review.sha}. No reviewer was spawned. Output tail:\n${review.tail}\n(full: ${review.outputPath ?? "not saved"}).${review.issues?.length ? ` Gate issues: ${review.issues.join("; ")}.` : ""} Delegate a replacement worker with replaces: and pass that path in context.`;
+        }
+        const skipped = review.gateSkipped?.length ? ` Gate skipped: ${review.gateSkipped.join("; ")}.` : "";
+        const sliceNote = review.sliceSkipped?.length ? ` Impact slice skipped: ${review.sliceSkipped.join("; ")}.` : "";
+        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}${skipped}${sliceNote}`;
       }
       touchCallerChief(caller);
       const branch = params.branch
@@ -3926,7 +4189,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_report",
     presentation: { label: { pending: "Reporting to Chief…", completed: "Reported to Chief" } },
-    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict; a planner's ready report requires plan (the full plan body), which Chief receives as a file. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
+    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict and findings; a planner's ready report requires plan (the full plan body), which Chief receives as a file. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
@@ -4011,7 +4274,9 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const chiefThreadId = row?.chief_thread_id ?? (seeded?.success ? seeded.data.chiefThreadId ?? null : null);
     // The newest 10 lessons, shown oldest first and clipped; better-sqlite3 is synchronous, so configure stays so.
-    const lessons = (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
+    const newestLessons = (roleClause: string) => (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? AND ${roleClause} ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
+    const lessons = newestLessons(`(role IS NULL OR role='advisor')`);
+    const reviewLessons = role === "reviewer" ? newestLessons(`role='reviewer'`) : [];
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skills cover the rest.
     return {
@@ -4024,6 +4289,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
         ...(lessons.length ? ["", clip(["## Lessons from earlier review rounds", ...lessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
+        ...(reviewLessons.length ? ["", clip(["## Review lessons (known false positives and checks)", ...reviewLessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
       ].join("\n"),
     };
   });
@@ -4130,7 +4396,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
     "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id] [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--kind worker|designer] [--json]",
+    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--verify \"cmd\"] [--kind worker|designer] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
@@ -4149,7 +4415,7 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
       { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id] [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--kind worker|designer] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--verify \"cmd\"] [--kind worker|designer] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
@@ -4258,6 +4524,7 @@ export default async function plugin(bb: BbPluginApi) {
             userApprovedRound: args.bool("user-approved-round") || undefined,
             // undefined, not false: an absent flag must not override replaces: inheritance.
             simple: args.bool("simple") || undefined,
+            verifyCommand: args.one("verify"),
           });
           if (!parsed.success) return fail(`Invalid delegate brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await delegate(parsed.data, context.threadId);
