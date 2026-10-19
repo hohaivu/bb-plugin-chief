@@ -364,7 +364,7 @@ const reportParams = z.object({
     "Ready only. Required in a review thread: approve when the change can ship as it stands, request_changes only when at least one blocking finding exists; nits alone never reject. Workers leave this unset.",
   ),
   lesson: z.string().trim().optional().describe(
-    `Ready only, advisor only, at most ${LESSON_MAX} characters: one durable, project-level rule future workers should follow so this class of rejection does not recur. Omit when the cause is task-specific.`,
+    `Ready only, advisor or reviewer, at most ${LESSON_MAX} characters. An advisor records one durable, project-level rule future workers should follow so this class of rejection does not recur; a reviewer records a durable review rule or known false positive, shown to future reviewers only. Omit when the cause is task-specific.`,
   ),
   regression: z.boolean().optional().describe(
     "Ready only, reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
@@ -1020,6 +1020,8 @@ export const MIGRATIONS = [
     `ALTER TABLE reviewer_verdicts ADD COLUMN worker_report_seq INTEGER`,
     // A reviewer's latest structured findings (JSON array of {file, line?, severity, message, fix?}); replaced by each report.
     `ALTER TABLE managed_threads ADD COLUMN findings TEXT`,
+    // Who recorded a lesson: 'reviewer' lessons go to later reviewers only; NULL (older rows) or 'advisor' go to every managed thread.
+    `ALTER TABLE chief_lessons ADD COLUMN role TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2585,7 +2587,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (params.lesson !== undefined) {
       if (!params.lesson) errors.push("lesson is empty; send text or omit it.");
       else tooLong("lesson", params.lesson, LESSON_MAX, "Shorten it to one durable rule.");
-      if (row.role !== "advisor") errors.push(`lesson is only for an advisor's ready report (role is ${row.role}); remove it.`);
+      if (row.role !== "advisor" && row.role !== "reviewer") errors.push(`lesson is only for an advisor or reviewer's ready report (role is ${row.role}); remove it.`);
     }
     if (row.role === "reviewer" && ready && !params.verdict) {
       errors.push('verdict is missing; a reviewer\'s ready report must carry "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
@@ -2806,8 +2808,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         store.markAdvised(threadId, now);
       }
-      if (row.role === "advisor" && params.state === "ready" && params.lesson) {
-        db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at) VALUES (?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now);
+      if ((row.role === "advisor" || row.role === "reviewer") && params.state === "ready" && params.lesson) {
+        db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role) VALUES (?, ?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role);
       }
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
       // Same transaction as the state commit: a crash before the full alert below still leaves Chief a pointer.
@@ -4083,7 +4085,9 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const chiefThreadId = row?.chief_thread_id ?? (seeded?.success ? seeded.data.chiefThreadId ?? null : null);
     // The newest 10 lessons, shown oldest first and clipped; better-sqlite3 is synchronous, so configure stays so.
-    const lessons = (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
+    const newestLessons = (roleClause: string) => (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? AND ${roleClause} ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
+    const lessons = newestLessons(`(role IS NULL OR role='advisor')`);
+    const reviewLessons = role === "reviewer" ? newestLessons(`role='reviewer'`) : [];
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skills cover the rest.
     return {
@@ -4096,6 +4100,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
         ...(lessons.length ? ["", clip(["## Lessons from earlier review rounds", ...lessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
+        ...(reviewLessons.length ? ["", clip(["## Review lessons (known false positives and checks)", ...reviewLessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
       ].join("\n"),
     };
   });

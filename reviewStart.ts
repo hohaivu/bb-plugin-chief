@@ -30,6 +30,7 @@ export function reviewerPrompt(opts: {
     "Send each finding in chief_report `findings` ({file, line, severity, message, fix}); put the at-most-5 nits cap, assumptions and `[AMBIGUOUS: …]` items in result.",
     "Send a `summary` with the report: verdict, blocking count, nit count, the most important blocking finding with file:line.",
     "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
+    "Set chief_report `lesson` (at most 400 characters) only for a durable, project-level review rule or known false positive a future reviewer should know; never for something specific to this task.",
     "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
     "## This review",
     opts.subject,
