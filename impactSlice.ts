@@ -7,7 +7,26 @@ import { promisify } from "node:util";
 // Node built-ins only and erasable types only, so `node` can import this file directly.
 const execFileAsync = promisify(execFile);
 
-export type ImpactSlice = { lines: string[] } | { skipped: string };
+/** `entries` counts the `path:line` pointers in `lines`; the other lines are header and notes. */
+export type ImpactSlice = { lines: string[]; entries: number } | { skipped: string };
+
+/** git with a 10 s timeout and 2 attempts, each bounded by the absolute `deadline`; past it, throws `deadline`. */
+export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number) {
+  return async (args: string[], noMatchOk = false) => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error("deadline");
+      try {
+        return (await execFileAsync("git", args, { cwd, env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024 })).stdout;
+      } catch (error) {
+        if (noMatchOk && (error as { code?: unknown }).code === 1) return "";
+        lastError = error;
+      }
+    }
+    throw lastError;
+  };
+}
 
 const MODS = "export|default|async|public|private|protected|internal|static|override|final|abstract|open";
 const KEYWORDS = "function\\*?|class|interface|type|enum|struct|protocol|extension|def|func|fn";
@@ -44,20 +63,7 @@ export async function computeImpactSlice(opts: {
 }): Promise<ImpactSlice> {
   const deadline = Date.now() + opts.deadlineMs;
   let attrDir: string | null = null;
-  const git = async (args: string[], noMatchOk = false) => {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const left = deadline - Date.now();
-      if (left <= 0) throw new Error("deadline");
-      try {
-        return (await execFileAsync("git", args, { cwd: opts.cwd, env: opts.env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024 })).stdout;
-      } catch (error) {
-        if (noMatchOk && (error as { code?: unknown }).code === 1) return "";
-        lastError = error;
-      }
-    }
-    throw lastError;
-  };
+  const git = gitWithin(opts.cwd, opts.env, deadline);
   const resolve = async (ref: string, fetchRef: string | undefined) => {
     const verify = () => git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then((out) => out.trim(), () => null);
     let sha = await verify();
@@ -112,7 +118,7 @@ export async function computeImpactSlice(opts: {
       }
     }
     const header = `Computed at ${sha} against merge-base ${mb.slice(0, 12)} with ${opts.baseRef}, by name match (git grep -w): overloads, dynamic dispatch and same-named symbols can mislead.`;
-    if (!touched.size && !callees.size) return { lines: [header, "No touched symbols or calls found in the diff."] };
+    if (!touched.size && !callees.size) return { lines: [header, "No touched symbols or calls found in the diff."], entries: 0 };
 
     const inDiff = (path: string, n: number) => (ranges.get(path) ?? []).some(([from, to]) => n >= from && n <= to);
     const seen = new Set<string>();
@@ -130,16 +136,22 @@ export async function computeImpactSlice(opts: {
         return [{ key, text: text! }];
       });
     };
+    // Candidates dropped by the per-symbol caps, so the omission notice counts them too.
+    let capped = 0;
     const callers: string[] = [];
     for (const name of [...signature].slice(0, MAX_SIGNATURES)) {
-      for (const hit of (await hits(name)).filter((hit) => !DEF.test(hit.text)).slice(0, 5)) {
+      const found = (await hits(name)).filter((hit) => !DEF.test(hit.text));
+      capped += Math.max(0, found.length - 5);
+      for (const hit of found.slice(0, 5)) {
         seen.add(hit.key);
         callers.push(`- \`${hit.key}\` — caller of \`${name}\` (signature changed)`);
       }
     }
     const definitions: string[] = [];
     for (const [name, from] of callees) {
-      for (const hit of (await hits(name)).filter((hit) => nameOf(hit.text, false) === name).slice(0, 2)) {
+      const found = (await hits(name)).filter((hit) => nameOf(hit.text, false) === name);
+      capped += Math.max(0, found.length - 2);
+      for (const hit of found.slice(0, 2)) {
         seen.add(hit.key);
         definitions.push(`- \`${hit.key}\` — \`${name}\` defined here (called by changed code in ${from})`);
       }
@@ -150,7 +162,7 @@ export async function computeImpactSlice(opts: {
       ...callers.slice(0, firstCallers), ...definitions.slice(0, firstDefinitions),
       ...callers.slice(firstCallers, firstCallers + opts.maxEntries - firstCallers - firstDefinitions),
     ];
-    const omitted = callers.length + definitions.length - entries.length;
+    const omitted = callers.length + definitions.length - entries.length + capped;
     const names = [...touched];
     const tail = [
       ...(omitted ? [`${omitted} more omitted`] : []),
@@ -163,6 +175,7 @@ export async function computeImpactSlice(opts: {
         ...(entries.length ? entries : ["No pointers outside the diff were found."]),
         ...(tail.length ? [`${tail.join("; ")}.`] : []),
       ],
+      entries: entries.length,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

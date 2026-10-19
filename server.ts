@@ -14,7 +14,7 @@ import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
-import { computeImpactSlice } from "./impactSlice";
+import { computeImpactSlice, gitWithin, type ImpactSlice } from "./impactSlice";
 import { createReviewStart, type GateResult, type PinnedHead } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import { createPlanProgress, type SegmentState } from "./planProgress";
@@ -2339,28 +2339,38 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** The impact slice of the commit under review, read from the project checkout with git only (no worktree is created). */
-  async function impactSlice(row: ManagedRow, head: PinnedHead | null, projectDir: string | null, maxEntries: number): Promise<{ lines: string[] } | { skipped: string }> {
-    try {
+  async function impactSlice(row: ManagedRow, head: PinnedHead | null, projectDir: string | null, maxEntries: number): Promise<ImpactSlice> {
+    // One 30 s deadline covers the host lookup, the branch resolution and the slice itself.
+    const deadline = Date.now() + 30_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<ImpactSlice>((resolve) => { timer = setTimeout(() => resolve({ skipped: "deadline (30 s) passed" }), 30_000); });
+    const work = async (): Promise<ImpactSlice> => {
       if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
       // follow-up: runGate could share this check
       const local = await bb.sdk.projects.get({ projectId: row.project_id }).then(async (project) => {
         const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
         return !!source?.hostId && source.hostId === (await bb.sdk.system.config()).primaryHostId;
-      }, () => null);
+      }).catch(() => null);
       if (local === null) return { skipped: "could not confirm which host holds the project checkout" };
       if (!local) return { skipped: "the project checkout is on a remote host, not the plugin server" };
-      const options = { cwd: projectDir, env: forgeEnv(), maxEntries, deadlineMs: 30_000 };
-      if (head) return await computeImpactSlice({ ...options, sha: head.sha, baseRef: `origin/${head.base}`, fetchRef: head.branch });
+      const options = () => ({ cwd: projectDir, env: forgeEnv(), maxEntries, deadlineMs: deadline - Date.now() });
+      if (head) return await computeImpactSlice({ ...options(), sha: head.sha, baseRef: `origin/${head.base}`, fetchRef: head.branch });
       if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
-      const git = (args: string[]) => execFileAsync("git", args, { cwd: projectDir, timeout: 10_000, env: forgeEnv() }).then((out) => out.stdout.trim(), () => null);
+      const run = gitWithin(projectDir, forgeEnv(), deadline);
+      const git = (args: string[]) => run(args).then((out) => out.trim() || null, (error: Error) => { if (error.message === "deadline") throw error; return null; });
       const sha = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${row.branch}^{commit}`])
         ?? await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${row.branch}^{commit}`]);
       if (!sha) return { skipped: `branch ${row.branch} not found locally` };
       const baseRef = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
       if (!baseRef) return { skipped: "origin/HEAD not set" };
-      return await computeImpactSlice({ ...options, sha, baseRef, fetchRef: row.branch });
+      return await computeImpactSlice({ ...options(), sha, baseRef, fetchRef: row.branch });
+    };
+    try {
+      return await Promise.race([work(), expired]);
     } catch (error) {
       return { skipped: clip(String(error), 200) };
+    } finally {
+      clearTimeout(timer);
     }
   }
 

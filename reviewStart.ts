@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ManagedSpawn } from "./managedSpawn";
+import type { ImpactSlice } from "./impactSlice";
 import type { createReviewLedger } from "./reviewLedger";
 import { REVIEW_ONLY } from "./roles";
 import type { ThreadStore } from "./threadStore";
@@ -83,7 +84,7 @@ export interface ReviewBriefInput {
   focus?: string;
   chiefThreadId: string | null;
   /** Per target: file:line pointers outside its diff, or why they could not be computed. Optional: older callers omit it. */
-  impactSlices?: { threadId: string; branch: string | null; lines?: string[]; skipped?: string }[];
+  impactSlices?: { threadId: string; branch: string | null; lines?: string[]; entries?: number; skipped?: string }[];
 }
 
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
@@ -163,7 +164,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
         "", "## Contracts to verify", ...contractLines,
         `Check every item against ${pinnedAll ? "the pinned commit" : "the worktree"}${plural}. An unmet item means request_changes naming it; say which items you confirmed.`,
       ] : []),
-      ...(slices.some((slice) => slice.lines) ? [
+      ...(slices.some((slice) => slice.entries) ? [
         "Use the impact slice in review-context.md only as reference for contract mismatches (a callee's real signature or contract, a caller's expectations); report findings only on lines this diff introduced, never on slice lines.",
       ] : []),
       ...(recordedSection.length ? [
@@ -268,7 +269,7 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   /** Runs row.verify_command on the pinned sha (or the branch tip when null) in a temporary checkout. */
   runGate: (row: Row, command: string, pinnedSha: string | null, projectDir: string | null) => Promise<GateResult>;
   /** Git-only file:line pointers outside the commit's diff; never blocks a review, a failure is `{ skipped }`. */
-  impactSlice: (row: Row, head: PinnedHead | null, projectDir: string | null, maxEntries: number) => Promise<{ lines: string[] } | { skipped: string }>;
+  impactSlice: (row: Row, head: PinnedHead | null, projectDir: string | null, maxEntries: number) => Promise<ImpactSlice>;
 }
 
 /** One module owns starting a reviewer: the owner and duplicate checks, the in-flight dedupe, the pinned heads,
@@ -360,11 +361,13 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       // After the gate, so a failed gate computes nothing; sequential, each bounded by its own deadline.
       const impactSlices: NonNullable<ReviewBriefInput["impactSlices"]> = [];
       const sliceSkipped: string[] = [];
+      let sliceBudget = 30; // total across targets; a target past it gets 0 entries and states them as omitted
       for (const target of targets) {
-        const slice = await deps.impactSlice(target, heads.get(target.thread_id) ?? null, projectDir, Math.max(5, Math.floor(30 / targets.length)))
+        const slice = await deps.impactSlice(target, heads.get(target.thread_id) ?? null, projectDir, Math.min(sliceBudget, Math.max(5, Math.floor(30 / targets.length))))
           .catch((error): { skipped: string } => ({ skipped: clip(String(error), 200) }));
         impactSlices.push({ threadId: target.thread_id, branch: heads.get(target.thread_id)?.branch ?? target.branch, ...slice });
         if ("skipped" in slice) sliceSkipped.push(`${target.thread_id}: ${slice.skipped}`);
+        else sliceBudget -= slice.entries;
       }
       const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
       const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
