@@ -784,6 +784,13 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
   const firstSeenEnded = new Map<string, number>();
   const IDLE_STATES = new Set(["ready", "blocked", "complete", "archived", "deleted"]);
 
+  /** The researcher's current row, or undefined once it has reported or ended: rows passed in may be stale after an await. */
+  const liveResearcher = (threadId: string) => {
+    const row = roleRow(threadId);
+    return row && row.role === "researcher" && !IDLE_STATES.has(row.state) ? row : undefined;
+  };
+  const alerted = (key: string) => !!db.prepare<[string]>(`SELECT 1 FROM alert_outbox WHERE dedupe_key=?`).get(key);
+
   /** Supervisor check: a researcher whose run ended without a report gets its result saved and Chief alerted, once per run. */
   async function checkUnreported(rows: Row[]) {
     for (const row of rows) {
@@ -794,7 +801,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
         if (!last) continue;
         const runId = last.run_id;
         // The outbox row survives a reload, so it is the once-per-run marker.
-        if (db.prepare<[string]>(`SELECT 1 FROM alert_outbox WHERE dedupe_key=?`).get(`${row.thread_id}:research-unreported:${runId}`)) continue;
+        if (alerted(`${row.thread_id}:research-unreported:${runId}`)) continue;
         const context = { threadId: row.thread_id, projectId: row.project_id };
         let run: RunStatus;
         try {
@@ -803,8 +810,10 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
         } catch (error) {
           const failures = (unreadCounts.get(runId) ?? 0) + 1;
           unreadCounts.set(runId, failures);
-          if (failures === RESEARCH_UNREAD_LIMIT) {
-            await alertChief(row, `research-unread:${runId}`, [
+          // >= so a failed enqueue retries next tick; the outbox key stops repeats once one lands.
+          const live = failures >= RESEARCH_UNREAD_LIMIT && !alerted(`${row.thread_id}:research-unread:${runId}`) ? liveResearcher(row.thread_id) : undefined;
+          if (live) {
+            await alertChief(live, `research-unread:${runId}`, [
               `Researcher "${row.title}" (${row.thread_id}): the plugin server could not read its run ${runId} ${failures} times in a row: ${clip(error instanceof Error ? error.message : String(error), 300)}`,
               `Check it with \`bb workflows status ${runId}\`.`,
             ].join("\n"));
@@ -816,12 +825,15 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
         const finishedAt = typeof run.finishedAt === "number" ? run.finishedAt : firstSeenEnded.get(runId)!;
         if (Date.now() - finishedAt < RESEARCH_REPORT_GRACE_MS) continue;
         const { text } = await resultText(runId, run, context);
+        if (!liveResearcher(row.thread_id)) continue;
         const path = await writeArtifact(row.thread_id, row.project_id, `research-${runId}.md`, `${text}\n`).catch((error) => {
           bb.log.warn(`checkUnreported could not save ${runId}: ${clip(String(error), 200)}`);
           return null;
         });
         const output = await lastOutput(row.thread_id).catch(() => null);
-        await alertChief(row, `research-unreported:${runId}`, [
+        const live = liveResearcher(row.thread_id);
+        if (!live) continue;
+        await alertChief(live, `research-unreported:${runId}`, [
           `Researcher "${row.title}" (${row.thread_id}): run ${runId} is ${run.status}; it finished ${Math.round((Date.now() - finishedAt) / 60_000)} min ago and the researcher has not reported.`,
           path ? `Result saved to ${path}` : `The result could not be saved; read it with \`bb workflows history ${runId} --cursor 0 --limit 1\`.`,
           `Last assistant output:\n${output ? clip(output, 2_000) : "(none available)"}`,
