@@ -17,6 +17,12 @@ import { createManagedSpawn } from "./managedSpawn";
 import { computeImpactSlice, gitWithin, type ImpactSlice } from "./impactSlice";
 import { createReviewStart, type GateResult, type PinnedHead } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
+import {
+  LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX,
+  checkReport, contractsOf, reportAlert, reportFileBody, verdictFileBody, type Pointer,
+} from "./reportIntake";
+import { advisorBrief, plannerBrief, resolveDelegation, verdictPreview, workerBrief } from "./delegationBrief";
+import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
 import { createPlanProgress, type SegmentState } from "./planProgress";
 import { createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
 import {
@@ -36,17 +42,11 @@ export type { ModelSelection, ResearchConfiguration } from "./research";
 const SECTION_NAME = "Chief";
 const RULES_FILE = "chief.md";
 const RECONCILE_INTERVAL_MS = 30_000;
-const MAX_ALERT_LENGTH = 3_000;
 const MAX_RESULT_LENGTH = 8_000;
-/** A report whose result fits is short: no file, and no summary needed. */
-const SUMMARY_MAX = 800;
-const MAX_PLAN_LENGTH = 64_000;
 // ponytail: a nudge is 1–3 sentences; anything longer is new work for a fresh thread.
 const MAX_NUDGE_LENGTH = 500;
 const REVIEW_IDLE_WAIT_MS = 60_000;
 const REVIEW_IDLE_POLL_MS = 2_000;
-// ponytail: arbitrary cap so a runaway plan can't schedule an unbounded worker chain.
-const MAX_WAVES = 8;
 // ponytail: done capped at 50, newest first
 const MAX_DONE_ITEMS = 50;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
@@ -314,7 +314,6 @@ const failEntry = z.object({
 });
 type FailEntry = z.infer<typeof failEntry>;
 const MAX_CARRIED_FAILS = 12;
-const MAX_REPORT_FAILS = 5;
 /** chief_report's fails entry. Published without length limits: checkReport enforces them in one pass, with a fix per field. */
 const reportFailEntry = z.object({
   text: z.string().trim().describe("at most 400 characters"),
@@ -333,8 +332,7 @@ const reportFinding = z.object({
   message: z.string().trim().describe("1-1000 characters"),
   fix: z.string().trim().optional().describe("at most 1000 characters"),
 });
-type ReportFinding = z.infer<typeof reportFinding>;
-const MAX_FINDINGS = 40;
+export type ReportFinding = z.infer<typeof reportFinding>;
 const findingsParam = z.union([z.string().trim(), z.array(reportFinding)]).optional().describe(
   `Ready only, reviewer only. Required on a reviewer's ready report ([] allowed for an approve with nothing to note). One entry per finding, at most ${MAX_FINDINGS}. request_changes iff at least one blocking. \`[AMBIGUOUS: …]\` items stay in result, not here.`,
 );
@@ -354,8 +352,6 @@ const waveShape = z.object({
     "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
   ),
 });
-const REPORT_TEXT_MAX = 4_000;
-const LESSON_MAX = 400;
 // One flat object, published without length limits: the validator's own errors cannot be customised, so checkReport()
 // in report() enforces every limit and per-state rule and names all failing fields in one error.
 const reportParams = z.object({
@@ -386,6 +382,8 @@ const reportParams = z.object({
   fails: failsParam,
   findings: findingsParam,
 });
+
+export type ReportParams = z.infer<typeof reportParams>;
 
 export const rpcContract = defineRpcContract({
   status: {
@@ -448,7 +446,7 @@ interface TodoRow {
   updated_at: number;
 }
 
-interface ManagedRow {
+export interface ManagedRow {
   thread_id: string;
   role: Role;
   branch: string | null;
@@ -602,55 +600,6 @@ function parseArgs(argv: string[]) {
   };
 }
 
-function clip(value: string, limit = MAX_ALERT_LENGTH) {
-  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
-}
-
-/** The longest prefix of lines that fits budget characters (newlines included), then an "…and N more"
- * line when some were left out and the marker itself fits. cut says whether anything was left out. */
-function fitLines(lines: string[], budget: number, marker = true) {
-  const kept: string[] = [];
-  let used = 0;
-  for (const line of lines) {
-    if (used + line.length + 1 > budget) break;
-    used += line.length + 1;
-    kept.push(line);
-  }
-  const cut = kept.length < lines.length;
-  const more = () => `  …and ${lines.length - kept.length} more`;
-  if (cut && marker) while (kept.length && used + more().length + 1 > budget) used -= kept.pop()!.length + 1;
-  return { lines: cut && marker && used + more().length + 1 <= budget ? [...kept, more()] : kept, cut };
-}
-
-type RecordedCommand = { command: string; exitCode: number | null; status: string };
-
-/** Longest command text an alert or prompt shows; the full report file keeps the whole command. */
-const COMMAND_EXCERPT = 120;
-
-/** Lines for the commands BB recorded, failures first. recorded null means the read failed, [] means none ran.
- * The header always stays; command lines stop at `budget` characters with an "…and N more" line, and each
- * command shows at most COMMAND_EXCERPT characters unless full is set. */
-function recordedLines(recorded: RecordedCommand[] | null, budget = Infinity, full = false) {
-  if (recorded === null) return ["Recorded: could not read the event log (see the plugin log)"];
-  if (!recorded.length) return ["Recorded: none recorded"];
-  const failed = (c: RecordedCommand) => c.exitCode !== null && c.exitCode !== 0;
-  const lines = [...recorded.filter(failed), ...recorded.filter((c) => !failed(c))]
-    .map((c) => `  ${full ? c.command : clip(c.command, COMMAND_EXCERPT)} → exit ${c.exitCode ?? c.status}`);
-  return [`Recorded (last ${recorded.length} commands): ${recorded.filter(failed).length} non-zero exit`, ...fitLines(lines, budget).lines];
-}
-
-/** Like clip(), but elides the middle instead of the tail: a long brief's opening
- * (the mission) and its trailing sections (Context, where a plan file path now
- * lives) both survive the cut, instead of the tail-only clip() dropping whichever
- * section comes last. */
-function clipMiddle(value: string, limit: number) {
-  const marker = "\n…\n";
-  if (value.length <= limit || limit <= marker.length) return clip(value, limit);
-  const room = limit - marker.length;
-  const head = Math.ceil(room / 2);
-  const tail = room - head;
-  return `${value.slice(0, head)}${marker}${value.slice(value.length - tail)}`;
-}
 
 /** A provider failure worth retrying on the same thread, or null. Text-matched: pi reports
  * 429s and connection drops only as provider/error detail, with no errorInfo. */
@@ -662,9 +611,6 @@ function transientFailure(text: string): { usageLimit: boolean; resetSeconds: nu
   return { usageLimit, resetSeconds: reset ? Number(reset[1]) : null };
 }
 
-function bullets(values?: string[]) {
-  return values?.length ? values.map((value) => `- ${value}`).join("\n") : "- None stated.";
-}
 
 /** Append-only: the host records each statement's hash by index and rejects a changed
  * or reordered one. Exported so the upgrade path can be tested on a real database. */
@@ -1643,25 +1589,10 @@ export default async function plugin(bb: BbPluginApi) {
     const { chief, projectId } = await owningChief(callerThreadId);
     const prepared = await managedSpawn.prepare(projectId, { role: "planner", hostId: await projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
-    const prompt = [
-      `You are the managed planner for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
-      "", "## Problem", params.mission,
-      ...(params.context ? ["", "## Context", params.context] : []),
-      "", "## Working contract",
-      "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. That rule covers the files the brief names, not every file a wider scan would touch. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
-      `- ${PLAN_ONLY}`,
-      "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
-      "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file. Keep that result under 800 characters and leave `summary` unset; the plan files are the full plan.",
-      "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
-      `- Split the work into at most ${MAX_WAVES} waves, each a self-contained plan one worker finishes. One wave by default; split only where one worker cannot finish the work. Give each wave \`dependsOn\`: \`[k]\` only when it truly builds on wave k's changes, \`[]\` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), write that exact interface into both waves' \`## Contracts to verify\` and give the later wave \`dependsOn: []\` so they run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. Keep \`dependsOn\` only when it needs the earlier wave's implementation or branch. Waves contain no phases.`,
-      "- When the task mixes UI that no approved design or explicit visual spec fixes with non-UI code (DB, notifications, OCR, …), split it: a design-only wave marked `design: true` (a Designer draws the artboards in the design tool, no app code), then the wave that builds on it with all the code, UI included, against the approved artboards. Never put both in one wave. Pure-UI work, pure non-UI work, and work whose look an approved design or spec already fixes stay as they are, with no `design` flag.",
-      "- Submit the plan through chief_report's `plan` field: one Markdown string for a single wave, or an array of `{body, dependsOn, design?}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
-      "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
-      "- Give every wave a `## Contracts to verify` Markdown heading: a checklist that states contracts as falsifiable properties where they apply: round-trip (decode(encode(x)) == x, save then load), idempotency (running twice equals running once), invariants and state bounds (what holds after every step, value or count limits), equivalence (new path equals old path or a reference on the same inputs), and what must never happen; state each with the edge cases and existing behaviour the wave must keep — what a reviewer would otherwise catch only after the fact. Do not force a class that does not fit. The worker and the reviewer both receive this exact list.",
-      ...(researchLine("planner", await researchSettings()) ? ["- When the root cause is unclear, or before planning you need a broad multi-file scan or several independent questions (scoping a large issue, mapping many similar call sites or files), use chief_research instead of reading it all yourself: investigate (one sub-question per hypothesis or independent question); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings against the code before relying on them."] : []),
-      "- A genuine product or scope decision is Chief's, not yours. If it blocks a sound plan, report blocked with the question as blocker and your recommended answer as recommendation. If the plan holds under a stated assumption, report ready and list the question and the assumption under `## Open questions` in the wave it affects. Never ask the user directly from this thread.",
-      "- A blocked report must include the blocker and your recommended decision or next action.",
-    ].join("\n");
+    const prompt = plannerBrief({
+      title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context,
+      research: researchLine("planner", await researchSettings()) !== null,
+    });
     const thread = await managedSpawn.launch(prepared, { projectId, environment: { type: "project-default" }, title, prompt },
       { role: "planner", chiefThreadId: chief.thread_id });
     return { threadId: thread.id, title, projectId };
@@ -1687,40 +1618,7 @@ export default async function plugin(bb: BbPluginApi) {
     const prepared = await managedSpawn.prepare(projectId, { role: "advisor", hostId });
     const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
     const reviews = worker ? taskReviews(worker) : [];
-    const prompt = [
-      `You are the managed advisor for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
-      "You are a strategic advisor and debugger of last resort: find the root cause and the smallest credible way forward.",
-      "", "## Question", params.mission,
-      ...(params.context ? ["", "## Context", params.context] : []),
-      ...(worker ? [
-        ...(worker.brief ? [
-          "", "## The brief this work was given", clipMiddle(worker.brief, 4_000),
-        ] : []),
-        ...(reviews.length ? [
-          "", "## Reviewer verdicts",
-          ...reviews.flatMap((review) => [
-            ...verdictPreview(review, ` (${review.thread_id})`),
-          ]),
-        ] : []),
-        "", "## Branch and diff",
-        `Branch: ${worker.branch ?? "the project default base"}`,
-        ...(worker.pr_url ? [`Pull request: ${worker.pr_url}`] : []),
-        "This worktree holds the change: read it with git diff against its base.",
-        ...(worker.result ? [
-          worker.summary ?? clip(worker.result, 300),
-          ...(worker.report_path ? [`Full report: ${worker.report_path}`] : []),
-          `Full report and last output: bb chief inspect ${worker.thread_id}`,
-        ] : []),
-      ] : []),
-      "", "## Working contract",
-      `- ${ADVISE_ONLY}`,
-      "- Read every file this brief names in full before concluding anything: no partial reads, no limit or offset.",
-      "- Reproduce before concluding: run the failing test or command, and quote the command and its exit status.",
-      "- A ready report gives the root cause, the evidence, what earlier rounds missed, and the recommended next step for a fresh worker. Put the full advice in `result` and a short `summary` (at most 800 characters: root cause, recommended fix, evidence command).",
-      "- A blocked report must include the blocker and your recommended decision or next action.",
-      ...(worker ? ["- If the repeated rejections come from a project-level rule a future worker should know (not a task-specific bug), set `lesson`: one sentence, at most 400 characters. Otherwise omit it."] : []),
-      "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
-    ].join("\n");
+    const prompt = advisorBrief({ title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context, worker, reviews });
     const thread = await managedSpawn.launch(prepared, {
       projectId,
       environment: worker
@@ -1793,36 +1691,15 @@ export default async function plugin(bb: BbPluginApi) {
       if (!priorLive.environmentId) throw new Error(`Worker ${prior.thread_id} has no reusable environment.`);
       if (params.branch && params.branch !== prior.branch) throw new Error(`replaces: ${prior.thread_id} carries branch ${prior.branch}; pass no --branch or the same one.`);
     }
-    const branch = prior ? prior.branch ?? undefined : params.branch;
-    const issueUrl = params.issueUrl ?? (prior ? prior.issue_url ?? undefined : undefined);
-    const prUrl = params.prUrl ?? (prior ? prior.pr_url ?? undefined : undefined);
-    // With replaces: and no explicit wave, the new worker inherits the prior worker's
-    // plan link — a fix worker after the final review still reads as "final wave".
-    let planThreadId = params.planThreadId;
-    let wave = params.wave;
-    if (planThreadId === undefined && wave === undefined && prior?.plan_thread_id && prior.plan_wave != null) {
-      planThreadId = prior.plan_thread_id;
-      wave = prior.plan_wave;
-    }
-    // Same rule for the kind: a fix successor stays a designer, an explicit next wave uses its own.
-    let kind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
-    // A fix successor of a #simple worker stays simple; a plan-linked successor never is, and an explicit false clears it.
-    const simple = params.simple ?? (!!prior && planThreadId === undefined && prior.simple === 1);
-    const verifyCommand = params.verifyCommand ?? prior?.verify_command ?? null;
-    // The schema only sees params.planThreadId; a replaces: inherited one must be checked here too.
-    if (planThreadId !== undefined && params.unplannedReason) {
-      throw new Error("unplannedReason cannot be combined with planThreadId.");
-    }
-    if (planThreadId !== undefined && params.simple) {
-      throw new Error("simple cannot be combined with planThreadId.");
-    }
+    const resolved = resolveDelegation(params, prior);
+    const { branch, issueUrl, prUrl, planThreadId, wave, simple, verifyCommand, unplannedReason } = resolved;
+    let kind = resolved.kind;
     // Planning on means every new delegation starts from a plan wave. replaces: hands off
     // an already-gated delegation, so it passes; the escape hatch must say why.
     const plannerOn = await plannerEnabled();
     if (planThreadId === undefined && !prior && !params.unplannedReason && !simple && plannerOn) {
       throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. Only bounded work whose shape and cause are already known may skip the plan — pass unplannedReason (CLI: --unplanned-reason) with a short reason why — the cause must come from the user, an issue, or a worker report, not your own code reading — or, only when the user's message contains #simple, pass simple: true (CLI: --simple).");
     }
-    const unplannedReason = params.unplannedReason ?? (planThreadId === undefined ? prior?.unplanned_reason ?? undefined : undefined);
     let planPath: string | undefined;
     let waveTotal: number | undefined;
     let waveNext: number | null = null;
@@ -1872,106 +1749,16 @@ export default async function plugin(bb: BbPluginApi) {
     const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
     const prepared = await managedSpawn.prepare(projectId, { role: kind, hostId });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
-    const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
-    const render = (mission: string, contextText?: string) => [
-      "## Mission", mission,
-      "", "## Success criteria", bullets(params.successCriteria),
-      "", "## Constraints", bullets(params.constraints),
-      ...(contextText ? ["", "## Context", contextText] : []),
-    ].join("\n");
-    const brief = render(params.mission, context);
-    // The reviewer gets the same sections, with a long mission or context clipped —
-    // it judges against the criteria and constraints, which stay in full.
-    const reviewerBrief = render(clip(params.mission, 1_500), context && clipMiddle(context, 1_500));
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
     // hands the fresh worker the review that prompted the handoff.
     const findings = prior ? ledger.openReview(prior.thread_id) : undefined;
     const ruledOut = prior ? chainFails(prior.thread_id) : [];
     let structured: ReportFinding[] | undefined;
     try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
-    const prompt = [
-      `You are the managed worker for “${params.title}”. Report to Chief thread ${chief.thread_id}.`,
-      "", brief,
-      ...(findings?.result ? [
-        "", `## Review findings to fix (${findings.thread_id})`,
-        ...(structured ? [
-          ...(findings.verdict_path ? [`Verdict file: ${findings.verdict_path}`] : []),
-          ...findingLines(structured, "blocking"),
-          ...(structured.some((entry) => entry.severity === "nit") ? ["Optional nits:", ...findingLines(structured, "nit")] : []),
-        ] : verdictPreview(findings)),
-        ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
-        "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
-        "Do not apply a finding that is wrong, or that contradicts the brief or plan. List it in your ready result under `## Disputed findings`, with evidence: file:line, command output, or the brief or plan text it contradicts.",
-        "Nits are optional: fix one only when it is trivial and inside this task's scope.",
-        "An `[AMBIGUOUS: …]` item is a question for Chief, not a finding to fix.",
-      ] : []),
-      ...(ruledOut.length ? [
-        "", "## Already ruled out",
-        ...ruledOut.map((entry) => `- [${entry.scope}] ${entry.text} (basis: ${entry.basis})`),
-        "Do not retry these unless you have new evidence; say why if you do.",
-      ] : []),
-      ...(wave !== undefined && waveTotal !== undefined ? [
-        "", "## Wave",
-        `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
-        waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
-        ...(waveIndependent ? ["This wave is independent: it has its own branch and PR from the default base; do not build on another wave's branch."] : []),
-        ...(implementsDesign !== null ? [`This wave implements the artboards that wave ${implementsDesign} drew and the owner approved. Read them through the design tool's MCP (read-only; never edit the design) and match them; the artboard names are in your mission or wave ${implementsDesign}'s report.`] : []),
-        ...(designWave ? ["This is a design-only wave: the next wave implements it once the owner approves your artboards."] : []),
-      ] : []),
-      ...(contracts ? [
-        "", "## Contracts to verify", clip(contracts, 3_000),
-        "Keep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.",
-      ] : []),
-      ...(verifyCommand !== null ? [
-        "", "## Verify command",
-        // Fence longer than any backtick run so a ``` line in the command cannot close it.
-        ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
-        "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. Chief runs the same command on your pushed commit before any reviewer starts; a non-zero exit there sends the work back without a review. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
-      ] : []),
-      ...(branch || issueUrl || prUrl ? [
-        "", "## Git workflow",
-        ...(branch ? [`Your worktree is based on ${branch}. Check that branch out and commit your work there.`] : []),
-        ...(prior ? [`This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them.${prior.result ? "" : ` Its last report: bb chief inspect ${prior.thread_id}`}`] : []),
-        ...(issueUrl ? [`Tracking issue: ${issueUrl}`] : []),
-        ...(prUrl ? [`Draft pull request: ${prUrl}`] : []),
-        "Do not create, merge, or mark ready any pull request — Chief owns the forge. Commit and push your work, then report ready.",
-      ] : []),
-      ...(prior?.result ? [
-        "", "## Predecessor's last report",
-        prior.summary ?? clip(prior.result, 1_500),
-        ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
-        ...(prior.recommendation ? [`Recommendation: ${clip(prior.recommendation, 600)}`] : []),
-        ...(prior.report_path ? [`Full report: ${prior.report_path}`] : []),
-      ] : []),
-      "", "## Working contract",
-      "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file or verdict file, read that file in full too before starting.",
-      "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
-      "- Commit and push after each meaningful step (a passing sub-change, before any risky edit, before reporting); the pushed branch is your checkpoint and what the reviewer sees.",
-      "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
-      "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
-      ...(planPath !== undefined ? ["- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`."] : []),
-      "- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, run the old and new code on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression.",
-      "- A blocked report must include the blocker and your recommended decision or next action.",
-      "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
-      "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
-      ...(simple ? [
-        "", "## Simple work (#simple)",
-        "- The user tagged this #simple: no planner ran, and Chief may complete it without a review. Your mission is the user's request; find the cause yourself before changing anything.",
-        "- Your Automated Verification (the command and its exit status) may be the only evidence Chief checks, so run the closest real check.",
-      ] : []),
-      ...(kind === "designer" ? [
-        "", "## Design work",
-        "- Pick the mode the brief describes; if it describes none, use No spec. Design tool: create or edit in a design tool (Paper, Figma, or similar). Design in code: implement a design-tool artboard in the UI files the brief names. No spec: decide and implement the look within the project's existing design system, in the UI files the brief names or, when it names none, the files that render that UI.",
-        "- Design tool and design in code use the tool's MCP. If that tool is not connected here, report blocked naming the missing tool. Before any other call to it, load its guide (Paper: `get_guide({ topic: \"paper-mcp-instructions\" })`) and follow it.",
-        "- Design tool: after each meaningful change, verify it with the tool's screenshot (Paper: `get_screenshot`), and when done creating or editing call its finish call (Paper: `finish_working_on_nodes`). Design tool work changes no code or files unless the brief names them.",
-        "- Design in code: read the artboard through the tool's MCP (read-only; do not edit the design), edit only the UI files the brief names, then compare a golden or simulator screenshot of the implemented UI with the artboard's screenshot.",
-        "- No spec: capture a golden or simulator screenshot of the implemented UI.",
-        "- In your ready result, put screenshot evidence under Automated: for each PNG, the command or tool call that produced it, its exit status when it has one, and the PNG path. For design in code, also list the differences that remain against the artboard. Taste and brand fit go under Manual.",
-        "- Design in code or No spec: if the repo has no golden or simulator screenshot tooling, report blocked naming what is missing; do not add screenshot tooling yourself.",
-        "- In your report prose, name design nodes by layer name, never by raw node ID.",
-        ...(designWave ? ["- Design-only wave: use Design tool mode. Draw or edit the artboards only; write no app code and change no repo files. In your ready result, list each artboard by layer name with its screenshot path so the owner can approve it."] : []),
-      ] : []),
-    ].join("\n");
+    const { prompt, reviewerBrief } = workerBrief({
+      title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign,
+      contracts, planContextLine, kind, simple, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut,
+    });
     const thread = await managedSpawn.launch(prepared, {
       projectId,
       environment: prior
@@ -2666,31 +2453,7 @@ export default async function plugin(bb: BbPluginApi) {
     else bb.log.error(message);
   }
 
-  /** A reviewer's verdict for another thread's prompt: the clipped findings plus where to read them in full. */
-  function verdictPreview(review: ManagedRow, suffix = "") {
-    return [
-      `Verdict: ${review.verdict ?? "none"}${suffix}`,
-      ...(review.verdict_path ? [`Verdict file (read it in full): ${review.verdict_path}`] : []),
-      review.summary ?? clip(review.result ?? "", 300),
-      `Full report and last output: bb chief inspect ${review.thread_id}`,
-    ];
-  }
 
-  /** One Markdown bullet per finding of the given severity, never clipped. */
-  function findingLines(list: ReportFinding[], severity: ReportFinding["severity"]) {
-    return list.filter((entry) => entry.severity === severity)
-      .map((entry) => `- ${entry.file}${entry.line ? `:${entry.line}` : ""} — ${entry.message}${entry.fix ? ` (fix: ${entry.fix})` : ""}`);
-  }
-
-  /** A wave body's `Contracts to verify` section, up to the next heading of the same or higher level. */
-  function contractsOf(body: string): string | undefined {
-    // ponytail: headings inside code blocks are deliberately out of scope, as for the NOT-doing check.
-    const heading = /^[ \t]*(#{1,6})[ \t]+contracts to verify\b.*$/im.exec(body);
-    if (!heading) return undefined;
-    const rest = body.slice(heading.index + heading[0].length);
-    const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(rest);
-    return (end ? rest.slice(0, end.index) : rest).trim() || undefined;
-  }
 
   type ThreadInput = ThreadInsert<ManagedRow["role"], ManagedRow["state"]>;
   /** The caller's managed row. While insertThread has not run yet, `pending` holds the row recovered from spawn-seeded
@@ -2733,184 +2496,8 @@ export default async function plugin(bb: BbPluginApi) {
     return row;
   }
 
-  type ReportParams = z.infer<typeof reportParams>;
   type WaveInput = { body: string; dependsOn?: number[]; design?: boolean };
 
-  /** Every reason a report cannot be saved, one line per failing field: the field, its actual size or value, the limit, and the fix. */
-  function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, params: ReportParams, plan: string | unknown[] | undefined): string[] {
-    const errors: string[] = [];
-    const num = (n: number) => n.toLocaleString("en-US");
-    const ready = params.state === "ready";
-    const tooLong = (field: string, value: string | undefined, max: number, fix: string) => {
-      if (value !== undefined && value.length > max) errors.push(`${field} is ${num(value.length)} characters; max ${num(max)}. ${fix}`);
-    };
-    const onlyWhenReady = (field: string, value: unknown) => {
-      if (value !== undefined && !ready) errors.push(`${field} is only allowed when state is ready (state is "${params.state}"); remove it.`);
-    };
-
-    if (params.summary !== undefined) {
-      if (!params.summary) errors.push("summary is empty; send text or omit it.");
-      else tooLong("summary", params.summary, SUMMARY_MAX, "Shorten summary, or leave it unset and keep detail in result.");
-    }
-    if (params.state === "blocked") {
-      for (const field of ["blocker", "recommendation"] as const) {
-        if (!params[field]) errors.push(`${field} is missing; state blocked needs a blocker and a recommendation.`);
-      }
-    } else if (params.blocker !== undefined) {
-      errors.push(`blocker is only for state blocked (state is "${params.state}"); remove blocker or set state to blocked.`);
-    }
-    tooLong("blocker", params.blocker, REPORT_TEXT_MAX, "Shorten it and move detail into result.");
-    tooLong("recommendation", params.recommendation, REPORT_TEXT_MAX, "Shorten it and move detail into result.");
-    if (ready && !params.result) errors.push("result is empty; a ready report needs a non-empty result.");
-    onlyWhenReady("verdict", params.verdict);
-    onlyWhenReady("lesson", params.lesson);
-    onlyWhenReady("regression", params.regression);
-    onlyWhenReady("plan", params.plan);
-    onlyWhenReady("findings", params.findings);
-    // Emptiness, length and role are independent of each other and of state: each failing one gets its own line.
-    if (params.lesson !== undefined) {
-      if (!params.lesson) errors.push("lesson is empty; send text or omit it.");
-      else tooLong("lesson", params.lesson, LESSON_MAX, "Shorten it to one durable rule.");
-      if (row.role !== "advisor" && row.role !== "reviewer") errors.push(`lesson is only for an advisor or reviewer's ready report (role is ${row.role}); remove it.`);
-    }
-    if (row.role === "reviewer" && ready && !params.verdict) {
-      errors.push('verdict is missing; a reviewer\'s ready report must carry "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
-    }
-    if (row.role === "worker" && row.plan_thread_id && ready
-      && !/^[ \t]*#{1,6}[ \t]+deviations from plan/im.test(params.result ?? "")) {
-      errors.push('result lacks a "## Deviations from plan" Markdown heading; a plan worker\'s ready report must list each departure from the plan and why, or "None".');
-    }
-
-    // report() decodes a JSON string first, so a string left here is not an array.
-    if (params.fails !== undefined && !Array.isArray(params.fails)) {
-      errors.push("fails: send an array of {text, scope, basis}.");
-    } else if (params.fails?.length) {
-      if (row.role !== "worker" && row.role !== "reviewer") errors.push(`fails is only for a worker's or reviewer's report (role is ${row.role}); remove it.`);
-      if (params.fails.length > MAX_REPORT_FAILS) errors.push(`fails has ${params.fails.length} entries; max ${MAX_REPORT_FAILS}. Keep the ${MAX_REPORT_FAILS} most useful dead ends.`);
-      params.fails.forEach((entry, index) => {
-        for (const [field, max] of [["text", 400], ["scope", 120], ["basis", 200]] as const) {
-          const name = `fails[${index}].${field}`;
-          if (typeof entry?.[field] !== "string" || !entry[field]) errors.push(`${name} is empty; send text or drop the entry.`);
-          else tooLong(name, entry[field], max, "Shorten it.");
-        }
-      });
-    }
-
-    // report() decodes a JSON string first, so a string left here is not an array.
-    if (params.findings !== undefined) {
-      if (row.role !== "reviewer") errors.push(`findings is only for a reviewer's ready report (role is ${row.role}); remove it.`);
-      if (!Array.isArray(params.findings)) errors.push("findings: send an array of {file, line?, severity, message, fix?}.");
-      else {
-        const list = params.findings as unknown[];
-        if (list.length > MAX_FINDINGS) errors.push(`findings has ${list.length} entries; max ${MAX_FINDINGS}. Keep the blocking ones and the most useful nits.`);
-        list.forEach((item, index) => {
-          const entry = (typeof item === "object" && item !== null ? item : {}) as Record<string, unknown>;
-          const text = (field: string, min: number, max: number) => {
-            const value = entry[field];
-            const name = `findings[${index}].${field}`;
-            if (value === undefined && min === 0) return;
-            if (typeof value !== "string" || value.trim().length < min) errors.push(`${name} is missing or empty; send text.`);
-            else tooLong(name, value.trim(), max, "Shorten it.");
-          };
-          text("file", 1, 300);
-          text("message", 1, 1000);
-          text("fix", 0, 1000);
-          if (entry.line !== undefined && !(Number.isInteger(entry.line) && (entry.line as number) >= 1)) errors.push(`findings[${index}].line is ${JSON.stringify(entry.line)}; send a 1-based integer or omit it.`);
-          if (entry.severity !== "blocking" && entry.severity !== "nit") errors.push(`findings[${index}].severity is ${JSON.stringify(entry.severity)}; allowed "blocking" or "nit".`);
-        });
-        const blocking = list.filter((item) => (item as { severity?: unknown } | null)?.severity === "blocking").length;
-        if (params.verdict === "request_changes" && !blocking) errors.push('verdict is request_changes but findings has no "blocking" entry; add the blocking finding or send approve.');
-        if (params.verdict === "approve" && blocking) errors.push(`verdict is approve but findings has ${blocking} "blocking" ${blocking > 1 ? "entries" : "entry"}; send request_changes or mark them "nit".`);
-      }
-    } else if (row.role === "reviewer" && ready) {
-      errors.push("findings is missing; send [] when there are none.");
-    }
-
-    // The plan's own shape and rules are checked whatever the state and role; those two have their own lines.
-    if (plan !== undefined) {
-      if (row.role !== "planner") errors.push(`plan is only for a planner's ready report (role is ${row.role}); remove it.`);
-      errors.push(...checkPlan(plan));
-    } else if (row.role === "planner" && ready) {
-      errors.push("plan is missing; a planner's ready report requires the full plan body, as a Markdown string or an array of {body, dependsOn?, design?}.");
-    }
-    return errors;
-  }
-
-  /** The plan-shape and planner-rule lines for checkReport. Each wave is inspected
-   * on its own, so one bad wave never hides another's failures; a check is skipped only when its own input is invalid. */
-  function checkPlan(plan: string | unknown[]): string[] {
-    const errors: string[] = [];
-    const num = (n: number) => n.toLocaleString("en-US");
-    const kind = (value: unknown) => value === null ? "null" : Array.isArray(value) ? "an array" : typeof value === "object" ? "an object" : `a ${typeof value}`;
-    if (Array.isArray(plan) && !plan.length) return [`plan is an empty array; pass a Markdown string, or an array of {body, dependsOn?, design?} with 1 to ${MAX_WAVES} waves.`];
-    const multi = typeof plan !== "string";
-    const items: unknown[] = multi ? plan : [{ body: plan }];
-    if (items.length > MAX_WAVES) errors.push(`plan has ${items.length} waves; max ${MAX_WAVES}. Merge waves.`);
-    // Per wave: its trimmed body (undefined when missing or not a string), the legal earlier waves it may build on
-    // ("any" when dependsOn is not an array), its parent when dependsOn passed every check (null = chain head), and whether design is true.
-    const bodies: (string | undefined)[] = [];
-    const maybeParents: (number[] | "any")[] = [];
-    const parents: (number | null | undefined)[] = [];
-    const designs: boolean[] = [];
-    items.forEach((item, index) => {
-      const n = index + 1;
-      if (typeof item !== "object" || item === null || Array.isArray(item)) {
-        errors.push(`plan wave ${n} is ${kind(item)}, not an object; use {body, dependsOn?, design?}.`);
-        bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false);
-        return;
-      }
-      const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown };
-      const name = multi ? `plan wave ${n} body` : "plan";
-      const body = typeof wave.body === "string" ? wave.body.trim() : undefined;
-      bodies.push(body);
-      if (body === undefined) errors.push(`${name} is ${wave.body === undefined ? "missing" : kind(wave.body)}; send the wave's Markdown text as a string, with its own "## Contracts to verify" heading.`);
-      else if (!body) errors.push(`${name} is empty; send the plan text.`);
-      else if (body.length > MAX_PLAN_LENGTH) errors.push(`${name} is ${num(body.length)} characters; max ${num(MAX_PLAN_LENGTH)}. ${multi ? "Split the wave." : "Split it into waves."}`);
-      if (wave.design !== undefined && typeof wave.design !== "boolean") {
-        errors.push(`plan wave ${n} design is ${JSON.stringify(wave.design)} (${typeof wave.design}); allowed true or false. Send a boolean, or drop design.`);
-      }
-      designs.push(wave.design === true);
-      const deps = wave.dependsOn;
-      const bad = (what: string, fix: string) => errors.push(`plan wave ${n} dependsOn is ${JSON.stringify(deps)}, ${what}; ${fix}`);
-      if (deps === undefined) { maybeParents.push(n > 1 ? [n - 1] : []); parents.push(n > 1 ? n - 1 : null); return; }
-      if (!Array.isArray(deps)) {
-        bad(`${kind(deps)}, not an array`, "use [] or [k] with k the 1-based earlier wave.");
-        maybeParents.push("any"); parents.push(undefined);
-        return;
-      }
-      // Type, count and range are independent: report each that fails, so one fix pass clears them all.
-      const nonIntegers = deps.filter((k) => !Number.isInteger(k));
-      const outOfRange = deps.filter((k) => Number.isInteger(k) && (k < 1 || k >= n));
-      if (nonIntegers.length) bad(`entries ${JSON.stringify(nonIntegers)} are not integers`, "use 1-based wave numbers.");
-      if (deps.length > 1) bad(`${deps.length} entries but max is 1`, "name only the wave it builds on.");
-      if (outOfRange.length) bad(`${JSON.stringify(outOfRange)} ${outOfRange.length > 1 ? "are not earlier waves" : "is not an earlier wave"}`, n === 1 ? "wave 1 depends on nothing; use []." : `use [] or one wave from 1 to ${n - 1}.`);
-      maybeParents.push(deps.filter((k) => Number.isInteger(k) && k >= 1 && k < n));
-      parents.push(nonIntegers.length || outOfRange.length || deps.length > 1 ? undefined : deps[0] ?? null);
-    });
-    // ponytail: headings inside code blocks are deliberately out of scope (user decision).
-    // The heading must be in some wave, so it is demanded whenever no readable body has it, even if another body is unreadable.
-    if (!bodies.some((body) => body !== undefined && /^[ \t]*#{1,6}[ \t]+what we(?:'re|’re| are) not doing/im.test(body))) {
-      errors.push(`plan lacks a "## What we're NOT doing" Markdown heading (any level, not bold text) in some wave; add one.${typeof plan === "string" && plan.startsWith("[")
-        ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string." : ""}`);
-    }
-    bodies.forEach((body, index) => {
-      if (body !== undefined && !contractsOf(body)) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
-    });
-    // A design wave is a chain tip when no later wave could build on it; a later wave whose dependsOn is not an array might, so it blocks the check.
-    designs.forEach((design, index) => {
-      const n = index + 1;
-      if (design && maybeParents.every((candidates, other) => other <= index || (candidates !== "any" && !candidates.includes(n)))) {
-        errors.push(`plan wave ${n} is design: true but no wave builds on it; follow it with the wave that implements it (dependsOn [${n}] or the next wave), or drop design.`);
-      }
-    });
-    const taken = new Set<number>();
-    parents.forEach((parent, index) => {
-      if (parent === undefined || parent === null) return;
-      if (taken.has(parent)) errors.push(`plan wave ${index + 1} and another wave both build on wave ${parent}; waves form chains only, so mark one of them dependsOn [] or chain it after the other.`);
-      taken.add(parent);
-    });
-    return errors;
-  }
 
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
     const found = await lookupRow(threadId, callerProjectId);
@@ -3025,99 +2612,19 @@ export default async function plugin(bb: BbPluginApi) {
     const reviewedTargets = reviewerVerdict ? ledger.targets(threadId) : [];
     if (reviewerVerdict) {
       try {
-        verdictPath = await writeArtifact(threadId, row.project_id, verdictName, [
-          `# Review verdict (${threadId})`, "",
-          `Verdict: ${verdict}`, ...(regressionFlag ? ["Regression: yes"] : []),
-          ...(reviewedTargets.length > 1
-            ? reviewedTargets.map((target) => `Reviewed worker: ${target.worker_thread_id}${target.head_sha ? ` at head ${target.head_sha}` : ""}`)
-            : [`Reviewed worker: ${row.worker_thread_id ?? "none"}`, ...(row.reviewed_head_sha ? [`Reviewed head: ${row.reviewed_head_sha}`] : [])]),
-          ...(findingList?.some((entry) => entry.severity === "blocking") ? ["", "## Blocking findings", "", ...findingLines(findingList, "blocking")] : []),
-          ...(findingList?.some((entry) => entry.severity === "nit") ? ["", "## Nits", "", ...findingLines(findingList, "nit")] : []),
-          "", "## Findings", "", params.result ?? "",
-          ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
-        ].join("\n") + "\n");
+        verdictPath = await writeArtifact(threadId, row.project_id, verdictName, verdictFileBody({
+          threadId, verdict, regressionFlag, reviewedTargets, workerThreadId: row.worker_thread_id, reviewedHeadSha: row.reviewed_head_sha,
+          findingList, result: params.result, recommendation: params.recommendation,
+        }));
       } catch (error) {
         bb.log.warn(`Could not write ${threadId}'s verdict file: ${String(error)}`);
       }
     }
-    // The alert is built in two tiers. The required lines come first, each with its own hard budget (header,
-    // State, the Full report pointer, Verdict and Verdict file, action, Blocker, Recommendation); their total is
-    // reserved out of the alert. Only what is left goes to optional detail: planner wave paths and inline-vis
-    // lines, Recorded commands, then Result or Summary. Whatever is cut lives unabridged in the full file:
-    // report-<seq>.md, or for a reviewer's verdict its verdict-<seq>.md. Both names carry the report number,
-    // so no file an earlier alert pointed at is ever overwritten.
-    const FIELD_ROOM = 600;
-    const ACTION_ROOM = 400;
-    const MIN_RESULT_ROOM = 200;
-    const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
     const longResult = (params.result?.length ?? 0) > SUMMARY_MAX;
     // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
     const preview = reviewerVerdict && !!verdictPath && !!params.result;
-    const longLabel = "Result (clipped, full text in the report file): ";
-    const inlineIntro = "To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):";
     const waveLines = plannerReady && planWaves ? planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`) : [];
-    const cost = (lines: string[]) => lines.reduce((total, line) => total + line.length + 1, 0);
-    type Pointer = { line: string; name: string | null };
-    // pointer is the Full report line, right after State so the whole-alert clip never reaches it; name is the
-    // file holding the full text, or null when it could not be written. clipped says whether anything was cut.
-    const layout = (pointer: Pointer | null) => {
-      const stored = !!pointer?.name;
-      const summaryLine = !!params.summary && (preview || stored || !params.result);
-      const resultText = summaryLine ? params.summary! : params.result ?? null;
-      // A Result the file backs up is sized for the longer label, so it can say it was clipped.
-      const filed = stored && !summaryLine && !preview;
-      const sizeLabel = summaryLine ? "Summary: " : filed ? longLabel : "Result: ";
-      // A reviewer's fallback preview keeps the legacy 300; a supplied summary is budgeted like any Result.
-      const cap = preview && !summaryLine ? 300 : Infinity;
-      // ponytail: the pointer and Verdict file lines carry absolute storage paths unclipped; BB keeps the root short
-      // (~/.bb/chief/<projectId>/<threadId>/), so the budget assumes roots well under ~1600 characters. Bound them if that changes.
-      const top = [
-        clip(`${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, 200),
-        `State: ${params.state}`,
-        ...(pointer ? [pointer.line] : []),
-        ...(failList?.length ? [`Fails: ${failList.length} ruled out (carried to any replaces: successor)`] : []),
-      ];
-      const planHead = waveLines.length ? [`Plan: ${waveLines.length} wave(s)`] : [];
-      const verdictLines = [...(verdict ? [`Verdict: ${verdict}`] : []), ...(verdictPath ? [`Verdict file: ${verdictPath}`] : [])];
-      const actionLine = clip(action, ACTION_ROOM);
-      const inspectLine = preview ? [`Full report and last output: bb chief inspect ${threadId}`] : [];
-      const recordedHead = recorded === undefined ? [] : recordedLines(recorded, 0);
-      const blocker = params.state === "blocked" ? params.blocker! : null;
-      const fieldCount = (blocker === null ? 0 : 1) + (params.recommendation ? 1 : 0);
-      const lessonLines = params.state === "ready" && params.lesson ? [`Lesson recorded for future managed threads: ${clip(params.lesson, 300)}`] : [];
-      const fixedCost = cost([...top, ...planHead, ...verdictLines, actionLine, ...lessonLines, ...inspectLine, ...recordedHead]);
-      const fieldRoom = Math.min(FIELD_ROOM, Math.max(100, Math.floor((alertRoom - fixedCost) / Math.max(fieldCount, 1)) - 20));
-      const suffix = pointer?.name ? ` (clipped; full text in ${pointer.name})` : " (clipped)";
-      const field = (name: string, value: string) => `${name}: ${value.length <= fieldRoom ? value : `${clip(value, fieldRoom - suffix.length)}${suffix}`}`;
-      const fields = [...(blocker === null ? [] : [field("Blocker", blocker)]), ...(params.recommendation ? [field("Recommendation", params.recommendation)] : [])];
-      const remaining = alertRoom - fixedCost - cost(fields);
-      // Optional detail gets what the required lines leave, minus a floor for Result.
-      let room = remaining - (resultText ? sizeLabel.length + Math.min(resultText.length, cap, MIN_RESULT_ROOM) + 1 : 0);
-      const waveFit = fitLines(waveLines, room);
-      room -= cost(waveFit.lines);
-      const inlineFit = fitLines(inlinePlans, room - inlineIntro.length - 1, false);
-      const inlineBlock = inlineFit.lines.length ? [inlineIntro, ...inlineFit.lines] : [];
-      room -= cost(inlineBlock);
-      const commands = recorded === undefined ? [] : recordedLines(recorded, room).slice(1);
-      const resultRoom = Math.min(cap, remaining - cost(waveFit.lines) - cost(inlineBlock) - cost(commands) - sizeLabel.length - 1);
-      const resultCut = !!resultText && resultText.length > resultRoom;
-      // A file-bearing report (first pass long or clipped) labels its Result as clipped; only a short, unclipped one stays plain.
-      const label = filed ? longLabel : summaryLine ? "Summary: " : "Result: ";
-      const text = [
-        ...top, ...planHead, ...waveFit.lines, ...inlineBlock, ...verdictLines, actionLine, ...fields, ...lessonLines, ...inspectLine,
-        ...recordedHead, ...commands,
-        ...(resultText && resultRoom > 0 ? [`${label}${clip(resultText, resultRoom)}`] : []),
-      ].join("\n");
-      const clipped = text.length > alertRoom
-        || action.length > ACTION_ROOM
-        || (blocker !== null && blocker.length > fieldRoom)
-        || (params.recommendation?.length ?? 0) > fieldRoom
-        || waveFit.cut || inlineFit.cut
-        || (!!recorded && (commands.filter((line) => !line.startsWith("  …and ")).length < recorded.length
-          || recorded.some((entry) => entry.command.length > COMMAND_EXCERPT)))
-        || resultCut;
-      return { text, clipped };
-    };
+    const layout = reportAlert({ role: row.role, title: row.title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview });
     // Long-or-clipped is decided from this first pass; the pass that follows only adds the pointer.
     const first = layout(null);
     let alert = first.text;
@@ -3129,16 +2636,9 @@ export default async function plugin(bb: BbPluginApi) {
     } else if (longResult || first.clipped) {
       let pointer: Pointer;
       try {
-        reportPath = await writeArtifact(threadId, row.project_id, reportName, [
-          `# ${row.role[0]!.toUpperCase()}${row.role.slice(1)} report from ${row.title} (${threadId})`, "",
-          `State: ${params.state}`, ...(verdict ? [`Verdict: ${verdict}`] : []), `Next: ${action}`,
-          ...(waveLines.length ? ["", "## Plan files", "", ...waveLines, ...inlinePlans] : []),
-          ...(params.state === "blocked" ? ["", "## Blocker", "", params.blocker!] : []),
-          ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
-          ...(recorded === undefined ? [] : ["", "## Recorded", "", ...recordedLines(recorded, Infinity, true)]),
-          ...(params.summary ? ["", "## Summary", "", params.summary] : []),
-          ...(params.result ? ["", "## Result", "", params.result] : []),
-        ].join("\n") + "\n");
+        reportPath = await writeArtifact(threadId, row.project_id, reportName, reportFileBody({
+          role: row.role, title: row.title, threadId, params, verdict, action, waveLines, inlinePlans, recorded,
+        }));
         pointer = { line: `Full report: ${reportPath}`, name: reportName };
       } catch (error) {
         bb.log.warn(`Could not write ${threadId}'s report file: ${String(error)}`);
