@@ -469,6 +469,8 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   await captureScenarios();
 
   async function captureScenarios() {
+    // Literal fixtures: never import the plugin's limits, so both builds read the same input.
+    const snapFindings = (kind: string) => kind === "approve" ? [] : [{ file: "server.ts", line: 1, severity: "blocking", message: "Snapshot blocking finding.", fix: "Snapshot complete fix." }];
     const all = rows();
     const chiefs = all.filter((row) => row.role === "chief");
     const live = all.filter(isLive);
@@ -568,7 +570,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       if (!start) { await step(`ladder ${name}: no ${firstWorker} in the copy`, () => "skipped"); return; }
       const owner = start.chief_thread_id as string;
       const project = start.project_id as string;
-      const verdict = (kind: string) => ({ state: "ready", verdict: kind, summary: `Snapshot ladder ${kind}`, result: `Snapshot ladder review: ${kind}.` });
+      const verdict = (kind: string) => ({ state: "ready", verdict: kind, findings: snapFindings(kind), summary: `Snapshot ladder ${kind}`, result: `Snapshot ladder review: ${kind}.` });
       const replace = (id: string, extra: object = {}) => tool("chief_delegate", { title: "Snapshot ladder successor", mission: "Snapshot ladder mission", replaces: id, ...extra }, owner, project);
       // One review round: chief_review on the tip, then the reviewer's verdict.
       const round = async (tag: string, tip: string, kind: string) => {
@@ -646,7 +648,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         const as = (id: string | undefined, name: string, params: unknown, chiefCalls = false) => (id ? tool(name, params, chiefCalls ? owner : id, project) : "no such thread");
         const body = (n: number) => `# Wave ${n}\nDo the work of wave ${n}.\n\n## Contracts to verify\n- Wave ${n} keeps its invariant\n\n## What we're NOT doing\n- Nothing else`;
         const ready = { state: "ready", summary: "Snapshot wave worker summary", result: "Changed server.ts:1.\n\n## Deviations from plan\nNone\n\n## Verification\nAutomated: npm test; echo=0\nManual: none" };
-        const verdict = (kind: string) => ({ state: "ready", verdict: kind, summary: `Snapshot wave ${kind}`, result: `Snapshot wave review: ${kind}.` });
+        const verdict = (kind: string) => ({ state: "ready", verdict: kind, findings: snapFindings(kind), summary: `Snapshot wave ${kind}`, result: `Snapshot wave review: ${kind}.` });
         const delegate = (n: number, extra: object = {}) => tool("chief_delegate", { title: `Snapshot plan wave ${n}`, mission: `Snapshot mission, wave ${n}`, planThreadId: planner, wave: n, ...extra }, owner, project);
         const review = (workerId: string | undefined) => as(workerId, "chief_review", { workerThreadId: workerId }, true);
         const roster = (label: string) => waveStep(`chief_roster ${label}`, () => tool("chief_roster", { includeComplete: true }, owner, project));
@@ -734,7 +736,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         await idleStep("chief_roster with the first tip idle", () => tool("chief_roster", { includeComplete: true }, owner, project));
         await idleStep("chief_review the first tip", () => tool("chief_review", { workerThreadId: "thr_fx_id_a" }, owner, project));
         await idleStep("chief_review the ready tip", () => tool("chief_review", { workerThreadId: "thr_fx_id_b" }, owner, project));
-        await idleStep("reviewer approves", () => { const id = reviewerOfIdle("thr_fx_id_b"); return id ? tool("chief_report", { state: "ready", verdict: "approve", summary: "Snapshot idle-ready approve", result: "Snapshot idle-ready review: approve." }, id, project) : "no reviewer"; });
+        await idleStep("reviewer approves", () => { const id = reviewerOfIdle("thr_fx_id_b"); return id ? tool("chief_report", { state: "ready", verdict: "approve", findings: snapFindings("approve"), summary: "Snapshot idle-ready approve", result: "Snapshot idle-ready review: approve." }, id, project) : "no reviewer"; });
         for (const id of ["thr_fx_id_a", "thr_fx_id_b"]) {
           await idleStep(`chief_complete ${id}`, () => tool("chief_complete", { threadId: id }, owner, project));
           await idleStep(`planner state after ${id}`, () => one(`SELECT state FROM managed_threads WHERE thread_id=?`, planner)?.state);
@@ -770,7 +772,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         await stackedStep("chief_roster before", () => tool("chief_roster", { includeComplete: true }, owner, project));
         await stackedStep("chief_review the first wave", () => tool("chief_review", { workerThreadId: "thr_fx_st_a" }, owner, project));
         await stackedStep("chief_review the tip", () => tool("chief_review", { workerThreadId: "thr_fx_st_c" }, owner, project));
-        await stackedStep("reviewer approves", () => { const id = reviewerOfStacked("thr_fx_st_c"); return id ? tool("chief_report", { state: "ready", verdict: "approve", summary: "Snapshot stacked approve", result: "Snapshot stacked review: approve." }, id, project) : "no reviewer"; });
+        await stackedStep("reviewer approves", () => { const id = reviewerOfStacked("thr_fx_st_c"); return id ? tool("chief_report", { state: "ready", verdict: "approve", findings: snapFindings("approve"), summary: "Snapshot stacked approve", result: "Snapshot stacked review: approve." }, id, project) : "no reviewer"; });
         await stackedStep("chief_complete thr_fx_st_a", () => tool("chief_complete", { threadId: "thr_fx_st_a" }, owner, project));
         setHead("thr_fx_st_b", "e");
         await stackedStep("chief_complete thr_fx_st_b with its head moved", () => tool("chief_complete", { threadId: "thr_fx_st_b" }, owner, project));
@@ -814,7 +816,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         const replacementOf = (workerId: string) => one(`SELECT thread_id FROM managed_threads WHERE role='worker' AND replaces_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, workerId)?.thread_id as string | undefined;
         const as = (id: string | undefined, params: unknown) => (id ? tool("chief_report", params, id, project) : "no such thread");
         const ready = { state: "ready", summary: "Snapshot stacked fix worker summary", result: "Changed server.ts:1.\n\n## Deviations from plan\nNone\n\n## Verification\nAutomated: npm test; echo=0\nManual: none" };
-        const verdict = { state: "ready", verdict: "request_changes", summary: "Snapshot stacked fix request_changes", result: "Snapshot stacked fix review: request_changes." };
+        const verdict = { state: "ready", verdict: "request_changes", findings: snapFindings("request_changes"), summary: "Snapshot stacked fix request_changes", result: "Snapshot stacked fix review: request_changes." };
         const fix = (id: string) => tool("chief_delegate", { title: "Snapshot stacked fix", mission: "Snapshot stacked fix mission", replaces: id }, owner, project);
         await fixStep("chief_review the tip", () => tool("chief_review", { workerThreadId: "thr_fx_sf_c" }, owner, project));
         await fixStep("reviewer request_changes", () => as(reviewerOfFix("thr_fx_sf_c"), verdict));
@@ -868,9 +870,9 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     });
     const reports: Record<string, [string, unknown][]> = {
       reviewer: [
-        ["approve", { state: "ready", verdict: "approve", summary: "Snapshot approve", result: "Snapshot review: nothing blocks the merge." }],
-        ["request_changes", { state: "ready", verdict: "request_changes", summary: "Snapshot reject", result: "Snapshot review: server.ts:1 is wrong." }],
-        ["request_changes regression", { state: "ready", verdict: "request_changes", regression: true, summary: "Snapshot regression", result: "Snapshot review: server.ts:1 regressed." }],
+        ["approve", { state: "ready", verdict: "approve", findings: snapFindings("approve"), summary: "Snapshot approve", result: "Snapshot review: nothing blocks the merge." }],
+        ["request_changes", { state: "ready", verdict: "request_changes", findings: snapFindings("request_changes"), summary: "Snapshot reject", result: "Snapshot review: server.ts:1 is wrong." }],
+        ["request_changes regression", { state: "ready", verdict: "request_changes", findings: snapFindings("request_changes"), regression: true, summary: "Snapshot regression", result: "Snapshot review: server.ts:1 regressed." }],
       ],
       planner: [
         ["valid plan array", { state: "ready", summary: "Snapshot plan", result: "Snapshot plan result", plan: [{ body: contract(1) + notDoing }, { body: contract(2), dependsOn: [1] }] }],

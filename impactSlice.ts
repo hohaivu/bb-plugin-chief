@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 /** `entries` counts the `path:line` pointers in `lines`; the other lines are header and notes. */
-export type ImpactSlice = { lines: string[]; entries: number } | { skipped: string };
+export type ImpactSlice = { lines: string[]; entries: number; guidelines: string[] } | { skipped: string };
 
 /** git with a 10 s timeout and 2 attempts, each bounded by the absolute `deadline`; past it, throws `deadline`. */
 export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number) {
@@ -46,6 +46,9 @@ const STOP = new Set(("if for while switch async catch return function typeof ne
 const MAX_CALLEES = 20;
 const MAX_SIGNATURES = 10;
 const MAX_HITS = 200;
+const GUIDELINE_NAMES = ["CLAUDE.md", "AGENTS.md"];
+/** 100 directories give 200 pathspecs, far below ARG_MAX. */
+const MAX_GUIDELINE_DIRS = 100;
 
 /** The defined name on a definition line, else (headers only) the last identifier before the first `(`. */
 function nameOf(text: string, fallback: boolean): string | null {
@@ -54,6 +57,29 @@ function nameOf(text: string, fallback: boolean): string | null {
   if (!fallback) return null;
   const ids = text.split("(")[0]!.match(/[A-Za-z_$][\w$]*/g);
   return text.includes("(") && ids?.length ? ids[ids.length - 1]! : null;
+}
+
+/** The CLAUDE.md and AGENTS.md paths at `sha` in the repository root and in each directory on a changed path, as rendered
+ * lines. Paths only, never contents. Best-effort: a failure becomes a note, never a thrown error. */
+async function guidelineLines(git: ReturnType<typeof gitWithin>, sha: string, changed: Set<string>): Promise<string[]> {
+  try {
+    const dirs = new Set([""]);
+    for (const path of changed) {
+      const parts = path.split("/");
+      for (let i = 1; i < parts.length; i += 1) dirs.add(parts.slice(0, i).join("/"));
+    }
+    const searched = [...dirs].slice(0, MAX_GUIDELINE_DIRS);
+    const specs = searched.flatMap((dir) => GUIDELINE_NAMES.map((name) => dir ? `${dir}/${name}` : name));
+    const out = await git(["--literal-pathspecs", "ls-tree", "--name-only", sha, "--", ...specs]);
+    const found = out.split("\n").filter(Boolean).map((path) => `- \`${path}\``);
+    return [
+      ...(found.length ? found : ["None in the repository root or on the changed files' paths."]),
+      ...(dirs.size > searched.length ? [`${dirs.size - searched.length} more directories not searched.`] : []),
+    ];
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return [`Not listed: ${message.replace(/\s+/g, " ").slice(0, 200)}.`];
+  }
 }
 
 /** Bounded file:line pointers to code just outside a commit's diff: definitions of what the added lines call, and callers
@@ -88,13 +114,19 @@ export async function computeImpactSlice(opts: {
 
     const ranges = new Map<string, [number, number][]>();
     const touched = new Set<string>();
+    const changed = new Set<string>();
     const signature = new Set<string>();
     const callees = new Map<string, string>();
     let file: string | null = null;
     let inHunk = false;
     for (const line of diff.split("\n")) {
       if (line.startsWith("diff --git ")) { inHunk = false; file = null; continue; }
-      if (!inHunk && line.startsWith("+++ ")) { file = line.startsWith("+++ b/") ? line.slice(6) : null; continue; }
+      if (!inHunk && line.startsWith("--- a/")) { changed.add(line.slice(6)); continue; }
+      if (!inHunk && line.startsWith("+++ ")) {
+        file = line.startsWith("+++ b/") ? line.slice(6) : null;
+        if (file) changed.add(file);
+        continue;
+      }
       const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@ ?(.*)$/.exec(line);
       if (hunk) {
         inHunk = true;
@@ -118,7 +150,8 @@ export async function computeImpactSlice(opts: {
       }
     }
     const header = `Computed at ${sha} against merge-base ${mb.slice(0, 12)} with ${opts.baseRef}, by name match (git grep -w): overloads, dynamic dispatch and same-named symbols can mislead.`;
-    if (!touched.size && !callees.size) return { lines: [header, "No touched symbols or calls found in the diff."], entries: 0 };
+    const guidelines = await guidelineLines(git, sha, changed);
+    if (!touched.size && !callees.size) return { lines: [header, "No touched symbols or calls found in the diff."], entries: 0, guidelines };
 
     const inDiff = (path: string, n: number) => (ranges.get(path) ?? []).some(([from, to]) => n >= from && n <= to);
     const seen = new Set<string>();
@@ -176,6 +209,7 @@ export async function computeImpactSlice(opts: {
         ...(tail.length ? [`${tail.join("; ")}.`] : []),
       ],
       entries: entries.length,
+      guidelines,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
