@@ -978,6 +978,16 @@ export const MIGRATIONS = [
     `ALTER TABLE chief_lessons ADD COLUMN role TEXT`,
     // Worker row only: the shell command a pre-review gate runs on the commit under review; inherited through replaces:.
     `ALTER TABLE managed_threads ADD COLUMN verify_command TEXT`,
+    // One row per (source thread, active cycle, kind), written when a transient provider failure or a stall is detected, whether or not its alert is delivered. `detail` is classified from the provider error text only; legacy=1 rows were copied from older alerts and are approximate.
+    `CREATE TABLE IF NOT EXISTS chief_failure_events (source_thread_id TEXT NOT NULL, active_cycle INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('provider','stall','hard_stall')), detail TEXT CHECK(detail IS NULL OR detail IN ('usage_limit','connection')), legacy INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL, PRIMARY KEY (source_thread_id, active_cycle, kind))`,
+    // One-time copy of the surviving failed:/stall: alerts, classified as bb chief stats classified them ("usage limit" in the message), so totals carry over. error: and report: keys are never copied.
+    `INSERT OR IGNORE INTO chief_failure_events (source_thread_id, active_cycle, kind, detail, legacy, at)
+     SELECT source_thread_id,
+       CAST(CASE WHEN dedupe_key LIKE '%:failed:%' THEN substr(dedupe_key, instr(dedupe_key, ':failed:') + 8) ELSE substr(dedupe_key, instr(dedupe_key, ':stall:') + 7) END AS INTEGER),
+       CASE WHEN dedupe_key LIKE '%:failed:%' THEN 'provider' WHEN dedupe_key LIKE '%:hard' THEN 'hard_stall' ELSE 'stall' END,
+       CASE WHEN dedupe_key LIKE '%:failed:%' THEN CASE WHEN instr(message, 'usage limit') > 0 THEN 'usage_limit' ELSE 'connection' END END,
+       1, created_at
+     FROM alert_outbox WHERE dedupe_key LIKE '%:failed:%' OR dedupe_key LIKE '%:stall:%'`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1015,6 +1025,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
+  // JS, not strftime, so the pinned snapshot clock sets it; OR IGNORE keeps the first startup's value.
+  db.prepare(`INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('failure_events_since', ?)`).run(String(Date.now()));
 
   const activeChiefForProject = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND project_id=? AND state NOT IN ('failed','deleted','archived','complete') ORDER BY created_at DESC LIMIT 1`,
@@ -2304,6 +2316,19 @@ export default async function plugin(bb: BbPluginApi) {
     return dedupeKey;
   }
 
+  /** Records a failure or stall once per (thread, cycle, kind), independent of its alert. Never throws:
+   * returns the line the caller appends to its alert when the write failed, so the failure reaches Chief. */
+  function recordFailure(row: ManagedRow, kind: "provider" | "stall" | "hard_stall", detail: "usage_limit" | "connection" | null) {
+    try {
+      if (!row.chief_thread_id) return null;
+      db.prepare(`INSERT OR IGNORE INTO chief_failure_events (source_thread_id, active_cycle, kind, detail, legacy, at) VALUES (?, ?, ?, ?, 0, ?)`)
+        .run(row.thread_id, row.active_cycle, kind, detail, Date.now());
+      return null;
+    } catch (error) {
+      return `This failure could not be recorded for bb chief stats: ${clip(String(error), 200)}`;
+    }
+  }
+
   function enqueueAlert(row: ManagedRow, key: string, message: string) {
     if (!row.chief_thread_id) throw new Error(`Managed thread ${row.thread_id} has no Chief to notify.`);
     return db.transaction(() => writeAlert(row, key, message))();
@@ -2754,7 +2779,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (row.state !== "failed") {
         store.countError(thread.id);
       }
-      // `error:` never `failed:`, so chiefStats keeps counting only transient failures as `:failed:`; the outbox dedupes per cycle.
+      // `error:` never `failed:`, so the legacy backfill never copies a non-transient failure; the outbox dedupes per cycle.
       await alertChief(row, `error:${row.active_cycle}`, [
         `${row.role} “${row.title}” (${row.thread_id}) failed.`,
         ...(failure ? [`Provider error: ${clip(failure.text, 400)}`] : ["No provider error was recorded."]),
@@ -2763,6 +2788,7 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     const { usageLimit, resetSeconds } = transient;
+    const unrecorded = recordFailure(row, "provider", usageLimit ? "usage_limit" : "connection");
     const cooling = usageLimit ? await noteCooldown(thread.id, failure) : null;
     const resetAt = resetSeconds === null ? null : failure.at + resetSeconds * 1000;
     const minutes = resetAt === null ? null : Math.max(1, Math.ceil((resetAt - Date.now()) / 60_000) + 1);
@@ -2776,6 +2802,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...(cooling ? [`New chief_delegate/chief_review/chief_plan/chief_consult/chief_research work on ${cooling.providerId}/${cooling.model} is refused until ${new Date(cooling.until).toISOString()}; other models on ${cooling.providerId} stay usable.`] : []),
       `Do not spawn a replacement: a fresh thread on the same provider and model hits the same error. Retry this same thread with: bb thread retry ${row.thread_id} --send-at ${backoff} --reason "${usageLimit ? "usage limit reset" : "transient provider error"}"`,
       "If the retry fails the same way again, escalate to the user (wait for the limit or switch provider/model) instead of retrying again.",
+      ...(unrecorded ? [unrecorded] : []),
     ].join("\n"));
   }
 
@@ -2807,6 +2834,8 @@ export default async function plugin(bb: BbPluginApi) {
             if (elapsed < threshold) continue;
             const hard = elapsed >= 2 * threshold;
             if ((hard ? row.stop_alerted_cycle : row.stall_alerted_cycle) === row.active_cycle) continue;
+            // Every tick until sent re-enters here; the primary key keeps one row.
+            const unrecorded = recordFailure(row, hard ? "hard_stall" : "stall", null);
             const output = await lastOutput(row.thread_id);
             const minutes = Math.round(threshold / 60_000);
             const sent = await alertChief(row, `stall:${row.active_cycle}${hard ? ":hard" : ""}`, [
@@ -2816,6 +2845,7 @@ export default async function plugin(bb: BbPluginApi) {
                 ? "Stop it now with chief_stop unless that output shows it finishing. Its worktree and branch are kept."
                 : `Inspect it with chief_inspect. If it is progressing, leave it. If it is stuck or looping, chief_stop it: its worktree and branch are kept. At ${2 * minutes} minutes you will be told to stop it.`,
               rerouteSteps(row),
+              ...(unrecorded ? [unrecorded] : []),
             ].join("\n"));
             if (sent) {
               store.markStallAlerted(row.thread_id, row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle);
@@ -3005,14 +3035,15 @@ export default async function plugin(bb: BbPluginApi) {
   function chiefStats(scope: { projectId: string; chiefThreadId: string | null }, rows: ManagedRow[], todos: TodoRow[]) {
     const ids = new Set(rows.map((row) => row.thread_id));
     const alerts = new Map<string, { usageLimit: number; connection: number; stalls: number; hardStalls: number }>();
-    const alertRows = db.prepare(`SELECT source_thread_id, dedupe_key, message FROM alert_outbox WHERE dedupe_key LIKE '%:failed:%' OR dedupe_key LIKE '%:stall:%'`).all() as Pick<AlertRow, "source_thread_id" | "dedupe_key" | "message">[];
-    for (const alert of alertRows) {
-      if (!ids.has(alert.source_thread_id)) continue;
-      const counts = alerts.get(alert.source_thread_id) ?? { usageLimit: 0, connection: 0, stalls: 0, hardStalls: 0 };
-      // "usage limit" matches the lifecycle failed alert's "provider usage limit (HTTP 429)" wording.
-      if (alert.dedupe_key.includes(":failed:")) counts[alert.message.includes("usage limit") ? "usageLimit" : "connection"] += 1;
-      else counts[alert.dedupe_key.endsWith(":hard") ? "hardStalls" : "stalls"] += 1;
-      alerts.set(alert.source_thread_id, counts);
+    const approximate = { usageLimit: 0, connection: 0, stalls: 0, hardStalls: 0 };
+    const events = db.prepare(`SELECT source_thread_id, kind, detail, legacy FROM chief_failure_events`).all() as { source_thread_id: string; kind: string; detail: string | null; legacy: number }[];
+    for (const event of events) {
+      if (!ids.has(event.source_thread_id)) continue;
+      const counts = alerts.get(event.source_thread_id) ?? { usageLimit: 0, connection: 0, stalls: 0, hardStalls: 0 };
+      const field = event.kind === "provider" ? (event.detail === "usage_limit" ? "usageLimit" : "connection") : event.kind === "hard_stall" ? "hardStalls" : "stalls";
+      counts[field] += 1;
+      if (event.legacy === 1) approximate[field] += 1;
+      alerts.set(event.source_thread_id, counts);
     }
     // ponytail: the branch fallback is a heuristic, so a branch reused by a later unplanned
     // task merges into one task; replaces_thread_id makes this precise from stats_since on.
@@ -3088,6 +3119,8 @@ export default async function plugin(bb: BbPluginApi) {
     const mid = times.length >> 1;
     const statsSince = (db.prepare(`SELECT value FROM plugin_meta WHERE key='stats_since'`).get() as { value: string } | undefined)?.value;
     const since = statsSince === undefined ? null : Number(statsSince);
+    const eventsSince = (db.prepare(`SELECT value FROM plugin_meta WHERE key='failure_events_since'`).get() as { value: string } | undefined)?.value;
+    const exactSince = eventsSince === undefined ? null : Number(eventsSince);
     const count = (status: string) => perTask.filter((task) => task.status === status).length;
     const todoCount = (state: TodoRow["state"]) => todos.filter((todo) => todo.state === state).length;
     const reviewers = rows.filter((row) => row.role === "reviewer");
@@ -3104,7 +3137,7 @@ export default async function plugin(bb: BbPluginApi) {
       researchBy.set(`${call.role}\u0000${call.mode}`, entry);
     }
     return {
-      scope, statsSince: since,
+      scope, statsSince: since, failureEventsSince: exactSince,
       tasks: {
         total: perTask.length, completed: count("completed"), open: count("open"), dropped: count("dropped"),
         planned: categoryCount("planned"), unplanned_planner_on: categoryCount("unplanned_planner_on"),
@@ -3118,7 +3151,7 @@ export default async function plugin(bb: BbPluginApi) {
         regressions: reviewers.filter((row) => row.regression === 1).length,
         consults: rows.filter((row) => row.role === "advisor").length,
       },
-      failures: { ...failuresOf(rows), rejectedReviews: requestChanges },
+      failures: { ...failuresOf(rows), rejectedReviews: requestChanges, approximate },
       wallTimeMs: {
         completed: times.length,
         median: !times.length ? null : times.length % 2 ? times[mid]! : (times[mid - 1]! + times[mid]!) / 2,
@@ -3127,7 +3160,7 @@ export default async function plugin(bb: BbPluginApi) {
       perTask,
       notes: [
         `Thread errors, busy rejections and branchless replaces chains are recorded from ${since === null ? "an unknown date" : new Date(since).toISOString()}; threads before that show 0 and may split into separate tasks.`,
-        "Provider failures come from transient-retry alerts, sent only since that alert shipped; failures before it are not counted, and a failure the classifier does not recognise is counted as a thread error.",
+        `Provider failures and stalls are counted once per thread, turn and kind when detected, whether or not their alert reached Chief, exactly from ${exactSince === null ? "an unknown date" : new Date(exactSince).toISOString()}. ${sum(Object.values(approximate))} of them (usage limit ${approximate.usageLimit}, connection ${approximate.connection}, stalls ${approximate.stalls}, hard stalls ${approximate.hardStalls}) were copied from older alerts and are approximate: an undelivered alert replaced by a newer one was lost, and a task title naming a usage limit counted a connection failure as one. A failure the classifier does not recognise is counted as a thread error.`,
         "A deleted thread loses its completed state, so its task counts as dropped.",
         "Wall time runs from the first planner or worker spawn to the final worker's completion.",
       ],
