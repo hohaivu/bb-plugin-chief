@@ -168,6 +168,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   let seedE7: (() => void) | undefined;
   let seedAbsorbed: (() => void) | undefined;
   let seedStall: ((agedMs: number) => void) | undefined;
+  let seedFe: (() => void) | undefined;
   if (chief) {
     const at = clock - 100_000;
     const insert = (row: Record<string, unknown>, offset: number) => {
@@ -278,6 +279,16 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     seedStall = (agedMs: number) => {
       insert({ thread_id: "thr_fx_stall_w", role: "worker", title: "Fixture stalled worker", state: "active", status: "active", active_since: clock - agedMs, active_cycle: 1, brief: "Fixture stalled worker brief", branch: "feature/fx-stall" }, 150);
     };
+    // The failure-event fixtures: workers whose failures and stalls category g drives. Seeded by g itself, so earlier categories read the same rows.
+    // The lg rows are the sources of the legacy alerts seeded before the plugin loads.
+    seedFe = () => {
+      const worker = (id: string, offset: number, extra: Record<string, unknown>) => insert({ thread_id: id, role: "worker", title: `Fixture ${id}`, brief: `Fixture ${id} brief`, ...extra }, offset);
+      worker("thr_fx_fe_w", 160, { state: "idle" });
+      worker("thr_fx_fe_title", 161, { state: "idle", title: "Fixture fe usage limit dashboard" });
+      for (const [offset, id] of [[162, "thr_fx_fe_st_a"], [163, "thr_fx_fe_st_b"]] as const) worker(id, offset, { state: "active", status: "active", active_since: clock - 20 * 60_000, active_cycle: 1 });
+      worker("thr_fx_fe_lg_a", 164, { state: "complete", title: "Fixture fe legacy a" });
+      worker("thr_fx_fe_lg_b", 165, { state: "complete", title: "Fixture fe legacy b" });
+    };
     // The wave-schedule fixture: a planner that has not reported its plan yet (e1c drives it through tools).
     insert({ thread_id: "thr_fx_wv_planner", role: "planner", title: "Fixture wave planner", state: "active", status: "idle", active_since: clock - 5_000, active_cycle: 1, brief: "Fixture wave planner brief" }, 50);
     ROLES.filter((role) => role !== "chief").forEach((role, index) => insert({
@@ -301,6 +312,8 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
   const commandEvents = new Map<string, any[]>(); // a worker's recorded commands (item/completed events, newest first)
   const pluginMetadata = new Map<string, object>(); // spawn-seeded metadata of a thread no managed row carries yet
   const getHooks = new Map<string, () => Promise<unknown>>(); // runs once, while a threads.get is in flight (a stale-row race)
+  const providerErrors = new Map<string, any[] | "throw">(); // a thread's provider/error events (newest first); "throw" fails the read
+  let failSend = false; // while set, every threads.send fails after recording `send-failed`
   const files = new Map<string, string>();
   const tabs = new Map<string, { revision: number; tabs: any[] }>();
   let spawnIndex = 0;
@@ -318,10 +331,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     supportedReasoningEfforts: ["medium", "high"].map((reasoningEffort) => ({ reasoningEffort, description: "" })),
   });
   const skillIds = existsSync(join(buildDir, "skills")) ? readdirSync(join(buildDir, "skills")).sort() : [];
-  const { bb: fake, harness } = createFakePluginHost({
-    pluginId: "chief",
-    agentSkillIds: skillIds,
-    sdk: {
+  const sdk = {
       system: { usageLimits: async () => ({}) },
       threadSections: {
         list: async () => (section ? [section] : []),
@@ -364,7 +374,15 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
         models: async () => ({ modelLoadError: null, providers: [], selectedOnlyModels: [], models: [catalogModel("gpt-6-astra", true), catalogModel("gpt-6-mini")] }),
       },
       threads: {
-        events: { list: async ({ threadId, types }: { threadId: string; types?: string[] }) => (types?.includes("item/completed") ? commandEvents.get(threadId) ?? [] : []) },
+        events: { list: async ({ threadId, types }: { threadId: string; types?: string[] }) => {
+          if (types?.includes("item/completed")) return commandEvents.get(threadId) ?? [];
+          if (types?.includes("provider/error")) {
+            const found = providerErrors.get(threadId);
+            if (found === "throw") throw new Error("snapshot: provider error read failed");
+            return found ?? [];
+          }
+          return [];
+        } },
         defaultExecutionOptions: async () => ({ permissionMode: "auto" }),
         spawn: async (args: any) => {
           spawnIndex += 1;
@@ -397,7 +415,11 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
           if (!found) throw new Error("not found");
           return { ...found, ...overrides.get(threadId) };
         },
-        send: async (args: any) => { events.push(`send ${stable(args)}`); return { ok: true, delivery: "sent" as const }; },
+        send: async (args: any) => {
+          if (failSend) { events.push(`send-failed ${stable(args)}`); throw new Error("snapshot: send failed"); }
+          events.push(`send ${stable(args)}`);
+          return { ok: true, delivery: "sent" as const };
+        },
         output: async ({ threadId }: { threadId: string }) => ({ output: `last output from ${threadId}` }),
         tabs: {
           get: async ({ threadId }: { threadId: string }) => tabs.get(threadId) ?? { revision: 0, tabs: [] },
@@ -417,10 +439,28 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
           return { ok: true as const };
         },
       },
-    },
-  } as never);
+  };
   // The plugin writes to the copy, not to the fake host's own temp database. Its migrations still run (and are verified) on it.
-  const bb: any = Object.create(fake, { storage: { value: { ...fake.storage, database: () => database } } });
+  const host = (storage: Database.Database) => {
+    const { bb: fake, harness: built } = createFakePluginHost({ pluginId: "chief", agentSkillIds: skillIds, sdk } as never);
+    return { bb: Object.create(fake, { storage: { value: { ...fake.storage, database: () => storage } } }) as any, harness: built };
+  };
+  const { bb, harness } = host(database);
+
+  // Legacy failure alerts, written before the plugin loads so a build that backfills them finds them. Literal values only.
+  // The pending one is created in the future, so no retry pass in this capture delivers it.
+  if (chief) {
+    const legacy = (key: string, message: string, createdAt: number, delivered: boolean) => database.prepare(
+      `INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, delivered_at, attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(key, chief.thread_id, key.slice(0, key.indexOf(":")), `[Chief lifecycle alert]\n${message}`, delivered ? createdAt + 1_000 : null, delivered ? 1 : 0, createdAt);
+    const failed = (reason: string) => `worker “Fixture legacy” (thr_fx_fe_lg_a) failed on a transient provider error: ${reason}.`;
+    legacy("thr_fx_fe_lg_a:failed:1", failed("provider usage limit (HTTP 429)"), clock - 50_000, true);
+    legacy("thr_fx_fe_lg_a:failed:2", failed("connection/provider error"), clock + 86_400_000, false);
+    legacy("thr_fx_fe_lg_b:stall:1", "worker “Fixture legacy b” (thr_fx_fe_lg_b) has been active for 20 minutes (stall threshold 15).", clock - 40_000, true);
+    legacy("thr_fx_fe_lg_b:stall:1:hard", "worker “Fixture legacy b” (thr_fx_fe_lg_b) has been active for 40 minutes, twice the 15-minute stall threshold.", clock - 30_000, true);
+    legacy("thr_fx_fe_lg_b:error:3", "worker “Fixture legacy b” (thr_fx_fe_lg_b) failed.", clock - 20_000, true);
+    legacy("thr_fx_fe_lg_b:report:1:abc", "worker “Fixture legacy b” (thr_fx_fe_lg_b) reported ready.", clock - 10_000, true);
+  }
 
   const mod: any = await import(pathToFileURL(distPath).href);
   process.stderr.write("  plugin loading\n");
@@ -1127,6 +1167,124 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       }
     }
 
+    // g. failure events: provider failures and stalls are recorded when detected, whether or not their alert was delivered.
+    // Every step prints its action, the fixture rows, their alerts and their failure events; the stats steps print the
+    // text and the JSON (the fixture's tasks only). The step labels say what each one proves.
+    begin("g-failure-events");
+    {
+      const eventRows = (db: Database.Database) => (db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='chief_failure_events'`).get()
+        ? (db.prepare(`SELECT * FROM chief_failure_events WHERE substr(source_thread_id, 1, 10) = 'thr_fx_fe_' ORDER BY source_thread_id, active_cycle, kind`).all() as object[]).map(stable).join("\n")
+        : "(no table)");
+      if (!chief) await step("failure events: no chief in the copy", () => "skipped");
+      else {
+        seedFe?.();
+        await e7Reload();
+        const fe = e7(["thr_fx_fe_"]);
+        const feStep = (label: string, fn: () => unknown) => fe(label, async () => {
+          const outcome = await fn();
+          return `${show(outcome)}\nchief_failure_events\n${eventRows(database)}`;
+        });
+        const context = { threadId: chief.thread_id, projectId: chief.project_id };
+        // The fixture's tasks only: every other task in the copy is category b's business.
+        const fixtureStats = async (run: (argv: string[], ctx?: object) => Promise<unknown> | unknown) => {
+          const out = async (argv: string[]) => {
+            const result = (await run(argv, context)) as { exitCode: number; stdout: string; stderr: string };
+            if (result.exitCode !== 0) throw new Error(`bb chief ${argv.join(" ")} exited ${result.exitCode}: ${result.stderr}`);
+            return result.stdout;
+          };
+          const text = await out(["stats"]);
+          const json = JSON.parse(await out(["stats", "--json"]));
+          json.perTask = json.perTask.filter((task: { title: string }) => task.title.startsWith("Fixture fe"));
+          return `${text.split("\n").filter((line) => line.startsWith("Failures:") || line.startsWith("- ") && line.includes("Fixture fe")).join("\n")}\n${stable(json)}`;
+        };
+        const statsStep = (label: string, run: typeof cli = cli) => step(`stats: ${label}`, () => fixtureStats(run));
+        const fire = async (h: typeof harness, kind: "thread.active" | "thread.failed", id: string) => {
+          overrides.set(id, { status: kind === "thread.active" ? "active" : "error" });
+          const result = await h.emitThreadEvent(kind, { thread: storedThread(id)! } as never);
+          return `${kind} ${id}: ${result.errors.length} errors`;
+        };
+        const failedWith = (id: string, message: string | "throw") => providerErrors.set(id, message === "throw" ? "throw"
+          : [{ type: "provider/error", seq: 1, createdAt: clock, data: { message, detail: null, errorInfo: undefined } }]);
+        const tick = async (h: typeof harness) => {
+          const run = h.runService("supervisor");
+          run.controller.abort(); // the first pass runs to its wait, which the abort ends
+          await run.done;
+          return "supervisor pass done";
+        };
+        // 1. The legacy rows seeded before the load: usage limit 1, connection 1, stall 1, hard stall 1; the error: and report: rows are never counted.
+        await feStep("g1 legacy alerts as the plugin loaded them", () => "legacy rows");
+        await statsStep("g1 legacy migrated DB");
+        // 2. A failed send still records the event.
+        await feStep("g2 thread.active thr_fx_fe_w", () => fire(harness, "thread.active", "thr_fx_fe_w"));
+        failedWith("thr_fx_fe_w", "usage_limit 429 Rate limit reached");
+        failSend = true;
+        await feStep("g2 thread.failed (usage limit), the send fails", () => fire(harness, "thread.failed", "thr_fx_fe_w"));
+        await statsStep("g2 failed send");
+        // 3. A duplicate failed event in the same cycle adds nothing.
+        await feStep("g3 duplicate thread.failed in the same cycle", () => fire(harness, "thread.failed", "thr_fx_fe_w"));
+        await statsStep("g3 duplicate");
+        // 4. A new cycle: its alert supersedes the pending one, and the first event stays counted.
+        failSend = false;
+        await feStep("g4 thread.active starts a new cycle", () => fire(harness, "thread.active", "thr_fx_fe_w"));
+        failedWith("thr_fx_fe_w", "connection error ECONNRESET");
+        await feStep("g4 thread.failed (connection), sent", () => fire(harness, "thread.failed", "thr_fx_fe_w"));
+        await statsStep("g4 new cycle");
+        // 5. The task title names a usage limit; the provider error is a connection error.
+        await feStep("g5 thread.active thr_fx_fe_title", () => fire(harness, "thread.active", "thr_fx_fe_title"));
+        failedWith("thr_fx_fe_title", "connection error ECONNRESET");
+        await feStep("g5 thread.failed (connection) on a task titled with a usage limit", () => fire(harness, "thread.failed", "thr_fx_fe_title"));
+        await statsStep("g5 title");
+        // 6. The provider error read throws: a thread error and no failure event.
+        failedWith("thr_fx_fe_w", "throw");
+        await feStep("g6 thread.active thr_fx_fe_w", () => fire(harness, "thread.active", "thr_fx_fe_w"));
+        await feStep("g6 thread.failed with an unreadable provider error", () => fire(harness, "thread.failed", "thr_fx_fe_w"));
+        await statsStep("g6 provider error read throws");
+        // 7. Stalls, first pass: both soft alerts stay pending because the send fails.
+        failSend = true;
+        await feStep("g7 supervisor pass, both stalls (soft), sends fail", () => tick(harness));
+        await statsStep("g7 stalls, first pass");
+        // 8. Stalls, second pass: st_a is now twice the threshold and its hard alert supersedes the pending soft one;
+        // st_b's soft alert is re-sent on retry and delivered once.
+        database.prepare(`UPDATE managed_threads SET active_since=? WHERE thread_id='thr_fx_fe_st_a'`).run(clock - 40 * 60_000);
+        failSend = false;
+        await e7Reload();
+        await feStep("g8 supervisor pass: st_a hard, st_b soft retried", () => tick(harness));
+        await statsStep("g8 stalls, second pass");
+        // 9. A restart: a second instance over the same DB changes nothing, and a duplicate failed event after it adds nothing.
+        // (The duplicate is on thr_fx_fe_title: g6 deliberately left thr_fx_fe_w's cycle without an event.)
+        const second = host(database);
+        await mod.default(second.bb);
+        await feStep("g9 restart: the second instance's log", () => second.harness.logEntries.map((entry: any) => `${entry.level} ${entry.message}`).join("\n") || "(no log entries)");
+        await statsStep("g9 restart", (argv, ctx) => second.harness.behavior.runCli(argv, ctx as never));
+        failedWith("thr_fx_fe_title", "connection error ECONNRESET");
+        await feStep("g9 duplicate thread.failed after the restart", () => fire(second.harness, "thread.failed", "thr_fx_fe_title"));
+        await statsStep("g9 duplicate after restart", (argv, ctx) => second.harness.behavior.runCli(argv, ctx as never));
+        await feStep("g9 thread.active, the retry starts a new cycle", () => fire(second.harness, "thread.active", "thr_fx_fe_title"));
+        await feStep("g9 thread.failed in the new cycle", () => fire(second.harness, "thread.failed", "thr_fx_fe_title"));
+        await statsStep("g9 retry after restart", (argv, ctx) => second.harness.behavior.runCli(argv, ctx as never));
+        await second.harness.lifecycle.dispose().catch(() => undefined);
+        // 10. A fresh install: the schema, the metadata keys and an empty stats.
+        await step("g10 fresh install", async () => {
+          const freshPath = `${outPath}.fresh.db`;
+          for (const suffix of ["", "-wal", "-shm"]) rmSync(freshPath + suffix, { force: true });
+          const fresh = new Database(freshPath);
+          const third = host(fresh);
+          try {
+            await mod.default(third.bb);
+            const schema = (fresh.prepare(`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`).all() as object[]).map((row) => Object.values(row).join(",")).join("\n");
+            const keys = (fresh.prepare(`SELECT key FROM plugin_meta ORDER BY key`).all() as { key: string }[]).map((row) => row.key).join(",");
+            const json = JSON.parse(((await third.harness.behavior.runCli(["stats", "--project", chief.project_id, "--json"], { projectId: chief.project_id } as never)) as { stdout: string }).stdout);
+            const { statsSince: _since, notes: _notes, ...rest } = json;
+            return `${schema}\nplugin_meta keys: ${keys}\n${stable(rest)}`;
+          } finally {
+            await third.harness.lifecycle.dispose().catch(() => undefined);
+            fresh.close();
+            for (const suffix of ["", "-wal", "-shm"]) rmSync(freshPath + suffix, { force: true });
+          }
+        });
+      }
+    }
+
     // f. final state of every table the scenarios touch
     begin("f-final-state");
     const dump = (table: string, order: string) => async () => (database.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all() as object[]).map(stable).join("\n");
@@ -1134,6 +1292,8 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
     await step("reviewer_verdicts", dump("reviewer_verdicts", "id"));
     await step("review_targets", dump("review_targets", "reviewer_thread_id, worker_thread_id"));
     await step("alert_outbox", dump("alert_outbox", "rowid"));
+    await step("chief_failure_events", async () => (database.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='chief_failure_events'`).get()
+      ? (database.prepare(`SELECT * FROM chief_failure_events ORDER BY source_thread_id, active_cycle, kind`).all() as object[]).map(stable).join("\n") : "(no table)"));
     await step("chief_todos", dump("chief_todos", "id"));
     await step("chief_lessons", dump("chief_lessons", "id"));
     await step("plan_log", dump("plan_log", "id"));
