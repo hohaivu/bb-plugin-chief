@@ -9,16 +9,18 @@ const execFileAsync = promisify(execFile);
 
 /** `entries` counts the `path:line` pointers in `lines`; the other lines are header and notes. */
 export type ImpactSlice = { lines: string[]; entries: number; guidelines: string[] } | { skipped: string };
+export type ImpactSliceSuccess = Exclude<ImpactSlice, { skipped: string }>;
 
-/** git with a 10 s timeout and 2 attempts, each bounded by the absolute `deadline`; past it, throws `deadline`. */
-export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number) {
+/** git with a 10 s timeout and 2 attempts, each bounded by the absolute `deadline`; past it, throws `deadline`.
+ * `stop` optionally cancels the command with a hard kill. */
+export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number, stop?: AbortSignal) {
   return async (args: string[], noMatchOk = false) => {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const left = deadline - Date.now();
       if (left <= 0) throw new Error("deadline");
       try {
-        return (await execFileAsync("git", args, { cwd, env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024 })).stdout;
+        return (await execFileAsync("git", args, { cwd, env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024, ...(stop ? { signal: stop, killSignal: "SIGKILL" as const } : {}) })).stdout;
       } catch (error) {
         if (noMatchOk && (error as { code?: unknown }).code === 1) return "";
         lastError = error;
@@ -49,8 +51,9 @@ const MAX_HITS = 200;
 const GUIDELINE_NAMES = ["CLAUDE.md", "AGENTS.md"];
 /** 100 directories give 200 pathspecs, far below ARG_MAX. */
 const MAX_GUIDELINE_DIRS = 100;
-/** The guideline listing runs after the pointer lookup, on its own budget capped by the overall deadline. */
+/** The guideline listing runs beside the pointer lookup, is never awaited, and is killed when the slice is ready. */
 const GUIDELINE_BUDGET_MS = 5_000;
+const GUIDELINE_PENDING = "Not listed: the guideline lookup did not finish before the impact slice was ready.";
 
 /** The defined name on a definition line, else (headers only) the last identifier before the first `(`. */
 function nameOf(text: string, fallback: boolean): string | null {
@@ -85,12 +88,16 @@ async function guidelineLines(git: ReturnType<typeof gitWithin>, sha: string, ch
 }
 
 /** Bounded file:line pointers to code just outside a commit's diff: definitions of what the added lines call, and callers
- * of symbols whose definition line changed. Pure git at `sha`; never throws, any failure is `{ skipped }`. */
+ * of symbols whose definition line changed. Pure git at `sha`; never throws, any failure is `{ skipped }`.
+ * `onReady` receives the finished slice before cleanup, so a caller with its own deadline can keep it. */
 export async function computeImpactSlice(opts: {
   cwd: string; sha: string; baseRef: string; fetchRef?: string; env: NodeJS.ProcessEnv; maxEntries: number; deadlineMs: number;
+  onReady?: (slice: ImpactSliceSuccess) => void;
 }): Promise<ImpactSlice> {
   const deadline = Date.now() + opts.deadlineMs;
   let attrDir: string | null = null;
+  const stopGuidelines = new AbortController();
+  let guidelines: string[] | null = null;
   const git = gitWithin(opts.cwd, opts.env, deadline);
   const resolve = async (ref: string, fetchRef: string | undefined) => {
     const verify = () => git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then((out) => out.trim(), () => null);
@@ -152,10 +159,16 @@ export async function computeImpactSlice(opts: {
       }
     }
     const header = `Computed at ${sha} against merge-base ${mb.slice(0, 12)} with ${opts.baseRef}, by name match (git grep -w): overloads, dynamic dispatch and same-named symbols can mislead.`;
-    // Best-effort and last: its own git budget keeps a slow or failing ls-tree from shortening or failing the pointer lookup.
-    const withGuidelines = async (slice: { lines: string[]; entries: number }) =>
-      ({ ...slice, guidelines: await guidelineLines(gitWithin(opts.cwd, opts.env, Math.min(deadline, Date.now() + GUIDELINE_BUDGET_MS)), sha, changed) });
-    if (!touched.size && !callees.size) return withGuidelines({ lines: [header, "No touched symbols or calls found in the diff."], entries: 0 });
+    // Best-effort and never awaited: whatever it has settled when the pointers are done is used, else a note.
+    void guidelineLines(gitWithin(opts.cwd, opts.env, Math.min(deadline, Date.now() + GUIDELINE_BUDGET_MS), stopGuidelines.signal), sha, changed)
+      .then((lines) => { guidelines = lines; }, () => undefined);
+    const ready = (slice: { lines: string[]; entries: number }): ImpactSliceSuccess => {
+      const success = { ...slice, guidelines: [...guidelines ?? [GUIDELINE_PENDING]] };
+      // A throwing callback must not downgrade the finished slice.
+      try { opts.onReady?.(success); } catch { /* the slice is still returned */ }
+      return success;
+    };
+    if (!touched.size && !callees.size) return ready({ lines: [header, "No touched symbols or calls found in the diff."], entries: 0 });
 
     const inDiff = (path: string, n: number) => (ranges.get(path) ?? []).some(([from, to]) => n >= from && n <= to);
     const seen = new Set<string>();
@@ -205,7 +218,7 @@ export async function computeImpactSlice(opts: {
       ...(omitted ? [`${omitted} more omitted`] : []),
       ...(tooCommon.length ? [`too common: ${tooCommon.map((name) => `\`${name}\``).join(", ")}`] : []),
     ];
-    return withGuidelines({
+    return ready({
       lines: [
         header,
         `Touched: ${names.slice(0, 20).map((name) => `\`${name}\``).join(", ")}${names.length > 20 ? ` and ${names.length - 20} more` : ""}${signature.size ? ` (signature changed: ${[...signature].slice(0, MAX_SIGNATURES).map((name) => `\`${name}\``).join(", ")})` : ""}`,
@@ -218,6 +231,7 @@ export async function computeImpactSlice(opts: {
     const message = error instanceof Error ? error.message : String(error);
     return { skipped: message.replace(/\s+/g, " ").slice(0, 200) };
   } finally {
+    stopGuidelines.abort();
     if (attrDir) await rm(attrDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
