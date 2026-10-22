@@ -20,7 +20,11 @@ export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number,
       const left = deadline - Date.now();
       if (left <= 0) throw new Error("deadline");
       try {
-        return (await execFileAsync("git", args, { cwd, env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024, ...(stop ? { signal: stop, killSignal: "SIGKILL" as const } : {}) })).stdout;
+        if (stop?.aborted) throw new Error("stopped");
+        const run = execFileAsync("git", args, { cwd, env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024 });
+        // execFile's own `signal` option sends SIGTERM only; a git that ignores it must still die.
+        stop?.addEventListener("abort", () => run.child.kill("SIGKILL"), { once: true });
+        return (await run).stdout;
       } catch (error) {
         if (noMatchOk && (error as { code?: unknown }).code === 1) return "";
         lastError = error;
