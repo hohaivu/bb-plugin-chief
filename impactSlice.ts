@@ -49,6 +49,8 @@ const MAX_HITS = 200;
 const GUIDELINE_NAMES = ["CLAUDE.md", "AGENTS.md"];
 /** 100 directories give 200 pathspecs, far below ARG_MAX. */
 const MAX_GUIDELINE_DIRS = 100;
+/** The guideline listing runs after the pointer lookup, on its own budget capped by the overall deadline. */
+const GUIDELINE_BUDGET_MS = 5_000;
 
 /** The defined name on a definition line, else (headers only) the last identifier before the first `(`. */
 function nameOf(text: string, fallback: boolean): string | null {
@@ -150,8 +152,10 @@ export async function computeImpactSlice(opts: {
       }
     }
     const header = `Computed at ${sha} against merge-base ${mb.slice(0, 12)} with ${opts.baseRef}, by name match (git grep -w): overloads, dynamic dispatch and same-named symbols can mislead.`;
-    const guidelines = await guidelineLines(git, sha, changed);
-    if (!touched.size && !callees.size) return { lines: [header, "No touched symbols or calls found in the diff."], entries: 0, guidelines };
+    // Best-effort and last: its own git budget keeps a slow or failing ls-tree from shortening or failing the pointer lookup.
+    const withGuidelines = async (slice: { lines: string[]; entries: number }) =>
+      ({ ...slice, guidelines: await guidelineLines(gitWithin(opts.cwd, opts.env, Math.min(deadline, Date.now() + GUIDELINE_BUDGET_MS)), sha, changed) });
+    if (!touched.size && !callees.size) return withGuidelines({ lines: [header, "No touched symbols or calls found in the diff."], entries: 0 });
 
     const inDiff = (path: string, n: number) => (ranges.get(path) ?? []).some(([from, to]) => n >= from && n <= to);
     const seen = new Set<string>();
@@ -201,7 +205,7 @@ export async function computeImpactSlice(opts: {
       ...(omitted ? [`${omitted} more omitted`] : []),
       ...(tooCommon.length ? [`too common: ${tooCommon.map((name) => `\`${name}\``).join(", ")}`] : []),
     ];
-    return {
+    return withGuidelines({
       lines: [
         header,
         `Touched: ${names.slice(0, 20).map((name) => `\`${name}\``).join(", ")}${names.length > 20 ? ` and ${names.length - 20} more` : ""}${signature.size ? ` (signature changed: ${[...signature].slice(0, MAX_SIGNATURES).map((name) => `\`${name}\``).join(", ")})` : ""}`,
@@ -209,8 +213,7 @@ export async function computeImpactSlice(opts: {
         ...(tail.length ? [`${tail.join("; ")}.`] : []),
       ],
       entries: entries.length,
-      guidelines,
-    };
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { skipped: message.replace(/\s+/g, " ").slice(0, 200) };
