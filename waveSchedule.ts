@@ -1,4 +1,10 @@
-export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean };
+export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean; title?: string };
+
+/** The first heading, else the first non-empty line, of a wave body: what the wave is about, for the tracking issue's schedule. */
+export function waveTitle(body: string): string | undefined {
+  const line = body.split("\n").map((entry) => entry.replace(/^\s*(?:#+\s*|[-*]\s+)/, "").trim()).find(Boolean);
+  return line ? line.slice(0, 120) : undefined;
+}
 export type WaveLink = { dependsOn?: number[] };
 
 /** Wave n's parent (1-based): its dependsOn, else the previous wave; null for a chain head. */

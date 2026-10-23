@@ -22,15 +22,18 @@ function slug(title: string) {
   return `${full.slice(0, 51).replace(/-+$/, "") || "task"}-${hash}`;
 }
 
-export function forgeInitScript(input: { title: string; base?: string; body?: string }) {
+/** issueUrl reuses a plan's shared tracking issue; issueTitle and issueBody replace the task's own title and body on a newly created issue (the pull request keeps title and body). */
+export function forgeInitScript(input: { title: string; base?: string; body?: string; issueUrl?: string; issueTitle?: string; issueBody?: string }) {
   const branch = `feature/${slug(input.title)}`;
   const script = [
     "set -u",
     `TITLE=${quote(input.title)}`,
     `BRANCH=${quote(branch)}`,
     `BODY=${quote(input.body ?? `Tracking work for ${input.title}.`)}`,
+    `ISSUE_TITLE=${quote(input.issueTitle ?? input.title)}`,
+    `ISSUE_BODY=${quote(input.issueBody ?? input.body ?? `Tracking work for ${input.title}.`)}`,
     `BASE=${quote(input.base ?? "")}`,
-    "ISSUE_URL=''",
+    `ISSUE_URL=${quote(input.issueUrl ?? "")}`,
     "PR_URL=''",
     "",
     "git fetch origin --quiet 2>/dev/null || true",
@@ -63,17 +66,19 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     "# Reuse an issue whose title matches exactly. A bare term search returns near",
     "# matches, so comparing titles is what stops a second issue opening every time the",
     "# same task is re-delegated.",
-    'if [ "$FORGE" = gh ]; then',
-    '  ISSUE_URL=$(TITLE="$TITLE" gh issue list --search "$TITLE" --state all --json title,url \\',
+    "# A plan's shared issue arrives preset in ISSUE_URL; then none of this runs.",
+    'if [ -n "$ISSUE_URL" ]; then :',
+    'elif [ "$FORGE" = gh ]; then',
+    '  ISSUE_URL=$(TITLE="$ISSUE_TITLE" gh issue list --search "$ISSUE_TITLE" --state all --json title,url \\',
     "    --jq '[.[] | select(.title == env.TITLE)][0].url // \"\"' 2>/dev/null || true)",
     '  if [ -z "$ISSUE_URL" ]; then',
-    '    ISSUE_URL=$(gh issue create --title "$TITLE" --body "$BODY" 2>/dev/null | grep -o "https://[^ ]*" | tail -1 || true)',
+    '    ISSUE_URL=$(gh issue create --title "$ISSUE_TITLE" --body "$ISSUE_BODY" 2>/dev/null | grep -o "https://[^ ]*" | tail -1 || true)',
     "  fi",
     'elif [ "$FORGE" = glab ] && command -v jq >/dev/null 2>&1; then',
-    '  ISSUE_URL=$(glab issue list --all --search "$TITLE" --in title -O json 2>/dev/null \\',
-    "    | TITLE=\"$TITLE\" jq -r '[.[] | select(.title == env.TITLE)][0].web_url // \"\"' 2>/dev/null || true)",
+    '  ISSUE_URL=$(glab issue list --all --search "$ISSUE_TITLE" --in title -O json 2>/dev/null \\',
+    "    | TITLE=\"$ISSUE_TITLE\" jq -r '[.[] | select(.title == env.TITLE)][0].web_url // \"\"' 2>/dev/null || true)",
     '  if [ -z "$ISSUE_URL" ]; then',
-    '    ISSUE_URL=$(glab issue create -t "$TITLE" -d "$BODY" --yes 2>/dev/null | grep -o "https://[^ ]*" | tail -1 || true)',
+    '    ISSUE_URL=$(glab issue create -t "$ISSUE_TITLE" -d "$ISSUE_BODY" --yes 2>/dev/null | grep -o "https://[^ ]*" | tail -1 || true)',
     "  fi",
     "fi",
     "",

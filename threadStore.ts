@@ -162,6 +162,11 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       );
       wrote();
     },
+    /** The plan's shared tracking issue; the first one recorded stays. */
+    setPlanIssueUrl(threadId: string, url: string) {
+      db.prepare(`UPDATE managed_threads SET plan_issue_url=? WHERE thread_id=? AND plan_issue_url IS NULL`).run(url, threadId);
+      wrote();
+    },
     /** A replaced worker or an old review, retired once its successor exists. */
     completeSuperseded(threadId: string, now: number) {
       db.prepare(`UPDATE managed_threads SET state='complete', active_since=NULL, updated_at=? WHERE thread_id=?`).run(now, threadId);
