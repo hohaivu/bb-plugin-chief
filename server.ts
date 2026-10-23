@@ -12,6 +12,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
+import { classify, composeComment, errorText, hasMarker, ownerHandle, parseForgeTarget, postComment, sanitizeForge, withMention } from "./forgeComments";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
 import { computeImpactSlice, gitWithin, type ImpactSlice } from "./impactSlice";
@@ -19,10 +20,10 @@ import { createReviewStart, type GateResult, type PinnedHead } from "./reviewSta
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import {
   LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX,
-  checkReport, contractsOf, reportAlert, reportFileBody, verdictFileBody, type Pointer,
+  checkReport, contractsOf, findingLines, reportAlert, reportFileBody, verdictFileBody, type Pointer,
 } from "./reportIntake";
 import { advisorBrief, plannerBrief, resolveDelegation, verdictPreview, workerBrief } from "./delegationBrief";
-import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
+import { COMMAND_EXCERPT, clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
 import { createPlanProgress, type SegmentState } from "./planProgress";
 import { createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
 import {
@@ -451,6 +452,8 @@ export interface ManagedRow {
   role: Role;
   branch: string | null;
   issue_url: string | null;
+  /** Planner row only: the one tracking issue every wave of its plan shares, once chief_forge_init has made it. */
+  plan_issue_url: string | null;
   pr_url: string | null;
   project_id: string;
   chief_thread_id: string | null;
@@ -554,7 +557,8 @@ const CHIEF_CORE_RULES = `# Chief core rules (always apply)
 
 - Evidence: Chief runs nothing in a managed thread's worktree and reads no project code. Its evidence is worker and reviewer reports, lifecycle alerts, the recorded commands in ready alerts, chief_inspect output, and reviewer verdicts. A cause no evidence states, doubtful evidence, or a disputed factual claim goes to a child thread (chief_plan when offered, chief_review, or chief_research when offered), never to Chief reading code.
 - Fresh worker: a worker that has reported is never reused. Follow-up work (skipped acceptance criteria, a review's requested changes, the next wave, a rebase or restack, a push or a failed push, discarding changes, running tests, or any new task) goes to a fresh worker with chief_delegate replaces: (same worktree, branch, and pull request). After replaces:, review and complete the successor, not the superseded worker. chief_continue only nudges a thread that is still working.
-- Review: only you start reviews, with chief_review; the server refuses every other caller. Start one independent review when a worker's ready alert says to: for a worker with no plan link, its own; for a plan, one review of every branch after every wave is ready, never between waves. Complete the work only on that reviewer's approve: chief_complete refuses a worker unless its newest review approves the pull request's current head commit, and it marks the worker's pull request ready itself, so never run gh pr ready or glab mr update --ready for a worker's pull request. A pull request or branch no worker owns (a branch review) is the exception: its review runs in a fresh worktree, and you mark the pull request ready yourself, only on that reviewer's approve. Exception: for #simple work, review is your judgment.`;
+- Review: only you start reviews, with chief_review; the server refuses every other caller. Start one independent review when a worker's ready alert says to: for a worker with no plan link, its own; for a plan, one review of every branch after every wave is ready, never between waves. Complete the work only on that reviewer's approve: chief_complete refuses a worker unless its newest review approves the pull request's current head commit, and it marks the worker's pull request ready itself, so never run gh pr ready or glab mr update --ready for a worker's pull request. A pull request or branch no worker owns (a branch review) is the exception: its review runs in a fresh worktree, and you mark the pull request ready yourself, only on that reviewer's approve. Exception: for #simple work, review is your judgment.
+- Need you: before writing a **Need you** request in chat, call chief_escalate with the managed thread it concerns and the full request.`;
 
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
@@ -988,6 +992,10 @@ export const MIGRATIONS = [
        CASE WHEN dedupe_key LIKE '%:failed:%' THEN CASE WHEN instr(message, 'usage limit') > 0 THEN 'usage_limit' ELSE 'connection' END END,
        1, created_at
      FROM alert_outbox WHERE dedupe_key LIKE '%:failed:%' OR dedupe_key LIKE '%:stall:%'`,
+    // Comments to post on a task's pull request or tracking issue. A row is written with the state change it describes and posted off the tool-call path; attempts is persisted before each post, so a crash is read as "maybe posted" and the marker check runs first.
+    `CREATE TABLE forge_comments (dedupe_key TEXT PRIMARY KEY, project_id TEXT NOT NULL, thread_id TEXT NOT NULL, target TEXT NOT NULL, body TEXT NOT NULL, mention INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, posted_at INTEGER, gave_up_at INTEGER, created_at INTEGER NOT NULL)`,
+    // Planner row only: the tracking issue shared by every wave of its plan.
+    `ALTER TABLE managed_threads ADD COLUMN plan_issue_url TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1014,6 +1022,12 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Auto-spawn Chief",
       description: "Automatically start a Chief supervisor when BB opens, the default project changes, or an active project Chief is missing.",
       default: false,
+    },
+    forgeOwnerHandle: {
+      type: "string",
+      label: "Forge handle to @-mention on escalations",
+      description: "Empty = the forge CLI's logged-in user.",
+      default: "",
     },
     cascadeArchive: {
       type: "boolean",
@@ -2255,7 +2269,9 @@ export default async function plugin(bb: BbPluginApi) {
     const replacement = result ? clip(result, MAX_RESULT_LENGTH) : null;
     // A replaced result drops the summary and report file that described the old one.
     store.markComplete({ status: live.status, result: replacement, note: overrideNote, now: Date.now(), threadId });
-    return { row: store.get(threadId)!, overridden: overrideNote !== null };
+    const completed = store.get(threadId)!;
+    enqueueCompletionComment(completed, overrideNote !== null);
+    return { row: completed, overridden: overrideNote !== null };
   }
 
   /** chief_owner_approval: records the owner's approval on a design-wave worker whose latest report was ready.
@@ -2395,6 +2411,176 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function retryAlerts() {
     for (const alert of pendingAlerts.all(Date.now() - 60_000) as AlertRow[]) await deliverAlert(alert.dedupe_key);
+  }
+
+  interface ForgeCommentRow {
+    dedupe_key: string; project_id: string; thread_id: string; target: string; body: string; mention: number; attempts: number;
+  }
+  const FORGE_COMMENT_MAX_ATTEMPTS = 5;
+  /** A transient failure waits this long before the next try; the supervisor tick (30 s) is the retry clock. */
+  const FORGE_COMMENT_RETRY_MS = 25_000;
+  const forgeTried = new Map<string, number>();
+
+  /** Queues a comment for the target's pull request or issue; the post happens off the caller's path.
+   * Never throws and never blocks: a forge comment is an extra copy of the local record, so the state change
+   * that triggered it always completes. A target that is no forge URL means no forge to post to: logged, not an error.
+   * Safe inside store.batch: the drain starts after the batch commits. */
+  function enqueueForgeComment(input: { key: string; row: ManagedRow; target: string | null | undefined; body: string; mention?: boolean }) {
+    try {
+      if (!parseForgeTarget(input.target)) {
+        bb.log.info(`No forge comment for ${input.key}: ${input.target ? "its target is not a full pull request or issue URL" : "there is no pull request or issue to post on"}.`);
+        return false;
+      }
+      db.prepare(`INSERT OR IGNORE INTO forge_comments (dedupe_key, project_id, thread_id, target, body, mention, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(input.key, input.row.project_id, input.row.thread_id, input.target, input.body, input.mention ? 1 : 0, Date.now());
+      queueMicrotask(() => { void drainForge(); });
+      return true;
+    } catch (error) {
+      const message = `Could not queue the forge comment ${input.key.split(":")[0]} for ${input.target}: ${errorText(error)}. The local record is intact.`;
+      bb.log.warn(message);
+      // Deferred so a failure inside store.batch does not write the alert into the transaction that may roll back.
+      queueMicrotask(() => { void Promise.resolve().then(() => alertChief(input.row, `forge-comment:${input.key}`, message)).catch((alertError) => bb.log.error(`${message} The Chief alert also failed: ${String(alertError)}`)); });
+      return false;
+    }
+  }
+
+  /** One attempt for one row. attempts is persisted before any network call, so a crash mid-post reads as "maybe posted"
+   * on the next try, which looks for the marker before posting again. */
+  async function postForgeComment(comment: ForgeCommentRow) {
+    const key = comment.dedupe_key;
+    const prior = comment.attempts;
+    db.prepare(`UPDATE forge_comments SET attempts=attempts+1 WHERE dedupe_key=?`).run(key);
+    forgeTried.set(key, Date.now());
+    try {
+      const target = parseForgeTarget(comment.target);
+      if (!target) throw Object.assign(new Error("the target is not a pull request or issue URL"), { code: "ENOENT" });
+      const env = forgeEnv();
+      if (!(prior > 0 && await hasMarker(target, key, env))) {
+        const body = comment.mention ? withMention(comment.body, await ownerHandle(target, (await settings.get()).forgeOwnerHandle ?? "", env)) : comment.body;
+        await postComment(target, body, env);
+      }
+      db.prepare(`UPDATE forge_comments SET posted_at=?, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
+      forgeTried.delete(key);
+    } catch (error) {
+      const reason = errorText(error);
+      const permanent = classify(error) === "permanent";
+      const exhausted = !permanent && prior + 1 >= FORGE_COMMENT_MAX_ATTEMPTS;
+      db.prepare(`UPDATE forge_comments SET last_error=?, gave_up_at=? WHERE dedupe_key=?`).run(reason, permanent || exhausted ? Date.now() : null, key);
+      if (permanent) bb.log.info(`Forge comment ${key.split(":")[0]} on ${comment.target} not posted (the forge CLI is missing, not logged in, or the target is gone): ${reason}`);
+      if (permanent || exhausted) forgeTried.delete(key);
+      if (!exhausted) return;
+      const row = store.get(comment.thread_id);
+      const message = `Could not post the ${key.split(":")[0]} comment to ${comment.target} after ${FORGE_COMMENT_MAX_ATTEMPTS} attempts: ${reason}. The local record is intact.`;
+      if (!row?.chief_thread_id) bb.log.error(message);
+      else await alertChief(row, `forge-comment:${key}`, message).catch((alertError) => bb.log.error(`${message} The Chief alert also failed: ${String(alertError)}`));
+    }
+  }
+
+  async function postPendingForgeComments() {
+    const now = Date.now();
+    const pending = db.prepare(`SELECT * FROM forge_comments WHERE posted_at IS NULL AND gave_up_at IS NULL ORDER BY created_at LIMIT 20`).all() as ForgeCommentRow[];
+    for (const comment of pending) {
+      if (now - (forgeTried.get(comment.dedupe_key) ?? 0) < FORGE_COMMENT_RETRY_MS) continue;
+      await postForgeComment(comment);
+    }
+  }
+
+  let forgeDraining: Promise<void> | null = null;
+  let forgeAgain = false;
+  /** Single-flight, like sweep(): an enqueue during a drain queues exactly one more pass. Callers never await it. */
+  function drainForge() {
+    if (forgeDraining) { forgeAgain = true; return forgeDraining; }
+    forgeDraining = (async () => {
+      do {
+        forgeAgain = false;
+        await postPendingForgeComments();
+      } while (forgeAgain);
+    })().catch((error) => bb.log.warn(`Forge comment drain failed; the supervisor tick retries: ${String(error)}`)).finally(() => { forgeDraining = null; });
+    return forgeDraining;
+  }
+
+  /** Which attempt at a task this is: the worker's position in its replaces: chain. */
+  const taskRound = (workerThreadId: string) => ledger.taskChain(workerThreadId).length;
+  /** Agent- or tool-originated text, made safe for the forge and bounded. */
+  const forgeText = (text: string, limit: number) => sanitizeForge(clip(text.trim(), limit));
+
+  /** One comment per pull request a verdict covers (a branch review: its own pull request, when it was given as a full URL). Runs inside report()'s store.batch. */
+  function enqueueVerdictComments(row: ManagedRow, seq: number, verdict: string, findingList: ReportFinding[] | undefined, result: string | undefined, recommendation: string | undefined) {
+    const targets = ledger.targets(row.thread_id);
+    const covered = targets.length
+      ? targets.map((target) => ({ worker: target.worker_thread_id, url: target.pr_url ?? store.get(target.worker_thread_id)?.pr_url, sha: target.head_sha, id: `verdict:${row.thread_id}:${seq}:${target.worker_thread_id}` }))
+      : [{ worker: null, url: row.pr_url, sha: row.reviewed_head_sha, id: `verdict:${row.thread_id}:${seq}` }];
+    const blocking = findingList?.filter((finding) => finding.severity === "blocking") ?? [];
+    const nits = findingList?.filter((finding) => finding.severity === "nit") ?? [];
+    const details = sanitizeForge([
+      ...(blocking.length ? ["### Blocking findings", "", ...findingLines(blocking, "blocking"), ""] : []),
+      ...(nits.length ? ["### Nits", "", ...findingLines(nits, "nit"), ""] : []),
+      ...(result ? ["### Findings", "", result, ""] : []),
+      ...(recommendation ? ["### Recommendation", "", recommendation] : []),
+    ].join("\n"));
+    for (const entry of covered) {
+      enqueueForgeComment({
+        key: entry.id, row, target: entry.url,
+        body: composeComment({
+          key: entry.id, title: "Review verdict", round: entry.worker ? taskRound(entry.worker) : undefined,
+          lines: [
+            verdict === "approve" ? "**Approved**" : "**Changes requested**",
+            ...(entry.sha ? [`Reviewed head: \`${entry.sha.slice(0, 12)}\``] : []),
+            `${blocking.length} blocking finding${blocking.length === 1 ? "" : "s"}, ${nits.length} nit${nits.length === 1 ? "" : "s"}`,
+          ],
+          details: { summary: "Findings and recommendation", body: details },
+        }),
+      });
+    }
+  }
+
+  /** A worker's blocked report, on its pull request (its issue when it has none). Runs inside report()'s store.batch. */
+  function enqueueBlockedComment(row: ManagedRow, seq: number, blocker: string | undefined, recommendation: string | undefined) {
+    const id = `blocked:${row.thread_id}:${seq}`;
+    enqueueForgeComment({
+      key: id, row, target: row.pr_url ?? row.issue_url,
+      body: composeComment({ key: id, title: "Blocked", round: taskRound(row.thread_id), lines: [
+        `**Blocker:** ${forgeText(blocker ?? "", 1_500)}`, ...(recommendation ? [`**Recommendation:** ${forgeText(recommendation, 1_500)}`] : []),
+      ] }),
+    });
+  }
+
+  /** A failed pre-review gate: the only forge record that this commit was not reviewed, and why. Never carries the output path. */
+  function enqueueGateComment(gate: { workerThreadId: string; command: string; sha: string; exitCode: number; tail: string }) {
+    const worker = store.get(gate.workerThreadId);
+    if (!worker) return;
+    const id = `gate:${gate.workerThreadId}:${gate.sha}`;
+    enqueueForgeComment({
+      key: id, row: worker, target: worker.pr_url,
+      body: composeComment({
+        key: id, title: "Pre-review gate failed", round: taskRound(worker.thread_id),
+        lines: ["No review was started for this commit.", `Command: \`${forgeText(gate.command, COMMAND_EXCERPT).replace(/`/g, "'")}\``, `Commit \`${gate.sha.slice(0, 12)}\` exited ${gate.exitCode}.`],
+        details: { summary: "Output tail", body: `\`\`\`\n${sanitizeForge(gate.tail).replace(/```/g, "’’’")}\n\`\`\`` },
+      }),
+    });
+  }
+
+  /** A worker task's outcome, on its tracking issue (its pull request when the repository has no issue). Called once markComplete has committed. */
+  function enqueueCompletionComment(row: ManagedRow, overridden: boolean) {
+    if (row.role !== "worker") return;
+    const id = `complete:${row.thread_id}`;
+    const waves = row.plan_thread_id ? planWavesFor(row.plan_thread_id).length : 0;
+    const details = [
+      ...(row.result ? [forgeText(row.result, 4_000)] : []),
+      ...(row.owner_approval ? ["", `Owner's approval: “${forgeText(row.owner_approval, 1_000)}”`] : []),
+    ].join("\n");
+    enqueueForgeComment({
+      key: id, row, target: row.issue_url ?? row.pr_url,
+      body: composeComment({
+        key: id, title: "Completed", round: taskRound(row.thread_id),
+        lines: [
+          `**${forgeText(row.title, 160)}**${row.plan_wave && waves ? ` · wave ${row.plan_wave} of ${waves}` : ""}`,
+          ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
+          ...(overridden ? ["Completed without a matching approve; the reason is in the result."] : []),
+        ],
+        details: { summary: "Result", body: details },
+      }),
+    });
   }
 
   /** The server, not the planner, owns writing the plan: the planner submits it
@@ -2612,6 +2798,11 @@ export default async function plugin(bb: BbPluginApi) {
         db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role) VALUES (?, ?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role);
       }
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
+      if (row.role === "reviewer" && params.state === "ready" && verdict) {
+        enqueueVerdictComments(row, reserved.report_seq, verdict, findingList, params.result, params.recommendation);
+      } else if (row.role === "worker" && params.state === "blocked") {
+        enqueueBlockedComment(row, reserved.report_seq, params.blocker, params.recommendation);
+      }
       // Same transaction as the state commit: a crash before the full alert below still leaves Chief a pointer.
       // The final alert's key shares the report: kind, so it evicts this row while undelivered.
       if (row.chief_thread_id) {
@@ -2871,6 +3062,7 @@ export default async function plugin(bb: BbPluginApi) {
           // Replace terminal Chiefs and retarget their queued alerts before any
           // pending delivery is attempted.
           await retryAlerts();
+          void drainForge();
         } catch (error) {
           bb.log.warn(`Supervisor reconciliation failed: ${String(error)}`);
         }
@@ -3427,6 +3619,7 @@ export default async function plugin(bb: BbPluginApi) {
     maxResultLength: MAX_RESULT_LENGTH,
   });
 
+  let forgeRuns: Promise<unknown> = Promise.resolve();
   bb.agents.registerTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
@@ -3478,21 +3671,53 @@ export default async function plugin(bb: BbPluginApi) {
           "</details>",
         ].join("\n");
       }
-      const { branch, script } = forgeInitScript({ ...params, body });
+      // One tracking issue per plan: its title and body describe the plan, every wave's pull request tracks it.
+      const planner = planThreadId ? store.get(planThreadId) : undefined;
+      const planIssue = (): Partial<Parameters<typeof forgeInitScript>[0]> => {
+        if (!planner) return {};
+        const current = store.get(planner.thread_id)?.plan_issue_url;
+        if (current) return { issueUrl: current };
+        const waves = planWavesFor(planner.thread_id);
+        return {
+          issueTitle: planner.title.replace(/^Plan · /, ""),
+          issueBody: sanitizeForge([
+            "Chief tracks this plan here: one comment per task outcome, one pull request per wave.", "",
+            clip(planner.result ?? "", 1_500), "", "### Waves",
+            ...waves.map((entry, index) => `${index + 1}. ${entry.design ? "design-only" : "implementation"}${entry.dependsOn?.length ? `, after wave ${entry.dependsOn.join(", ")}` : ""}`),
+          ].join("\n")),
+        };
+      };
+      const first = forgeInitScript({ ...params, body, ...planIssue() });
+      const { branch } = first;
+      let script = first.script;
       const cwd = await projectPath(caller.project_id);
       let failure: string | null = null;
       if (cwd) {
         // ponytail: a remote-host project whose path also exists on the server would run against the wrong checkout; unlikely.
         try {
-          const { stdout } = await execFileAsync("sh", ["-c", script], {
-            cwd, timeout: FORGE_SCRIPT_TIMEOUT_MS,
-            env: { ...process.env, PATH: serverPath() },
+          // Runs for one plan are serialized, so the second wave's call sees the issue the first one made.
+          const parse = (stdout: unknown) => {
+            const found = String(stdout).match(/^CHIEF_FORGE (.*)$/gm)?.at(-1)?.slice("CHIEF_FORGE ".length);
+            return { line: found, values: Object.fromEntries((found ?? "").split(" ").map((pair) => {
+              const at = pair.indexOf("=");
+              return [pair.slice(0, at), pair.slice(at + 1)];
+            })) as Record<string, string> };
+          };
+          const run = forgeRuns.then(async () => {
+            script = forgeInitScript({ ...params, body, ...planIssue() }).script;
+            const out = await execFileAsync("sh", ["-c", script], {
+              cwd, timeout: FORGE_SCRIPT_TIMEOUT_MS,
+              env: { ...process.env, PATH: serverPath() },
+            });
+            // Recorded before the next wave's run starts, so that run reuses this issue.
+            const { values } = parse(out.stdout);
+            if (planner && values.branch && values.forge && values.issue_url) {
+              store.setPlanIssueUrl(planner.thread_id, values.issue_url);
+            }
+            return out;
           });
-          const line = String(stdout).match(/^CHIEF_FORGE (.*)$/gm)?.at(-1)?.slice("CHIEF_FORGE ".length);
-          const values = Object.fromEntries((line ?? "").split(" ").map((pair) => {
-            const at = pair.indexOf("=");
-            return [pair.slice(0, at), pair.slice(at + 1)];
-          }));
+          forgeRuns = run.catch(() => undefined);
+          const { line, values } = parse((await run).stdout);
           if (line && values.branch && values.forge) {
             return `The forge pre-flight already ran in the project checkout: branch=${values.branch} base=${values.base ?? ""} issue_url=${values.issue_url ?? ""} pr_url=${values.pr_url ?? ""}. Pass branch, issueUrl and prUrl to chief_delegate, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, not a failure. Do not run anything yourself.`;
           }
@@ -3674,6 +3899,7 @@ export default async function plugin(bb: BbPluginApi) {
         touchCallerChief(caller);
         const review = await startReview(caller, params.workerThreadId, params.focus);
         if (review.gated) {
+          enqueueGateComment(review);
           return `Pre-review gate failed: \`${review.command}\` exited ${review.exitCode} on ${review.sha}. No reviewer was spawned. Output tail:\n${review.tail}\n(full: ${review.outputPath ?? "not saved"}).${review.issues?.length ? ` Gate issues: ${review.issues.join("; ")}.` : ""} Delegate a replacement worker with replaces: and pass that path in context.`;
         }
         const skipped = review.gateSkipped?.length ? ` Gate skipped: ${review.gateSkipped.join("; ")}.` : "";
@@ -3721,6 +3947,32 @@ export default async function plugin(bb: BbPluginApi) {
       const target = await controlledTarget(workerThreadId, caller);
       touchCallerChief(caller);
       return recordOwnerApproval(target, approval);
+    },
+  });
+  bb.agents.registerTool({
+    name: "chief_escalate",
+    presentation: { label: { pending: "Posting escalation…", completed: "Posted escalation" } },
+    description: "Before you write a **Need you** request in chat, post it on the managed thread's pull request (else its tracking issue) with an @mention of the owner, so it is on record where the work is. threadId is the managed thread the request concerns; request is the full request. It returns at once; the post happens in the background. A planner with no tracking issue yet returns \"chat only\": then write the request in chat alone. Calling it again with the same request posts nothing new.",
+    parameters: z.object({
+      threadId: z.string(),
+      request: z.string().trim().min(1).max(12_000).describe("The full request, as you will write it in chat under Need you."),
+    }),
+    async execute({ threadId, request }, context) {
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
+      if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
+      const concerned = await controlledTarget(threadId, caller);
+      touchCallerChief(caller);
+      const chatOnly = "No pull request or issue to post on; write the request in chat only.";
+      const url = concerned.pr_url ?? concerned.issue_url
+        ?? (concerned.role === "reviewer" ? ledger.targets(concerned.thread_id).map((target) => target.pr_url ?? store.get(target.worker_thread_id)?.pr_url).find(Boolean) : undefined)
+        ?? (concerned.role === "planner" ? concerned.plan_issue_url : undefined);
+      if (!url) return chatOnly;
+      const id = `escalate:${threadId}:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;
+      const queued = enqueueForgeComment({
+        key: id, row: concerned, target: url, mention: true,
+        body: composeComment({ key: id, title: "Need you", lines: [forgeText(request, 12_000)] }),
+      });
+      return queued ? `Queued for ${url}. Now write the same request in chat under **Need you**.` : chatOnly;
     },
   });
   bb.agents.registerTool({
@@ -3791,7 +4043,7 @@ export default async function plugin(bb: BbPluginApi) {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
           "chief_consult",
-          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval",
+          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_escalate",
           ...(researchTool ? ["chief_research"] : []),
         ],
         skills: ["chief"],
