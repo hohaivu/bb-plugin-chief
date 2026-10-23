@@ -8,17 +8,23 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 /** `entries` counts the `path:line` pointers in `lines`; the other lines are header and notes. */
-export type ImpactSlice = { lines: string[]; entries: number } | { skipped: string };
+export type ImpactSlice = { lines: string[]; entries: number; guidelines: string[] } | { skipped: string };
+export type ImpactSliceSuccess = Exclude<ImpactSlice, { skipped: string }>;
 
-/** git with a 10 s timeout and 2 attempts, each bounded by the absolute `deadline`; past it, throws `deadline`. */
-export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number) {
+/** git with a 10 s timeout and 2 attempts, each bounded by the absolute `deadline`; past it, throws `deadline`.
+ * `stop` optionally cancels the command with a hard kill. */
+export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number, stop?: AbortSignal) {
   return async (args: string[], noMatchOk = false) => {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const left = deadline - Date.now();
       if (left <= 0) throw new Error("deadline");
       try {
-        return (await execFileAsync("git", args, { cwd, env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024 })).stdout;
+        if (stop?.aborted) throw new Error("stopped");
+        const run = execFileAsync("git", args, { cwd, env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024 });
+        // execFile's own `signal` option sends SIGTERM only; a git that ignores it must still die.
+        stop?.addEventListener("abort", () => run.child.kill("SIGKILL"), { once: true });
+        return (await run).stdout;
       } catch (error) {
         if (noMatchOk && (error as { code?: unknown }).code === 1) return "";
         lastError = error;
@@ -46,6 +52,12 @@ const STOP = new Set(("if for while switch async catch return function typeof ne
 const MAX_CALLEES = 20;
 const MAX_SIGNATURES = 10;
 const MAX_HITS = 200;
+const GUIDELINE_NAMES = ["CLAUDE.md", "AGENTS.md"];
+/** 100 directories give 200 pathspecs, far below ARG_MAX. */
+const MAX_GUIDELINE_DIRS = 100;
+/** The guideline listing runs beside the pointer lookup, is never awaited, and is killed when the slice is ready. */
+const GUIDELINE_BUDGET_MS = 5_000;
+const GUIDELINE_PENDING = "Not listed: the guideline lookup did not finish before the impact slice was ready.";
 
 /** The defined name on a definition line, else (headers only) the last identifier before the first `(`. */
 function nameOf(text: string, fallback: boolean): string | null {
@@ -56,13 +68,40 @@ function nameOf(text: string, fallback: boolean): string | null {
   return text.includes("(") && ids?.length ? ids[ids.length - 1]! : null;
 }
 
+/** The CLAUDE.md and AGENTS.md paths at `sha` in the repository root and in each directory on a changed path, as rendered
+ * lines. Paths only, never contents. Best-effort: a failure becomes a note, never a thrown error. */
+async function guidelineLines(git: ReturnType<typeof gitWithin>, sha: string, changed: Set<string>): Promise<string[]> {
+  try {
+    const dirs = new Set([""]);
+    for (const path of changed) {
+      const parts = path.split("/");
+      for (let i = 1; i < parts.length; i += 1) dirs.add(parts.slice(0, i).join("/"));
+    }
+    const searched = [...dirs].slice(0, MAX_GUIDELINE_DIRS);
+    const specs = searched.flatMap((dir) => GUIDELINE_NAMES.map((name) => dir ? `${dir}/${name}` : name));
+    const out = await git(["--literal-pathspecs", "ls-tree", "--name-only", sha, "--", ...specs]);
+    const found = out.split("\n").filter(Boolean).map((path) => `- \`${path}\``);
+    return [
+      ...(found.length ? found : ["None in the repository root or on the changed files' paths."]),
+      ...(dirs.size > searched.length ? [`${dirs.size - searched.length} more directories not searched.`] : []),
+    ];
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return [`Not listed: ${message.replace(/\s+/g, " ").slice(0, 200)}.`];
+  }
+}
+
 /** Bounded file:line pointers to code just outside a commit's diff: definitions of what the added lines call, and callers
- * of symbols whose definition line changed. Pure git at `sha`; never throws, any failure is `{ skipped }`. */
+ * of symbols whose definition line changed. Pure git at `sha`; never throws, any failure is `{ skipped }`.
+ * `onReady` receives the finished slice before cleanup, so a caller with its own deadline can keep it. */
 export async function computeImpactSlice(opts: {
   cwd: string; sha: string; baseRef: string; fetchRef?: string; env: NodeJS.ProcessEnv; maxEntries: number; deadlineMs: number;
+  onReady?: (slice: ImpactSliceSuccess) => void;
 }): Promise<ImpactSlice> {
   const deadline = Date.now() + opts.deadlineMs;
   let attrDir: string | null = null;
+  const stopGuidelines = new AbortController();
+  let guidelines: string[] | null = null;
   const git = gitWithin(opts.cwd, opts.env, deadline);
   const resolve = async (ref: string, fetchRef: string | undefined) => {
     const verify = () => git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then((out) => out.trim(), () => null);
@@ -88,13 +127,19 @@ export async function computeImpactSlice(opts: {
 
     const ranges = new Map<string, [number, number][]>();
     const touched = new Set<string>();
+    const changed = new Set<string>();
     const signature = new Set<string>();
     const callees = new Map<string, string>();
     let file: string | null = null;
     let inHunk = false;
     for (const line of diff.split("\n")) {
       if (line.startsWith("diff --git ")) { inHunk = false; file = null; continue; }
-      if (!inHunk && line.startsWith("+++ ")) { file = line.startsWith("+++ b/") ? line.slice(6) : null; continue; }
+      if (!inHunk && line.startsWith("--- a/")) { changed.add(line.slice(6)); continue; }
+      if (!inHunk && line.startsWith("+++ ")) {
+        file = line.startsWith("+++ b/") ? line.slice(6) : null;
+        if (file) changed.add(file);
+        continue;
+      }
       const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@ ?(.*)$/.exec(line);
       if (hunk) {
         inHunk = true;
@@ -118,7 +163,16 @@ export async function computeImpactSlice(opts: {
       }
     }
     const header = `Computed at ${sha} against merge-base ${mb.slice(0, 12)} with ${opts.baseRef}, by name match (git grep -w): overloads, dynamic dispatch and same-named symbols can mislead.`;
-    if (!touched.size && !callees.size) return { lines: [header, "No touched symbols or calls found in the diff."], entries: 0 };
+    // Best-effort and never awaited: whatever it has settled when the pointers are done is used, else a note.
+    void guidelineLines(gitWithin(opts.cwd, opts.env, Math.min(deadline, Date.now() + GUIDELINE_BUDGET_MS), stopGuidelines.signal), sha, changed)
+      .then((lines) => { guidelines = lines; }, () => undefined);
+    const ready = (slice: { lines: string[]; entries: number }): ImpactSliceSuccess => {
+      const success = { ...slice, guidelines: [...guidelines ?? [GUIDELINE_PENDING]] };
+      // A throwing callback must not downgrade the finished slice.
+      try { opts.onReady?.(success); } catch { /* the slice is still returned */ }
+      return success;
+    };
+    if (!touched.size && !callees.size) return ready({ lines: [header, "No touched symbols or calls found in the diff."], entries: 0 });
 
     const inDiff = (path: string, n: number) => (ranges.get(path) ?? []).some(([from, to]) => n >= from && n <= to);
     const seen = new Set<string>();
@@ -168,7 +222,7 @@ export async function computeImpactSlice(opts: {
       ...(omitted ? [`${omitted} more omitted`] : []),
       ...(tooCommon.length ? [`too common: ${tooCommon.map((name) => `\`${name}\``).join(", ")}`] : []),
     ];
-    return {
+    return ready({
       lines: [
         header,
         `Touched: ${names.slice(0, 20).map((name) => `\`${name}\``).join(", ")}${names.length > 20 ? ` and ${names.length - 20} more` : ""}${signature.size ? ` (signature changed: ${[...signature].slice(0, MAX_SIGNATURES).map((name) => `\`${name}\``).join(", ")})` : ""}`,
@@ -176,11 +230,12 @@ export async function computeImpactSlice(opts: {
         ...(tail.length ? [`${tail.join("; ")}.`] : []),
       ],
       entries: entries.length,
-    };
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { skipped: message.replace(/\s+/g, " ").slice(0, 200) };
   } finally {
+    stopGuidelines.abort();
     if (attrDir) await rm(attrDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }

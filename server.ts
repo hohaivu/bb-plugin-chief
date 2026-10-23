@@ -2142,12 +2142,16 @@ export default async function plugin(bb: BbPluginApi) {
     // One 30 s deadline covers the host lookup, the branch resolution and the slice itself.
     const deadline = Date.now() + 30_000;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const expired = new Promise<ImpactSlice>((resolve) => { timer = setTimeout(() => resolve({ skipped: "deadline (30 s) passed" }), 30_000); });
+    // A finished slice is final: neither the deadline nor a later failure may replace it with a skip.
+    let completed: ImpactSlice | undefined;
+    let publish: (slice: ImpactSlice) => void = () => undefined;
+    const ready = new Promise<ImpactSlice>((resolve) => { publish = (slice) => { completed = slice; resolve(slice); }; });
+    const expired = new Promise<ImpactSlice>((resolve) => { timer = setTimeout(() => resolve(completed ?? { skipped: "deadline (30 s) passed" }), 30_000); });
     const work = async (): Promise<ImpactSlice> => {
       if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
       const hostSkip = await checkoutHostSkip(row.project_id);
       if (hostSkip) return { skipped: hostSkip };
-      const options = () => ({ cwd: projectDir, env: forgeEnv(), maxEntries, deadlineMs: deadline - Date.now() });
+      const options = () => ({ cwd: projectDir, env: forgeEnv(), maxEntries, deadlineMs: deadline - Date.now(), onReady: publish });
       if (head) return await computeImpactSlice({ ...options(), sha: head.sha, baseRef: `origin/${head.base}`, fetchRef: head.branch });
       if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
       const run = gitWithin(projectDir, forgeEnv(), deadline);
@@ -2160,9 +2164,9 @@ export default async function plugin(bb: BbPluginApi) {
       return await computeImpactSlice({ ...options(), sha, baseRef, fetchRef: row.branch });
     };
     try {
-      return await Promise.race([work(), expired]);
+      return await Promise.race([work(), ready, expired]);
     } catch (error) {
-      return { skipped: clip(String(error), 200) };
+      return completed ?? { skipped: clip(String(error), 200) };
     } finally {
       clearTimeout(timer);
     }

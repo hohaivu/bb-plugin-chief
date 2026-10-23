@@ -25,12 +25,14 @@ export function reviewerPrompt(opts: {
     "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
     "Classify the change, then check it by type: a bug fix fixes the root cause, not the symptom, and has a regression test or a reproducing check; a refactor or migration leaves behaviour unchanged, with the base commit as the oracle: where practical, run the old and new code on the same inputs (the same command, test or fixture against a checkout of the base), and treat any behaviour difference the worker did not explain as a regression; a feature aligns with the contract and spec in the brief; a mixed change is checked part by part by each part's type.",
     "Evidence rules: a blocking finding needs a traced input → code path → failure; never reject on speculation. Never approve only because tests pass; read the change. Report only problems this diff introduced; a pre-existing problem is at most a nit, unless the diff makes it reachable. When a signature or exported contract changed, inspect its callers.",
+    "Do not report, as blocking or nit: what a linter, typechecker or compiler would catch (when the project's check fails, that failed check is the finding); code explicitly silenced by a lint-ignore, ts-ignore or similar comment; code that looks like a bug but is correct; nitpicks a senior engineer would not raise; an issue that depends on specific inputs or state when you have not traced an input that triggers it; subjective suggestions; general quality concerns such as test coverage, unless a guideline file or the brief requires them (the bug-fix regression check and the test audit still apply). If you are not certain a problem is real, leave it out: a false positive costs the worker a fix round.",
+    "Guideline files are the CLAUDE.md and AGENTS.md files in the repository root and in each directory on a changed file's path; review-context.md lists them when it can, otherwise find them yourself. A guideline violation on a line this diff introduced is blocking only when the finding's message quotes the exact rule and the changed file sits inside that guideline file's directory; otherwise do not report it.",
     "Test audit: when the diff adds or changes tests, check that each would fail on a plausible wrong implementation (an off-by-one, a missed boundary, a swapped branch, a dropped case). A test that asserts a tautology, a trivial constant, or only what the mock returns proves nothing. Vacuous tests count as missing verification evidence for the behaviour they claim to cover.",
     "A contract stated as a property (round-trip, idempotency, invariant or bound, equivalence, must-never-happen) holds for inputs beyond the worker's own examples: check at least one boundary or adversarial input the worker did not choose.",
     "Classify every finding as blocking or nit. Blocking means the change cannot ship as it stands. These are always blocking: a bug or incorrect behaviour, an unmet listed contract, a regression, missing or false verification evidence, a designer mismatch the brief does not accept, scope drift the worker did not state, and functional code replaced by a comment, TODO or placeholder. A nit is style, naming, a minor simplification, or an optional improvement.",
     "State the assumptions your verdict rests on. Write a finding that needs a product or architecture answer as `[AMBIGUOUS: <question>]`; it is neither a blocker nor a nit, and alone it never sets request_changes. Drop doubts that would not change the verdict.",
     "The verdict is request_changes only when at least one blocking finding exists; nits alone mean approve.",
-    "Send each finding in chief_report `findings` ({file, line, severity, message, fix}); put the at-most-5 nits cap, assumptions and `[AMBIGUOUS: …]` items in result.",
+    "Send each finding in chief_report `findings` ({file, line, severity, message, fix}); a `fix` describes the complete fix, not a partial hint or a first step. Put the at-most-5 nits cap, assumptions and `[AMBIGUOUS: …]` items in result.",
     "Send a `summary` with the report: verdict, blocking count, nit count, the most important blocking finding with file:line.",
     "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
     "Set chief_report `lesson` (at most 400 characters) only for a durable, project-level review rule or known false positive a future reviewer should know; never for something specific to this task.",
@@ -84,7 +86,7 @@ export interface ReviewBriefInput {
   focus?: string;
   chiefThreadId: string | null;
   /** Per target: file:line pointers outside its diff, or why they could not be computed. Optional: older callers omit it. */
-  impactSlices?: { threadId: string; branch: string | null; lines?: string[]; entries?: number; skipped?: string }[];
+  impactSlices?: { threadId: string; branch: string | null; lines?: string[]; entries?: number; guidelines?: string[]; skipped?: string }[];
 }
 
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
@@ -134,7 +136,15 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ...(slice.lines ?? [`Skipped: ${slice.skipped}.`]),
     ]),
   ] : [];
-  const sections = [briefSection, recordedSection, reportSection, previousSection, planSection, sliceSection].filter((lines) => lines.length);
+  const listed = slices.filter((slice) => slice.guidelines);
+  const guidelineSection = listed.length ? [
+    "## Guideline files",
+    ...listed.flatMap((slice) => [
+      ...(many ? [`### ${slice.branch ?? "no branch"} (worker ${slice.threadId})`] : []),
+      ...slice.guidelines!,
+    ]),
+  ] : [];
+  const sections = [briefSection, recordedSection, reportSection, previousSection, planSection, sliceSection, guidelineSection].filter((lines) => lines.length);
   const context = sections.map((lines) => lines.join("\n")).join("\n\n");
   const summary = sections.length ? [
     "", "## Context",
@@ -144,6 +154,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     ...(previousSection.length ? [`- The previous review (${previous!.threadId}) with its findings.`] : []),
     ...(planSection.length ? [`- The plan wave file${chain.length > 1 ? "s" : ""} this review covers.`] : []),
     ...(sliceSection.length ? ["- The impact slice: pointers to code outside the diff that the change calls or that calls it."] : []),
+    ...(guidelineSection.length ? ["- The guideline files (CLAUDE.md, AGENTS.md) in the repository root and on the changed files' paths."] : []),
     "Read `$BB_THREAD_STORAGE/review-context.md` in full before reviewing. If it is missing, wait 10 seconds and read again; if still missing, report blocked naming it.",
   ] : [];
   const prompt = reviewerPrompt({
