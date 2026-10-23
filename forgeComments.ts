@@ -34,6 +34,8 @@ const LOCAL_PATH = new RegExp(
 /** Text from an agent or a tool never carries a local path, a thread id, a bb command, a live @mention or a fake marker onto the forge. */
 export function sanitizeForge(text: string) {
   return text
+    // A file URL is a local path: drop the scheme so LOCAL_PATH reduces it to its basename and location.
+    .replace(/\bfile:\/\/(?:localhost)?(?=\/)/gi, "")
     .replace(/`\s*(?:\$ )?bb\s[^`\n]*`/g, "[bb command]")
     .replace(/^[ \t]*(?:\$ )?bb\s.*$/gm, "[bb command]")
     .replace(LOCAL_PATH, (path) => {
@@ -100,7 +102,7 @@ export async function postComment(target: ForgeTarget, body: string, env: NodeJS
   }
 }
 
-/** Whether a comment holding this key's marker is already on the target. Throws when the list cannot be read. */
+/** Whether a comment holding this key's marker is already on the target. Throws when the list cannot be read in full. */
 export async function hasMarker(target: ForgeTarget, key: string, env: NodeJS.ProcessEnv) {
   const marker = markerFor(key);
   if (target.forge === "github") {
@@ -113,7 +115,8 @@ export async function hasMarker(target: ForgeTarget, key: string, env: NodeJS.Pr
     if (notes.some((note) => note.body?.includes(marker))) return true;
     if (notes.length < 100) return false;
   }
-  return false;
+  // An incomplete scan never proves the marker absent: the caller must not post on it.
+  throw new Error(`Marker scan stopped after ${MAX_LIST_PAGES} pages of notes without reaching the end; not posting blind.`);
 }
 
 const handles = new Map<string, string>();

@@ -25,7 +25,7 @@ import {
 import { advisorBrief, plannerBrief, resolveDelegation, verdictPreview, workerBrief } from "./delegationBrief";
 import { COMMAND_EXCERPT, clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
 import { createPlanProgress, type SegmentState } from "./planProgress";
-import { createWaveSchedule, parentOf, successorOf } from "./waveSchedule";
+import { createWaveSchedule, parentOf, successorOf, waveTitle } from "./waveSchedule";
 import {
   ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY,
   managedSkills, modelRoleSchema, roleSchema, workerKindSchema,
@@ -2257,11 +2257,13 @@ export default async function plugin(bb: BbPluginApi) {
     if (BUSY_STATUSES.has(live.status)) throw new Error(`Cannot complete ${threadId} while it is ${live.status}.`);
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Cannot complete ${threadId} because it is not a live thread.`);
     let overrideNote: string | null = null;
+    let overrideReason: string | null = null;
     if (row.role === "worker") {
       const refusal = await completionRefusal(row);
       if (refusal) {
         const reason = overrideSchema.safeParse(override);
         if (!reason.success || !reason.data) throw new Error(`Refusing to complete ${threadId}: ${refusal}`);
+        overrideReason = reason.data;
         overrideNote = `\n\nCompleted without a matching approve: ${reason.data}`;
         bb.log.warn(`Completing ${threadId} with an override (${refusal}) Reason: ${reason.data}`);
       }
@@ -2270,7 +2272,7 @@ export default async function plugin(bb: BbPluginApi) {
     // A replaced result drops the summary and report file that described the old one.
     store.markComplete({ status: live.status, result: replacement, note: overrideNote, now: Date.now(), threadId });
     const completed = store.get(threadId)!;
-    enqueueCompletionComment(completed, overrideNote !== null);
+    enqueueCompletionComment(completed, overrideReason);
     return { row: completed, overridden: overrideNote !== null };
   }
 
@@ -2561,7 +2563,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** A worker task's outcome, on its tracking issue (its pull request when the repository has no issue). Called once markComplete has committed. */
-  function enqueueCompletionComment(row: ManagedRow, overridden: boolean) {
+  function enqueueCompletionComment(row: ManagedRow, overrideReason: string | null) {
     if (row.role !== "worker") return;
     const id = `complete:${row.thread_id}`;
     const waves = row.plan_thread_id ? planWavesFor(row.plan_thread_id).length : 0;
@@ -2576,7 +2578,7 @@ export default async function plugin(bb: BbPluginApi) {
         lines: [
           `**${forgeText(row.title, 160)}**${row.plan_wave && waves ? ` · wave ${row.plan_wave} of ${waves}` : ""}`,
           ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
-          ...(overridden ? ["Completed without a matching approve; the reason is in the result."] : []),
+          ...(overrideReason ? [`**Completed without a matching approve:** ${forgeText(overrideReason, 1_000)}`] : []),
         ],
         details: { summary: "Result", body: details },
       }),
@@ -2749,6 +2751,7 @@ export default async function plugin(bb: BbPluginApi) {
     const planWaves = plannerReady && planInput ? await writePlan(threadId, row.project_id, planInput) : null;
     const scheduledWaves = planWaves && planInput
       ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof planInput === "string" ? planInput : planInput[index]!.body)!,
+        title: waveTitle(typeof planInput === "string" ? planInput : planInput[index]!.body),
         ...(typeof planInput !== "string" && planInput[index]!.dependsOn ? { dependsOn: planInput[index]!.dependsOn } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}) }))
       : null;
@@ -3683,7 +3686,7 @@ export default async function plugin(bb: BbPluginApi) {
           issueBody: sanitizeForge([
             "Chief tracks this plan here: one comment per task outcome, one pull request per wave.", "",
             clip(planner.result ?? "", 1_500), "", "### Waves",
-            ...waves.map((entry, index) => `${index + 1}. ${entry.design ? "design-only" : "implementation"}${entry.dependsOn?.length ? `, after wave ${entry.dependsOn.join(", ")}` : ""}`),
+            ...waves.map((entry, index) => `Wave ${index + 1}: ${entry.title ?? "no description"}${entry.dependsOn?.length ? ` · depends on ${entry.dependsOn.join(", ")}` : ""}${entry.design ? " · design" : ""}`),
           ].join("\n")),
         };
       };
