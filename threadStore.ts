@@ -246,6 +246,16 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       db.prepare(`UPDATE managed_threads SET advised_at=COALESCE(advised_at, ?) WHERE thread_id=?`).run(now, threadId);
       wrote();
     },
+    /** A planner's ready report: 'required' or null; never overwrites a resolved review. */
+    setPlanReview(threadId: string, value: string | null) {
+      db.prepare(`UPDATE managed_threads SET plan_review=? WHERE thread_id=? AND (plan_review IS NULL OR plan_review='required')`).run(value, threadId);
+      wrote();
+    },
+    /** A plan advisor's first advice: the first write wins. */
+    resolvePlanReview(threadId: string, outcome: "approved" | "changes") {
+      db.prepare(`UPDATE managed_threads SET plan_review=? WHERE thread_id=? AND plan_review='required'`).run(outcome, threadId);
+      wrote();
+    },
     /** Guarded by report_seq, and report_path also by result_rev: a slow write never attaches its path to a
      * newer report, nor to a result chief_complete replaced meanwhile (even with identical text). */
     attachReportFiles(threadId: string, seq: number, resultRev: number, verdictPath: string | null, reportPath: string | null) {

@@ -83,6 +83,14 @@ the schedule. Chief never opens or reads a plan file, and delegates wave 1 right
 for user sign-off. It escalates to you only for a genuine product or scope open question the planner
 named. Nothing is implemented until it delegates.
 
+**Plan review.** A plan with more than one wave, or one the planner marked `complex` on its ready
+report, gets exactly one read-only advisor review before delegation. Its ready alert asks for
+`chief_consult (planThreadId: …)`, and `chief_forge_init` and `chief_delegate` refuse the plan until
+that review resolves. On `approve`, Chief delegates the plan as it is. On `request_changes` or a
+blocked advisor, Chief runs `chief_plan (revises: …)`: a fresh planner revises the plan with the
+advice attached, and the revision is delegated with no second review. A stopped or failed attempt
+leaves the review open for a fresh one. There is no skip. A single-wave plan delegates at once.
+
 When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), the planner
 writes that interface into both waves' `## Contracts to verify` and marks the later wave
 `dependsOn: []`, so both run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. `dependsOn` stays only for waves that need the earlier
@@ -92,7 +100,7 @@ A worker that cannot finish its wave commits what is done and reports `blocked` 
 scope and a proposed split. Chief re-plans the remaining scope with `chief_plan`, delegates the new
 plan's wave 1 with `replaces:` the blocked worker (same worktree and branch), chains the rest off it,
 drops the old plan's undelegated waves, and completes the old planner. A re-plan wave delegated with
-`replaces:` continues the prior branch; any re-plan wave left `dependsOn: []` and delegated without
+`replaces:` continues the prior branch, and a re-plan that qualifies for plan review gets it first; any re-plan wave left `dependsOn: []` and delegated without
 `replaces:` starts a new branch from the default base, without the done work.
 
 The toggle reaches Chief threads that are already running. Turn it off to delegate directly.
@@ -118,7 +126,8 @@ reports a regression), Chief gains `chief_consult`: a read-only advisor that rea
 the reproduction commands its brief allows, but never changes a tracked file, commits, or pushes. With a worker it runs in
 that worker's own worktree, briefed on the mission, the reviewer verdicts, and the branch; without
 one it runs in the project's own checkout, like a plan. Its advice goes back to Chief, which decides
-the next worker round or escalates.
+the next worker round or escalates. With `planThreadId` (`--plan-thread`) it gives a plan its one
+review before delegation (see **Plan review**).
 
 ### Researcher
 
@@ -197,8 +206,8 @@ bb chief stats [--project proj_...] [--chief thr_...] [--json]   # tasks, repair
 bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
-bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--json]
-bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_...] [--context "..."] [--json]
+bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--revises thr_...] [--json]
+bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_... | --plan-thread thr_...] [--context "..."] [--json]
 bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--simple] [--kind worker|designer] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
@@ -208,7 +217,7 @@ bb chief complete thr_... [--result "..."] [--json]
 
 `bb chief review` is retired for every caller, because the CLI cannot prove who is calling. Only the active Chief starts reviews, through its `chief_review` tool; the review rule is in its core rules (`CHIEF_CORE_RULES` in server.ts).
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on), `chief_consult`, `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_escalate`, and worker/reviewer/advisor `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on; `revises` for a reviewed plan), `chief_consult` (`planThreadId` for a plan's one review), `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_escalate`, and worker/reviewer/advisor `chief_report`.
 
 ## Build and verify
 

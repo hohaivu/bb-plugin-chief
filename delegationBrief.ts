@@ -221,15 +221,39 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   return { prompt, brief, reviewerBrief };
 }
 
-export type PlannerBriefInput = { title: string; chiefThreadId: string; mission: string; context?: string; research: boolean };
+export type PlannerBriefInput = {
+  title: string; chiefThreadId: string; mission: string; context?: string; research: boolean;
+  /** Set for chief_plan revises: the plan its one advisor review sent back, and that advice. */
+  revision?: {
+    plannerThreadId: string;
+    planPaths: string[];
+    advisorThreadId: string;
+    advisorReportPath: string | null;
+    advisorSummary: string | null;
+    blocker?: string | null;
+    recommendation?: string | null;
+  };
+};
 
 /** A planner's prompt: the problem and the plan contract. */
 export function plannerBrief(input: PlannerBriefInput): string {
-  const { title, chiefThreadId, mission, context, research } = input;
+  const { title, chiefThreadId, mission, context, research, revision } = input;
   return [
     `You are the managed planner for “${title}”. Report to Chief thread ${chiefThreadId}.`,
     "", "## Problem", mission,
     ...(context ? ["", "## Context", context] : []),
+    ...(revision ? [
+      "", "## Plan to revise",
+      `Planner ${revision.plannerThreadId} wrote this plan and its one advisor review (${revision.advisorThreadId}) sent it back. Read every plan file and the advisor's report in full:`,
+      ...revision.planPaths.map((path) => `- ${path}`),
+      ...(revision.advisorReportPath ? [`- Advisor report: ${revision.advisorReportPath}`] : []),
+      ...(revision.advisorSummary ? [`Advisor summary: ${revision.advisorSummary}`] : []),
+      ...(revision.blocker ? [`The advisor reported blocked: ${revision.blocker}`, `Its recommendation: ${revision.recommendation ?? ""}`] : []),
+      "- Keep the parts no finding touches. Fix every blocking finding.",
+      "- List each finding you reject under a `## Disputed findings` heading, with your evidence.",
+      "- If the advisor named a decision, resolve it from the context above, or report blocked with it.",
+      "- Do not set `complex`: your plan goes straight to delegation with no second review.",
+    ] : []),
     "", "## Working contract",
     "- Read every file this brief names in full before proposing anything: no partial reads, no limit or offset. That rule covers the files the brief names, not every file a wider scan would touch. Then trace the real flow through the code this change would touch — a plan naming the wrong files is worse than no plan.",
     `- ${PLAN_ONLY}`,
@@ -242,6 +266,7 @@ export function plannerBrief(input: PlannerBriefInput): string {
     "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
     "- Give every wave a `## Contracts to verify` Markdown heading: a checklist that states contracts as falsifiable properties where they apply: round-trip (decode(encode(x)) == x, save then load), idempotency (running twice equals running once), invariants and state bounds (what holds after every step, value or count limits), equivalence (new path equals old path or a reference on the same inputs), and what must never happen; state each with the edge cases and existing behaviour the wave must keep — what a reviewer would otherwise catch only after the fact. Do not force a class that does not fit. The worker and the reviewer both receive this exact list.",
     ...(research ? ["- When the root cause is unclear, or before planning you need a broad multi-file scan or several independent questions (scoping a large issue, mapping many similar call sites or files), use chief_research instead of reading it all yourself: investigate (one sub-question per hypothesis or independent question); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings against the code before relying on them."] : []),
+    ...(revision ? [] : ["- Set `complex: true` on your ready report when the plan is high-risk: cross-cutting work (3+ modules or 10+ files), a data or schema migration, security, auth or permissions, a public API, CLI or persisted-format change, or concurrency or lifecycle work. A multi-wave plan gets one advisor review either way."]),
     "- A genuine product or scope decision is Chief's, not yours. If it blocks a sound plan, report blocked with the question as blocker and your recommended answer as recommendation. If the plan holds under a stated assumption, report ready and list the question and the assumption under `## Open questions` in the wave it affects. Never ask the user directly from this thread.",
     "- A blocked report must include the blocker and your recommended decision or next action.",
   ].join("\n");
@@ -262,11 +287,13 @@ export type AdvisorBriefInput = {
     report_path: string | null;
   };
   reviews: VerdictRow[];
+  /** Set for a plan review (chief_consult planThreadId): the planner, its plan files, result and report. */
+  plan?: { plannerThreadId: string; paths: string[]; summary: string | null; reportPath: string | null };
 };
 
 /** An advisor's prompt: the question, and with a worker its brief, verdicts, branch and report. */
 export function advisorBrief(input: AdvisorBriefInput): string {
-  const { title, chiefThreadId, mission, context, worker, reviews } = input;
+  const { title, chiefThreadId, mission, context, worker, reviews, plan } = input;
   return [
     `You are the managed advisor for “${title}”. Report to Chief thread ${chiefThreadId}.`,
     "You are a strategic advisor and debugger of last resort: find the root cause and the smallest credible way forward.",
@@ -292,10 +319,29 @@ export function advisorBrief(input: AdvisorBriefInput): string {
         `Full report and last output: bb chief inspect ${worker.thread_id}`,
       ] : []),
     ] : []),
+    ...(plan ? [
+      "", "## Plan to review",
+      `Planner ${plan.plannerThreadId} wrote this plan. Read every plan file:`,
+      ...plan.paths.map((path) => `- ${path}`),
+      ...(plan.summary ? [`Planner result: ${plan.summary}`] : []),
+      ...(plan.reportPath ? [`Planner report: ${plan.reportPath}`] : []),
+      "", "## Plan-review checklist",
+      "- Wrong or missing files and callers.",
+      "- An unsound wave split or `dependsOn`.",
+      "- Contracts that are not falsifiable.",
+      "- Missing Automated or Manual Verification.",
+      "- A missing `## What we're NOT doing` heading.",
+      "- Scope drift from the mission.",
+      "- Migration or compatibility risk.",
+      "- State transitions that are not total.",
+    ] : []),
     "", "## Working contract",
     `- ${ADVISE_ONLY}`,
     "- Read every file this brief names in full before concluding anything: no partial reads, no limit or offset.",
-    "- Reproduce before concluding: run the failing test or command, and quote the command and its exit status.",
+    plan
+      ? "- Verify each claim against the code; run read-only commands only and report each exit status."
+      : "- Reproduce before concluding: run the failing test or command, and quote the command and its exit status.",
+    ...(plan ? ["- Report ready with verdict: approve when the plan can be delegated as is (nits go in result); request_changes only for blocking problems, each with a concrete fix. Report blocked only for a product decision the owner must make; that also counts as the plan's one review. There is one review round: the planner revises once and nobody re-reviews."] : []),
     "- A ready report gives the root cause, the evidence, what earlier rounds missed, and the recommended next step for a fresh worker. Put the full advice in `result` and a short `summary` (at most 800 characters: root cause, recommended fix, evidence command).",
     "- A blocked report must include the blocker and your recommended decision or next action.",
     ...(worker ? ["- If the repeated rejections come from a project-level rule a future worker should know (not a task-specific bug), set `lesson`: one sentence, at most 400 characters. Otherwise omit it."] : []),

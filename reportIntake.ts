@@ -69,6 +69,12 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, pa
   if (row.role === "reviewer" && ready && !params.verdict) {
     errors.push('verdict is missing; a reviewer\'s ready report must carry "approve" when the change can ship as it stands, or "request_changes" when the worker must fix something.');
   }
+  if (row.role === "advisor" && row.plan_thread_id && ready && !params.verdict) {
+    errors.push("verdict is missing; a plan review's ready report requires verdict: approve or request_changes.");
+  }
+  if (params.complex !== undefined && (row.role !== "planner" || !ready)) {
+    errors.push(`complex is only for a planner's ready report (role is ${row.role}, state is "${params.state}"); remove it.`);
+  }
   if (row.role === "worker" && row.plan_thread_id && ready
     && !/^[ \t]*#{1,6}[ \t]+deviations from plan/im.test(params.result ?? "")) {
     errors.push('result lacks a "## Deviations from plan" Markdown heading; a plan worker\'s ready report must list each departure from the plan and why, or "None".');
