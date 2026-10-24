@@ -283,10 +283,13 @@ const delegateParams = delegateShape.superRefine((value, ctx) => {
 
 /** A planner is briefed on the same problem as a worker, minus the criteria and
  * constraints it is being asked to propose. */
-const planParams = delegateShape.pick({ title: true, mission: true, context: true });
+const planParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
+  revises: z.string().trim().min(1).optional().describe("A planner whose plan its one advisor review sent back with changes: the new planner revises that plan with the advice attached, and its plan is delegated with no second review."),
+});
 
-const consultParams = planParams.extend({
+const consultParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
   workerThreadId: z.string().trim().min(1).optional().describe("The managed worker whose change keeps failing review: the advisor runs in its worktree and gets its brief, reviewer verdicts, and branch."),
+  planThreadId: z.string().trim().min(1).optional().describe("A planner whose multi-wave or complex plan needs its one read-only advisor review before chief_forge_init or chief_delegate. Not with workerThreadId."),
 });
 
 const reviewParams = z.object({
@@ -371,6 +374,9 @@ const reportParams = z.object({
   ),
   regression: z.boolean().optional().describe(
     "Ready only, reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
+  ),
+  complex: z.boolean().optional().describe(
+    "Planner ready report only: true when the plan is high-risk (see your brief). A multi-wave plan gets one advisor review either way.",
   ),
   plan: z.union([
     z.string().trim(),
@@ -481,7 +487,11 @@ export interface ManagedRow {
   lifecycle_alert_key: string | null;
   /** Planner row only: JSON `[{path}]`, the schedule a planner-ready report persisted. */
   plan_waves: string | null;
-  /** Worker row only: the planner it was delegated from, with plan_wave, when planThreadId/wave was given. */
+  /** Planner row only: NULL (no review needed), 'required', or the one review's outcome 'approved' or 'changes'. */
+  plan_review: string | null;
+  /** Advisor row only: when it first reported ready or blocked, or null. */
+  advised_at: number | null;
+  /** Worker row: the planner it was delegated from, with plan_wave, when planThreadId/wave was given. Advisor row: the planner whose plan it reviews. */
   plan_thread_id: string | null;
   plan_wave: number | null;
   /** Worker row only: the reason it was delegated without a plan while planning was on. */
@@ -494,7 +504,7 @@ export interface ManagedRow {
   reviewed_report_seq: number | null;
   /** Reviewer row only: the PR head commit the forge reported when this reviewer was spawned, or null (no PR, or head unreadable). */
   reviewed_head_sha: string | null;
-  /** Worker row only: the worker it replaced through replaces:, or null. */
+  /** Worker row: the worker it replaced through replaces:. Planner row: the planner whose plan it revises. Otherwise null. */
   replaces_thread_id: string | null;
   /** Design-wave worker only: the owner's approval of its artboards, in the owner's words as Chief quoted them; null until recorded, and cleared by the worker's next report or chief_continue. */
   owner_approval: string | null;
@@ -563,7 +573,7 @@ const CHIEF_CORE_RULES = `# Chief core rules (always apply)
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason or simple) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file — the one exception: a design-only wave's ready alert asks you to get the owner's approval of its artboards before you delegate the next wave. Only the owner approves design-only work, never a reviewer: record their words with chief_owner_approval (chief_review refuses it), and the next wave will not delegate without it. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (bounded work whose cause evidence already states; see the core rules) or simple: true (only when the user's message contains #simple). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
+  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason or simple) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call. When it names the waves to delegate, delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file — the one exception: a design-only wave's ready alert asks you to get the owner's approval of its artboards before you delegate the next wave. Only the owner approves design-only work, never a reviewer: record their words with chief_owner_approval (chief_review refuses it), and the next wave will not delegate without it. A plan with more than one wave, or one its planner marked complex, gets exactly one read-only advisor review first: its ready alert asks for chief_consult (planThreadId), and chief_forge_init and chief_delegate refuse it until that review resolves. On approve, delegate it as it is; on request_changes or a blocked advisor, its alert asks for chief_plan (revises), and the revision is delegated with no second review. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (bounded work whose cause evidence already states; see the core rules) or simple: true (only when the user's message contains #simple). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
 
 const DESIGN_REVIEW_REFUSAL = "Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.";
 
@@ -996,6 +1006,8 @@ export const MIGRATIONS = [
     `CREATE TABLE forge_comments (dedupe_key TEXT PRIMARY KEY, project_id TEXT NOT NULL, thread_id TEXT NOT NULL, target TEXT NOT NULL, body TEXT NOT NULL, mention INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, posted_at INTEGER, gave_up_at INTEGER, created_at INTEGER NOT NULL)`,
     // Planner row only: the tracking issue shared by every wave of its plan.
     `ALTER TABLE managed_threads ADD COLUMN plan_issue_url TEXT`,
+    // Planner row only: its one advisor review — NULL (none needed), 'required', 'approved' or 'changes'.
+    `ALTER TABLE managed_threads ADD COLUMN plan_review TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1132,6 +1144,7 @@ export default async function plugin(bb: BbPluginApi) {
       return covered.length > 0 && covered.every((target) => store.get(target.worker_thread_id)?.state === "complete");
     }
     if (row.role === "advisor") {
+      if (row.plan_thread_id) return store.get(row.plan_thread_id)?.state === "complete";
       return !!row.worker_thread_id && store.get(row.worker_thread_id)?.state === "complete";
     }
     if (row.role !== "planner" || !row.plan_waves) return false;
@@ -1613,15 +1626,46 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error("Planning is off. Turn on “Plan before delegating” in Chief's settings, or delegate this work directly.");
     }
     const { chief, projectId } = await owningChief(callerThreadId);
+    const revision = params.revises ? revisionInput(params.revises, chief.thread_id) : undefined;
     const prepared = await managedSpawn.prepare(projectId, { role: "planner", hostId: await projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = plannerBrief({
       title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context,
-      research: researchLine("planner", await researchSettings()) !== null,
+      research: researchLine("planner", await researchSettings()) !== null, revision,
     });
     const thread = await managedSpawn.launch(prepared, { projectId, environment: { type: "project-default" }, title, prompt },
-      { role: "planner", chiefThreadId: chief.thread_id });
+      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null },
+      // Earlier revision attempts that failed or stopped are superseded atomically with the new one.
+      params.revises ? (newId) => {
+        const now = Date.now();
+        for (const earlier of revisionsOf(params.revises!).all) {
+          if (earlier.thread_id !== newId && !BUSY_STATUSES.has(earlier.state) && !terminal(earlier.state)) store.completeSuperseded(earlier.thread_id, now);
+        }
+      } : undefined);
     return { threadId: thread.id, title, projectId };
+  }
+
+  /** chief_plan revises: P is allowed only once P's one review asked for changes and no revision is in or working; returns the revision brief input. */
+  function revisionInput(plannerId: string, chiefThreadId: string): NonNullable<Parameters<typeof plannerBrief>[0]["revision"]> {
+    const planner = store.get(plannerId);
+    if (!planner || planner.role !== "planner" || !controlsThread(planner, chiefThreadId)) throw new Error(`No managed planner ${plannerId} for this Chief.`);
+    if (planner.plan_review !== "changes") {
+      if (!planner.plan_review && planner.replaces_thread_id) throw new Error(`${plannerId} is already the revision of ${planner.replaces_thread_id}; a revision gets no review — delegate its waves.`);
+      throw new Error(planReviewRefusal(planner) ?? `Plan ${plannerId} needs no revision: only a plan whose one advisor review asked for changes is revised. Delegate it.`);
+    }
+    const revisions = revisionsOf(plannerId);
+    if (planner.state === "complete") throw new Error(`Plan ${plannerId} was revised by ${revisions.ready?.thread_id ?? "an earlier revision"}: delegate ${revisions.ready?.thread_id ?? "its"} waves.`);
+    if (revisions.busy) throw new Error(`Plan ${plannerId} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}.`);
+    const decider = planAdvisors(plannerId).decider!;
+    const blocked = decider.last_report_state === "blocked";
+    return {
+      plannerThreadId: plannerId,
+      planPaths: planWavesFor(plannerId).map((wave) => wave.path),
+      advisorThreadId: decider.thread_id,
+      advisorReportPath: decider.report_path,
+      advisorSummary: decider.summary ?? (decider.result ? clip(decider.result, 800) : null),
+      ...(blocked ? { blocker: decider.blocker, recommendation: decider.recommendation } : {}),
+    };
   }
 
   /** A consult is read-only, like a review: with a worker it reuses that
@@ -1629,6 +1673,7 @@ export default async function plugin(bb: BbPluginApi) {
    * one it runs in the project's own checkout, like a plan. */
   async function startConsult(params: z.infer<typeof consultParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await owningChief(callerThreadId);
+    if (params.planThreadId) return startPlanConsult(params, params.planThreadId, chief.thread_id, projectId);
     const worker = params.workerThreadId ? store.get(params.workerThreadId) : undefined;
     if (params.workerThreadId && (!worker || worker.role !== "worker" || !controlsThread(worker, chief.thread_id))) {
       throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
@@ -1652,6 +1697,34 @@ export default async function plugin(bb: BbPluginApi) {
         : { type: "project-default" },
       title, prompt,
     }, { role: "advisor", chiefThreadId: chief.thread_id, workerThreadId: worker?.thread_id ?? null });
+    return { threadId: thread.id, title, projectId };
+  }
+
+  /** chief_consult planThreadId: the plan's one read-only advisor review, in the project's own checkout. */
+  async function startPlanConsult(params: z.infer<typeof consultParams>, plannerId: string, chiefThreadId: string, projectId: string) {
+    if (params.workerThreadId) throw new Error("Use one of workerThreadId or planThreadId.");
+    const planner = store.get(plannerId);
+    if (!planner || planner.role !== "planner" || !controlsThread(planner, chiefThreadId) || !planner.plan_waves || planner.state === "complete") {
+      throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
+    }
+    if (planner.plan_review !== "required") {
+      if (!planner.plan_review) throw new Error(`Only a multi-wave or complex plan gets an advisor review; ${plannerId} does not (a revision never does): delegate it.`);
+      const { decider } = planAdvisors(plannerId);
+      throw new Error(`Plan ${plannerId} already had its one review (${decider?.thread_id ?? "?"}): ${planReviewRefusal(planner) ?? nextAction(planner) ?? "delegate its waves."}`);
+    }
+    const { inFlight } = planAdvisors(plannerId);
+    if (inFlight) throw new Error(`Plan ${plannerId} is already in review by ${inFlight.thread_id}: wait for ${inFlight.thread_id}, or chief_stop it first.`);
+    const prepared = await managedSpawn.prepare(projectId, { role: "advisor", hostId: await projectHostId(projectId) });
+    const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
+    const prompt = advisorBrief({
+      title: params.title, chiefThreadId, mission: params.mission, context: params.context, reviews: [],
+      plan: {
+        plannerThreadId: plannerId, paths: planWavesFor(plannerId).map((wave) => wave.path),
+        summary: planner.result ? clip(planner.result, 1_500) : null, reportPath: planner.report_path,
+      },
+    });
+    const thread = await managedSpawn.launch(prepared, { projectId, environment: { type: "project-default" }, title, prompt },
+      { role: "advisor", chiefThreadId, planThreadId: plannerId });
     return { threadId: thread.id, title, projectId };
   }
 
@@ -1738,6 +1811,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (!planner || planner.role !== "planner" || !controlsThread(planner, chief.thread_id)) {
         throw new Error(`No managed planner ${planThreadId} for this Chief.`);
       }
+      const reviewRefusal = planReviewRefusal(planner);
+      if (reviewRefusal) throw new Error(reviewRefusal);
       const waves = planWavesFor(planThreadId);
       if (wave === undefined || wave < 1 || wave > waves.length) {
         throw new Error(`Wave ${wave ?? "?"} is out of range: planner ${planThreadId} scheduled ${waves.length} wave(s).`);
@@ -1953,14 +2028,75 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** The plan advisors of planner P, oldest first: the one in flight, the decider (first advice wins) and the newest abandoned attempt. */
+  function planAdvisors(plannerId: string) {
+    const all = store.all().filter((r) => r.role === "advisor" && r.plan_thread_id === plannerId)
+      .sort((a, b) => a.created_at - b.created_at);
+    const inFlight = all.find((r) => r.advised_at == null && BUSY_STATUSES.has(r.state));
+    const advised = all.filter((r) => r.advised_at != null);
+    const decider = advised.length ? advised.reduce((a, b) => (b.advised_at! < a.advised_at! ? b : a)) : undefined;
+    const abandoned = all.filter((r) => r.advised_at == null && r !== inFlight).at(-1);
+    return { inFlight, decider, abandoned };
+  }
+
+  /** The planners revising planner P, newest first: one still working, and the one whose plan is in. */
+  function revisionsOf(plannerId: string) {
+    const all = store.all().filter((r) => r.role === "planner" && r.replaces_thread_id === plannerId).reverse();
+    return {
+      all,
+      busy: all.find((r) => BUSY_STATUSES.has(r.state)),
+      ready: all.find((r) => (r.state === "ready" || r.state === "complete") && !!r.plan_waves),
+    };
+  }
+
+  /** Why a planner's waves may not be forge-initialised or delegated yet, naming the one next call; null when they may. */
+  function planReviewRefusal(planner: ManagedRow): string | null {
+    const P = planner.thread_id;
+    if (planner.plan_review === "required") {
+      const { inFlight, abandoned } = planAdvisors(P);
+      if (inFlight) return `Plan ${P} is in its one advisor review (${inFlight.thread_id}): wait for ${inFlight.thread_id}'s report before chief_forge_init or chief_delegate.`;
+      const waves = planWavesFor(P).length;
+      const why = waves > 1 ? `Plan ${P} has ${waves} waves` : `Plan ${P} is marked complex`;
+      const ended = abandoned ? `Advisor ${abandoned.thread_id} ended without advice (state ${abandoned.state}). ` : "";
+      return `${ended}${why}: get its one advisor review first — chief_consult (planThreadId: ${P}, title, mission: review this plan before delegation). Do not chief_forge_init or chief_delegate it yet.`;
+    }
+    if (planner.plan_review !== "changes") return null;
+    const revisions = revisionsOf(P);
+    if (planner.state === "complete" && revisions.ready) return `Plan ${P} was revised by ${revisions.ready.thread_id}: delegate ${revisions.ready.thread_id}'s waves instead.`;
+    if (revisions.busy) return `Plan ${P} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}'s ready alert, then delegate ${revisions.busy.thread_id}'s waves.`;
+    return `The advisor requested changes to plan ${P}: chief_plan (revises: ${P}, title, mission: revise per the advisor) — the plugin attaches the plan files and the advice; delegate the revision's waves when its ready alert arrives; it gets no second review.`;
+  }
+
+  /** A plan advisor's line: only the deciding advisor renders one, from its planner's review outcome. */
+  function planAdvisorAction(row: ManagedRow, forAlert: boolean): string | null {
+    const planner = store.get(row.plan_thread_id!);
+    if (!planner || planAdvisors(planner.thread_id).decider?.thread_id !== row.thread_id) return null;
+    if (planner.plan_review === "approved") {
+      const next = nextAction(planner, forAlert);
+      return next ? `The advisor approves the plan. ${next}` : null;
+    }
+    if (planner.plan_review !== "changes") return null;
+    const line = planReviewRefusal(planner);
+    if (!line) return null;
+    return row.last_report_state === "blocked"
+      ? `Plan advisor blocked: ${clip(row.blocker ?? "", 200)}. That was the plan's one review: escalate to the user if it names a product decision, then ${line}`
+      : line;
+  }
+
   /** A row's single pending call, reused identically in report()'s alert and
    * chief_roster's Pending block so the two surfaces never disagree. Purely a
    * function of already-persisted row state — no new columns, no new tracking. */
   function nextAction(row: ManagedRow, forAlert = false): string | null {
+    if (row.role === "advisor" && row.plan_thread_id) return planAdvisorAction(row, forAlert);
+    if (row.role === "planner" && row.replaces_thread_id && row.state === "blocked") {
+      return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user, then chief_plan (revises: ${row.replaces_thread_id}) with the decision in context; it gets no review.`;
+    }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.`;
     if (row.state !== "ready") return null;
     if (row.role === "planner") {
       if (!row.plan_waves) return null;
+      const refusal = planReviewRefusal(row);
+      if (refusal) return refusal;
       const waves = planWavesFor(row.thread_id);
       const { heads, undelegated } = schedule.undelegatedHeads(row.thread_id, waves);
       if (!undelegated.length) return null;
@@ -2796,6 +2932,13 @@ export default async function plugin(bb: BbPluginApi) {
       });
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         store.markAdvised(threadId, now);
+        // The plan's one review: the first advice from any of its advisors decides it.
+        if (row.plan_thread_id) store.resolvePlanReview(row.plan_thread_id, params.state === "ready" && verdict === "approve" ? "approved" : "changes");
+      }
+      if (plannerReady && scheduledWaves) {
+        store.setPlanReview(threadId, (scheduledWaves.length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
+        const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
+        if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }
       if ((row.role === "advisor" || row.role === "reviewer") && params.state === "ready" && params.lesson) {
         db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role) VALUES (?, ?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role);
@@ -3096,7 +3239,9 @@ export default async function plugin(bb: BbPluginApi) {
         ? `Once it is idle, start a fresh review with chief_review (workerThreadId: ${row.worker_thread_id}).`
         : `Once it is idle, chief_complete it, then start a fresh chief_review for branch ${row.branch}.`;
     }
+    if (row.role === "planner" && row.replaces_thread_id) return `Once it is idle, start a fresh chief_plan (revises: ${row.replaces_thread_id}) with a narrower brief; the review round is already used.`;
     if (row.role === "planner") return "Once it is idle, start a fresh chief_plan with a narrower brief.";
+    if (row.role === "advisor" && row.plan_thread_id) return `Once it is idle, start a fresh chief_consult (planThreadId: ${row.plan_thread_id}); the plan still needs its one review.`;
     if (row.role === "researcher") return "Once it is idle, decide without it or start a fresh chief_research with a narrower question.";
     return "Once it is idle, decide without it or start a fresh chief_consult with a narrower question.";
   }
@@ -3212,6 +3357,21 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** One row's full detail block, reused by chief_roster and bb chief status. */
+  /** The roster's plan-review lines: a planner's review status, a revision's original, a plan advisor's planner. */
+  function planReviewLines(row: ManagedRow): string[] {
+    if (row.role === "advisor" && row.plan_thread_id) return [`reviews plan: ${row.plan_thread_id}`];
+    if (row.role !== "planner") return [];
+    const lines = row.replaces_thread_id ? [`revises: ${row.replaces_thread_id}`] : [];
+    if (!row.plan_review) return lines;
+    const { inFlight, decider } = planAdvisors(row.thread_id);
+    const revised = revisionsOf(row.thread_id).ready;
+    const status = row.plan_review === "required"
+      ? inFlight ? `in review (${inFlight.thread_id})` : "required"
+      : row.plan_review === "approved" ? `approved (${decider?.thread_id ?? "?"})`
+      : row.state === "complete" && revised ? `revised by ${revised.thread_id}` : `changes requested (${decider?.thread_id ?? "?"})`;
+    return [...lines, `plan review: ${status}`];
+  }
+
   function rosterRowLines(row: ManagedRow): string[] {
     return [
       `${row.role} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
@@ -3221,6 +3381,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
       ...waveLines(row),
+      ...planReviewLines(row),
       ...(row.unplanned_reason ? [`unplanned: ${clip(row.unplanned_reason, 200)}`] : []),
       ...(row.summary || row.result ? [`result: ${row.summary ?? clip(row.result!, 300)}`] : []),
       ...(row.report_path ? [`report: ${row.report_path}`] : []),
@@ -3626,7 +3787,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
-    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned or #simple work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
+    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan until its required advisor review resolves. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned or #simple work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
     parameters: z.object({
       title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
       base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request. Stack only when this work builds on that pull request's changes; independent work gets its own PR on the default base."),
@@ -3661,6 +3822,8 @@ export default async function plugin(bb: BbPluginApi) {
         if (!planner || planner.role !== "planner" || !controlsThread(planner, caller.thread_id)) {
           throw new Error(`No managed planner ${planThreadId} for this Chief.`);
         }
+        const reviewRefusal = planReviewRefusal(planner);
+        if (reviewRefusal) throw new Error(reviewRefusal);
         const waves = planWavesFor(planThreadId);
         if (wave > waves.length) {
           throw new Error(`Wave ${wave} is out of range: planner ${planThreadId} scheduled ${waves.length} wave(s).`);
@@ -3742,7 +3905,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. verifyCommand goes into the worker's brief as its own check and sets a pre-review gate. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it.`,
+    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work and simple for #simple. verifyCommand goes into the worker's brief as its own check and sets a pre-review gate. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it. A plan with more than one wave or marked complex is refused until its one advisor review resolves (chief_consult planThreadId).`,
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
@@ -3756,7 +3919,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_plan",
     presentation: { label: { pending: "Starting planner…", completed: "Started planner" } },
-    description: "Send one unit of work to a read-only planner. It proposes an implementation plan, split into waves; its ready alert names the exact next call.",
+    description: "Send one unit of work to a read-only planner. It proposes an implementation plan, split into waves; its ready alert names the exact next call. With revises, a fresh planner revises a plan whose one advisor review asked for changes; the revision is delegated with no second review.",
     parameters: planParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
@@ -3770,7 +3933,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_consult",
     presentation: { label: { pending: "Starting advisor…", completed: "Started advisor" } },
-    description: "Start a read-only advisor on a hard problem or a change that keeps failing review. It may read code and run commands to reproduce it, never edits, and reports its advice back to you.",
+    description: "Start a read-only advisor on a hard problem or a change that keeps failing review. It may read code and run commands to reproduce it, never edits, and reports its advice back to you. With planThreadId, it gives a multi-wave or complex plan its one review before delegation; refused for any other plan.",
     parameters: consultParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
@@ -3981,7 +4144,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_report",
     presentation: { label: { pending: "Reporting to Chief…", completed: "Reported to Chief" } },
-    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict and findings; a planner's ready report requires plan (the full plan body), which Chief receives as a file. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
+    description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict and findings; a planner's ready report requires plan (the full plan body), which Chief receives as a file, and may set complex; a plan review's ready report requires a verdict. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
     parameters: reportParams,
     async execute(params, context) {
       if (!context.threadId) throw new Error("chief_report requires a thread context.");
@@ -4186,8 +4349,8 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief start [--project proj_id] [--json]",
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
-    "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--json]",
-    "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id] [--json]",
+    "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--revises thr_id] [--json]",
+    "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id | --plan-thread thr_id] [--json]",
     "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--verify \"cmd\"] [--kind worker|designer] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
@@ -4205,8 +4368,8 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "start", summary: "Start or return the latest Chief for a project", usage: "bb chief start [--project proj_id] [--json]" },
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
-      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--json]" },
-      { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id] [--json]" },
+      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--revises thr_id] [--json]" },
+      { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id | --plan-thread thr_id] [--json]" },
       { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--simple] [--verify \"cmd\"] [--kind worker|designer] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
@@ -4289,6 +4452,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "plan") {
           const parsed = planParams.safeParse({
             title: args.one("title"), mission: args.one("mission"), context: args.one("context"),
+            revises: args.one("revises"),
           });
           if (!parsed.success) return fail(`Invalid plan brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await startPlan(parsed.data, context.threadId);
@@ -4297,7 +4461,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (command === "consult") {
           const parsed = consultParams.safeParse({
             title: args.one("title"), mission: args.one("mission"), context: args.one("context"),
-            workerThreadId: args.one("worker"),
+            workerThreadId: args.one("worker"), planThreadId: args.one("plan-thread"),
           });
           if (!parsed.success) return fail(`Invalid consult brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await startConsult(parsed.data, context.threadId);
