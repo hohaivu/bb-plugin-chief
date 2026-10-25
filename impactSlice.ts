@@ -34,6 +34,20 @@ export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number,
   };
 }
 
+/** Whether `previousSha` is an ancestor of `head.sha` in the checkout at `cwd`, git only. Never throws: anything else is `{ skipped }`. */
+export async function reviewedAncestry(opts: { cwd: string; env: NodeJS.ProcessEnv; previousSha: string; head: { branch: string; sha: string }; deadlineMs: number }): Promise<{ ancestor: true } | { skipped: string }> {
+  try {
+    const git = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs);
+    await git(["fetch", "origin", opts.head.branch]).catch(() => undefined);
+    // Exit 0 only: 1 (not an ancestor) and 128 (a commit is missing) both throw.
+    await git(["merge-base", "--is-ancestor", opts.previousSha, opts.head.sha]);
+    return { ancestor: true };
+  } catch (error) {
+    const message = String((error as Error)?.message ?? error).replace(/\s+/g, " ").trim().slice(0, 200);
+    return { skipped: `${opts.previousSha.slice(0, 12)} is not an ancestor of ${opts.head.sha.slice(0, 12)} (force-push or rebase?), or the check failed: ${message}` };
+  }
+}
+
 const MODS = "export|default|async|public|private|protected|internal|static|override|final|abstract|open";
 const KEYWORDS = "function\\*?|class|interface|type|enum|struct|protocol|extension|def|func|fn";
 const ID = "[A-Za-z_$][A-Za-z0-9_$]*";

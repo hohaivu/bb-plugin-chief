@@ -62,6 +62,8 @@ export interface BriefTarget {
   hasResult: boolean;
   reportPath: string | null;
   head: PinnedHead | null;
+  /** Re-review: the previous reviewed head this round's range starts from; absent = review the whole change. */
+  since?: string;
 }
 
 export interface ReviewBriefInput {
@@ -97,10 +99,13 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
   const many = targets.length > 1;
   const plural = many ? "s" : "";
   const pinnedAll = targets.every((target) => target.head);
+  const scoped = targets.some((target) => target.since) || !!worker.since;
   const targetLine = (target: BriefTarget) => {
     const pinned = target.head;
     return pinned
-      ? `- worker ${target.threadId} “${target.title}”: ${target.prUrl} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch}\`, then review \`git diff origin/${pinned.base}...${pinned.sha}\``
+      ? `- worker ${target.threadId} “${target.title}”: ${target.prUrl} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch}\`, then review ${target.since
+        ? `only the changes since the previous review: \`git diff ${target.since}..${pinned.sha}\` (the whole pull request, \`git diff origin/${pinned.base}...${pinned.sha}\`, is context only)`
+        : `\`git diff origin/${pinned.base}...${pinned.sha}\``}`
       : `- worker ${target.threadId} “${target.title}”: branch ${target.branch}${target.prUrl ? ` (${target.prUrl})` : ""}, head not readable, not pinned: \`git fetch origin ${target.branch}\`, then review \`git diff <the project's default branch>...origin/${target.branch}\`; the verdict binds to its report ${target.reportSeq}`;
   };
   const briefSection = worker.brief && !head && !many ? ["## The brief this work was given", worker.brief] : [];
@@ -162,7 +167,9 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     subject: many
       ? `Independently review the whole plan: ${targets.length} branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change. The worker's recorded commands ran against the worker's own tree: rerun the project's build/check at each pinned commit.\n${targets.map(targetLine).join("\n")}`
       : head
-        ? `Independently review pull request ${worker.prUrl} (worker thread ${worker.threadId}: “${worker.title}”), pinned to its head commit ${head.sha} (branch ${head.branch}, targeting ${head.base}). First run \`git fetch origin ${head.branch} && git checkout --detach ${head.sha}\`. The pull request description is the brief: read it (gh pr view ${worker.prUrl} --json title,body, or glab mr view ${worker.prUrl}), then review the diff of ${head.sha} against origin/${head.base}. Treat nothing outside that commit as part of the change. The worker's recorded commands ran against the worker's own tree, not this commit: rerun the project's build/check at ${head.sha}.`
+        ? `Independently review pull request ${worker.prUrl} (worker thread ${worker.threadId}: “${worker.title}”), pinned to its head commit ${head.sha} (branch ${head.branch}, targeting ${head.base}). First run \`git fetch origin ${head.branch} && git checkout --detach ${head.sha}\`. The pull request description is the brief: read it (gh pr view ${worker.prUrl} --json title,body, or glab mr view ${worker.prUrl}), then review ${worker.since
+          ? `only the worker's changes since the previous review, which covered ${worker.since}: \`git diff ${worker.since}..${head.sha}\` (\`git log ${worker.since}..${head.sha}\` lists the commits; an empty range means no new commits). Read the whole diff against origin/${head.base} only as context.`
+          : `the diff of ${head.sha} against origin/${head.base}.`} Treat nothing outside that commit as part of the change. The worker's recorded commands ran against the worker's own tree, not this commit: rerun the project's build/check at ${head.sha}.`
         : `Independently review the work owned by worker thread ${worker.threadId}: “${worker.title}”.`,
     chiefThreadId: input.chiefThreadId,
     focus: input.focus,
@@ -188,11 +195,18 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ...(reportSection.length && (head || many) ? [
         `Read each worker report for its Deviations from plan only; each pull request at its pinned commit is the change.`,
       ] : []),
+      ...(scoped ? [
+        "", "## Re-review scope", `An earlier round already reviewed this change up to the previous reviewed head named above${many ? " for each target that names a range" : ""}. Report findings only on lines the commits in that range add or change; earlier code is out of scope unless those commits make a problem in it reachable. Check the contract items those commits touch and every item the previous review found unmet.`,
+      ] : []),
       ...(previous ? [
         "", `Check each finding of the previous review against ${pinnedAll ? "the pinned commit" : "the current worktree"}${plural}: say which were fixed and which remain. Do not re-open points it approved. A nit from the previous review that is still open never makes this round request_changes; list it as a nit again. Weigh every item under the worker's \`## Disputed findings\`. Drop a finding the evidence refutes. Keep it blocking only with a traced failure.`,
       ] : []),
       ...(wavePaths.length ? [
-        "", `Review ${many ? "each branch" : "the whole branch"} against its base against the plan wave files in review-context.md.`,
+        "", scoped
+          ? many
+            ? "Review each branch against the plan wave files in review-context.md: only its re-review range where it names one, else the whole branch against its base."
+            : "Review the changes since the previous review against the plan wave files in review-context.md."
+          : `Review ${many ? "each branch" : "the whole branch"} against its base against the plan wave files in review-context.md.`,
         "Read each worker's full report (its Full report path in review-context.md, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
       ] : []),
     ],
@@ -242,7 +256,7 @@ interface ReviewRow {
   created_at: number;
 }
 
-export type ReviewStarted = { gated?: false; threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; gateSkipped?: string[]; sliceSkipped?: string[] };
+export type ReviewStarted = { gated?: false; threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; gateSkipped?: string[]; sliceSkipped?: string[]; scope?: string[] };
 /** A pre-review gate failed: no reviewer was spawned, no ledger row written, no open review superseded. */
 export type ReviewGated = { gated: true; workerThreadId: string; command: string; sha: string; exitCode: number; outputPath: string | null; tail: string; issues?: string[] };
 export type GateResult = { passed: true } | { skipped: string } | { failed: Omit<ReviewGated, "gated"> };
@@ -284,6 +298,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   runGate: (row: Row, command: string, pinnedSha: string | null, projectDir: string | null) => Promise<GateResult>;
   /** Git-only file:line pointers outside the commit's diff; never blocks a review, a failure is `{ skipped }`. */
   impactSlice: (row: Row, head: PinnedHead | null, projectDir: string | null, maxEntries: number) => Promise<ImpactSlice>;
+  /** Whether the previous reviewed head is an ancestor of the pinned head; never blocks a review, a failure is `{ skipped }`. */
+  reviewedAncestry: (row: Row, previousSha: string, head: PinnedHead, projectDir: string | null) => Promise<{ ancestor: true } | { skipped: string }>;
 }
 
 /** One module owns starting a reviewer: the owner and duplicate checks, the in-flight dedupe, the pinned heads,
@@ -372,6 +388,25 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         if ("failed" in gate) return { gated: true as const, ...gate.failed };
         if ("skipped" in gate) gateSkipped.push(`${target.thread_id}: ${gate.skipped}`);
       }
+      // Re-review scope, after the gate: each target ranges from its own chain's newest verdict head; any doubt reviews the whole change.
+      const since = new Map<string, string>();
+      const scope: string[] = [];
+      for (const target of targets) {
+        const verdict = ledger.newestVerdict(target);
+        if (!verdict) continue; // round 1: the whole change, no note
+        const pinned = heads.get(target.thread_id);
+        const previousSha = verdict.head_sha?.toLowerCase();
+        if (!pinned || !previousSha) {
+          scope.push(`${target.thread_id}: whole ${pinned ? "pull request" : "change"} (${pinned ? "the previous review recorded no head commit" : "no pinned pull request head"})`);
+          continue;
+        }
+        // Equal heads: nothing new was pushed, an empty range; the reviewer still checks the previous findings.
+        const ancestry = previousSha === pinned.sha ? { ancestor: true as const }
+          : await deps.reviewedAncestry(target, previousSha, pinned, projectDir).catch((error): { skipped: string } => ({ skipped: clip(String(error), 200) }));
+        if ("skipped" in ancestry) { scope.push(`${target.thread_id}: whole pull request (${ancestry.skipped})`); continue; }
+        since.set(target.thread_id, previousSha);
+        scope.push(`${target.thread_id}: changes since ${previousSha.slice(0, 12)}`);
+      }
       // After the gate, so a failed gate computes nothing; sequential, each bounded by its own deadline.
       const impactSlices: NonNullable<ReviewBriefInput["impactSlices"]> = [];
       const sliceSkipped: string[] = [];
@@ -396,6 +431,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const briefTarget = (row: Row): BriefTarget => ({
         threadId: row.thread_id, title: row.title, prUrl: row.pr_url, branch: row.branch, reportSeq: row.report_seq,
         hasResult: !!row.result, reportPath: row.report_path, head: heads.get(row.thread_id) ?? null,
+        ...(since.has(row.thread_id) ? { since: since.get(row.thread_id) } : {}),
       });
       const { prompt, context } = reviewBrief({
         worker: {
@@ -437,7 +473,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           for (const old of openReviews) store.completeSuperseded(old.thread_id, now);
         });
       }
-      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id), gateSkipped, sliceSkipped };
+      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id), gateSkipped, sliceSkipped, scope };
     });
   }
 

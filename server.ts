@@ -15,7 +15,7 @@ import { forgeInitScript } from "./forge";
 import { classify, composeComment, errorText, hasMarker, ownerHandle, parseForgeTarget, postComment, sanitizeForge, withMention } from "./forgeComments";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
-import { computeImpactSlice, gitWithin, type ImpactSlice } from "./impactSlice";
+import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
 import { createReviewStart, type GateResult, type PinnedHead } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import {
@@ -2195,6 +2195,7 @@ export default async function plugin(bb: BbPluginApi) {
     db, store, ledger, managedSpawn, requireChiefCaller, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
     busyStatuses: BUSY_STATUSES, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
     recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext, runGate, impactSlice,
+    reviewedAncestry: reviewedAncestryOf,
   });
 
   /** Why the project's checkout path cannot be used here, or null when it is on the server's primary host.
@@ -2285,6 +2286,18 @@ export default async function plugin(bb: BbPluginApi) {
     if (!cleanup) return result;
     if ("failed" in result) return { failed: { ...result.failed, issues: [...(result.failed.issues ?? []), cleanup] } };
     return { skipped: "skipped" in result ? `${result.skipped}; ${cleanup}` : cleanup };
+  }
+
+  /** Whether the previous reviewed head is an ancestor of the pinned head, from the project checkout; never throws. */
+  async function reviewedAncestryOf(row: ManagedRow, previousSha: string, head: PinnedHead, projectDir: string | null): Promise<{ ancestor: true } | { skipped: string }> {
+    try {
+      if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
+      const hostSkip = await checkoutHostSkip(row.project_id);
+      if (hostSkip) return { skipped: hostSkip };
+      return await reviewedAncestry({ cwd: projectDir, env: forgeEnv(), previousSha, head, deadlineMs: 20_000 });
+    } catch (error) {
+      return { skipped: clip(String(error), 200) };
+    }
   }
 
   /** The impact slice of the commit under review, read from the project checkout with git only (no worktree is created). */
@@ -4070,7 +4083,8 @@ export default async function plugin(bb: BbPluginApi) {
         }
         const skipped = review.gateSkipped?.length ? ` Gate skipped: ${review.gateSkipped.join("; ")}.` : "";
         const sliceNote = review.sliceSkipped?.length ? ` Impact slice skipped: ${review.sliceSkipped.join("; ")}.` : "";
-        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}${skipped}${sliceNote}`;
+        const scopeNote = review.scope?.length ? ` Review scope: ${review.scope.join("; ")}.` : "";
+        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}${skipped}${sliceNote}${scopeNote}`;
       }
       touchCallerChief(caller);
       const branch = params.branch
