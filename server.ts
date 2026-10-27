@@ -2237,6 +2237,8 @@ export default async function plugin(bb: BbPluginApi) {
   /** An undeleted gate thread this old belongs to no running gate (one lives GATE_TIMEOUT_MS at most), so the supervisor deletes it. */
   const GATE_ORPHAN_MS = GATE_TIMEOUT_MS + 120_000;
   const GATE_DELETE_ATTEMPTS = 3;
+  /** The longest a failed gate waits to learn whether its thread was removed. */
+  const GATE_RELEASE_WAIT_MS = 15_000;
   /** bb waits 5 min, then retries a failed teardown after 1, 2, 4 and 8 min with hooks of up to 15 min each. */
   const GATE_TEARDOWN_LIMIT_MS = 60 * 60_000;
   const MISSING = /not found|404/i;
@@ -2277,8 +2279,8 @@ export default async function plugin(bb: BbPluginApi) {
             pluginMetadata: { chiefGate: true, workerThreadId: row.thread_id },
             ...owner,
           });
-          db.prepare(`INSERT INTO gate_threads (thread_id, chief_thread_id, worker_thread_id, created_at) VALUES (?, ?, ?, ?)`)
-            .run(thread.id, row.chief_thread_id, row.thread_id, Date.now());
+          db.prepare(`INSERT INTO gate_threads (thread_id, environment_id, chief_thread_id, worker_thread_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+            .run(thread.id, thread.environmentId ?? null, row.chief_thread_id, row.thread_id, Date.now());
           return thread.id;
         }, left());
         gateThreadId = forked;
@@ -2372,7 +2374,13 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (gateThreadId) {
       const threadId = gateThreadId;
-      void releaseGate(threadId, terminalIds).catch((error) => bb.log.error(`Could not release gate thread ${threadId}; the supervisor retries it: ${String(error)}`));
+      const release = releaseGate(threadId, terminalIds).catch((error) => String(error));
+      if ("failed" in result) {
+        // A known failure stays failed; trouble releasing the gate is added to it, within the gate's own deadline allowance.
+        const budget = Math.min(GATE_RELEASE_WAIT_MS, deadline + GATE_ENRICH_GRACE_MS + 400 - Date.now());
+        const trouble = await bounded(() => release, budget).catch(() => "it did not finish in time");
+        if (trouble) (result.failed.issues ??= []).push(`the gate thread ${threadId} was not removed (${clip(trouble, 200)}); the supervisor keeps retrying and alerts Chief if bb cannot remove it`);
+      }
     }
     return result;
   }
@@ -2383,29 +2391,35 @@ export default async function plugin(bb: BbPluginApi) {
       .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\r/g, "").trim();
   }
 
-  /** Marks a gate thread deleted, or counts a failed attempt. Never throws. */
-  async function deleteGateThread(threadId: string) {
+  /** Marks a gate thread deleted, or counts a failed attempt. Returns null when it is deleted, else why not. Never throws. */
+  async function deleteGateThread(threadId: string): Promise<string | null> {
     try {
       await bounded(() => bb.sdk.threads.delete({ threadId, childThreadsConfirmed: false }), 30_000);
       db.prepare(`UPDATE gate_threads SET thread_deleted=1 WHERE thread_id=?`).run(threadId);
+      return null;
     } catch (error) {
-      if (MISSING.test(String(error))) db.prepare(`UPDATE gate_threads SET thread_deleted=1 WHERE thread_id=?`).run(threadId);
-      else db.prepare(`UPDATE gate_threads SET delete_attempts=delete_attempts+1 WHERE thread_id=?`).run(threadId);
+      if (MISSING.test(String(error))) { db.prepare(`UPDATE gate_threads SET thread_deleted=1 WHERE thread_id=?`).run(threadId); return null; }
+      db.prepare(`UPDATE gate_threads SET delete_attempts=delete_attempts+1 WHERE thread_id=?`).run(threadId);
+      return String(error);
     }
   }
 
-  /** Force-closes the gate's terminals, then deletes its thread: bb tears the worktree down after that. Started by runGate and never awaited. */
+  /** Force-closes the gate's terminals, then deletes its thread: bb tears the worktree down after that. Resolves to null once the thread is deleted, else why not. */
   async function releaseGate(threadId: string, terminalIds: string[]) {
     await Promise.allSettled(terminalIds.map((terminalId) => bounded(() => bb.sdk.terminals.close({ terminalId, mode: "force" }), 10_000)));
-    await deleteGateThread(threadId);
+    return deleteGateThread(threadId);
   }
 
   /** Tells the worker's Chief once that bb could not finish with a gate thread or its worktree. Never recovers anything itself. */
-  async function alertGate(gate: GateRow, detail: string) {
+  function alertGate(gate: GateRow, detail: string) {
     const worker = store.get(gate.worker_thread_id);
     const message = `The pre-review gate thread ${gate.thread_id}${gate.environment_id ? ` (environment ${gate.environment_id})` : ""} for ${gate.worker_thread_id} was not cleaned up: ${detail}. Inspect it with \`bb environment show ${gate.environment_id ?? "<environment id>"}\` and recover by hand if needed; Chief never force-removes it.`;
-    if (worker?.chief_thread_id) await alertChief(worker, `gate-teardown:${gate.thread_id}`, message);
-    else bb.log.error(`${message} The worker has no Chief to notify.`);
+    if (worker?.chief_thread_id) {
+      // The kind (before the first colon) is per gate, so one gate's alert never evicts another's undelivered one. Delivery is
+      // not awaited: the outbox row is durable and retryAlerts re-sends it, so a stalled send cannot hold up the other rows.
+      const key = enqueueAlert(worker, `gate-teardown-${gate.thread_id}:cleanup`, message);
+      void deliverAlert(key).catch((error) => bb.log.warn(`Gate alert ${key} will be retried: ${String(error)}`));
+    } else bb.log.error(`${message} The worker has no Chief to notify.`);
     db.prepare(`UPDATE gate_threads SET alerted=1 WHERE thread_id=?`).run(gate.thread_id);
   }
 
@@ -2419,30 +2433,43 @@ export default async function plugin(bb: BbPluginApi) {
           if (!gate.delete_attempts && age < GATE_ORPHAN_MS) continue; // a gate still running
           await deleteGateThread(gate.thread_id);
           const attempts = (db.prepare(`SELECT delete_attempts FROM gate_threads WHERE thread_id=?`).get(gate.thread_id) as { delete_attempts: number }).delete_attempts;
-          if (attempts >= GATE_DELETE_ATTEMPTS && !gate.alerted) await alertGate(gate, `deleting the thread failed ${attempts} times`);
+          if (attempts >= GATE_DELETE_ATTEMPTS && !gate.alerted) alertGate(gate, `deleting the thread failed ${attempts} times`);
           continue;
         }
         let environment: Awaited<ReturnType<typeof bb.sdk.environments.get>> | null = null;
         let readError: unknown = null;
-        if (gate.environment_id) {
+        let environmentId = gate.environment_id;
+        let noEnvironment = false;
+        if (!environmentId) {
+          // The fork's environment may have been unknown when the row was written: ask bb which one the thread got.
           try {
-            environment = await bounded(() => bb.sdk.environments.get({ environmentId: gate.environment_id! }), 15_000);
+            const thread = await bounded(() => bb.sdk.threads.get({ threadId: gate.thread_id }), 15_000);
+            environmentId = thread.environmentId ?? null;
+            if (environmentId) db.prepare(`UPDATE gate_threads SET environment_id=? WHERE thread_id=?`).run(environmentId, gate.thread_id);
+            // Only bb's own record of a long-deleted thread proves that none was allocated; a fresh one may still be provisioning.
+            else noEnvironment = age > GATE_ORPHAN_MS;
+          } catch (error) { readError = error; }
+        }
+        if (environmentId) {
+          try {
+            environment = await bounded(() => bb.sdk.environments.get({ environmentId: environmentId! }), 15_000);
           } catch (error) {
             if (!MISSING.test(String(error))) readError = error;
           }
         }
-        if (!readError && (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed")) {
+        // Dropped only on affirmative evidence: no environment was allocated, bb has no record of it, or bb removed it.
+        if (!readError && (noEnvironment || (environmentId && (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed")))) {
           db.prepare(`DELETE FROM gate_threads WHERE thread_id=?`).run(gate.thread_id);
           continue;
         }
         if (gate.alerted) continue;
         const teardown = environment?.lifecycle.teardown;
-        const trouble = readError ? (age > GATE_TEARDOWN_LIMIT_MS ? `the environment could not be read (${clip(String(readError), 200)})` : null)
+        const trouble = readError || !environment ? (age > GATE_TEARDOWN_LIMIT_MS ? `the environment could not be ${readError ? `read (${clip(String(readError), 200)})` : "determined"}` : null)
           : teardown?.message?.startsWith("Needs recovery:") ? teardown.message
-          : environment!.hostLifecycle === "cleanup-failed" && teardown?.status !== "running" ? `bb reports cleanup-failed${teardown?.message ? `: ${teardown.message}` : ""}`
-          : age > GATE_TEARDOWN_LIMIT_MS ? `bb has not removed it after 60 minutes (${environment!.lifecycle.phase}/${environment!.hostLifecycle})`
+          : environment.hostLifecycle === "cleanup-failed" && teardown?.status !== "running" ? `bb reports cleanup-failed${teardown?.message ? `: ${teardown.message}` : ""}`
+          : age > GATE_TEARDOWN_LIMIT_MS ? `bb has not removed it after 60 minutes (${environment.lifecycle.phase}/${environment.hostLifecycle})`
           : null;
-        if (trouble) await alertGate(gate, trouble);
+        if (trouble) alertGate(gate, trouble);
       } catch (error) {
         bb.log.warn(`Gate thread ${gate.thread_id} could not be checked this tick: ${String(error)}`);
       }
@@ -2639,6 +2666,8 @@ export default async function plugin(bb: BbPluginApi) {
     return db.transaction(() => writeAlert(row, key, message))();
   }
 
+  /** A delivery call that stalls longer than this fails like any other, so its in-flight entry clears and the outbox retries it. */
+  const ALERT_CALL_MS = 30_000;
   async function deliverAlert(key: string) {
     const existing = alertDeliveries.get(key);
     if (existing) return existing;
@@ -2650,12 +2679,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (alert.attempts > 0) {
         try {
           const text = clip(alert.message);
-          const queued = await bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id });
+          const queued = await bounded(() => bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id }), ALERT_CALL_MS);
           const alreadyQueued = queued.some((message) =>
             message.content.some((part) => part.type === "text" && part.text === text));
-          const alreadySent = alreadyQueued || (await bb.sdk.threads.events.list({
+          const alreadySent = alreadyQueued || (await bounded(() => bb.sdk.threads.events.list({
             threadId: alert.target_thread_id, types: ["item/completed"], order: "desc", limit: "50",
-          })).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
+          }), ALERT_CALL_MS)).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
             && event.data.item.content.some((part) => part.type === "text" && part.text === text));
           if (alreadySent) {
             db.prepare(`UPDATE alert_outbox SET delivered_at=?, attempts=attempts+1, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
@@ -2666,12 +2695,12 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       try {
-        await bb.sdk.threads.send({
+        await bounded(() => bb.sdk.threads.send({
           threadId: alert.target_thread_id,
           senderThreadId: alert.source_thread_id,
           mode: "queue-if-active",
           input: [{ type: "text", text: clip(alert.message), mentions: [] }],
-        });
+        }), ALERT_CALL_MS);
         db.prepare(`UPDATE alert_outbox SET delivered_at=?, attempts=attempts+1, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
         return true;
       } catch (error) {
