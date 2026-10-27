@@ -2297,6 +2297,7 @@ export default async function plugin(bb: BbPluginApi) {
             if (environment.status === "error" || environment.status === "destroyed") return { skipped: `the gate environment failed to provision (${environment.status})` };
             if (environment.status === "ready" && environment.path) break;
           }
+          if (left() <= 0) return { skipped: `the gate environment was not ready within ${GATE_TIMEOUT_MS / 1_000} s` };
           await sleep(Math.min(GATE_POLL_MS, left()));
         }
 
