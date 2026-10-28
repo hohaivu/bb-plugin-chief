@@ -14,6 +14,7 @@ import { classify, composeComment, errorText, hasMarker, ownerHandle, parseForge
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
+import { cleanupEligible, deleteSafeBranch, ownedBranch } from "./cleanup";
 import { createReviewStart, type GateResult, type PinnedHead } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import {
@@ -563,6 +564,8 @@ export interface ManagedRow {
   thread_errors: number;
   /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
   busy_rejections: number;
+  /** Worker row only: when chief_complete stamped it as positively approved while cleanupApproved was on; NULL otherwise, and on every row from before the column. */
+  cleanup_approved_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -1037,6 +1040,12 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN plan_review TEXT`,
     // One row per pre-review gate thread: the durable handle that deletes the hidden fork and watches bb remove its worktree. The row is dropped only once bb reports the environment gone.
     `CREATE TABLE IF NOT EXISTS gate_threads (thread_id TEXT PRIMARY KEY, environment_id TEXT, chief_thread_id TEXT, worker_thread_id TEXT NOT NULL, created_at INTEGER NOT NULL, thread_deleted INTEGER NOT NULL DEFAULT 0, delete_attempts INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0)`,
+    // Worker row only: when chief_complete saw a positive approval with cleanupApproved on. NULL (override, #simple without a verdict, setting off, rows from before) is never cleaned up.
+    `ALTER TABLE managed_threads ADD COLUMN cleanup_approved_at INTEGER`,
+    // One row per thread the post-approval cleanup handles: its current step, the generation (archived_at) it archived, and the bounded-retry state of that step.
+    `CREATE TABLE IF NOT EXISTS cleanup_jobs (thread_id TEXT PRIMARY KEY, chief_thread_id TEXT NOT NULL, project_id TEXT NOT NULL, environment_id TEXT, branch TEXT, step TEXT NOT NULL CHECK(step IN ('archive','teardown','branch','storage','done')), step_at INTEGER NOT NULL, archived_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, outcome TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+    // A thread whose Chief artifacts were written to its storage root because the BB data dir was unknown: its storage may hold evidence and is never cleared.
+    `CREATE TABLE IF NOT EXISTS artifact_fallbacks (thread_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1076,12 +1085,20 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Planners, workers, reviewers, and advisors started while this is on are archived when their Chief is archived — and deleted when it is deleted, worktrees included. Ownership is fixed at start: threads already running keep their current behavior, and a replacement Chief does not inherit the children of the one it replaced.",
       default: true,
     },
+    cleanupApproved: {
+      type: "boolean",
+      label: "Clean up approved work",
+      description: "After Chief completes a worker with an approving review (or a design wave with the owner's approval), a background cleanup worker archives its task's threads when nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there. Override and unreviewed #simple completions are never cleaned up.",
+      default: true,
+    },
   });
 
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
   // JS, not strftime, so the pinned snapshot clock sets it; OR IGNORE keeps the first startup's value.
   db.prepare(`INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('failure_events_since', ?)`).run(String(Date.now()));
+  // Threads created before this key cannot be proved free of artifact fallbacks, so their storage is kept.
+  db.prepare(`INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('artifact_fallbacks_since', ?)`).run(String(Date.now()));
 
   const activeChiefForProject = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND project_id=? AND state NOT IN ('failed','deleted','archived','complete') ORDER BY created_at DESC LIMIT 1`,
@@ -1153,6 +1170,8 @@ export default async function plugin(bb: BbPluginApi) {
   const schedule = createWaveSchedule<ManagedRow>(store.rows);
   const { planWavesFor, isDesignWave, waveWorkers, reviewTargetsFor } = schedule;
   let plannerActive = false;
+  // The cleanupApproved setting, cached so chief_complete never reads settings: false until the first read, which fails closed.
+  let cleanupActive = false;
   // ponytail: cached for wave 2's synchronous configure(); the chief_research gate reads live settings.
   let researchActive: ResearchSettings | null = null;
   const rulesCache = new Map<string, string>();
@@ -2504,6 +2523,219 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  const CLEANUP_ATTEMPTS = 3;
+  /** How long a job waits on a busy root or live descendants before it gives up on that thread. */
+  const CLEANUP_WAIT_MS = 60 * 60_000;
+  /** bb's undo window after an archive: its worktree and storage are untouched until it passes. */
+  const CLEANUP_GRACE_MS = 5 * 60_000;
+  const CLEANUP_READ_MS = 15_000;
+  const CLEANUP_CALL_MS = 30_000;
+  type CleanupStep = "archive" | "teardown" | "branch" | "storage" | "done";
+  interface CleanupJob {
+    thread_id: string; chief_thread_id: string; project_id: string; environment_id: string | null; branch: string | null; step: CleanupStep;
+    step_at: number; archived_at: number | null; attempts: number; last_error: string | null; outcome: string | null; created_at: number; updated_at: number;
+  }
+  /** Where a step's third failure lands: the safe outcome (nothing destructive follows a failed archive) and what the alert tells Chief. */
+  const CLEANUP_FAILURE: Record<Exclude<CleanupStep, "done">, { next: "storage" | "done"; outcome: string; left: string }> = {
+    archive: { next: "done", outcome: "kept: archive failed", left: "the thread, its branch and its storage are untouched" },
+    teardown: { next: "storage", outcome: "branch kept: environment unreadable", left: "the bb/ branch (bb's worktree state is unknown)" },
+    branch: { next: "storage", outcome: "branch kept: lookup or git failed", left: "the local bb/ branch" },
+    storage: { next: "done", outcome: "storage kept", left: "the thread storage" },
+  };
+
+  /** Moves a job to its next step in one UPDATE, with the alert that goes with the move in the same transaction. Delivery is
+   * not awaited: the outbox row is durable and retryAlerts re-sends it. */
+  function cleanupMove(job: CleanupJob, step: CleanupStep, change: { outcome?: string; archivedAt?: number; environmentId?: string | null; branch?: string | null } = {}, alert?: { key: string; message: string }) {
+    const key = db.transaction(() => {
+      const now = Date.now();
+      db.prepare(`UPDATE cleanup_jobs SET step=?, step_at=?, attempts=0, last_error=NULL, outcome=COALESCE(?, outcome), archived_at=COALESCE(?, archived_at),
+        environment_id=COALESCE(?, environment_id), branch=COALESCE(?, branch), updated_at=? WHERE thread_id=?`).run(
+        step, now, change.outcome ?? null, change.archivedAt ?? null, change.environmentId ?? null, change.branch ?? null, now, job.thread_id,
+      );
+      return alert ? writeAlert(store.get(job.thread_id)!, alert.key, alert.message) : null;
+    })();
+    if (key) void deliverAlert(key).catch((error) => bb.log.warn(`Cleanup alert ${key} will be retried: ${String(error)}`));
+  }
+
+  /** Counts a failed attempt; the third moves the job to the step's safe outcome and tells Chief, in one transaction. */
+  function cleanupFail(job: CleanupJob, error: unknown) {
+    const detail = clip(error instanceof Error ? error.message : String(error), 500);
+    if (job.step === "done") return;
+    if (job.attempts + 1 < CLEANUP_ATTEMPTS) {
+      db.prepare(`UPDATE cleanup_jobs SET attempts=attempts+1, last_error=?, updated_at=? WHERE thread_id=?`).run(detail, Date.now(), job.thread_id);
+      return;
+    }
+    const failure = CLEANUP_FAILURE[job.step];
+    const recover = job.step === "archive" ? `bb thread archive ${job.thread_id}`
+      : job.step === "teardown" ? `bb environment show ${job.environment_id ?? "<environment id>"}`
+      : job.step === "branch" ? `git branch -D ${job.branch ?? "<branch>"} (only after confirming origin holds its commits)`
+      : `bb storage clear-thread --thread ${job.thread_id} --yes${/plugin|method/i.test(detail) && /not found|unknown|not installed|disabled/i.test(detail) ? " (enable the storage-retention plugin first)" : ""}`;
+    cleanupMove(job, failure.next, { outcome: failure.outcome }, {
+      key: `cleanup-${job.step}-failed:alert`,
+      message: `Cleanup of ${job.thread_id} failed at the ${job.step} step after ${CLEANUP_ATTEMPTS} attempts: ${clip(detail, 200)}. Left in place: ${failure.left}. Recover by hand: ${recover}.`,
+    });
+  }
+
+  /** The thread as bb has it now, or null when it is gone or deleted. Any other read error throws. */
+  async function cleanupRead(threadId: string) {
+    try {
+      const thread = await bounded(() => bb.sdk.threads.get({ threadId }), CLEANUP_READ_MS);
+      return thread.deletedAt === null ? thread : null;
+    } catch (error) {
+      if (MISSING.test(String(error))) return null;
+      throw error;
+    }
+  }
+
+  /** One supervisor-tick pass over the post-approval cleanup: enqueue the threads of positively approved, completed tasks, then
+   * move each open job one step. Archive comes first and only when bb's recursive archive cannot reach any other live thread; the
+   * branch and the storage follow bb's own teardown and grace. Every failure is bounded: three attempts, then one alert and a
+   * safe outcome. One job's error never skips another. With the setting off nothing runs and jobs are kept as they are. */
+  async function observeCleanup() {
+    if (!cleanupActive) return;
+    let eligible = new Set<string>();
+    try {
+      eligible = cleanupEligible(store.all(), (id) => ledger.targets(id).map((target) => target.worker_thread_id));
+      const insert = db.prepare(`INSERT OR IGNORE INTO cleanup_jobs (thread_id, chief_thread_id, project_id, step, step_at, created_at, updated_at) VALUES (?, ?, ?, 'archive', ?, ?, ?)`);
+      const now = Date.now();
+      for (const id of eligible) {
+        const row = store.get(id)!;
+        insert.run(id, row.chief_thread_id, row.project_id, now, now, now);
+      }
+    } catch (error) {
+      bb.log.error(`Cleanup could not enqueue approved threads this tick: ${String(error)}`);
+    }
+    try {
+      const jobs = db.prepare(`SELECT * FROM cleanup_jobs WHERE step <> 'done' ORDER BY created_at ASC, rowid ASC`).all() as CleanupJob[];
+      for (const job of jobs) {
+        try {
+          await cleanupStep(job, eligible);
+        } catch (error) {
+          try { cleanupFail(job, error); }
+          catch (inner) { bb.log.error(`Cleanup of ${job.thread_id} could not record a failure at the ${job.step} step (${String(error)}): ${String(inner)}`); }
+        }
+      }
+    } catch (error) {
+      bb.log.error(`Cleanup could not read its jobs this tick: ${String(error)}`);
+    }
+  }
+
+  async function cleanupStep(job: CleanupJob, eligible: Set<string>) {
+    const id = job.thread_id;
+    const row = store.get(id);
+    if (!row) return cleanupMove(job, "done", { outcome: "kept: no managed row" });
+    const label = `${row.role} “${row.title}” (${id})`;
+    const waited = Date.now() - job.step_at;
+    const finish = (outcome: string, alert?: { key: string; message: string }) => cleanupMove(job, "done", { outcome }, alert);
+
+    if (job.step === "archive") {
+      const live = await cleanupRead(id);
+      if (!live) return finish("deleted");
+      if (live.pinnedAt !== null) return finish("kept: pinned");
+      let archivedAt = live.archivedAt;
+      let environmentId = live.environmentId ?? null;
+      if (archivedAt === null) {
+        if (BUSY_STATUSES.has(live.status)) return waited > CLEANUP_WAIT_MS ? finish("kept: in use") : undefined;
+        // bb's archive is recursive over children, hidden forks and lifecycle dependents with no check of their own: archive only a thread whose closure is itself.
+        const [summary, children, forks] = await Promise.all([
+          bounded(() => bb.sdk.threads.childSummary({ threadId: id }), CLEANUP_READ_MS),
+          bounded(() => bb.sdk.threads.list({ parentThreadId: id, includeHidden: true, limit: 100 }), CLEANUP_READ_MS),
+          bounded(() => bb.sdk.threads.list({ sourceThreadId: id, includeHidden: true, limit: 100 }), CLEANUP_READ_MS),
+        ]);
+        const liveOthers = (page: typeof children) => page.length >= 100 || page.some((other) => other.id !== id && other.archivedAt === null && other.deletedAt === null);
+        if (summary.unarchivedDescendantCount > 0 || liveOthers(children) || liveOthers(forks)) {
+          if (waited <= CLEANUP_WAIT_MS) return;
+          return finish("kept: live descendants", {
+            key: "cleanup-scope-kept:alert",
+            message: `Cleanup of ${label} did not archive it: other live threads would be archived with it (children, forks or dependents) and they stayed live for 60 minutes. Left in place: the thread, its branch and its storage. Archive it yourself when they are done: bb thread archive ${id}.`,
+          });
+        }
+        const archived = await bounded(() => bb.sdk.threads.archive({ threadId: id }), CLEANUP_CALL_MS);
+        const extra = archived.archivedThreadIds.filter((other) => other !== id);
+        if (extra.length) {
+          const key = enqueueAlert(row, "cleanup-scope-extra:alert", `Cleaning up ${label} archived ${extra.length} other thread(s) with it: ${extra.join(", ")}. Restore each with: ${extra.map((other) => `bb thread unarchive ${other}`).join("; ")}.`);
+          void deliverAlert(key).catch((error) => bb.log.warn(`Cleanup alert ${key} will be retried: ${String(error)}`));
+        }
+        const after = await bounded(() => bb.sdk.threads.get({ threadId: id }), CLEANUP_READ_MS);
+        if (after.archivedAt === null) throw new Error("the archive call returned but the thread is not archived");
+        archivedAt = after.archivedAt;
+        environmentId = after.environmentId ?? environmentId;
+      }
+      // Step-out: the thread's own bb/ branch, only when its worktree environment is read and its name is owned by this job's Chief and project.
+      let branch: string | null = null;
+      let unreadable: string | null = null;
+      if (environmentId) {
+        try {
+          const environment = await bounded(() => bb.sdk.environments.get({ environmentId: environmentId! }), CLEANUP_READ_MS);
+          const owns = (threadId: string) => { const owner = store.get(threadId); return eligible.has(threadId) && owner?.chief_thread_id === job.chief_thread_id && owner?.project_id === job.project_id; };
+          branch = environment.isWorktree ? ownedBranch(environment.branchName, owns) : null;
+        } catch (error) { unreadable = clip(String(error), 200); }
+      }
+      return cleanupMove(job, branch ? "teardown" : "storage", { archivedAt, environmentId, branch, outcome: unreadable ? "branch kept: environment unreadable" : undefined }, unreadable ? {
+        key: "cleanup-branch-kept:alert",
+        message: `Cleanup of ${label} archived it but could not read its environment ${environmentId} (${unreadable}), so its bb/ branch was not touched. Left in place: the branch. Inspect: bb environment show ${environmentId}.`,
+      } : undefined);
+    }
+
+    // Every later step belongs to the archive generation it recorded: an unarchive, or an unarchive and a re-archive, ends the job.
+    const generation = job.archived_at;
+    if (generation === null) throw new Error("no archive time recorded for this job");
+    if (job.step === "storage" && Date.now() < generation + CLEANUP_GRACE_MS) return;
+    const live = await cleanupRead(id);
+    if (!live) return finish("kept: thread deleted");
+    if (live.archivedAt !== generation) return finish("kept: unarchived");
+
+    if (job.step === "teardown") {
+      let environment: Awaited<ReturnType<typeof bb.sdk.environments.get>> | null = null;
+      try {
+        environment = await bounded(() => bb.sdk.environments.get({ environmentId: job.environment_id! }), CLEANUP_READ_MS);
+      } catch (error) {
+        if (!MISSING.test(String(error))) throw error; // a read error is never proof that the environment is gone
+      }
+      if (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return cleanupMove(job, "branch");
+      const teardown = environment.lifecycle.teardown;
+      const trouble = teardown?.message?.startsWith("Needs recovery:") ? teardown.message
+        : environment.hostLifecycle === "cleanup-failed" && teardown?.status !== "running" ? `bb reports cleanup-failed${teardown?.message ? `: ${teardown.message}` : ""}` : null;
+      const left = `Left in place: the bb/ branch ${job.branch} and the worktree. Inspect: bb environment show ${job.environment_id}.`;
+      if (trouble) return cleanupMove(job, "storage", { outcome: "branch kept: teardown trouble" }, { key: "cleanup-teardown-trouble:alert", message: `Cleanup of ${label}: bb could not remove its worktree environment: ${clip(trouble, 300)}. ${left}` });
+      if (Date.now() - generation <= GATE_TEARDOWN_LIMIT_MS) return;
+      if (environment.lifecycle.phase === "active") return cleanupMove(job, "storage", { outcome: "branch kept: environment in use" });
+      return cleanupMove(job, "storage", { outcome: "branch kept: teardown stuck" }, { key: "cleanup-teardown-stuck:alert", message: `Cleanup of ${label}: bb has not removed its worktree environment 60 minutes after the archive (${environment.lifecycle.phase}/${environment.hostLifecycle}). ${left}` });
+    }
+
+    if (job.step === "branch") {
+      const [project, config] = await Promise.all([
+        bounded(() => bb.sdk.projects.get({ projectId: job.project_id }), CLEANUP_READ_MS),
+        bounded(() => bb.sdk.system.config(), CLEANUP_READ_MS),
+      ]);
+      const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
+      const kept = (reason: string, alert = false) => cleanupMove(job, "storage", { outcome: `branch kept: ${reason}` }, alert ? {
+        key: "cleanup-branch-kept:alert",
+        message: `Cleanup of ${label} kept its bb/ branch ${job.branch}: ${reason}. Left in place: the local branch. Delete it yourself with git branch -D ${job.branch} once you have confirmed origin holds its commits.`,
+      } : undefined);
+      if (!source?.hostId) return kept("no source host recorded for the project", true);
+      if (!source.path) return kept("the project has no checkout path");
+      if (source.hostId !== config.primaryHostId) return kept("the project checkout is on a remote host, not the plugin server");
+      const result = await bounded(() => deleteSafeBranch({ cwd: source.path!, env: forgeEnv(), branch: job.branch!, deadlineMs: CLEANUP_CALL_MS }), CLEANUP_CALL_MS + 5_000);
+      if ("error" in result) throw new Error(result.error);
+      if ("kept" in result) return kept(result.kept, true);
+      return cleanupMove(job, "storage", { outcome: "deleted" in result ? `branch deleted${result.note ? ` (${result.note})` : ""}` : "branch already gone" });
+    }
+
+    // storage
+    const since = Number((db.prepare(`SELECT value FROM plugin_meta WHERE key='artifact_fallbacks_since'`).get() as { value: string } | undefined)?.value);
+    const fallback = db.prepare(`SELECT 1 FROM artifact_fallbacks WHERE thread_id=?`).get(id);
+    // A fallback leaves Chief's artifacts in this storage; before tracking began the history is unknown, so that fails closed too.
+    if (fallback || !(row.created_at >= since)) {
+      return finish("storage kept: evidence", {
+        key: "cleanup-evidence-kept:alert",
+        message: `Cleanup of ${label} kept its thread storage: ${fallback ? "Chief's artifacts for it were written there (the BB data dir was unknown)" : "it was created before Chief tracked that, so its artifacts may be there"}. Left in place: the storage. Clear it yourself once nothing there is needed: bb storage clear-thread --thread ${id} --yes.`,
+      });
+    }
+    await bounded(() => bb.sdk.plugins.callRpc({ pluginId: "bb--storage-retention", method: "clearThread", input: { threadId: id }, outputSchema: z.object({ ok: z.literal(true) }) }), CLEANUP_CALL_MS);
+    return finish("cleaned");
+  }
+
   /** Whether the previous reviewed head is an ancestor of the pinned head, from the project checkout; never throws. */
   async function reviewedAncestryOf(row: ManagedRow, previousSha: string, head: PinnedHead, projectDir: string | null): Promise<{ ancestor: true } | { skipped: string }> {
     try {
@@ -2596,8 +2828,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Cannot complete ${threadId} because it is not a live thread.`);
     let overrideNote: string | null = null;
     let overrideReason: string | null = null;
+    let approved = false;
     if (row.role === "worker") {
       const refusal = await completionRefusal(row);
+      // A null refusal is a positive approval only with a verdict behind it (an approve) or on a design wave (the owner's approval); #simple work with no verdict also passes.
+      approved = refusal === null && (isDesignWave(row) || !!ledger.newestVerdict(row));
       if (refusal) {
         const reason = overrideSchema.safeParse(override);
         if (!reason.success || !reason.data) throw new Error(`Refusing to complete ${threadId}: ${refusal}`);
@@ -2608,10 +2843,13 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const replacement = result ? clip(result, MAX_RESULT_LENGTH) : null;
     // A replaced result drops the summary and report file that described the old one.
-    store.markComplete({ status: live.status, result: replacement, note: overrideNote, now: Date.now(), threadId });
+    const now = Date.now();
+    store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && cleanupActive ? now : null });
     const completed = store.get(threadId)!;
     enqueueCompletionComment(completed, overrideReason);
-    return { row: completed, overridden: overrideNote !== null };
+    const cleanup: "queued" | "override" | "unapproved" | "off" | null = row.role !== "worker" ? null
+      : overrideNote !== null ? "override" : !approved ? "unapproved" : cleanupActive ? "queued" : "off";
+    return { row: completed, overridden: overrideNote !== null, cleanup };
   }
 
   /** chief_owner_approval: records the owner's approval on a design-wave worker whose latest report was ready.
@@ -2630,6 +2868,14 @@ export default async function plugin(bb: BbPluginApi) {
       ? `Recorded the owner's approval of wave ${row.plan_wave}. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); name the approved artboards in its mission.`
       : `Recorded the owner's approval of wave ${row.plan_wave}. Complete it with chief_complete (threadId: ${row.thread_id}). Never chief_review.`;
   }
+
+  /** The line chief_complete and the CLI add for a worker's cleanup outcome; non-workers have none. */
+  const cleanupLine = (cleanup: "queued" | "override" | "unapproved" | "off" | null) => cleanup === null ? "" : {
+    queued: "\nCleanup queued: a background cleanup worker archives this task's threads (worker, reviewers, advisors, and the planner after its last wave) once nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; any failure alerts you.",
+    override: "\nNo cleanup: completed with override.",
+    unapproved: "\nNo cleanup: no approving review.",
+    off: "\nNo cleanup: the cleanupApproved setting is off.",
+  }[cleanup];
 
   /** After a worker completes: flips its draft pull request to ready, best-effort. A forge failure
    * never undoes the completion. "skipped" means there was no pull request to flip. */
@@ -2954,6 +3200,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (dataDir) dataDirs.set(hostId, dataDir);
       else {
         bb.log.warn(`Host ${hostId}'s BB data dir is unavailable (${reason}); writing Chief artifacts to thread storage instead.`);
+        // Recorded before the path is used, so a thread's storage that holds evidence is never cleared; if this throws, so does the artifact write.
+        db.prepare(`INSERT OR IGNORE INTO artifact_fallbacks (thread_id, at) VALUES (?, ?)`).run(threadId, Date.now());
         return { hostId, dir: storageRootPath };
       }
     }
@@ -3370,6 +3618,7 @@ export default async function plugin(bb: BbPluginApi) {
           await sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
           await checkUnreported(store.all());
           const values = await settings.get();
+          cleanupActive = values.cleanupApproved;
           const parsed = Number(values.stallMinutes);
           const threshold = (Number.isFinite(parsed) && parsed > 0 ? parsed : 15) * 60_000;
           const now = Date.now();
@@ -3413,6 +3662,7 @@ export default async function plugin(bb: BbPluginApi) {
           // pending delivery is attempted.
           await retryAlerts();
           await observeGateTeardown();
+          await observeCleanup();
           void drainForge();
         } catch (error) {
           bb.log.warn(`Supervisor reconciliation failed: ${String(error)}`);
@@ -3427,6 +3677,7 @@ export default async function plugin(bb: BbPluginApi) {
       void ensureChief(next.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
     }
     plannerActive = next.plannerEnabled;
+    cleanupActive = next.cleanupApproved;
     researchActive = researchFrom(next);
   });
 
@@ -4333,20 +4584,20 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_complete",
     presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
-    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. It never archives threads or removes worktrees; that cleanup is left to the user. A design-only wave's worker completes only with the owner's approval recorded by chief_owner_approval. Any other worker with a pull request completes only when the newest review is an approve for the pull request's current head commit (a worker without one: for its current report); otherwise it is refused naming the reason. override (a reason) is the only bypass and is recorded in the result. After a worker completes, this call marks its draft pull request ready for review: never run gh pr ready or glab mr update --ready yourself for a worker's pull request.",
+    description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. A worker completed with an approving review (or a design wave with the owner's approval) while the cleanupApproved setting is on is then cleaned up by a background cleanup worker: it archives the task's threads when nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; override and unreviewed #simple completions are never cleaned up. A design-only wave's worker completes only with the owner's approval recorded by chief_owner_approval. Any other worker with a pull request completes only when the newest review is an approve for the pull request's current head commit (a worker without one: for its current report); otherwise it is refused naming the reason. override (a reason) is the only bypass and is recorded in the result. After a worker completes, this call marks its draft pull request ready for review: never run gh pr ready or glab mr update --ready yourself for a worker's pull request.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional(), override: overrideSchema.describe("Complete a worker even though no approve covers its pull request head (or current report). The reason is recorded in its result. Use only when the user or the evidence justifies skipping the review.") }),
     async execute({ threadId, result, override }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       await controlledTarget(threadId, caller);
       touchCallerChief(caller);
-      const { row, overridden } = await markComplete(threadId, result, override);
+      const { row, overridden, cleanup } = await markComplete(threadId, result, override);
       const ready = await readyPullRequest(row);
       const todos = row.role === "worker" ? (todosForProject.all(caller.project_id) as TodoRow[]).filter((todo) => todo.chief_thread_id === caller.thread_id) : [];
       const todoLine = todos.length
         ? `\n${clip(`Open todos: ${todos.map((todo) => `#${todo.id} ${clip(todo.text, 80)}`).join(", ")} — close any this work finished with chief_roster todo { id, state: "done" }.`, 1_000)}`
         : "";
-      return `Marked “${row.title}” complete${overridden ? ` without a matching approve (override recorded in its result)` : ""}.${ready.line}${todoLine}`;
+      return `Marked “${row.title}” complete${overridden ? ` without a matching approve (override recorded in its result)` : ""}.${ready.line}${cleanupLine(cleanup)}${todoLine}`;
     },
   });
   bb.agents.registerTool({
@@ -4769,10 +5020,10 @@ export default async function plugin(bb: BbPluginApi) {
           if (override === "true") return fail("--override needs a reason.");
           const reason = overrideSchema.safeParse(override);
           if (!reason.success) return fail("--override must be 1-500 characters.");
-          const { row, overridden } = await markComplete(threadId, args.one("result"), reason.data);
+          const { row, overridden, cleanup } = await markComplete(threadId, args.one("result"), reason.data);
           const ready = await readyPullRequest(row);
-          return ok({ ...toManaged(row), overridden, prReady: ready.prReady, ...(ready.error ? { prReadyError: ready.error } : {}) },
-            `Marked “${row.title}” complete${overridden ? " without a matching approve (override recorded in its result)" : ""}.${ready.line}`);
+          return ok({ ...toManaged(row), overridden, cleanup, prReady: ready.prReady, ...(ready.error ? { prReadyError: ready.error } : {}) },
+            `Marked “${row.title}” complete${overridden ? " without a matching approve (override recorded in its result)" : ""}.${ready.line}${cleanupLine(cleanup)}`);
         }
         return fail(`Unknown command “${command}”.`);
       } catch (error) {
@@ -4792,6 +5043,7 @@ export default async function plugin(bb: BbPluginApi) {
   await plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
   await researchSettings().catch((error) => bb.log.warn(`Could not read the researcher settings: ${String(error)}`));
   const initial = await settings.get();
+  cleanupActive = initial.cleanupApproved;
   if (initial.autoSpawn && initial.chiefProject) {
     void ensureChief(initial.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
   }

@@ -203,13 +203,13 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       wrote();
     },
 
-    /** chief_complete. A replaced result drops the summary and report file that described the old one. */
-    markComplete(args: { status: string; result: string | null; note: string | null; now: number; threadId: string }) {
+    /** chief_complete. A replaced result drops the summary and report file that described the old one. cleanupApprovedAt is written in the same UPDATE, so completion and cleanup eligibility never split. */
+    markComplete(args: { status: string; result: string | null; note: string | null; now: number; threadId: string; cleanupApprovedAt: number | null }) {
       db.prepare(`UPDATE managed_threads SET state='complete', status=@status,
       result=CASE WHEN @note IS NULL THEN COALESCE(@result, result) ELSE COALESCE(@result, result, '') || @note END,
       summary=CASE WHEN @result IS NULL THEN summary END, report_path=CASE WHEN @result IS NULL THEN report_path END,
       result_rev=result_rev + (@result IS NOT NULL),
-      blocker=NULL, recommendation=NULL, active_since=NULL, updated_at=@now WHERE thread_id=@threadId`).run(args);
+      blocker=NULL, recommendation=NULL, active_since=NULL, cleanup_approved_at=@cleanupApprovedAt, updated_at=@now WHERE thread_id=@threadId`).run(args);
       wrote();
     },
 
