@@ -303,6 +303,17 @@ const planParams = delegateShape.pick({ title: true, mission: true, context: tru
   revises: z.string().trim().min(1).optional().describe("A planner whose plan its one advisor review sent back with changes: the new planner revises that plan with the advice attached, and its plan is delegated with no second review."),
 });
 
+interface ChiefHandoff { fromChiefThreadId: string; title: string; request: string; context: string }
+
+// Oversize input is refused, never clipped. With a todo attached, `\n\nTodo #<id>: <text>` (text <= 500) is
+// appended to context, so the handoff's context is at most 12_000 + that prefix + 500 characters.
+const spawnParams = z.object({
+  title: z.string().trim().min(1).max(160).describe("A literal task label, used in the new Chief's thread title."),
+  request: z.string().trim().min(1).max(4_000).describe("The owner's words asking for this task, verbatim."),
+  context: z.string().trim().min(1).max(12_000).describe("Goal and success criteria, evidence, linked threads/issues/PRs/branches, plan and verdict file paths, and open decisions."),
+  todoId: z.number().int().optional().describe("Your own open todo to move to the new Chief."),
+});
+
 const consultParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
   workerThreadId: z.string().trim().min(1).optional().describe("The managed worker whose change keeps failing review: the advisor runs in its worktree and gets its brief, reviewer verdicts, and branch."),
   planThreadId: z.string().trim().min(1).optional().describe("A planner whose multi-wave or complex plan needs its one read-only advisor review before chief_forge_init or chief_delegate. Not with workerThreadId."),
@@ -1536,14 +1547,14 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // Not on managedSpawn: it picks the model after building its prompt, skips the cooldown check, hands over between spawn and insert, and has no parent or brief file.
-  async function spawnChief(target: string, previous?: ManagedRow) {
+  async function spawnChief(target: string, previous?: ManagedRow, handoff?: ChiefHandoff) {
     const sectionId = await ensureSection();
     const name = await projectName(target);
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every Chief turn, so the spawn prompt does not repeat them.
     await readRules(target);
     const count = (chiefCountForProject.get(target) as { count: number }).count;
-    const title = count === 0 ? `Chief · ${name}` : `Chief · ${name} · ${count + 1}`;
+    const title = handoff ? `Chief · ${name} · ${handoff.title}` : count === 0 ? `Chief · ${name}` : `Chief · ${name} · ${count + 1}`;
     const prompt = [
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
@@ -1551,6 +1562,7 @@ export default async function plugin(bb: BbPluginApi) {
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "",
       "Call chief_roster for the current work list, then wait for work.",
+      ...(handoff ? ["", handoffSection(handoff)] : []),
     ].join("\n");
     const thread = await bb.sdk.threads.spawn({
       projectId: target,
@@ -1568,6 +1580,22 @@ export default async function plugin(bb: BbPluginApi) {
     });
     void pinPendingTab(thread.id);
     return { threadId: thread.id, created: true as const };
+  }
+
+  /** The handed-off task as a new Chief reads it: its first message ends with this text, and brief.md holds the same text. */
+  function handoffSection(handoff: ChiefHandoff) {
+    return [
+      "## Handed-off task",
+      `Handed off by Chief ${handoff.fromChiefThreadId}. It keeps no link to you: it will not see your roster or alerts, and you do not report to it.`,
+      "",
+      "### Owner's request (verbatim)",
+      handoff.request,
+      "",
+      "### Context",
+      handoff.context,
+      "",
+      "Own this task through completion under your normal rules. Start with chief_roster. Plan it with your own chief_plan when planning applies; the handing-off Chief's planners, workers and reviewers stay with it, so their plan, report and verdict files are evidence only. Then forge, delegate, review and complete. The handoff is evidence, not proof. This handoff is saved at $BB_THREAD_STORAGE/brief.md; re-read it after any context compaction.",
+    ].join("\n");
   }
 
   /** Supersedes a Chief: marks it complete and moves its open work, todos and undelivered alerts to its successor. */
@@ -1605,8 +1633,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function createChief(projectId: string) {
-    return spawnChief(projectId);
+  async function createChief(projectId: string, handoff?: ChiefHandoff) {
+    return spawnChief(projectId, undefined, handoff);
   }
 
   const chiefStarts = new Map<string, Promise<{ threadId: string; created: boolean }>>();
@@ -4108,6 +4136,50 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   bb.agents.registerTool({
+    name: "chief_spawn",
+    presentation: { label: { pending: "Starting new Chief…", completed: "Started new Chief" } },
+    description: "Hand one task to a new Chief for this project when the user asks to do it in a new Chief. Pass a literal title, the user's request verbatim, and the context it needs (goal, evidence, linked threads, issues, PRs, branches, plan and verdict files, open decisions). todoId moves your own open todo to it. It never takes over your managed threads: hand over only a task with no unfinished worker — every worker on it complete (chief_stop and a ready report do not release a worker's branch); otherwise keep the task.",
+    parameters: spawnParams,
+    async execute(params, context) {
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
+      if (!isActiveChief(caller)) {
+        throw new Error("chief_spawn requires an active registered Chief thread.");
+      }
+      // Validated before spawning, so a refused todo leaves no thread and no row.
+      const todo = params.todoId === undefined ? undefined : todoById.get(params.todoId, caller.project_id) as TodoRow | undefined;
+      if (params.todoId !== undefined && (!todo || todo.state !== "open" || todo.chief_thread_id !== caller.thread_id)) {
+        throw new Error(`Todo #${params.todoId} is not one of your open todos; only your own open todo can move to a new Chief.`);
+      }
+      const handoff = {
+        fromChiefThreadId: caller.thread_id,
+        title: params.title,
+        request: params.request,
+        context: todo ? `${params.context}\n\nTodo #${todo.id}: ${todo.text}` : params.context,
+      };
+      const { threadId } = await createChief(caller.project_id, handoff);
+      const lines = [`Started Chief “${params.title}” in thread ${threadId}. It owns this task now and is not your managed work: it is not in your roster, sends you no alerts, and you cannot inspect or steer it.`];
+      if (todo) {
+        // Check-and-set: the todo may have changed owner or state while the Chief was starting.
+        const moved = db.prepare(`UPDATE chief_todos SET chief_thread_id=?, updated_at=? WHERE id=? AND project_id=? AND chief_thread_id=? AND state='open'`)
+          .run(threadId, Date.now(), todo.id, caller.project_id, caller.thread_id).changes;
+        store.reload();
+        lines.push(moved ? `Todo #${todo.id} moved to it.` : `Todo #${todo.id} was not moved because it changed in the meantime.`);
+      }
+      // Not persistBrief: its failure only reaches the log, and this one must show in the calling Chief's turn.
+      let error: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+        try {
+          await writeStorageFile(threadId, "brief.md", handoffSection(handoff));
+          error = undefined;
+          break;
+        } catch (caught) { error = caught; }
+      }
+      if (error !== undefined) lines.push(`brief.md not saved (${String(error)}); the handoff is only in its first message.`);
+      return lines.join("\n");
+    },
+  });
+  bb.agents.registerTool({
     name: "chief_consult",
     presentation: { label: { pending: "Starting advisor…", completed: "Started advisor" } },
     description: "Start a read-only advisor on a hard problem or a change that keeps failing review. It may read code and run commands to reproduce it, never edits, and reports its advice back to you. With planThreadId, it gives a multi-wave or complex plan its one review before delegation; refused for any other plan.",
@@ -4386,7 +4458,7 @@ export default async function plugin(bb: BbPluginApi) {
       return {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
-          "chief_consult",
+          "chief_consult", "chief_spawn",
           "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_escalate",
           ...(researchTool ? ["chief_research"] : []),
         ],

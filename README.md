@@ -217,7 +217,9 @@ bb chief complete thr_... [--result "..."] [--json]
 
 `bb chief review` is retired for every caller, because the CLI cannot prove who is calling. Only the active Chief starts reviews, through its `chief_review` tool; the review rule is in its core rules (`CHIEF_CORE_RULES` in server.ts).
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on; `revises` for a reviewed plan), `chief_consult` (`planThreadId` for a plan's one review), `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_escalate`, and worker/reviewer/advisor `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on; `revises` for a reviewed plan), `chief_consult` (`planThreadId` for a plan's one review), `chief_spawn` (hands one task to a new Chief), `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_escalate`, and worker/reviewer/advisor `chief_report`.
+
+`chief_spawn` starts a second Chief for the project with the task's request and context as its first message, with no link back. It moves at most one of the caller's open todos, and a task moves only when none of the source Chief's unfinished workers holds it: `chief_stop` and a ready report do not release a worker, only `chief_complete` does.
 
 ## Build and verify
 
