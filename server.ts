@@ -1,7 +1,5 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -61,6 +59,24 @@ const FORGE_BRIEF_SECTION_MAX = 1_500;
 const BUSY_STATUSES = new Set(["active", "starting", "stopping", "pending"]);
 
 const execFileAsync = promisify(execFile);
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(ms, 0)));
+
+/** Races one call against a deadline. A synchronous throw becomes a rejection, and the timer never outlives the call.
+ * A call that loses the race is abandoned, not cancelled. */
+async function bounded<T>(call: () => Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      (async () => call())(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("deadline passed")), Math.max(ms, 0)); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const shq = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 
 /** Homebrew bins appended to the server's PATH.
  * ponytail: heuristic for GUI-launched servers whose PATH lacks Homebrew; upgrade path is a configured PATH. */
@@ -1008,6 +1024,8 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN plan_issue_url TEXT`,
     // Planner row only: its one advisor review — NULL (none needed), 'required', 'approved' or 'changes'.
     `ALTER TABLE managed_threads ADD COLUMN plan_review TEXT`,
+    // One row per pre-review gate thread: the durable handle that deletes the hidden fork and watches bb remove its worktree. The row is dropped only once bb reports the environment gone.
+    `CREATE TABLE IF NOT EXISTS gate_threads (thread_id TEXT PRIMARY KEY, environment_id TEXT, chief_thread_id TEXT, worker_thread_id TEXT NOT NULL, created_at INTEGER NOT NULL, thread_deleted INTEGER NOT NULL DEFAULT 0, delete_attempts INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0)`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2213,79 +2231,249 @@ export default async function plugin(bb: BbPluginApi) {
     return `could not confirm which host holds the project checkout (${clip(String(lookupError), 200)})`;
   }
 
-  /** The pre-review gate: runs the worker's verify command in a detached temporary worktree of the commit under review.
-   * Only a non-zero exit of the command fails it; anything that keeps it from running is a skip with the reason, and the review proceeds.
-   * Never throws: every step, cleanup included, runs inside this boundary, and cleanup trouble is added to the result, never replaces it. */
-  async function runGate(row: ManagedRow, command: string, pinnedSha: string | null, projectDir: string | null): Promise<GateResult> {
-    if (!projectDir) return { skipped: "no local checkout of the project on the plugin server (remote host or unknown path)" };
-    let phase = "host lookup";
-    let raw: string | null = null;
-    let dir: string | null = null;
+  const GATE_POLL_MS = 1_000;
+  /** Slack past the gate's deadline for reading the output of a command that already failed. */
+  const GATE_ENRICH_GRACE_MS = 500;
+  /** An undeleted gate thread this old belongs to no running gate (one lives GATE_TIMEOUT_MS at most), so the supervisor deletes it. */
+  const GATE_ORPHAN_MS = GATE_TIMEOUT_MS + 120_000;
+  const GATE_DELETE_ATTEMPTS = 3;
+  /** The longest a failed gate waits to learn whether its thread was removed. */
+  const GATE_RELEASE_WAIT_MS = 15_000;
+  /** bb waits 5 min, then retries a failed teardown after 1, 2, 4 and 8 min with hooks of up to 15 min each. */
+  const GATE_TEARDOWN_LIMIT_MS = 60 * 60_000;
+  const MISSING = /not found|404/i;
+  interface GateRow { thread_id: string; environment_id: string | null; chief_thread_id: string | null; worker_thread_id: string; created_at: number; thread_deleted: number; delete_attempts: number; alerted: number }
+
+  /** The pre-review gate: runs the worker's verify command on the commit under review in a bb-managed worktree.
+   * The worktree comes from an idle fork of the worker thread (no prompt, so no agent turn runs); prep and the command run
+   * as `sh -c` terminals there. Only the command's own non-zero exit fails the gate, and that result is latched before the
+   * output is read. Anything that keeps the command from running is a skip with the reason, and the review proceeds.
+   * Never throws. Teardown is handed to releaseGate and the supervisor, and never changes the result. */
+  async function runGate(row: ManagedRow, command: string, head: PinnedHead | null, workerEnvironmentId: string | null): Promise<GateResult> {
+    const deadline = Date.now() + GATE_TIMEOUT_MS;
+    const left = () => deadline - Date.now();
+    const terminalIds: string[] = [];
+    let gateThreadId: string | null = null;
+    let phase = "setup";
+    let latched: Extract<GateResult, { failed: unknown }> | null = null;
     let result: GateResult;
     try {
       result = await (async (): Promise<GateResult> => {
-        const hostSkip = await checkoutHostSkip(row.project_id);
-        if (hostSkip) return { skipped: hostSkip };
-        const git = async (args: string[]) => {
-          let lastError: unknown;
-          for (let attempt = 0; attempt < 2; attempt += 1) {
-            try {
-              return (await execFileAsync("git", args, { cwd: projectDir, timeout: 60_000, env: forgeEnv() })).stdout.trim();
-            } catch (error) {
-              lastError = error;
+        const pinned = head?.sha.toLowerCase() ?? null;
+        if (!workerEnvironmentId) return { skipped: "the worker has no environment to fork the gate from" };
+        if (pinned === null && !row.branch) return { skipped: "the worker has no branch and no pinned head" };
+        if (pinned !== null && !/^[0-9a-f]{40}$/.test(pinned)) return { skipped: `the pinned head ${clip(head!.sha, 80)} is not a full commit id` };
+        phase = "host lookup";
+        const hostId = await bounded(() => environmentHostId(workerEnvironmentId), left());
+        if (!hostId) return { skipped: "the worker's machine is unknown" };
+
+        phase = "fork of the worker thread";
+        // The row is written the moment the fork returns, even when this gate has stopped waiting, so the thread can never be orphaned by the deadline.
+        const forked = await bounded(async () => {
+          const owner = await lifecycleOwner(row.chief_thread_id);
+          const thread = await bb.sdk.threads.fork({
+            sourceThreadId: row.thread_id,
+            title: `Pre-review gate · ${row.title}`,
+            visibility: "hidden",
+            environment: { type: "host", hostId, workspace: { type: "managed-worktree", baseBranch: { kind: "default" } } },
+            pluginMetadata: { chiefGate: true, workerThreadId: row.thread_id },
+            ...owner,
+          });
+          db.prepare(`INSERT INTO gate_threads (thread_id, environment_id, chief_thread_id, worker_thread_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+            .run(thread.id, thread.environmentId ?? null, row.chief_thread_id, row.thread_id, Date.now());
+          return thread.id;
+        }, left());
+        gateThreadId = forked;
+
+        phase = "provisioning of the gate environment";
+        let environmentId: string | null = null;
+        for (;;) {
+          const thread = await bounded(() => bb.sdk.threads.get({ threadId: forked }), left());
+          if (thread.deletedAt !== null || thread.status === "error") return { skipped: `the gate environment failed to provision (thread ${thread.deletedAt !== null ? "deleted" : "in error"})` };
+          if (thread.environmentId) {
+            if (!environmentId) {
+              environmentId = thread.environmentId;
+              db.prepare(`UPDATE gate_threads SET environment_id=? WHERE thread_id=?`).run(environmentId, forked);
             }
+            const environment = await bounded(() => bb.sdk.environments.get({ environmentId: environmentId! }), left());
+            if (environment.status === "error" || environment.status === "destroyed") return { skipped: `the gate environment failed to provision (${environment.status})` };
+            if (environment.status === "ready" && environment.path) break;
           }
-          throw lastError;
+          if (left() <= 0) return { skipped: `the gate environment was not ready within ${GATE_TIMEOUT_MS / 1_000} s` };
+          await sleep(Math.min(GATE_POLL_MS, left()));
+        }
+
+        // Runs one `sh -c` script as an environment terminal; only a normal process exit is a result.
+        const runTerminal = async (script: string): Promise<{ exitCode: number; terminalId: string } | { abnormal: string }> => {
+          const created = await bounded(() => bb.sdk.terminals.create({ cols: 200, rows: 50, scope: { kind: "environment", environmentId: environmentId! }, start: { mode: "argv", argv: ["sh", "-c", script] } }), left());
+          terminalIds.push(created.id);
+          for (let session = created; ; session = await bounded(() => bb.sdk.terminals.get({ terminalId: created.id }), left())) {
+            if (session.status === "exited") {
+              return session.closeReason === "process-exit" && typeof session.exitCode === "number"
+                ? { exitCode: session.exitCode, terminalId: created.id }
+                : { abnormal: `closed by ${session.closeReason ?? "unknown"}, exit ${session.exitCode ?? "none"}` };
+            }
+            if (session.status === "disconnected") return { abnormal: "the terminal disconnected" };
+            if (left() <= 0) return { abnormal: `no result within ${GATE_TIMEOUT_MS / 1_000} s` };
+            await sleep(Math.min(GATE_POLL_MS, left()));
+          }
         };
-        phase = "commit lookup";
-        let sha = pinnedSha;
-        if (!sha) {
-          if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
-          sha = await git(["rev-parse", "--verify", `refs/heads/${row.branch}^{commit}`]);
-        } else {
-          const known = await execFileAsync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: projectDir, timeout: 60_000, env: forgeEnv() }).then(() => true, () => false);
-          if (!known && row.branch) await git(["fetch", "origin", row.branch]);
-        }
-        phase = "temporary directory";
-        raw = await mkdtemp(join(tmpdir(), "chief-gate-"));
-        dir = await realpath(raw);
-        phase = `git checkout of ${sha}`;
-        await git(["worktree", "add", "--detach", dir, sha]);
+
+        phase = "checkout";
+        const target = pinned !== null ? `${pinned.slice(0, 12)}` : `branch ${row.branch}`;
+        const prep = await runTerminal([
+          "set -e",
+          pinned !== null
+            ? `SHA=${shq(pinned)}\ngit cat-file -e "$SHA^{commit}" 2>/dev/null || git fetch origin ${shq(head!.branch)}`
+            : `SHA=$(git rev-parse --verify ${shq(`refs/heads/${row.branch}^{commit}`)})`,
+          `git checkout --detach --quiet "$SHA"`,
+          `test "$(git rev-parse HEAD)" = "$SHA"`,
+          `echo "CHIEF_GATE_SHA=$SHA"`,
+        ].join("\n"));
+        if (!("exitCode" in prep) || prep.exitCode !== 0) return { skipped: `could not check out ${target} (${"exitCode" in prep ? `exit ${prep.exitCode}` : prep.abnormal})` };
+        const prepOutput = await bounded(() => bb.sdk.terminals.output({ terminalId: prep.terminalId, tailBytes: 100_000 }), left());
+        const sha = /CHIEF_GATE_SHA=([0-9a-f]{40})/.exec(readTerminal(prepOutput))?.[1];
+        if (!sha) return { skipped: `could not check out ${target} (the checkout did not report a commit)` };
+
         phase = "verify command";
-        let failure: { code?: unknown; killed?: boolean; signal?: string | null; stdout?: string; stderr?: string };
+        const verify = await runTerminal(command);
+        if (!("exitCode" in verify)) return { skipped: `the command did not finish (${verify.abnormal})` };
+        if (verify.exitCode === 0) return { passed: true };
+        // The command's own non-zero exit is the only failure; from here it stands whatever happens to the output or the artifact.
+        const failed = { workerThreadId: row.thread_id, command, sha, exitCode: verify.exitCode, outputPath: null as string | null, tail: "", issues: [] as string[] };
+        latched = { failed };
+        const enrichUntil = deadline + GATE_ENRICH_GRACE_MS;
         try {
-          await execFileAsync("sh", ["-c", command], { cwd: dir, timeout: GATE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: serverPath() } });
-          return { passed: true };
-        } catch (error) {
-          failure = (error ?? {}) as typeof failure;
-        }
-        if (failure.killed || typeof failure.code !== "number") return { skipped: `the command did not finish (${failure.signal ?? "timeout or spawn error"})` };
-        // The command's own non-zero exit is the only failure; it stands whatever happens to the artifact or cleanup.
-        const output = `${failure.stdout ?? ""}${failure.stderr ? `\n${failure.stderr}` : ""}`.trim();
-        const failed = { workerThreadId: row.thread_id, command, sha, exitCode: failure.code, outputPath: null as string | null, tail: output.slice(-1_500), issues: [] as string[] };
-        let artifactError: unknown;
-        for (let attempt = 0; attempt < 3 && !failed.outputPath; attempt += 1) {
+          let output: string | null = null;
+          let truncated = false;
           try {
-            failed.outputPath = await writeArtifact(row.thread_id, row.project_id, `gate-${Date.now()}.md`,
-              `# Pre-review gate failed\n\nCommand: \`${command}\`\nCommit: ${sha}\nExit: ${failure.code}\n\n\`\`\`\n${output}\n\`\`\`\n`);
-          } catch (error) { artifactError = error; }
+            const response = await bounded(() => bb.sdk.terminals.output({ terminalId: verify.terminalId, tailBytes: 1_000_000 }), enrichUntil - Date.now());
+            output = readTerminal(response);
+            truncated = response.truncated;
+            failed.tail = output.slice(-1_500);
+          } catch (error) {
+            failed.issues.push(`output unavailable (${clip(String(error), 200)}); there is no tail or output file`);
+          }
+          if (output !== null) {
+            let artifactError: unknown;
+            for (let attempt = 0; attempt < 3 && !failed.outputPath; attempt += 1) {
+              try {
+                failed.outputPath = await bounded(() => writeArtifact(row.thread_id, row.project_id, `gate-${Date.now()}.md`,
+                  `# Pre-review gate failed\n\nCommand: \`${command}\`\nCommit: ${sha}\nExit: ${verify.exitCode}\n${truncated ? "\nThe output was truncated to its last 1 MB.\n" : ""}\n\`\`\`\n${output}\n\`\`\`\n`), enrichUntil - Date.now());
+              } catch (error) { artifactError = error; }
+            }
+            if (!failed.outputPath) failed.issues.push(`full output not saved (${clip(String(artifactError), 200)}); the tail above is all that is available`);
+          }
+        } catch (error) {
+          failed.issues.push(`reading the output failed (${clip(String(error), 200)})`);
         }
-        if (!failed.outputPath) failed.issues.push(`full output not saved (${clip(String(artifactError), 200)}); the tail above is all that is available`);
         return { failed };
       })();
     } catch (error) {
-      result = { skipped: `${phase} failed (${clip(String(error), 200)})` };
+      result = latched ?? { skipped: `${phase} failed (${clip(String(error), 200)})` };
     }
-    let cleanup: string | null = null;
+    if (gateThreadId) {
+      const threadId = gateThreadId;
+      const release = releaseGate(threadId, terminalIds).catch((error) => String(error));
+      if ("failed" in result) {
+        // A known failure stays failed; trouble releasing the gate is added to it, within the gate's own deadline allowance.
+        const budget = Math.min(GATE_RELEASE_WAIT_MS, deadline + GATE_ENRICH_GRACE_MS + 400 - Date.now());
+        const trouble = await bounded(() => release, budget).catch(() => "it did not finish in time");
+        if (trouble) (result.failed.issues ??= []).push(`the gate thread ${threadId} was not removed (${clip(trouble, 200)}); the supervisor keeps retrying and alerts Chief if bb cannot remove it`);
+      }
+    }
+    return result;
+  }
+
+  /** The terminal's output as text: chunks joined, ANSI escapes and carriage returns removed. */
+  function readTerminal(response: { chunks: { dataBase64: string }[] }) {
+    return Buffer.concat(response.chunks.map((chunk) => Buffer.from(chunk.dataBase64, "base64"))).toString("utf8")
+      .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\r/g, "").trim();
+  }
+
+  /** Marks a gate thread deleted, or counts a failed attempt. Returns null when it is deleted, else why not. Never throws. */
+  async function deleteGateThread(threadId: string): Promise<string | null> {
     try {
-      if (dir) cleanup = await removeGateWorktree(projectDir, dir);
-      else if (raw) await rm(raw, { recursive: true, force: true });
+      await bounded(() => bb.sdk.threads.delete({ threadId, childThreadsConfirmed: false }), 30_000);
+      db.prepare(`UPDATE gate_threads SET thread_deleted=1 WHERE thread_id=?`).run(threadId);
+      return null;
     } catch (error) {
-      cleanup = `cleanup of ${dir ?? raw} failed (${clip(String(error), 200)})`;
+      if (MISSING.test(String(error))) { db.prepare(`UPDATE gate_threads SET thread_deleted=1 WHERE thread_id=?`).run(threadId); return null; }
+      db.prepare(`UPDATE gate_threads SET delete_attempts=delete_attempts+1 WHERE thread_id=?`).run(threadId);
+      return String(error);
     }
-    if (!cleanup) return result;
-    if ("failed" in result) return { failed: { ...result.failed, issues: [...(result.failed.issues ?? []), cleanup] } };
-    return { skipped: "skipped" in result ? `${result.skipped}; ${cleanup}` : cleanup };
+  }
+
+  /** Force-closes the gate's terminals, then deletes its thread: bb tears the worktree down after that. Resolves to null once the thread is deleted, else why not. */
+  async function releaseGate(threadId: string, terminalIds: string[]) {
+    await Promise.allSettled(terminalIds.map((terminalId) => bounded(() => bb.sdk.terminals.close({ terminalId, mode: "force" }), 10_000)));
+    return deleteGateThread(threadId);
+  }
+
+  /** Tells the worker's Chief once that bb could not finish with a gate thread or its worktree. Never recovers anything itself. */
+  function alertGate(gate: GateRow, detail: string) {
+    const worker = store.get(gate.worker_thread_id);
+    const message = `The pre-review gate thread ${gate.thread_id}${gate.environment_id ? ` (environment ${gate.environment_id})` : ""} for ${gate.worker_thread_id} was not cleaned up: ${detail}. Inspect it with \`bb environment show ${gate.environment_id ?? "<environment id>"}\` and recover by hand if needed; Chief never force-removes it.`;
+    if (worker?.chief_thread_id) {
+      // The kind (before the first colon) is per gate, so one gate's alert never evicts another's undelivered one. Delivery is
+      // not awaited: the outbox row is durable and retryAlerts re-sends it, so a stalled send cannot hold up the other rows.
+      const key = enqueueAlert(worker, `gate-teardown-${gate.thread_id}:cleanup`, message);
+      void deliverAlert(key).catch((error) => bb.log.warn(`Gate alert ${key} will be retried: ${String(error)}`));
+    } else bb.log.error(`${message} The worker has no Chief to notify.`);
+    db.prepare(`UPDATE gate_threads SET alerted=1 WHERE thread_id=?`).run(gate.thread_id);
+  }
+
+  /** One supervisor-tick pass over the gate threads: finish deleting each thread, then watch bb remove its environment.
+   * A row is dropped only once bb reports the environment gone; trouble reaches Chief once. One row's error never skips another. */
+  async function observeGateTeardown() {
+    for (const gate of db.prepare(`SELECT * FROM gate_threads`).all() as GateRow[]) {
+      try {
+        const age = Date.now() - gate.created_at;
+        if (!gate.thread_deleted) {
+          if (!gate.delete_attempts && age < GATE_ORPHAN_MS) continue; // a gate still running
+          await deleteGateThread(gate.thread_id);
+          const attempts = (db.prepare(`SELECT delete_attempts FROM gate_threads WHERE thread_id=?`).get(gate.thread_id) as { delete_attempts: number }).delete_attempts;
+          if (attempts >= GATE_DELETE_ATTEMPTS && !gate.alerted) alertGate(gate, `deleting the thread failed ${attempts} times`);
+          continue;
+        }
+        let environment: Awaited<ReturnType<typeof bb.sdk.environments.get>> | null = null;
+        let readError: unknown = null;
+        let environmentId = gate.environment_id;
+        let noEnvironment = false;
+        if (!environmentId) {
+          // The fork's environment may have been unknown when the row was written: ask bb which one the thread got.
+          try {
+            const thread = await bounded(() => bb.sdk.threads.get({ threadId: gate.thread_id }), 15_000);
+            environmentId = thread.environmentId ?? null;
+            if (environmentId) db.prepare(`UPDATE gate_threads SET environment_id=? WHERE thread_id=?`).run(environmentId, gate.thread_id);
+            // Only bb's own record of a long-deleted thread proves that none was allocated; a fresh one may still be provisioning.
+            else noEnvironment = age > GATE_ORPHAN_MS;
+          } catch (error) { readError = error; }
+        }
+        if (environmentId) {
+          try {
+            environment = await bounded(() => bb.sdk.environments.get({ environmentId: environmentId! }), 15_000);
+          } catch (error) {
+            if (!MISSING.test(String(error))) readError = error;
+          }
+        }
+        // Dropped only on affirmative evidence: no environment was allocated, bb has no record of it, or bb removed it.
+        if (!readError && (noEnvironment || (environmentId && (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed")))) {
+          db.prepare(`DELETE FROM gate_threads WHERE thread_id=?`).run(gate.thread_id);
+          continue;
+        }
+        if (gate.alerted) continue;
+        const teardown = environment?.lifecycle.teardown;
+        const trouble = readError || !environment ? (age > GATE_TEARDOWN_LIMIT_MS ? `the environment could not be ${readError ? `read (${clip(String(readError), 200)})` : "determined"}` : null)
+          : teardown?.message?.startsWith("Needs recovery:") ? teardown.message
+          : environment.hostLifecycle === "cleanup-failed" && teardown?.status !== "running" ? `bb reports cleanup-failed${teardown?.message ? `: ${teardown.message}` : ""}`
+          : age > GATE_TEARDOWN_LIMIT_MS ? `bb has not removed it after 60 minutes (${environment.lifecycle.phase}/${environment.hostLifecycle})`
+          : null;
+        if (trouble) alertGate(gate, trouble);
+      } catch (error) {
+        bb.log.warn(`Gate thread ${gate.thread_id} could not be checked this tick: ${String(error)}`);
+      }
+    }
   }
 
   /** Whether the previous reviewed head is an ancestor of the pinned head, from the project checkout; never throws. */
@@ -2333,33 +2521,6 @@ export default async function plugin(bb: BbPluginApi) {
     } finally {
       clearTimeout(timer);
     }
-  }
-
-  /** Bounded cleanup of a gate-owned worktree: unlock, force-remove, delete, prune, then confirm both registration
-   * and directory are gone. A command may lock or delete its own checkout, so none of these steps alone is proof.
-   * Returns null when both are confirmed gone, otherwise what is left and how to remove it. Never throws. */
-  async function removeGateWorktree(projectDir: string, dir: string): Promise<string | null> {
-    const git = (args: string[]) => execFileAsync("git", args, { cwd: projectDir, timeout: 30_000, env: forgeEnv() }).then((out) => out.stdout);
-    let lastState = "";
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (attempt) await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
-      try {
-        await git(["worktree", "unlock", dir]).catch(() => null);
-        await git(["worktree", "remove", "--force", "--force", dir]).catch(() => null);
-        let rmError = "";
-        await rm(dir, { recursive: true, force: true }).catch((error) => { rmError = `, rm: ${String(error)}`; });
-        await git(["worktree", "prune"]).catch(() => null);
-        const list = await git(["worktree", "list", "--porcelain"]).catch(() => null);
-        const registered = list === null ? "worktree list failed" : list.split("\n").includes(`worktree ${dir}`) ? "still registered" : null;
-        // Only ENOENT proves the directory is gone; any other error leaves its state unknown.
-        const present = await stat(dir).then(() => "directory present", (error) => (error as { code?: string })?.code === "ENOENT" ? null : `directory could not be checked (${String(error)})`);
-        if (!registered && !present) return null;
-        lastState = `${registered ?? "unregistered"}, ${present ?? "directory gone"}${rmError}`;
-      } catch (error) {
-        lastState = `cleanup attempt failed (${String(error)})`;
-      }
-    }
-    return `could not remove temporary worktree ${dir} in ${projectDir} after 3 attempts (${clip(lastState, 300)}); run \`git worktree unlock ${dir}; git worktree remove --force --force ${dir}; git worktree prune\` there`;
   }
 
   /** Which path a worker review took, for chief_review's reply. */
@@ -2505,6 +2666,8 @@ export default async function plugin(bb: BbPluginApi) {
     return db.transaction(() => writeAlert(row, key, message))();
   }
 
+  /** A delivery call that stalls longer than this fails like any other, so its in-flight entry clears and the outbox retries it. */
+  const ALERT_CALL_MS = 30_000;
   async function deliverAlert(key: string) {
     const existing = alertDeliveries.get(key);
     if (existing) return existing;
@@ -2516,12 +2679,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (alert.attempts > 0) {
         try {
           const text = clip(alert.message);
-          const queued = await bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id });
+          const queued = await bounded(() => bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id }), ALERT_CALL_MS);
           const alreadyQueued = queued.some((message) =>
             message.content.some((part) => part.type === "text" && part.text === text));
-          const alreadySent = alreadyQueued || (await bb.sdk.threads.events.list({
+          const alreadySent = alreadyQueued || (await bounded(() => bb.sdk.threads.events.list({
             threadId: alert.target_thread_id, types: ["item/completed"], order: "desc", limit: "50",
-          })).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
+          }), ALERT_CALL_MS)).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
             && event.data.item.content.some((part) => part.type === "text" && part.text === text));
           if (alreadySent) {
             db.prepare(`UPDATE alert_outbox SET delivered_at=?, attempts=attempts+1, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
@@ -2532,12 +2695,12 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       try {
-        await bb.sdk.threads.send({
+        await bounded(() => bb.sdk.threads.send({
           threadId: alert.target_thread_id,
           senderThreadId: alert.source_thread_id,
           mode: "queue-if-active",
           input: [{ type: "text", text: clip(alert.message), mentions: [] }],
-        });
+        }), ALERT_CALL_MS);
         db.prepare(`UPDATE alert_outbox SET delivered_at=?, attempts=attempts+1, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
         return true;
       } catch (error) {
@@ -3221,6 +3384,7 @@ export default async function plugin(bb: BbPluginApi) {
           // Replace terminal Chiefs and retarget their queued alerts before any
           // pending delivery is attempted.
           await retryAlerts();
+          await observeGateTeardown();
           void drainForge();
         } catch (error) {
           bb.log.warn(`Supervisor reconciliation failed: ${String(error)}`);
@@ -4068,7 +4232,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_review",
     presentation: { label: { pending: "Starting review…", completed: "Started review" } },
-    description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. A worker delegated with verifyCommand is gated first: the command runs in a temporary checkout of the commit under review, and a non-zero exit spawns no reviewer and returns the output instead (a gate that cannot run is skipped with the reason). With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
+    description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. A worker delegated with verifyCommand is gated first: the command runs in a bb-managed worktree checked out at the commit under review, and a non-zero exit spawns no reviewer and returns the output instead (a gate that cannot run is skipped with the reason). With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
     parameters: reviewParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

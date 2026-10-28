@@ -294,8 +294,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   clipMiddle: (value: string, limit: number) => string;
   /** Writes the reviewer's review-context.md; owns its retries and alerting Chief on final failure. */
   writeReviewContext: (threadId: string, content: string, workerThreadId: string) => Promise<void>;
-  /** Runs row.verify_command on the pinned sha (or the branch tip when null) in a temporary checkout. */
-  runGate: (row: Row, command: string, pinnedSha: string | null, projectDir: string | null) => Promise<GateResult>;
+  /** Runs row.verify_command in a bb-managed worktree forked from the worker, at the pinned sha (or the branch tip when null). */
+  runGate: (row: Row, command: string, head: PinnedHead | null, workerEnvironmentId: string | null) => Promise<GateResult>;
   /** Git-only file:line pointers outside the commit's diff; never blocks a review, a failure is `{ skipped }`. */
   impactSlice: (row: Row, head: PinnedHead | null, projectDir: string | null, maxEntries: number) => Promise<ImpactSlice>;
   /** Whether the previous reviewed head is an ancestor of the pinned head; never blocks a review, a failure is `{ skipped }`. */
@@ -381,7 +381,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         if (!target.verify_command) continue;
         let gate: GateResult;
         try {
-          gate = await deps.runGate(target, target.verify_command, heads.get(target.thread_id)?.sha ?? null, projectDir);
+          gate = await deps.runGate(target, target.verify_command, heads.get(target.thread_id) ?? null, lives.get(target.thread_id)?.environmentId ?? null);
         } catch (error) {
           gate = { skipped: `the gate failed unexpectedly (${clip(String(error), 200)})` };
         }
