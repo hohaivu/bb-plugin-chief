@@ -524,8 +524,9 @@ function NewChiefButton({ projectId }: { projectId: string; threadId: string; is
   const [isLaunching, setIsLaunching] = useState(false);
   const { projects } = experimental_useSidebarThreads();
 
-  // Hide only a known personal project (no repo for workers to branch from), so the button shows while the list loads.
-  if (projects.find((project) => project.id === projectId)?.isPersonal) return null;
+  // Render only once the project is known to be non-personal (a personal project has no repo for workers to branch from).
+  const project = projects.find((candidate) => candidate.id === projectId);
+  if (!project || project.isPersonal) return null;
 
   const launch = async () => {
     if (isLaunching) return;
