@@ -9,6 +9,7 @@ import {
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
+import { toast } from "sonner";
 import type { ModelConfiguration, ModelSelection, ResearchConfiguration, rpcContract, TodoItem } from "./server";
 
 const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
@@ -22,9 +23,10 @@ const ROLES = [
   { role: "advisor", label: "Advisor", hint: "Diagnoses work that keeps failing review." },
 ] as const;
 
-function Crown() {
+function Crown({ plus = false }: { plus?: boolean }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14">
+      {plus ? <path d="M20 1v6m-3-3h6" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" /> : null}
       <path
         d="m4 8 4 3 4-6 4 6 4-3-2 10H6L4 8Zm3 13h10"
         fill="none"
@@ -516,6 +518,43 @@ function ChiefHeaderBadge({
   );
 }
 
+function NewChiefButton({ projectId }: { projectId: string; threadId: string; isCompactViewport: boolean }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const [isLaunching, setIsLaunching] = useState(false);
+  const { projects } = experimental_useSidebarThreads();
+
+  // Hide only a known personal project (no repo for workers to branch from), so the button shows while the list loads.
+  if (projects.find((project) => project.id === projectId)?.isPersonal) return null;
+
+  const launch = async () => {
+    if (isLaunching) return;
+    setIsLaunching(true);
+    try {
+      const result = await rpc.call("create", { projectId });
+      navigate.toThread(result.threadId);
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      // The header stays mounted on the old thread in split panes, so never leave it disabled.
+      setIsLaunching(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      aria-label="New Chief"
+      title="New Chief"
+      disabled={isLaunching}
+      onClick={() => void launch()}
+      className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-state-hover hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+    >
+      <Crown plus />
+    </button>
+  );
+}
+
 /** Text with every thread id turned into a navigate button. */
 function Linked({ text }: { text: string }) {
   const navigate = useBbNavigate();
@@ -627,6 +666,11 @@ export default definePluginApp((app) => {
     id: "chief-role",
     title: "Chief role",
     component: ChiefHeaderBadge,
+  });
+  app.slots.experimental_threadHeaderAction({
+    id: "new-chief",
+    title: "New Chief",
+    component: NewChiefButton,
   });
   app.slots.threadPanelAction({
     id: "pending",
