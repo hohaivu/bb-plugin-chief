@@ -5341,6 +5341,25 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     expect(after).not.toContain("3/2");
   });
 
+  // Contract: equivalence. A plan with no waived wave counts exactly as before: done is the waves behind the current one, plus one once approved.
+  // Preservation: passes before the fix; the mutation control makes every final wave count as waived.
+  test("an unwaived plan's progress runs 0/2, 1/2, then 2/2 only once approved", async () => {
+    const state = await setupWithPlans();
+    const chief = await start(state);
+    const planner = await planOf(state, chief.threadId, [{ body: PLAN_FIXTURE }, { body: testWave(2), test: true }]);
+    expect(await roster(state, chief.threadId)).toContain("waves: 0/2 done, wave 1 not delegated");
+    const impl = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "1"]);
+    await call(state, "chief_report", { state: "ready", result: READY }, impl);
+    expect(await roster(state, chief.threadId)).toContain("waves: 0/2 done, wave 1 ready");
+    const tester = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "2", "--replaces", impl]);
+    await call(state, "chief_report", { state: "ready", result: READY }, tester);
+    expect(await roster(state, chief.threadId)).toContain("waves: 1/2 done, wave 2 ready");
+    await call(state, "chief_review", { workerThreadId: tester }, chief.threadId);
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await call(state, "chief_report", { state: "ready", result: "Looks right", verdict: "approve", findings: [] }, reviewer.threadId);
+    expect(await roster(state, chief.threadId)).toContain("waves: 2/2 done, wave 2 approved");
+  });
+
   // Contract: an undelegated waived wave counts done and stays in the total; the alert's M is the same total.
   // Regression: total dropped the absent wave (0/1), so the roster disagreed with "wave N of M".
   test("a test wave waived before delegation counts done and stays in the total", async () => {
@@ -5372,6 +5391,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     const impl1 = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "1"]);
     await call(state, "chief_report", { state: "ready", result: READY }, impl1);
     const tester = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "2", "--replaces", impl1]);
+    expect(state.spawned.at(-1).prompt).toContain("Wave 2 of 4");
     await call(state, "chief_report", { state: "ready", result: READY }, tester);
     await skip(state, chief.threadId, planner.threadId, 2, "First chain waived after delegation");
     const text = await roster(state, chief.threadId);
@@ -5446,4 +5466,116 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
       expect(text).not.toContain("authorized omissions");
     }
   });
+
+  const pushRules = (prompt: string, branch: string) => {
+    expect(prompt).toContain(`Your worktree is based on ${branch}. `);
+    expect(prompt).toContain(`git push origin HEAD:${branch}`);
+    expect(prompt).toContain("Never push any other branch");
+    expect(prompt).toContain(`git fetch origin ${branch}`);
+    expect(prompt).toContain("never force-push");
+    expect(prompt).toContain("Do not create, merge, or mark ready any pull request");
+  };
+
+  // Contract (todo #743): every brief with a branch names the exact push refspec, so a worktree on its own bb/ branch still moves the named branch.
+  // Regression: the brief said only "Check that branch out", and a tester pushed its bb/ branch instead.
+  test.each([
+    ["a fresh worker", "worker"],
+    ["a fresh designer", "designer"],
+  ])("%s with a branch gets the push refspec", async (_label, kind) => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId, "Fix totals", { branch: "feature/x", kind });
+    pushRules(state.spawned.at(-1).prompt, "feature/x");
+    expect(state.spawned.at(-1).environment.workspace.baseBranch).toEqual({ kind: "named", name: "feature/x" });
+  });
+
+  test("a tester on a new branch after the tested wave's PR merged gets the push refspec", async () => {
+    const state = await setupWithPlans();
+    const chief = await start(state);
+    const planner = await planOf(state, chief.threadId, [{ body: PLAN_FIXTURE }, { body: testWave(2), test: true }]);
+    const impl = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "1", "--branch", "feature/x"]);
+    await call(state, "chief_report", { state: "ready", result: READY }, impl);
+    await call(state, "chief_complete", { threadId: impl, skipReview: "Merged; tests follow on the same branch name" }, chief.threadId);
+    await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "2", "--kind", "tester", "--branch", "feature/x"]);
+    const spawn = state.spawned.at(-1);
+    expect(spawn.environment.workspace).toMatchObject({ type: "managed-worktree", baseBranch: { kind: "named", name: "feature/x" } });
+    expect(spawn.prompt).toContain("## Test work");
+    pushRules(spawn.prompt, "feature/x");
+  });
+
+  test.each([
+    ["a worker", undefined],
+    ["a tester", "tester"],
+  ])("a replaces: successor %s inherits the branch and the push refspec", async (_label, kind) => {
+    const state = await setup();
+    const chief = await start(state);
+    const first = await delegate(state, chief.threadId, "Fix totals", { branch: "feature/x" });
+    await delegate(state, chief.threadId, "Next", { replaces: first.threadId, ...(kind ? { kind } : {}) });
+    pushRules(state.spawned.at(-1).prompt, "feature/x");
+  });
+
+  // Preservation: a brief with no branch has no push-target line; the mutation control makes the line unconditional.
+  test("a brief with no branch has no push-target line", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    expect(state.spawned.at(-1).prompt).not.toContain("git push origin HEAD:");
+    expect(state.spawned.at(-1).prompt).not.toContain("Never push any other branch");
+  });
+
+  const RUNS_TESTS = "not run: runs tests (a tester's)";
+  const FULL_SUITE = "not run: full suite not asked for";
+  const withVerify = async (state: State, chiefId: string, command: string, extra: string[]) => {
+    const result = await state.harness.behavior.runCli(["delegate", "--title", "Check", "--mission", "Do it", "--verify", command, ...extra, "--json"], { threadId: chiefId, ...P });
+    expect(result.exitCode, result.stderr).toBe(0);
+    return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
+  };
+  const verifyBlock = (prompt: string, command: string) => expect(prompt).toContain(`## Verify command\n\`\`\`sh\n${command}\n\`\`\`\n`);
+
+  // Contract: a test-running verifyCommand is accepted and only flagged in the brief, per role (a worker or designer must not run it; a tester must not run the full suite).
+  // Preservation: the mutation control drops each instruction line.
+  test.each([
+    ["worker", ["--kind", "worker"], RUNS_TESTS, FULL_SUITE],
+    ["designer", ["--kind", "designer"], RUNS_TESTS, FULL_SUITE],
+  ])("a %s with a test-running verifyCommand is accepted and told not to run it", async (_role, extra, present, absent) => {
+    const state = await setup();
+    const chief = await start(state);
+    await withVerify(state, chief.threadId, "npx vitest run", [...extra, "--unplanned-reason", "Bounded test fixture"]);
+    const prompt: string = state.spawned.at(-1).prompt;
+    verifyBlock(prompt, "npx vitest run");
+    expect(prompt).toContain(present);
+    expect(prompt).not.toContain(absent);
+  });
+
+  test.each([
+    ["a filtered command", 'npx vitest run server.test.ts -t "totals"'],
+    ["an unfiltered full-suite command", "npm test"],
+  ])("a tester with %s gets the full-suite rule, not the worker's runs-tests line", async (_label, command) => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix totals");
+    await withVerify(state, chief.threadId, command, ["--replaces", worker.threadId, "--kind", "tester"]);
+    const prompt: string = state.spawned.at(-1).prompt;
+    verifyBlock(prompt, command);
+    expect(prompt).toContain(FULL_SUITE);
+    expect(prompt).not.toContain(RUNS_TESTS);
+  });
+
+  test("replaces: inherits the verifyCommand and the successor's own role decides the instruction", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await withVerify(state, chief.threadId, "npm run build", ["--unplanned-reason", "Bounded test fixture"]);
+    // A tester replacing a worker inherits the worker's build command.
+    const tester = await delegate(state, chief.threadId, "Test it", { replaces: worker, kind: "tester" });
+    verifyBlock(state.spawned.at(-1).prompt, "npm run build");
+    expect(state.spawned.at(-1).prompt).toContain(FULL_SUITE);
+    // A worker replacing a tester inherits the tester's test command and must not run it.
+    const tests = await withVerify(state, chief.threadId, "npx vitest run", ["--replaces", tester.threadId, "--kind", "tester"]);
+    await delegate(state, chief.threadId, "Fix product", { replaces: tests, kind: "worker" });
+    const prompt: string = state.spawned.at(-1).prompt;
+    verifyBlock(prompt, "npx vitest run");
+    expect(prompt).toContain(RUNS_TESTS);
+    expect(prompt).not.toContain(FULL_SUITE);
+  });
 });
+
