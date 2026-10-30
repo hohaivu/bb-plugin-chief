@@ -5863,27 +5863,80 @@ describe("tester role", () => {
     const chief = await start(state);
     const planner = await plan(state, chief.threadId, [planWave(1), TEST_WAVE(2), planWave(3, { dependsOn: [] }), TEST_WAVE(4, [3])]);
     await approvePlan(state, chief.threadId, planner.threadId);
-    const handOff = async (waveNo: number, extra: object) => {
+    // A result past the alert's summary limit is written to a report file; the others have only the inspect line.
+    const LONG = `${READY}\n${"Lint and build clean. ".repeat(60)}`;
+    const handOff = async (waveNo: number, extra: object, result = READY) => {
       await delegateWave(state, chief.threadId, planner.threadId, waveNo, extra);
       const row = workerOn(state, planner.threadId, waveNo);
-      await readyIdle(state, row.thread_id);
+      await readyIdle(state, row.thread_id, result);
       return row.thread_id as string;
     };
-    const w1 = await handOff(1, { branch: "feature/a" });
+    const w1 = await handOff(1, { branch: "feature/a" }, LONG);
     const w3 = await handOff(3, { branch: "feature/b" });
-    const t2 = await handOff(2, { replaces: w1 });
-    const fix = await handOff(2, { replaces: t2, kind: "worker" });
+    const t2 = await handOff(2, { replaces: w1 }, LONG);
+    const fix = await handOff(2, { replaces: t2, kind: "worker" }, LONG);
     const t2b = await handOff(2, { replaces: fix, kind: "tester" });
     const t4 = await handOff(4, { replaces: w3 });
 
     await tool(state, "chief_review", { workerThreadId: t2b }, chief.threadId);
     const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
     const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
-    // The fake host writes no report file, so each pointer is the bare inspect line.
-    const pointer = (kind: string, id: string) => `- ${kind} ${id}: bb chief inspect ${id}`;
+    const pointer = (kind: string, id: string) => {
+      const file = rowOf(state, id).report_path as string | null;
+      return `- ${kind} ${id}: ${file ? `Full report: ${file}; ` : ""}bb chief inspect ${id}`;
+    };
+    for (const id of [w1, t2, fix]) expect(rowOf(state, id).report_path).toBe(join(state.storageRoot, "chief", "proj_1", id, "report-1.md"));
+    for (const id of [w3]) expect(rowOf(state, id).report_path).toBeNull();
     const section = (id: string) => context.split(`### Before worker ${id}\n`)[1]!.split(/\n###? /)[0]!;
     expect(section(t2b).trim().split("\n")).toEqual([pointer("worker", fix), pointer("tester", t2), pointer("worker", w1)]);
     expect(section(t4).trim().split("\n")).toEqual([pointer("worker", w3)]);
     expect(state.spawned.at(-1).prompt).toContain("A tester changes only tests, fixtures, test helpers and test config: check its commits since the Base commit its report names (git diff <base>..<head> --stat); a product-code change there is scope drift.");
+  });
+
+  // Contract (testing policy at the brief boundary): a worker's and a designer's spawn prompt forbids writing or running
+  // tests; a tester's replaces that with the test-work section and the test-files-only limit; a reviewer is told a missing
+  // test is never a finding against a worker or designer. Regression: a worker is briefed to test (or a tester is told
+  // not to), so test work lands in product commits.
+  test.each<[string, (previous: string) => object, boolean]>([
+    ["worker", () => ({}), false],
+    ["designer", () => ({ kind: "designer" }), false],
+    ["tester", (previous) => ({ kind: "tester", replaces: previous }), true],
+  ])("a %s's spawn prompt states the testing policy", async (_label, extra, tests) => {
+    const state = await setup();
+    const chief = await start(state);
+    const first = await delegate(state, chief.threadId, "Fix totals");
+    await readyIdle(state, first.threadId, "Done");
+    const worker = await delegate(state, chief.threadId, "Policy", extra(first.threadId));
+    const prompt = state.spawned.at(-1).prompt as string;
+    expect(prompt.includes("Never write, edit or run tests of any kind (unit, integration, end-to-end, screenshot or golden); a tester does.")).toBe(!tests);
+    expect(prompt.includes("## Test work")).toBe(tests);
+    expect(prompt.includes("Change only test files, fixtures, test helpers and test config; never product code.")).toBe(tests);
+    await readyIdle(state, worker.threadId, "Done");
+    await tool(state, "chief_review", { workerThreadId: worker.threadId }, chief.threadId);
+    expect(state.spawned.at(-1).prompt).toContain("A missing test or test run is never a finding against a worker or designer: workers never test. Against a tester's work it is missing verification evidence.");
+  });
+
+  // Contract (provenance, single target): a review of one tester shows the earlier worker's recorded commands under its
+  // report pointer, failures first, so the reviewer sees the implementer's lint/build evidence without opening the report.
+  // Regression: a single-target review lists the pointer only (no commands) or drops the predecessor's commands.
+  test("a single review of a tester shows the earlier worker's recorded commands under its pointer", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const command = (text: string, exitCode: number) => ({ type: "item/completed", seq: 1, data: { item: { type: "commandExecution", command: text, exitCode, status: exitCode ? "failed" : "completed" } } });
+    state.seedEvents(worker.threadId, [command("npm run build", 0), command("npm run lint", 1)]);
+    await readyIdle(state, worker.threadId, `Done\n${"Lint and build clean. ".repeat(60)}`);
+    const tester = await delegate(state, chief.threadId, "Tests", { kind: "tester", replaces: worker.threadId });
+    await readyIdle(state, tester.threadId, "Tested");
+    await tool(state, "chief_review", { workerThreadId: tester.threadId }, chief.threadId);
+    const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
+    const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+    expect(context).toContain([
+      "## Earlier workers on this branch",
+      `- worker ${worker.threadId}: Full report: ${rowOf(state, worker.threadId).report_path}; bb chief inspect ${worker.threadId}`,
+      "  Recorded (last 2 commands): 1 non-zero exit",
+      "    npm run lint → exit 1",
+      "    npm run build → exit 0",
+    ].join("\n"));
   });
 });
