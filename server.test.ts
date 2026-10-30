@@ -5593,7 +5593,8 @@ describe("tester role", () => {
     expect(workerOn(state, planner.threadId, 2)).toMatchObject({ kind: "tester", plan_wave: 2 });
   });
 
-  // Contract (equivalence): a persisted plan with no test fields behaves as before test waves existed — wave 2 is an
+  // Contract (equivalence, server wiring only): legacyWaveGraph.test.ts owns graph/progress equivalence against bf73de5.
+  // Here a persisted plan with no test fields behaves as before test waves existed — wave 2 is an
   // ordinary worker (no kind), the ready step offers no tester or waiver, and finishing the last wave absorbs the planner
   // with no testsSkipped. Regression: a missing `test` reads as an untested chain, so a tester is demanded or the
   // planner is never absorbed. No other test starts from a legacy plan.
