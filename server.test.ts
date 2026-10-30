@@ -11,6 +11,7 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import plugin, { MIGRATIONS, RESEARCH_SCRIPTS } from "./server";
 import { checkPlan } from "./reportIntake";
+import { reviewBrief, type ReviewBriefInput } from "./reviewStart";
 import { managedSkills } from "./roles";
 import type { TodoItem } from "./server";
 
@@ -5519,7 +5520,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
   });
 
   // Contract: with no waived wave the reviewer's prompt and context carry no waiver text and keep every wave's contracts in order.
-  // Preservation: passes before the fix; the mutation control drops the waiverLines guard.
+  // Preservation: passes before the fix; the mutation control drops the waiverLines guard and fails the byte comparison.
   test("a plan with no waived wave gets every contract and no waiver text", async () => {
     const state = await setupWithPlans();
     const chief = await start(state);
@@ -5534,6 +5535,31 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
       expect(text).not.toContain("Chief waived");
       expect(text).not.toContain("authorized omissions");
     }
+    // Byte equivalence: the files were captured from chief_review at the pre-fix oracle (8f7e4d6) on these same inputs.
+    const portable = (text: string) => text.replaceAll(state.storageRoot, "<storage>");
+    await expect(portable(prompt)).toMatchFileSnapshot("./__snapshots__/review-no-waiver.prompt.txt");
+    await expect(portable(context)).toMatchFileSnapshot("./__snapshots__/review-no-waiver.context.txt");
+  });
+
+  // Contract: reviewBrief without waiverLines (an older caller) renders what it rendered before, and an empty list changes nothing.
+  // The snapshot files were captured at the pre-fix oracle; the mutation control drops the waiverLines guard.
+  test("reviewBrief without waiverLines renders the pre-waiver prompt and context", async () => {
+    const target = { threadId: "thr_w", title: "Fix totals", prUrl: "https://github.com/acme/shop/pull/8", branch: "feature/x", reportSeq: 1, hasResult: true, reportPath: "/r/report-1.md",
+      head: { branch: "feature/x", sha: "abc123", base: "main" } };
+    const input: ReviewBriefInput = {
+      worker: { ...target, kind: null, brief: null, reported: "Done" },
+      targets: [target],
+      wavePaths: ["/p/plan-1.md", "/p/plan-2.md"],
+      chain: [1, 2],
+      contractLines: ["Wave 1 of 2:", "- Totals stay non-negative", "Wave 2 of 2:", "- Suite stays green"],
+      recordedLines: ["npm test → exit 0"],
+      previous: null,
+      chiefThreadId: "thr_c",
+    };
+    const omitted = reviewBrief(input);
+    expect(reviewBrief({ ...input, waiverLines: [] })).toEqual(omitted);
+    await expect(omitted.prompt).toMatchFileSnapshot("./__snapshots__/review-brief-no-waiverlines.prompt.txt");
+    await expect(omitted.context).toMatchFileSnapshot("./__snapshots__/review-brief-no-waiverlines.context.txt");
   });
 
   const pushRules = (prompt: string, branch: string) => {

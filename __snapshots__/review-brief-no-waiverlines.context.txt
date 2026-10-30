@@ -1,0 +1,10 @@
+## Recorded commands (from the worker's event log)
+npm test → exit 0
+
+## The worker's report file
+Full report: /r/report-1.md
+Full report and last output: bb chief inspect thr_w
+
+## Plan: this branch carries waves 1, 2 of 2
+Wave 1 of 2: /p/plan-1.md
+Wave 2 of 2: /p/plan-2.md
