@@ -11,14 +11,14 @@ export type WorkerKind = z.infer<typeof workerKindSchema>;
 /** The role key chief_models stores a per-machine model pick under: the lifecycle roles plus
  * `designer` (a worker kind, not a thread role). Explicit, not derived from roleSchema: the researcher's
  * model is the mode's research pick, and chief_models' CHECK would refuse it. */
-export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer"]);
+export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "tester"]);
 export type ModelRole = z.infer<typeof modelRoleSchema>;
 
 export const researchRoleSchema = z.enum(["chief", "planner", "researcher"]);
 export type ResearchRole = z.infer<typeof researchRoleSchema>;
 
-/** A model role with no pick of its own reads another role's pick: no Designer row inherits the Worker pick. */
-export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker" };
+/** A model role with no pick of its own reads another role's pick: no Designer or Tester row inherits the Worker pick. */
+export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker", tester: "worker" };
 
 /** The role skill each managed role loads next to the shared chief-worker core. */
 export const ROLE_SKILLS: Record<Exclude<Role, "chief">, string[]> = {
@@ -56,4 +56,4 @@ export const CONTINUE_REMINDERS: Partial<Record<Role, string>> = {
 // A new role needs a NEW appended migration (never an edit to an existing one) that rebuilds both tables whose
 // role list is a CHECK constraint in MIGRATIONS (server.ts):
 //   - managed_threads: the latest rebuild is managed_threads_v4 (role IN chief, planner, worker, reviewer, advisor, researcher).
-//   - chief_models: the latest rebuild is chief_models_v6 (role IN chief, planner, worker, reviewer, advisor, designer).
+//   - chief_models: the latest rebuild is chief_models_v7 (role IN chief, planner, worker, reviewer, advisor, designer, tester).

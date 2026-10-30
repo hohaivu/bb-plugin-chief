@@ -227,6 +227,7 @@ const modelConfigurationSchema = z.object({
       planner: modelSelectionSchema.nullable(),
       worker: modelSelectionSchema.nullable(),
       designer: modelSelectionSchema.nullable(),
+      tester: modelSelectionSchema.nullable(),
       reviewer: modelSelectionSchema.nullable(),
       advisor: modelSelectionSchema.nullable(),
     }),
@@ -1049,6 +1050,11 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN review_skipped TEXT`,
     // Worker row only: Chief's reason for completing unplanned work with no tester (chief_complete testsSkipped); NULL otherwise.
     `ALTER TABLE managed_threads ADD COLUMN tests_skipped TEXT`,
+    // A Tester model pick; no row inherits the Worker pick.
+    `CREATE TABLE chief_models_v7 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','designer','tester')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
+    `INSERT INTO chief_models_v7 SELECT * FROM chief_models`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_v7 RENAME TO chief_models`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1455,7 +1461,7 @@ export default async function plugin(bb: BbPluginApi) {
     const fallback = MODEL_FALLBACK[role];
     const selection = hostId === null
       ? null
-      // No Designer row inherits the Worker pick; a stored but unservable one goes to BB default.
+      // No Designer or Tester row inherits the Worker pick; a stored but unservable one goes to BB default.
       : readRoleModel(hostId, role) ?? (fallback ? readRoleModel(hostId, fallback) : null);
     if (!hostId || !selection) return {};
     return (await usableSelection(hostId, selection)) ?? {};
@@ -1900,12 +1906,15 @@ export default async function plugin(bb: BbPluginApi) {
       if (designWave && params.kind === undefined) kind = "designer";
       const parent = parentOf(waves, wave);
       if (parent !== null && waves[parent - 1]?.design) implementsDesign = parent;
+      // A tester may start fresh on its own branch once the tested wave's worker is complete (its PR merged, its branch gone).
+      const testedWorker = waveWorkers(planThreadId, parent ?? wave).at(-1);
+      const afterMerge = !prior && kind === "tester" && !!params.branch && testedWorker?.state === "complete";
       if (scheduled.absent) throw new Error(`Wave ${wave}'s tests were skipped (${scheduled.testsSkipped}); nothing to delegate.`);
       if (scheduled.test) {
         // A test wave continues its parent's branch: its first hand-off replaces the parent wave's worker.
         const onPlan = prior?.plan_thread_id === planThreadId;
         const sameWave = onPlan && prior!.plan_wave === wave;
-        if (!onPlan || !(sameWave || prior!.plan_wave === parent)) {
+        if (!afterMerge && (!onPlan || !(sameWave || prior!.plan_wave === parent))) {
           const parentWorker = parent !== null ? waveWorkers(planThreadId, parent).at(-1) : undefined;
           throw new Error(`Wave ${wave} is a test wave: it runs on wave ${parent}'s branch. Delegate it as chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${parentWorker?.thread_id ?? `<wave ${parent}'s latest worker>`}, kind: tester).`);
         }
@@ -1917,8 +1926,8 @@ export default async function plugin(bb: BbPluginApi) {
         if (kind === "worker" && !sameWave) throw new Error(`Wave ${wave} is a test wave: its first hand-off is kind: tester. kind: worker only replaces a worker on wave ${wave}, to fix product code.`);
       } else if (kind === "tester" && waves.some((other) => other.test)) {
         throw new Error(`Wave ${wave} is not a test wave: a tester runs only this plan's test waves (${waves.flatMap((other, index) => other.test ? [index + 1] : []).join(", ")}).`);
-      } else if (kind === "tester" && !prior) {
-        throw new Error("kind: tester on a plan with no test wave needs replaces: of the worker whose branch it tests.");
+      } else if (kind === "tester" && !prior && !afterMerge) {
+        throw new Error("kind: tester on a plan with no test wave needs replaces: of the worker whose branch it tests, or a new branch once that worker is complete.");
       }
       if (kind === "tester") {
         for (const n of chainOf(waves, wave)) {
@@ -1955,7 +1964,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
     // shortcut: a tester spawns on the Worker pick; a tester pick needs a chief_models rebuild and an app.tsx row, upgrade when the owner asks.
-    const prepared = await managedSpawn.prepare(projectId, { role: kind === "tester" ? "worker" : kind, hostId });
+    const prepared = await managedSpawn.prepare(projectId, { role: kind, hostId });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
     // hands the fresh worker the review that prompted the handoff.
@@ -4651,6 +4660,7 @@ export default async function plugin(bb: BbPluginApi) {
           planner: readRoleModel(host.id, "planner"),
           worker: readRoleModel(host.id, "worker"),
           designer: readRoleModel(host.id, "designer"),
+          tester: readRoleModel(host.id, "tester"),
           reviewer: readRoleModel(host.id, "reviewer"),
           advisor: readRoleModel(host.id, "advisor"),
         };

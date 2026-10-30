@@ -1691,6 +1691,29 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).input[0].text).not.toContain("Before starting another worker round");
   });
 
+  test("tester model: a kind tester spawn uses the Tester pick when set, else the Worker pick", async () => {
+    const state = await setup();
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "worker", selection: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" },
+    });
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const unset = await delegate(state, chief.threadId, "Test unset", { kind: "tester", replaces: worker.threadId });
+    expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
+
+    await state.harness.behavior.callRpc("setRoleModel", {
+      hostId: "host_1", role: "tester", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
+    });
+    await delegate(state, chief.threadId, "Test set", { kind: "tester", replaces: unset.threadId });
+    expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-astra" });
+    // The Tester pick is not the Worker pick: a plain worker stays on the Worker model.
+    await delegate(state, chief.threadId, "Plain work");
+    expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
+
+    const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
+    expect(configuration.hosts[0]!.selections.tester).toMatchObject({ providerId: "codex", model: "gpt-6-astra" });
+  });
+
   describe("designer kind", () => {
     const opts = (chiefThreadId: string) => ({ threadId: chiefThreadId, projectId: "proj_1" });
     const rowOf = (state: any, threadId: string) => state.db.prepare("SELECT role, kind FROM managed_threads WHERE thread_id=?").get(threadId);
@@ -4269,6 +4292,25 @@ describe("Chief backend", () => {
     expect(db.prepare(`SELECT host_id, role, provider_id, model, reasoning_level FROM chief_models ORDER BY host_id, role`).all())
       .toEqual([{ host_id: "host_1", role: "worker", provider_id: "codex", model: "gpt-6-astra", reasoning_level: "high" }]);
     expect(() => insert.run("host_1", "junior", "codex", "gpt-6-mini", "low", 4)).toThrow();
+  });
+
+  test("chief_models_v7 migration keeps every model row and accepts a tester pick", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-tester" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    bb.storage.migrate(db, MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("chief_models_v7"))));
+    const insert = db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    expect(() => insert.run("host_1", "tester", "codex", "gpt-6-mini", "low", 0)).toThrow();
+    const roles = ["chief", "planner", "worker", "reviewer", "advisor", "designer"];
+    roles.forEach((role, i) => insert.run("host_1", role, "codex", `model-${role}`, "high", i + 1));
+    insert.run("host_2", "worker", "claude-code", "claude-opus-5", "medium", 99);
+    const before = db.prepare(`SELECT * FROM chief_models ORDER BY host_id, role`).all();
+
+    bb.storage.migrate(db, MIGRATIONS);
+
+    expect(db.prepare(`SELECT * FROM chief_models ORDER BY host_id, role`).all()).toEqual(before);
+    expect(() => insert.run("host_1", "tester", "codex", "gpt-6-mini", "low", 100)).not.toThrow();
+    expect(() => insert.run("host_1", "junior", "codex", "gpt-6-mini", "low", 101)).toThrow();
   });
 
   test("explains a machine with no signed-in provider instead of offering a model", async () => {
