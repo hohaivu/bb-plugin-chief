@@ -4040,7 +4040,7 @@ describe("Chief backend", () => {
     const w1 = await delegateWave(1, "feature/a");
     const w2 = await delegateWave(2, "feature/b");
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain("waves: 0/2 done, wave 1 starting, wave 2 starting");
+    expect(roster).toContain("waves: 2/4 done, wave 1 starting, wave 2 starting");
     expect(roster).toContain(`: ${path2} (independent)`);
     expect(state.spawned.at(-1).prompt).toContain("This wave is independent");
 
@@ -4151,7 +4151,7 @@ describe("Chief backend", () => {
       "--plan-thread", planner.threadId, "--wave", "1", "--json",
     ], opts)).stdout!) as { threadId: string };
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain("waves: 0/3 done, wave 1 starting");
+    expect(roster).toContain("waves: 1/4 done, wave 1 starting");
 
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: `Wave 1 of 3 done${NO_DEVIATIONS}`,
@@ -4161,7 +4161,7 @@ describe("Chief backend", () => {
       "--plan-thread", planner.threadId, "--wave", "2", "--replaces", w1.threadId, "--json",
     ], opts)).stdout!) as { threadId: string };
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain("waves: 1/3 done, wave 2 starting");
+    expect(roster).toContain("waves: 2/4 done, wave 2 starting");
 
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: `Wave 2 of 3 done${NO_DEVIATIONS}`,
@@ -4171,24 +4171,24 @@ describe("Chief backend", () => {
       "--plan-thread", planner.threadId, "--wave", "3", "--replaces", w2.threadId, "--json",
     ], opts)).stdout!) as { threadId: string };
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain("waves: 2/3 done, wave 3 starting");
+    expect(roster).toContain("waves: 3/4 done, wave 3 starting");
 
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: `Wave 3 of 3 done${NO_DEVIATIONS}`,
     }, { threadId: w3.threadId, projectId: "proj_1" });
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain("waves: 2/3 done, wave 3 ready");
+    expect(roster).toContain("waves: 3/4 done, wave 3 ready");
 
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: w3.threadId }, opts);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain("waves: 2/3 done, wave 3 in review");
+    expect(roster).toContain("waves: 3/4 done, wave 3 in review");
 
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Looks correct", verdict: "approve", findings: [],
     }, { threadId: reviewer.threadId, projectId: "proj_1" });
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain("waves: 3/3 done, wave 3 approved");
+    expect(roster).toContain("waves: 4/4 done, wave 3 approved");
   });
 
   test("tells the worker the forge is Chief's even when only a pull request was created", async () => {
@@ -5743,7 +5743,7 @@ describe("tester role", () => {
   });
 
   // Contract (absent waiver): chief_skip_tests on an undelegated test wave drops it from the graph, so the parent's
-  // worker is the chain tip, the wave is not counted, delegating it is refused naming the reason, and completing the
+  // worker is the chain tip, the wave counts done but leaves the graph, delegating it is refused naming the reason, and completing the
   // parent absorbs the planner. Regression: the skipped wave stays pending (progress 0/2, planner never absorbed).
   // No existing test knows test waves or the waiver.
   test("chief_skip_tests on an undelegated test wave makes the implementation worker the chain tip", async () => {
