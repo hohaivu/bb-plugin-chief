@@ -14,7 +14,7 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 2. Talk to `Chief · <project name>` in the normal thread UI.
 3. Planning is on by default: Chief plans first, then forges, then delegates wave 1. For planned work, Chief sends it to a read-only planner first, which splits it into waves; the plugin persists the schedule and its ready alert names the exact next delegation, so Chief relays it without reading any plan file. `chief_delegate` refuses an unplanned call unless it carries `unplannedReason`: Chief's reason for skipping the plan.
 4. Chief owns the forge: `chief_forge_init` builds one script that opens a tracking issue, creates the task branch `feature/<slug>` with an empty starting commit without moving Chief's checkout, and opens a draft pull request from that branch into the base. The server runs it in the project checkout and hands Chief the `CHIEF_FORGE branch=… issue_url=… pr_url=…` values; when that cannot finish (no local checkout, no `gh`/`glab` on the server's PATH, an error), the tool returns the script and Chief runs it instead. Every forge step is best-effort — a missing or unauthenticated CLI, or a repository with issues disabled, is skipped and reported, never a reason to hold up the work.
-5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. When the agent decides or implements how the UI looks — editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code, or building UI with no approved design or explicit visual spec — it passes `kind: "designer"`. A worker is only for UI whose look an approved design or an explicit spec already fixes. A Designer's brief adds design rules for its mode: load the tool's guide; verify with tool screenshots and call its finish call (design tool), or compare a golden/simulator PNG with the artboard (design in code). Its reviewer checks the screenshots against the artboard. The worker commits and pushes there and never touches the pull request; `chief_complete` marks it ready for review once the work is verified and reviewed, or with `skipReview` when Chief judges a review unnecessary. A plan splits a task that mixes such UI with non-UI code into a design-only wave (a Designer draws; the owner approves the artboards) and an implementation wave run by a worker.
+5. Chief delegates clearly titled work to a worker whose managed worktree is based on that task branch. When the agent decides or implements how the UI looks — editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code, or building UI with no approved design or explicit visual spec — it passes `kind: "designer"`. A worker is only for UI whose look an approved design or an explicit spec already fixes. A Designer's brief adds design rules for its mode: load the tool's guide; verify with tool screenshots and call its finish call (design tool), or compare a golden/simulator PNG with the artboard (design in code). Its reviewer checks the screenshots against the artboard. The worker commits and pushes there and never touches the pull request; `chief_complete` marks it ready for review once the work is verified and reviewed, or with `skipReview` when Chief judges a review unnecessary. A plan splits a task that mixes such UI with non-UI code into a design-only wave (a Designer draws; the owner approves the artboards) and an implementation wave run by a worker. Workers and designers never write or run tests: every plan ends in a test wave, run by a fresh `kind: "tester"` worker (`chief-role-tester`) that writes and runs the tests for the waves it builds on. Chief waives a test wave with `chief_skip_tests` (reason), and unplanned work with `chief_complete` `testsSkipped`.
    **Forge comments.** Chief also writes a short record where people look: on the task's pull request (its tracking issue when it has none) it comments each review verdict, a blocked worker and the completed result, and `chief_escalate` posts a **Need you** request with an @mention of the owner (the `forgeOwnerHandle` setting, else the `gh`/`glab` login). A plan has one shared tracking issue; every wave's pull request tracks it, and the plan's issue URL is kept on the planner row. Comments go through a `forge_comments` outbox in the plugin database: queued before anything is posted, posted in the background (never on a tool call's path), retried on the supervisor tick up to 5 times, and each carries a hidden marker so a retry after a crash never posts twice. Text is stripped of local paths, thread ids, `bb` commands and live @mentions first. A failure never blocks the work: the local record is written regardless, a missing CLI is skipped quietly, and a comment that still fails after 5 tries alerts Chief once. Agents never read these comments; the worker brief and reviewer prompt say so.
 6. Workers report `ready` evidence or a `blocked` state with a blocker and recommendation. Only Chief can mark work `complete`.
 7. Lifecycle events alert the correct project Chief when a managed thread reports, hits a transient provider failure, or appears stalled — with its last output and the next steps (idle, archived and deleted threads only update the roster and send no alert); at twice `stallMinutes` the alert tells Chief to stop it with `chief_stop`. Alerts use a durable SQLite outbox and retry after transient delivery failures.
@@ -27,7 +27,7 @@ The plugin never treats a generic SDK error as proof that a thread was deleted. 
 
 Put `chief.md` at the project root. Chief reads it through BB's project file API and periodically refreshes its cache. Missing, empty, or unreadable files use conservative built-in rules. Chief's core rules (`CHIEF_CORE_RULES` in server.ts) are always appended to Chief's rules, so `chief.md` cannot drop them.
 
-Every managed thread loads the shared `chief-worker` skill (brief, scope, `chief_report`, the report contract reviewers check) plus its role's skill: `chief-role-worker` (workers; designers also get `chief-role-designer`), `chief-role-reviewer`, or `chief-role-read-only` (planners and advisors); researchers get the core only.
+Every managed thread loads the shared `chief-worker` skill (brief, scope, `chief_report`, the report contract reviewers check) plus its role's skill: `chief-role-worker` (workers; designers also get `chief-role-designer`, testers `chief-role-tester`), `chief-role-reviewer`, or `chief-role-read-only` (planners and advisors); researchers get the core only.
 
 ## Configuration
 
@@ -60,7 +60,7 @@ Settings → **Chief models by machine** scans every enrolled machine for its si
 and their live model catalogs, and lets you pick a provider, model, and reasoning level per role:
 Chief, planner, worker, designer, reviewer, and advisor. A role without a selection spawns on BB's own
 default for the project, and a selection the machine can no longer serve (signed out, model
-retired) falls back to that default rather than failing the spawn. A Designer without its own pick uses the Worker pick.
+retired) falls back to that default rather than failing the spawn. A Designer without its own pick uses the Worker pick; a tester always uses the Worker pick.
 
 ### Git workflow
 
@@ -80,7 +80,7 @@ of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 
 Settings → **Plan before delegating** (on by default). With it on, Chief gains `chief_plan`: it sends
 one unit of work to a read-only planner that reads the project's own checkout on a plain prompt, with
-no provider plan mode and no approval prompt, and splits the work into up to 8 sequential waves, each
+no provider plan mode and no approval prompt, and splits the work into 2 to 8 waves (always an array: at least one implementation wave and a closing test wave), each
 a self-contained plan for one worker. It submits those waves through `chief_report`'s
 `plan` field, and the plugin saves each one to the shared artifact folder `<BB data dir>/chief/<projectId>/<threadId>/` (falling back to the thread's own storage when the data dir is unknown) as `plan-1.md … plan-N.md` (or
 `plan.md` for the legacy string form) and persists the schedule. Reports and verdicts go to the same folder.
@@ -91,7 +91,7 @@ the schedule. Chief never opens or reads a plan file, and delegates wave 1 right
 for user sign-off. It escalates to you only for a genuine product or scope open question the planner
 named. Nothing is implemented until it delegates.
 
-**Plan review.** A plan with more than one wave, or one the planner marked `complex` on its ready
+**Plan review.** A plan with more than one implementation wave (test waves do not count), or one the planner marked `complex` on its ready
 report, gets exactly one read-only advisor review before delegation. Its ready alert asks for
 `chief_consult (planThreadId: …)`, and `chief_forge_init` and `chief_delegate` refuse the plan until
 that review resolves. On `approve`, Chief delegates the plan as it is. On `request_changes` or a
@@ -119,7 +119,7 @@ inherits the prior worker's reason when it gave one. The one escape hatch is `un
 (`--unplanned-reason` on the CLI): Chief's reason for skipping the plan, by its own judgment. It is persisted and shown as `unplanned: <reason>` in `chief_roster`
 and `bb chief status`, and `Unplanned: <reason>` in `chief_inspect`. With planning off, nothing changes.
 
-**Skips.** Chief alone decides, per task, whether to skip the planner (`unplannedReason`) or the review (`chief_complete` `skipReview`), or both, and states each reason. The reasons show in `chief_roster` / `bb chief status` (`unplanned:`, `review skipped:`), `chief_inspect` and the completion comment on the pull request or issue (`Planning skipped:`, `Review skipped:`). The server judges no task's complexity: `skipReview` is refused only for a non-worker, together with `override`, on a design wave, without a ready report, or while a review of the task is running. A skipReview completion is never cleaned up. Chief never edits code; workers run lint/analyze, build and any verify command and report each with its exit status, and reviewers only read code.
+**Skips.** Chief alone decides, per task, whether to skip the planner (`unplannedReason`) or the review (`chief_complete` `skipReview`), or both, and states each reason. Tests are waived with `chief_skip_tests` (a plan's test wave) or `chief_complete` `testsSkipped` (unplanned work with no tester); `testsSkipped` is refused when the plan has a test wave. The reasons show in `chief_roster` / `bb chief status` (`unplanned:`, `review skipped:`), `chief_inspect` and the completion comment on the pull request or issue (`Planning skipped:`, `Review skipped:`). The server judges no task's complexity: `skipReview` is refused only for a non-worker, together with `override`, on a design wave, without a ready report (a blocked tester on a waived test wave is accepted), or while a review of the task is running. A skipReview completion is never cleaned up. Chief never edits code; workers run lint/analyze, build and any verify command (testers also run the tests) and report each with its exit status, and reviewers only read code.
 
 **Shared plan log.** Workers delegated from the same planner get `chief_log`. One call appends up to 5
 `FACT`/`FAIL` notes and returns the peer notes it has not seen yet (30 at most per call), then each wave's
@@ -215,7 +215,7 @@ bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
 bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--revises thr_...] [--json]
 bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_... | --plan-thread thr_...] [--context "..."] [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--kind worker|designer] [--json]
+bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--kind worker|designer|tester] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief stop thr_... [--reason "..."] [--json]
@@ -224,7 +224,7 @@ bb chief complete thr_... [--result "..."] [--json]
 
 `bb chief review` is retired for every caller, because the CLI cannot prove who is calling. Only the active Chief starts reviews, through its `chief_review` tool; the review rule is in its core rules (`CHIEF_CORE_RULES` in server.ts).
 
-Agent tools expose the lifecycle: `chief_plan` (when planning is on; `revises` for a reviewed plan), `chief_consult` (`planThreadId` for a plan's one review), `chief_spawn` (hands one task to a new Chief), `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_escalate`, and worker/reviewer/advisor `chief_report`.
+Agent tools expose the lifecycle: `chief_plan` (when planning is on; `revises` for a reviewed plan), `chief_consult` (`planThreadId` for a plan's one review), `chief_spawn` (hands one task to a new Chief), `chief_forge_init`, `chief_delegate`, project-scoped `chief_roster` (with an optional `todo` field), `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_skip_tests`, `chief_escalate`, and worker/reviewer/advisor `chief_report`.
 
 `chief_spawn` starts a second Chief for the project with the task's request and context as its first message, with no link back. It moves at most one of the caller's open todos, and a task moves only when none of the source Chief's unfinished workers holds it: `chief_stop` and a ready report do not release a worker, only `chief_complete` does.
 

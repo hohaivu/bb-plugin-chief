@@ -8,3 +8,4 @@ description: Rules for a Chief-managed designer thread only; do not load in unma
 Read with the shared `chief-worker` skill; rules that bind two roles (the report contract, verification, deviations) live there.
 
 - The design rules for your mode (design tool, design in code, or no spec) are in your brief's Design work block.
+- Screenshot evidence comes from the running app (simulator or browser) only. Never write or run golden or screenshot tests: a tester does.
