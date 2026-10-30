@@ -1900,12 +1900,15 @@ export default async function plugin(bb: BbPluginApi) {
       if (designWave && params.kind === undefined) kind = "designer";
       const parent = parentOf(waves, wave);
       if (parent !== null && waves[parent - 1]?.design) implementsDesign = parent;
+      // A tester may start fresh on its own branch once the tested wave's worker is complete (its PR merged, its branch gone).
+      const testedWorker = waveWorkers(planThreadId, parent ?? wave).at(-1);
+      const afterMerge = !prior && kind === "tester" && !!params.branch && testedWorker?.state === "complete";
       if (scheduled.absent) throw new Error(`Wave ${wave}'s tests were skipped (${scheduled.testsSkipped}); nothing to delegate.`);
       if (scheduled.test) {
         // A test wave continues its parent's branch: its first hand-off replaces the parent wave's worker.
         const onPlan = prior?.plan_thread_id === planThreadId;
         const sameWave = onPlan && prior!.plan_wave === wave;
-        if (!onPlan || !(sameWave || prior!.plan_wave === parent)) {
+        if (!afterMerge && (!onPlan || !(sameWave || prior!.plan_wave === parent))) {
           const parentWorker = parent !== null ? waveWorkers(planThreadId, parent).at(-1) : undefined;
           throw new Error(`Wave ${wave} is a test wave: it runs on wave ${parent}'s branch. Delegate it as chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${parentWorker?.thread_id ?? `<wave ${parent}'s latest worker>`}, kind: tester).`);
         }
@@ -1917,8 +1920,8 @@ export default async function plugin(bb: BbPluginApi) {
         if (kind === "worker" && !sameWave) throw new Error(`Wave ${wave} is a test wave: its first hand-off is kind: tester. kind: worker only replaces a worker on wave ${wave}, to fix product code.`);
       } else if (kind === "tester" && waves.some((other) => other.test)) {
         throw new Error(`Wave ${wave} is not a test wave: a tester runs only this plan's test waves (${waves.flatMap((other, index) => other.test ? [index + 1] : []).join(", ")}).`);
-      } else if (kind === "tester" && !prior) {
-        throw new Error("kind: tester on a plan with no test wave needs replaces: of the worker whose branch it tests.");
+      } else if (kind === "tester" && !prior && !afterMerge) {
+        throw new Error("kind: tester on a plan with no test wave needs replaces: of the worker whose branch it tests, or a new branch once that worker is complete.");
       }
       if (kind === "tester") {
         for (const n of chainOf(waves, wave)) {
