@@ -26,7 +26,7 @@ export interface ProgressStates {
 }
 
 export type SegmentState =
-  | { kind: "notDelegated" | "approved" | "changesRequested" | "inReview" }
+  | { kind: "notDelegated" | "approved" | "changesRequested" | "inReview" | "testsSkipped" }
   | { kind: "worker"; state: string };
 
 /** One module owns how far a plan has progressed: it combines the wave graph (waveSchedule.ts) with the review
@@ -142,7 +142,8 @@ export function createPlanProgress<Row extends ProgressRow>(
     return { covered, open, plan: covered.length > 1, stacks, loose: open.filter((target) => !stacked.has(target)) };
   }
 
-  /** A planner's progress: one segment per chain, and how many waves are done. */
+  /** A planner's progress: one segment per chain, and how many of all its waves are done. A test wave Chief waived
+   * (chief_skip_tests) counts as done, delegated or not, and stays in the total. */
   function waveProgress(planner: Row): { done: number; total: number; segments: { wave: number; state: SegmentState }[] } {
     const waves = planWavesFor(planner.thread_id);
     const chainHeads = heads(waves);
@@ -166,15 +167,19 @@ export function createPlanProgress<Row extends ProgressRow>(
       // does not show an approval or rejection that predates the current attempt.
       const reviewerCovers = reviewer != null && ledger.isCurrent(current!);
       const approved = isFinalWave && reviewerCovers && reviewer!.verdict === "approve";
+      const waived = isFinalWave && !!current && !!waves[currentWave - 1]?.testsSkipped;
       const state: SegmentState = !current ? { kind: "notDelegated" }
         : approved ? { kind: "approved" }
         : reviewerCovers && reviewer!.verdict === "request_changes" ? { kind: "changesRequested" }
         : reviewerCovers && states.busy(reviewer!.state) ? { kind: "inReview" }
+        : waived ? { kind: "testsSkipped" }
         : { kind: "worker", state: current.state };
-      done += Math.max(0, chain.indexOf(currentWave)) + (approved ? 1 : 0);
+      done += Math.max(0, chain.indexOf(currentWave)) + (approved || waived ? 1 : 0);
       return { wave: currentWave, state };
     });
-    return { done, total: waves.filter((wave) => !wave.absent).length, segments };
+    // Absent (waived before delegation) waves are on no chain, so they are counted once here.
+    done += waves.filter((wave) => wave.absent).length;
+    return { done, total: waves.length, segments };
   }
 
   /** Whether a planner is absorbed: every chain's tip has a complete worker, and every linked worker is terminal. */
