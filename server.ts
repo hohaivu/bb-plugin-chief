@@ -3993,7 +3993,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
-    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan until its required advisor review resolves. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned or #simple work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
+    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan until its required advisor review resolves. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
     parameters: z.object({
       title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
       base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request. Stack only when this work builds on that pull request's changes; independent work gets its own PR on the default base."),
