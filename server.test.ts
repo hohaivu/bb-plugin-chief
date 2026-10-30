@@ -5352,23 +5352,35 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     return { planner, impl, tester };
   }
 
-  // Contract: a delegated test wave Chief waived counts done whatever its tester's state, before any review; total stays waves.length.
+  const row = (state: State, id: string) => state.db.prepare(`SELECT state, last_report_state FROM managed_threads WHERE thread_id=?`).get(id) as { state: string; last_report_state: string };
+  /** One more turn through the lifecycle boundary: the thread goes active, then idle; a report's state survives it. */
+  async function turn(state: State, id: string) {
+    for (const [status, event] of [["active", "thread.active"], ["idle", "thread.idle"]] as const) {
+      state.live.set(id, { ...state.live.get(id)!, status });
+      await state.harness.behavior.emitThreadEvent(event, { thread: state.live.get(id)!, lastAssistantText: "x" });
+    }
+  }
+
+  // Contract: a delegated test wave Chief waived counts done whatever its tester's state (ready, idle after ready, idle after blocked, stopped after blocked), before any review; total stays waves.length.
   // Regression: progress stayed 1/2 ("wave 2 blocked") until an approving review. Also pins that the planner is neither complete nor absorbed on N/N alone.
+  // The idle rows pin a managed row whose state is idle with the earlier report still recorded: counting only a ready or blocked state would miss them.
   test.each([
-    ["ready, then idle", async () => {}, "ready"],
-    ["blocked, then idle", async (state: State, id: string) => { await call(state, "chief_report", BLOCKED, id); }, "blocked"],
-    ["blocked, then stopped", async (state: State, id: string, chiefId: string) => {
-      await call(state, "chief_report", BLOCKED, id);
+    ["ready", "ready", async () => {}, "ready", "ready"],
+    ["ready, then idle", "ready", async (state: State, id: string) => { await turn(state, id); }, "idle", "ready"],
+    ["blocked", "blocked", async () => {}, "blocked", "blocked"],
+    ["blocked, then idle", "blocked", async (state: State, id: string) => { await turn(state, id); }, "idle", "blocked"],
+    ["blocked, then stopped", "blocked", async (state: State, id: string, chiefId: string) => {
       state.live.set(id, { ...state.live.get(id)!, status: "active" });
       await call(state, "chief_stop", { threadId: id, reason: "Not worth more time" }, chiefId);
-    }, "stopped"],
-  ])("a waived delegated test wave counts done once its tester is %s, before any review", async (_label, settleTester, testerState) => {
+    }, "blocked", "blocked"],
+  ])("a waived delegated test wave counts done once its tester is %s, before any review", async (_label, reported, settleTester, managed, lastReport) => {
     const state = await setupWithPlans();
     const chief = await start(state);
     const { planner, tester } = await withTester(state, chief.threadId);
-    if (testerState === "ready") await call(state, "chief_report", { state: "ready", result: READY }, tester);
-    else await settleTester(state, tester, chief.threadId);
-    expect(await roster(state, chief.threadId)).toContain("waves: 1/2 done, wave 2 " + (testerState === "ready" ? "ready" : "blocked"));
+    await call(state, "chief_report", reported === "ready" ? { state: "ready", result: READY } : BLOCKED, tester);
+    await settleTester(state, tester, chief.threadId);
+    expect(row(state, tester)).toEqual({ state: managed, last_report_state: lastReport });
+    expect(await roster(state, chief.threadId)).toContain(`waves: 1/2 done, wave 2 ${managed}`);
 
     await skip(state, chief.threadId, planner.threadId, 2, "Product bug tracked elsewhere");
     const waived = await roster(state, chief.threadId);
