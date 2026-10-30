@@ -6,6 +6,7 @@ import type { createReviewLedger, ReviewTarget } from "./reviewLedger";
 export interface ProgressRow {
   thread_id: string;
   role: string;
+  kind: string | null;
   state: string;
   last_report_state: string | null;
   created_at: number;
@@ -92,6 +93,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     | { kind: "restack"; waves: PlanWave[]; next: number; successor: Row }
     | { kind: "nextWave"; waves: PlanWave[]; next: number }
     | { kind: "unplanned" }
+    | { kind: "retest"; waves: PlanWave[] }
     | { kind: "review"; waves: PlanWave[]; namer: Row; targets: Row[] } {
     const waves = planWavesFor(row.plan_thread_id);
     const next = row.plan_thread_id && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
@@ -102,6 +104,9 @@ export function createPlanProgress<Row extends ProgressRow>(
     if (stack) return stack.restacked ? null : { kind: "restack", waves, next: stack.next, successor: stack.successor };
     if (next !== null) return { kind: "nextWave", waves, next };
     if (!row.plan_thread_id || row.plan_wave == null || !waves.length) return { kind: "unplanned" };
+    // A worker changed code on a test wave after the tests ran: offer a rerun until a review covers that report.
+    const wave = waves[row.plan_wave - 1];
+    if (wave?.test && !wave.testsSkipped && row.kind !== "tester" && !ledger.isCurrent(row)) return { kind: "retest", waves };
     if (waitingOn(row)) return null;
     const targets = reviewTargetsFor(row);
     // The targets whose current report no review covers yet. The plan's one call is named on the first of them
@@ -169,7 +174,7 @@ export function createPlanProgress<Row extends ProgressRow>(
       done += Math.max(0, chain.indexOf(currentWave)) + (approved ? 1 : 0);
       return { wave: currentWave, state };
     });
-    return { done, total: waves.length, segments };
+    return { done, total: waves.filter((wave) => !wave.absent).length, segments };
   }
 
   /** Whether a planner is absorbed: every chain's tip has a complete worker, and every linked worker is terminal. */

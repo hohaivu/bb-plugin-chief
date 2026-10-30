@@ -203,12 +203,12 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     },
 
     /** chief_complete. A replaced result drops the summary and report file that described the old one. cleanupApprovedAt is written in the same UPDATE, so completion and cleanup eligibility never split. */
-    markComplete(args: { status: string; result: string | null; note: string | null; now: number; threadId: string; cleanupApprovedAt: number | null; reviewSkipped: string | null }) {
+    markComplete(args: { status: string; result: string | null; note: string | null; now: number; threadId: string; cleanupApprovedAt: number | null; reviewSkipped: string | null; testsSkipped: string | null }) {
       db.prepare(`UPDATE managed_threads SET state='complete', status=@status,
       result=CASE WHEN @note IS NULL THEN COALESCE(@result, result) ELSE COALESCE(@result, result, '') || @note END,
       summary=CASE WHEN @result IS NULL THEN summary END, report_path=CASE WHEN @result IS NULL THEN report_path END,
       result_rev=result_rev + (@result IS NOT NULL),
-      blocker=NULL, recommendation=NULL, active_since=NULL, cleanup_approved_at=@cleanupApprovedAt, review_skipped=@reviewSkipped, updated_at=@now WHERE thread_id=@threadId`).run(args);
+      blocker=NULL, recommendation=NULL, active_since=NULL, cleanup_approved_at=@cleanupApprovedAt, review_skipped=@reviewSkipped, tests_skipped=@testsSkipped, updated_at=@now WHERE thread_id=@threadId`).run(args);
       wrote();
     },
 
@@ -248,6 +248,17 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     /** A planner's ready report: 'required' or null; never overwrites a resolved review. */
     setPlanReview(threadId: string, value: string | null) {
       db.prepare(`UPDATE managed_threads SET plan_review=? WHERE thread_id=? AND (plan_review IS NULL OR plan_review='required')`).run(value, threadId);
+      wrote();
+    },
+    /** chief_skip_tests: sets one wave's testsSkipped in plan_waves and touches no other field. */
+    skipTestWave(plannerThreadId: string, wave: number, reason: string) {
+      db.transaction(() => {
+        const row = db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(plannerThreadId) as { plan_waves: string | null } | undefined;
+        const waves = JSON.parse(row?.plan_waves ?? "[]") as Record<string, unknown>[];
+        if (!waves[wave - 1]) throw new Error(`Planner ${plannerThreadId} has no wave ${wave}.`);
+        waves[wave - 1]!.testsSkipped = reason;
+        db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id=?`).run(JSON.stringify(waves), plannerThreadId);
+      })();
       wrote();
     },
     /** A plan advisor's first advice: the first write wins. */
