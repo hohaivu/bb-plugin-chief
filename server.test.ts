@@ -5341,10 +5341,10 @@ describe("tester role", () => {
     (state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planThreadId) as { plan_waves: string }).plan_waves;
 
   /** Chief + a [implementation, test] plan with wave 1 delegated, ready and idle. */
-  async function readyImpl(state: State) {
+  async function readyImpl(state: State, wave1: object = {}) {
     const chief = await start(state);
     const planner = await plan(state, chief.threadId);
-    await delegateWave(state, chief.threadId, planner.threadId, 1);
+    await delegateWave(state, chief.threadId, planner.threadId, 1, wave1);
     const impl = workerOn(state, planner.threadId, 1);
     await report(state, impl.thread_id, { state: "ready", result: READY });
     setLive(state, impl.thread_id, "idle");
@@ -5385,7 +5385,7 @@ describe("tester role", () => {
   // No existing test knows test waves or the waiver.
   test("chief_skip_tests on an undelegated test wave makes the implementation worker the chain tip", async () => {
     const state = await setup();
-    const { chief, planner, impl } = await readyImpl(state);
+    const { chief, planner, impl } = await readyImpl(state, { prUrl: "https://github.com/acme/shop/pull/8" });
     expect(state.sent.at(-1).input[0].text).toContain(
       `chief_delegate (planThreadId: ${planner.threadId}, wave: 2, replaces: ${impl}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${planner.threadId}, wave: 2, reason).`);
     const before = JSON.parse(planWaves(state, planner.threadId));
@@ -5401,8 +5401,12 @@ describe("tester role", () => {
     expect(roster).toContain("tests skipped: docs only");
     await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl })).rejects.toThrow("Wave 2's tests were skipped (docs only); nothing to delegate.");
 
+    expect(String(await tool(state, "chief_inspect", { threadId: planner.threadId }, chief.threadId))).toContain("wave 2: tests skipped: docs only");
+
     await tool(state, "chief_complete", { threadId: impl, skipReview: "docs only change" }, chief.threadId);
     expect(rowOf(state, planner.threadId).state).toBe("complete");
+    const comment = state.db.prepare(`SELECT body FROM forge_comments WHERE dedupe_key=?`).get(`complete:${impl}`) as { body: string };
+    expect(comment.body).toContain("**Tests skipped (wave 2):** docs only");
   });
 
   // Contract (delegated waiver): once a tester on the test wave is idle, blocked or stopped, chief_skip_tests succeeds,
@@ -5428,6 +5432,10 @@ describe("tester role", () => {
     expect(JSON.parse(planWaves(state, planner.threadId))[1].testsSkipped).toBe("failures accepted");
     expect(workerOn(state, planner.threadId, 2).thread_id).toBe(tester);
 
+    // The waived wave is never pending: a blocked or stopped tester's review is still admitted.
+    expect(String(await tool(state, "chief_roster", {}, chief.threadId))).toContain("tests skipped: failures accepted");
+    await reviewed(state, chief.threadId, tester, "approve");
+    // A blocked report passes skipReview only because its test wave is waived.
     await tool(state, "chief_complete", { threadId: tester, skipReview: "waived" }, chief.threadId);
     expect(rowOf(state, tester).state).toBe("complete");
   });
