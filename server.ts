@@ -3655,7 +3655,7 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
-  const SEGMENT_LABELS = { notDelegated: "not delegated", approved: "approved", changesRequested: "changes requested", inReview: "in review" } as const;
+  const SEGMENT_LABELS = { notDelegated: "not delegated", approved: "approved", changesRequested: "changes requested", inReview: "in review", testsSkipped: "tests skipped" } as const;
 
   /** A planner's wave schedule and how far it has been delegated, or a worker's own
    * wave — shared by chief_roster and bb chief status so the two never disagree either. */

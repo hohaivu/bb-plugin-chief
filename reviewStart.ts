@@ -86,6 +86,8 @@ export interface ReviewBriefInput {
   chain: number[];
   /** The waves' contract text, already cut to fit. */
   contractLines: string[];
+  /** Chief's waived test waves this review covers, one line each with the reason, already cut to fit. Optional: older callers omit it. */
+  waiverLines?: string[];
   /** The recorded-commands lines (BB's own event log), already rendered. */
   recordedLines: string[];
   /** The newest open reviewer with a result, its verdict already rendered; null when none. */
@@ -99,7 +101,7 @@ export interface ReviewBriefInput {
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
  * Pure: it renders what startReview gathered and reads nothing else. */
 export function reviewBrief(input: ReviewBriefInput): { prompt: string; context: string } {
-  const { worker, targets, wavePaths, chain, contractLines, previous } = input;
+  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [] } = input;
   const head = worker.head;
   const many = targets.length > 1;
   const plural = many ? "s" : "";
@@ -165,8 +167,9 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ]),
     ]),
   ] : [];
+  const waiverSection = waiverLines.length ? ["## Waived test waves", ...waiverLines] : [];
   const testerTargets = (many ? targets : [worker]).filter((target) => target.kind === "tester");
-  const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, sliceSection, guidelineSection].filter((lines) => lines.length);
+  const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, waiverSection, sliceSection, guidelineSection].filter((lines) => lines.length);
   const context = sections.map((lines) => lines.join("\n")).join("\n\n");
   const summary = sections.length ? [
     "", "## Context",
@@ -176,6 +179,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     ...(earlierSection.length ? ["- The earlier workers on each branch and where to read their reports."] : []),
     ...(previousSection.length ? [`- The previous review (${previous!.threadId}) with its findings.`] : []),
     ...(planSection.length ? [`- The plan wave file${chain.length > 1 ? "s" : ""} this review covers.`] : []),
+    ...(waiverSection.length ? ["- The test waves Chief waived, with Chief's reason for each."] : []),
     ...(sliceSection.length ? ["- The impact slice: pointers to code outside the diff that the change calls or that calls it."] : []),
     ...(guidelineSection.length ? ["- The guideline files (CLAUDE.md, AGENTS.md) in the repository root and on the changed files' paths."] : []),
     "Read `$BB_THREAD_STORAGE/review-context.md` in full before reviewing. If it is missing, wait 10 seconds and read again; if still missing, report blocked naming it.",
@@ -232,6 +236,9 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
             : "Review the changes since the previous review against the plan wave files in review-context.md."
           : `Review ${many ? "each branch" : "the whole branch"} against its base against the plan wave files in review-context.md.`,
         "Read each worker's full report (its Full report path in review-context.md, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
+      ] : []),
+      ...(waiverLines.length ? [
+        "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them.",
       ] : []),
     ],
   });
@@ -431,7 +438,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const chain = worker.plan_wave != null && waves.length && !planReview ? chainOf(waves, worker.plan_wave) : waves.map((_, index) => index + 1);
       const contractLines = waves.length === 1
         ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
-        : chain.flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
+        : chain.filter((n) => !waves[n - 1]!.testsSkipped).flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
       const recorded = targets.length > 1 ? null : await recordedCommands(workerThreadId);
       // Each target's earlier reported workers on its branch: the implementer's evidence when the target is a tester.
       const earlier = new Map<string, NonNullable<BriefTarget["earlier"]>>();
@@ -458,6 +465,8 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         wavePaths: waves.map((wave) => wave.path),
         chain,
         contractLines,
+        waiverLines: chain.filter((n) => waves[n - 1]!.testsSkipped)
+          .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: tests skipped by Chief: ${clip(waves[n - 1]!.testsSkipped!, 500)}`),
         recordedLines: recordedLines(recorded),
         previous: previous?.result ? {
           threadId: previous.thread_id,

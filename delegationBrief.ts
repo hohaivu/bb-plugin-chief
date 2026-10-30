@@ -180,7 +180,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(branch || issueUrl || prUrl ? [
       "", "## Git workflow",
-      ...(branch ? [`Your worktree is based on ${branch}. Check that branch out and commit your work there.`] : []),
+      ...(branch ? [`Your worktree is based on ${branch}. Commit on the current worktree branch and push every commit to ${branch}: \`git push origin HEAD:${branch}\`. Never push any other branch: Chief, the pull request and the reviewer read only ${branch}. If that push is rejected because ${branch} moved, run \`git fetch origin ${branch}\`, rebase onto origin/${branch} and push again; never force-push.`] : []),
       ...(prior ? [`This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them.${prior.result ? "" : ` Its last report: bb chief inspect ${prior.thread_id}`}`] : []),
       ...(issueUrl ? [`Tracking issue: ${issueUrl}`] : []),
       ...(prUrl ? [`Draft pull request: ${prUrl}`] : []),
