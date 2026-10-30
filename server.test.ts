@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5251,5 +5251,199 @@ describe("chief_research", () => {
     const off = (await configured()).instructions;
     expect(off).not.toContain("When a few known files answer the question, read them directly");
     expect(off).not.toContain("do not rerun the same fan-out");
+  });
+});
+
+describe("waived test waves, reviewer waivers and the branch push line", () => {
+  const P = { projectId: "proj_1" };
+  type State = Awaited<ReturnType<typeof setup>>;
+  /** The shared setup leaves hosts.get and files.move unstubbed, which writing a plan file needs. */
+  async function setupWithPlans() {
+    const state = await setup();
+    state.harness.sdk.stub("hosts.get", async () => ({ id: "host_storage", threadStorageRootPath: join(state.storageRoot, "thread-storage") }));
+    state.harness.sdk.stub("files.move", async ({ sourcePath, destinationPath }: { sourcePath: string; destinationPath: string }) => { await rename(sourcePath, destinationPath); return {}; });
+    return state;
+  }
+  const call = (state: State, tool: string, params: object, threadId: string) => state.harness.behavior.callAgentTool(tool, params, { threadId, ...P });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const stateOf = (state: State, id: string) => (state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(id) as { state: string }).state;
+  const READY = "Done\n\n## Deviations from plan\nNone";
+  const BLOCKED = { state: "blocked", result: "Tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" };
+  const testWave = (n: number) => `# Wave ${n}\nRun the tests.\n\n## Contracts to verify\n- TESTWAVE${n} suite stays green`;
+
+  async function planOf(state: State, chiefId: string, waves: { body: string; dependsOn?: number[]; test?: boolean }[]) {
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], { threadId: chiefId, ...P });
+    const planner = (await status(state)).threads.find((row) => row.role === "planner" && row.chiefThreadId === chiefId)!;
+    await call(state, "chief_report", { state: "ready", result: "Plan", plan: waves }, planner.threadId);
+    return planner;
+  }
+  async function cli(state: State, chiefId: string, args: string[]) {
+    const result = await state.harness.behavior.runCli(["delegate", "--title", "Wave", "--mission", "Do it", ...args, "--json"], { threadId: chiefId, ...P });
+    expect(result.exitCode, result.stderr).toBe(0);
+    return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
+  }
+  const roster = async (state: State, chiefId: string) => String(await call(state, "chief_roster", {}, chiefId));
+  const skip = (state: State, chiefId: string, planner: string, wave: number, reason: string) =>
+    call(state, "chief_skip_tests", { planThreadId: planner, wave, reason }, chiefId);
+  /** Plan [impl 1, test 2] with wave 1 ready and a tester delegated on wave 2. */
+  async function withTester(state: State, chiefId: string) {
+    const planner = await planOf(state, chiefId, [{ body: PLAN_FIXTURE }, { body: testWave(2), test: true }]);
+    const impl = await cli(state, chiefId, ["--plan-thread", planner.threadId, "--wave", "1"]);
+    await call(state, "chief_report", { state: "ready", result: READY }, impl);
+    const tester = await cli(state, chiefId, ["--plan-thread", planner.threadId, "--wave", "2", "--replaces", impl]);
+    return { planner, impl, tester };
+  }
+
+  // Contract: a delegated test wave Chief waived counts done whatever its tester's state, before any review; total stays waves.length.
+  // Regression: progress stayed 1/2 ("wave 2 blocked") until an approving review. Also pins that the planner is neither complete nor absorbed on N/N alone.
+  test.each([
+    ["ready, then idle", async () => {}, "ready"],
+    ["blocked, then idle", async (state: State, id: string) => { await call(state, "chief_report", BLOCKED, id); }, "blocked"],
+    ["blocked, then stopped", async (state: State, id: string, chiefId: string) => {
+      await call(state, "chief_report", BLOCKED, id);
+      state.live.set(id, { ...state.live.get(id)!, status: "active" });
+      await call(state, "chief_stop", { threadId: id, reason: "Not worth more time" }, chiefId);
+    }, "stopped"],
+  ])("a waived delegated test wave counts done once its tester is %s, before any review", async (_label, settleTester, testerState) => {
+    const state = await setupWithPlans();
+    const chief = await start(state);
+    const { planner, tester } = await withTester(state, chief.threadId);
+    if (testerState === "ready") await call(state, "chief_report", { state: "ready", result: READY }, tester);
+    else await settleTester(state, tester, chief.threadId);
+    expect(await roster(state, chief.threadId)).toContain("waves: 1/2 done, wave 2 " + (testerState === "ready" ? "ready" : "blocked"));
+
+    await skip(state, chief.threadId, planner.threadId, 2, "Product bug tracked elsewhere");
+    const waived = await roster(state, chief.threadId);
+    expect(waived).toContain("waves: 2/2 done, wave 2 tests skipped");
+    expect(state.spawned.some((entry) => String(entry.title).startsWith("Review · "))).toBe(false);
+    // N/N alone neither completes nor absorbs the planner.
+    await settle();
+    expect(stateOf(state, planner.threadId)).toBe("ready");
+    await expect(call(state, "chief_complete", { threadId: tester }, chief.threadId)).rejects.toThrow(/Refusing to complete/);
+    await call(state, "chief_complete", { threadId: tester, skipReview: "Waived tests, branch accepted as is" }, chief.threadId);
+    await settle();
+    expect(stateOf(state, planner.threadId)).toBe("complete");
+  });
+
+  // Contract: an approved waived wave counts once. Preservation: it passes before the fix too; the mutation control adds both terms.
+  test("an approving review of a waived test wave keeps 2/2, never 3/2", async () => {
+    const state = await setupWithPlans();
+    const chief = await start(state);
+    const { planner, tester } = await withTester(state, chief.threadId);
+    await call(state, "chief_report", { state: "ready", result: READY }, tester);
+    await skip(state, chief.threadId, planner.threadId, 2, "Fixture waiver");
+    await call(state, "chief_review", { workerThreadId: tester }, chief.threadId);
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    await call(state, "chief_report", { state: "ready", result: "Looks right", verdict: "approve", findings: [] }, reviewer.threadId);
+    const after = await roster(state, chief.threadId);
+    expect(after).toContain("waves: 2/2 done, wave 2 approved");
+    expect(after).not.toContain("3/2");
+  });
+
+  // Contract: an undelegated waived wave counts done and stays in the total; the alert's M is the same total.
+  // Regression: total dropped the absent wave (0/1), so the roster disagreed with "wave N of M".
+  test("a test wave waived before delegation counts done and stays in the total", async () => {
+    const state = await setupWithPlans();
+    const chief = await start(state);
+    const planner = await planOf(state, chief.threadId, [{ body: PLAN_FIXTURE }, { body: testWave(2), test: true }]);
+    await skip(state, chief.threadId, planner.threadId, 2, "Docs only");
+    expect(await roster(state, chief.threadId)).toContain("waves: 1/2 done, wave 1 not delegated");
+    const impl = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "1"]);
+    expect(state.spawned.at(-1).prompt).toContain("Wave 1 of 2");
+    await call(state, "chief_report", { state: "ready", result: READY }, impl);
+    expect(await roster(state, chief.threadId)).toContain("waves: 1/2 done, wave 1 ready");
+    expect(state.sent.at(-1).input[0].text).toContain("All 2 waves are ready.");
+  });
+
+  // Contract: agreement. Two chains, one test wave waived after delegation and one before: the roster denominator equals the M of the wave line.
+  test("with waived waves the progress denominator equals the plan's wave count", async () => {
+    const state = await setupWithPlans();
+    const chief = await start(state);
+    const planner = await planOf(state, chief.threadId, [
+      { body: PLAN_FIXTURE }, { body: testWave(2), test: true },
+      { body: wave(3), dependsOn: [] }, { body: testWave(4), test: true, dependsOn: [3] },
+    ]);
+    // Two implementation waves need the plan's one advisor review before any delegation.
+    await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Plan review", mission: "Review this plan before delegation" }, chief.threadId);
+    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    await call(state, "chief_report", { state: "ready", result: "Sound plan", verdict: "approve" }, advisor.threadId);
+    await skip(state, chief.threadId, planner.threadId, 4, "Second chain needs no tests");
+    const impl1 = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "1"]);
+    await call(state, "chief_report", { state: "ready", result: READY }, impl1);
+    const tester = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "2", "--replaces", impl1]);
+    await call(state, "chief_report", { state: "ready", result: READY }, tester);
+    await skip(state, chief.threadId, planner.threadId, 2, "First chain waived after delegation");
+    const text = await roster(state, chief.threadId);
+    expect(text).toMatch(/waves: \d\/4 done/);
+    expect(text).toContain("wave 2 of 4:");
+    expect(text).toContain("wave 4 of 4:");
+    expect(text).toContain("waves: 3/4 done, wave 2 tests skipped, wave 3 not delegated");
+  });
+
+  const reviewerSpawn = (state: State) => state.spawned.filter((entry) => String(entry.title).startsWith("Review · ")).at(-1)!.prompt as string;
+  const reviewContext = async (state: State) => {
+    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    return readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+  };
+  const WAIVER_REASON = "R".repeat(500);
+  const RULE = "are authorized omissions: their absence is not scope drift";
+  const KEEP = "Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review.";
+
+  // Contract: through chief_review, the reviewer gets Chief's waiver in review-context.md and the authorized-omission rule in its prompt,
+  // never the waived wave's contracts; unwaived contracts and the plan file list stay. Regression: the reviewer was asked to verify contracts of tests that never ran.
+  test.each([
+    ["a tester ran, then Chief waived", true],
+    ["Chief waived before any tester", false],
+  ])("the reviewer gets the waiver in place of the waived wave's contracts when %s", async (_label, delegated) => {
+    const state = await setupWithPlans();
+    const chief = await start(state);
+    let reviewed: string;
+    let planner: { threadId: string };
+    if (delegated) {
+      const set = await withTester(state, chief.threadId);
+      planner = set.planner;
+      reviewed = set.tester;
+      await call(state, "chief_report", { state: "ready", result: READY }, reviewed);
+      await skip(state, chief.threadId, planner.threadId, 2, WAIVER_REASON);
+    } else {
+      planner = await planOf(state, chief.threadId, [{ body: PLAN_FIXTURE }, { body: testWave(2), test: true }]);
+      await skip(state, chief.threadId, planner.threadId, 2, WAIVER_REASON);
+      reviewed = await cli(state, chief.threadId, ["--plan-thread", planner.threadId, "--wave", "1"]);
+      await call(state, "chief_report", { state: "ready", result: READY }, reviewed);
+    }
+    await call(state, "chief_review", { workerThreadId: reviewed }, chief.threadId);
+    const prompt = reviewerSpawn(state);
+    const context = await reviewContext(state);
+    const path2 = join(state.storageRoot, "chief", "proj_1", planner.threadId, "plan-2.md");
+
+    expect(context).toContain(`## Waived test waves\nWave 2 of 2: ${path2}: tests skipped by Chief: ${WAIVER_REASON}`);
+    expect(prompt).toContain("- The test waves Chief waived, with Chief's reason for each.");
+    expect(prompt).toContain(RULE);
+    expect(prompt).toContain(KEEP);
+    expect(prompt).toContain("Totals stay non-negative");
+    expect(prompt).not.toContain("TESTWAVE2");
+    expect(prompt).toContain("Wave 1 of 2:\n- Totals stay non-negative");
+    expect(prompt).not.toContain("Wave 2 of 2:\n");
+    // The waived wave's file is still listed in the plan section.
+    expect(context).toContain(`Wave 2 of 2: ${path2}`);
+  });
+
+  // Contract: with no waived wave the reviewer's prompt and context carry no waiver text and keep every wave's contracts in order.
+  // Preservation: passes before the fix; the mutation control drops the waiverLines guard.
+  test("a plan with no waived wave gets every contract and no waiver text", async () => {
+    const state = await setupWithPlans();
+    const chief = await start(state);
+    const { tester } = await withTester(state, chief.threadId);
+    await call(state, "chief_report", { state: "ready", result: READY }, tester);
+    await call(state, "chief_review", { workerThreadId: tester }, chief.threadId);
+    const prompt = reviewerSpawn(state);
+    const context = await reviewContext(state);
+    expect(prompt).toContain("## Contracts to verify\nWave 1 of 2:\n- Totals stay non-negative\nWave 2 of 2:\n- TESTWAVE2 suite stays green\n");
+    for (const text of [prompt, context]) {
+      expect(text).not.toContain("Waived test waves");
+      expect(text).not.toContain("Chief waived");
+      expect(text).not.toContain("authorized omissions");
+    }
   });
 });
