@@ -31,7 +31,6 @@ type DelegateInput = {
   planThreadId?: string;
   wave?: number;
   kind?: WorkerKind;
-  simple?: boolean;
   unplannedReason?: string;
   verifyCommand?: string;
 };
@@ -44,7 +43,6 @@ type PriorRow = VerdictRow & {
   plan_thread_id: string | null;
   plan_wave: number | null;
   kind: "designer" | null;
-  simple: number | null;
   verify_command: string | null;
   unplanned_reason: string | null;
   blocker: string | null;
@@ -78,18 +76,13 @@ export function resolveDelegation(params: DelegateInput, prior: PriorRow | undef
   }
   // Same rule for the kind: a fix successor stays a designer, an explicit next wave uses its own.
   const kind: WorkerKind = params.kind ?? (prior && params.planThreadId === undefined && params.wave === undefined && prior.kind === "designer" ? "designer" : "worker");
-  // A fix successor of a #simple worker stays simple; a plan-linked successor never is, and an explicit false clears it.
-  const simple = params.simple ?? (!!prior && planThreadId === undefined && prior.simple === 1);
   const verifyCommand = params.verifyCommand ?? prior?.verify_command ?? null;
   // The schema only sees params.planThreadId; a replaces: inherited one must be checked here too.
   if (planThreadId !== undefined && params.unplannedReason) {
     throw new Error("unplannedReason cannot be combined with planThreadId.");
   }
-  if (planThreadId !== undefined && params.simple) {
-    throw new Error("simple cannot be combined with planThreadId.");
-  }
   const unplannedReason = params.unplannedReason ?? (planThreadId === undefined ? prior?.unplanned_reason ?? undefined : undefined);
-  return { branch, issueUrl, prUrl, planThreadId, wave, kind, simple, verifyCommand, unplannedReason };
+  return { branch, issueUrl, prUrl, planThreadId, wave, kind, verifyCommand, unplannedReason };
 }
 
 export type WorkerBriefInput = {
@@ -107,7 +100,6 @@ export type WorkerBriefInput = {
   /** "Plan file (wave N of M): path", or undefined without a plan link. */
   planContextLine: string | undefined;
   kind: WorkerKind;
-  simple: boolean;
   verifyCommand: string | null;
   branch: string | undefined;
   issueUrl: string | undefined;
@@ -122,7 +114,7 @@ export type WorkerBriefInput = {
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, planContextLine,
-    kind, simple, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut } = input;
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
   const render = (mission: string, contextText?: string) => [
     "## Mission", mission,
@@ -171,7 +163,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Verify command",
       // Fence longer than any backtick run so a ``` line in the command cannot close it.
       ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
-      "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. Chief runs the same command on your pushed commit before any reviewer starts; a non-zero exit there sends the work back without a review. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
+      "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
     ] : []),
     ...(branch || issueUrl || prUrl ? [
       "", "## Git workflow",
@@ -199,12 +191,8 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     "- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, run the old and new code on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression.",
     "- A blocked report must include the blocker and your recommended decision or next action.",
     "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
+    "- When the change touches code, run the project's lint/analyze and build after your last commit (and the Verify command when given) and list each with its exit status under Automated Verification. Reviewers read code only and never run them, and Chief may complete without a review, so your recorded runs are the only build/lint evidence.",
     "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
-    ...(simple ? [
-      "", "## Simple work (#simple)",
-      "- The user tagged this #simple: no planner ran, and Chief may complete it without a review. Your mission is the user's request; find the cause yourself before changing anything.",
-      "- Your Automated Verification (the command and its exit status) may be the only evidence Chief checks, so run the closest real check.",
-    ] : []),
     ...(kind === "designer" ? [
       "", "## Design work",
       "- Pick the mode the brief describes; if it describes none, use No spec. Design tool: create or edit in a design tool (Paper, Figma, or similar). Design in code: implement a design-tool artboard in the UI files the brief names. No spec: decide and implement the look within the project's existing design system, in the UI files the brief names or, when it names none, the files that render that UI.",

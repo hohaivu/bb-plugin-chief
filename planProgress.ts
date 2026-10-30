@@ -83,7 +83,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     return pending.length ? { waves, pending } : null;
   }
 
-  /** A ready worker's next step, or null (#simple work stays with the server). The plan's one review is named once,
+  /** A ready worker's next step, or null. The plan's one review is named once,
    * on its first reviewable tip, unless forAlert. */
   function readyStep(row: Row, forAlert = false):
     | null

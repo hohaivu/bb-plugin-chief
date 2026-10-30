@@ -23,9 +23,10 @@ export function reviewerPrompt(opts: {
   return [
     REVIEW_ONLY,
     "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
-    "Classify the change, then check it by type: a bug fix fixes the root cause, not the symptom, and has a regression test or a reproducing check; a refactor or migration leaves behaviour unchanged, with the base commit as the oracle: where practical, run the old and new code on the same inputs (the same command, test or fixture against a checkout of the base), and treat any behaviour difference the worker did not explain as a regression; a feature aligns with the contract and spec in the brief; a mixed change is checked part by part by each part's type.",
+    "Review by reading the code. Never run builds, linters, typecheckers or tests yourself, at any commit: the worker owns that evidence. Judge its reported Automated Verification and the commands BB recorded; a check the brief, plan or project requires with no passing record is missing verification evidence.",
+    "Classify the change, then check it by type: a bug fix fixes the root cause, not the symptom, and has a regression test or a reproducing check; a refactor or migration leaves behaviour unchanged, with the base commit as the oracle: the worker's report should compare old and new code on the same inputs (the same command, test or fixture against the base); treat an unexplained behaviour difference as a regression, and a missing comparison where one was practical as missing verification evidence; a feature aligns with the contract and spec in the brief; a mixed change is checked part by part by each part's type.",
     "Evidence rules: a blocking finding needs a traced input → code path → failure; never reject on speculation. Never approve only because tests pass; read the change. Report only problems this diff introduced; a pre-existing problem is at most a nit, unless the diff makes it reachable. When a signature or exported contract changed, inspect its callers.",
-    "Do not report, as blocking or nit: what a linter, typechecker or compiler would catch (when the project's check fails, that failed check is the finding); code explicitly silenced by a lint-ignore, ts-ignore or similar comment; code that looks like a bug but is correct; nitpicks a senior engineer would not raise; an issue that depends on specific inputs or state when you have not traced an input that triggers it; subjective suggestions; general quality concerns such as test coverage, unless a guideline file or the brief requires them (the bug-fix regression check and the test audit still apply). If you are not certain a problem is real, leave it out: a false positive costs the worker a fix round.",
+    "Do not report, as blocking or nit: what a linter, typechecker or compiler would catch (when the worker's recorded or reported check failed, that failed check is the finding); code explicitly silenced by a lint-ignore, ts-ignore or similar comment; code that looks like a bug but is correct; nitpicks a senior engineer would not raise; an issue that depends on specific inputs or state when you have not traced an input that triggers it; subjective suggestions; general quality concerns such as test coverage, unless a guideline file or the brief requires them (the bug-fix regression check and the test audit still apply). If you are not certain a problem is real, leave it out: a false positive costs the worker a fix round.",
     "Guideline files are the CLAUDE.md and AGENTS.md files in the repository root and in each directory on a changed file's path; review-context.md lists them when it can, otherwise find them yourself. A guideline violation on a line this diff introduced is blocking only when the finding's message quotes the exact rule and the changed file sits inside that guideline file's directory; otherwise do not report it.",
     "Test audit: when the diff adds or changes tests, check that each would fail on a plausible wrong implementation (an off-by-one, a missed boundary, a swapped branch, a dropped case). A test that asserts a tautology, a trivial constant, or only what the mock returns proves nothing. Vacuous tests count as missing verification evidence for the behaviour they claim to cover.",
     "A contract stated as a property (round-trip, idempotency, invariant or bound, equivalence, must-never-happen) holds for inputs beyond the worker's own examples: check at least one boundary or adversarial input the worker did not choose.",
@@ -109,7 +110,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       : `- worker ${target.threadId} “${target.title}”: branch ${target.branch}${target.prUrl ? ` (${target.prUrl})` : ""}, head not readable, not pinned: \`git fetch origin ${target.branch}\`, then review \`git diff <the project's default branch>...origin/${target.branch}\`; the verdict binds to its report ${target.reportSeq}`;
   };
   const briefSection = worker.brief && !head && !many ? ["## The brief this work was given", worker.brief] : [];
-  const recordedSection = head || many ? [] : ["## Recorded commands (from the worker's event log)", ...input.recordedLines];
+  const recordedSection = many ? [] : ["## Recorded commands (from the worker's event log)", ...input.recordedLines];
   const reportSection = many
     ? targets.flatMap((target) => target.hasResult ? [
       `## The report of worker ${target.threadId}`,
@@ -165,11 +166,11 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
   const prompt = reviewerPrompt({
     pinned: pinnedAll,
     subject: many
-      ? `Independently review the whole plan: ${targets.length} branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change. The worker's recorded commands ran against the worker's own tree: rerun the project's build/check at each pinned commit.\n${targets.map(targetLine).join("\n")}`
+      ? `Independently review the whole plan: ${targets.length} branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change.\n${targets.map(targetLine).join("\n")}`
       : head
         ? `Independently review pull request ${worker.prUrl} (worker thread ${worker.threadId}: “${worker.title}”), pinned to its head commit ${head.sha} (branch ${head.branch}, targeting ${head.base}). First run \`git fetch origin ${head.branch} && git checkout --detach ${head.sha}\`. The pull request description is the brief: read it (gh pr view ${worker.prUrl} --json title,body, or glab mr view ${worker.prUrl}), then review ${worker.since
           ? `only the worker's changes since the previous review, which covered ${worker.since}: \`git diff ${worker.since}..${head.sha}\` (\`git log ${worker.since}..${head.sha}\` lists the commits; an empty range means no new commits). Read the whole diff against origin/${head.base} only as context.`
-          : `the diff of ${head.sha} against origin/${head.base}.`} Treat nothing outside that commit as part of the change. The worker's recorded commands ran against the worker's own tree, not this commit: rerun the project's build/check at ${head.sha}.`
+          : `the diff of ${head.sha} against origin/${head.base}.`} Treat nothing outside that commit as part of the change.`
         : `Independently review the work owned by worker thread ${worker.threadId}: “${worker.title}”.`,
     chiefThreadId: input.chiefThreadId,
     focus: input.focus,
@@ -193,7 +194,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
         "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
       ] : []),
       ...(reportSection.length && (head || many) ? [
-        `Read each worker report for its Deviations from plan only; each pull request at its pinned commit is the change.`,
+        `Read each worker report for its Deviations from plan and its Automated Verification; each pull request at its pinned commit is the change.`,
       ] : []),
       ...(scoped ? [
         "", "## Re-review scope", `An earlier round already reviewed this change up to the previous reviewed head named above${many ? " for each target that names a range" : ""}. Report findings only on lines the commits in that range add or change; earlier code is out of scope unless those commits make a problem in it reachable. Check the contract items those commits touch and every item the previous review found unmet.`,
@@ -252,14 +253,10 @@ interface ReviewRow {
   replaces_thread_id: string | null;
   reject_streak: number;
   reviewed_head_sha: string | null;
-  verify_command?: string | null;
   created_at: number;
 }
 
-export type ReviewStarted = { gated?: false; threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; gateSkipped?: string[]; sliceSkipped?: string[]; scope?: string[] };
-/** A pre-review gate failed: no reviewer was spawned, no ledger row written, no open review superseded. */
-export type ReviewGated = { gated: true; workerThreadId: string; command: string; sha: string; exitCode: number; outputPath: string | null; tail: string; issues?: string[] };
-export type GateResult = { passed: true } | { skipped: string } | { failed: Omit<ReviewGated, "gated"> };
+export type ReviewStarted = { threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; sliceSkipped?: string[]; scope?: string[] };
 
 /** The row fields launch writes for a reviewer. */
 interface ReviewInsert {
@@ -294,8 +291,6 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   clipMiddle: (value: string, limit: number) => string;
   /** Writes the reviewer's review-context.md; owns its retries and alerting Chief on final failure. */
   writeReviewContext: (threadId: string, content: string, workerThreadId: string) => Promise<void>;
-  /** Runs row.verify_command in a bb-managed worktree forked from the worker, at the pinned sha (or the branch tip when null). */
-  runGate: (row: Row, command: string, head: PinnedHead | null, workerEnvironmentId: string | null) => Promise<GateResult>;
   /** Git-only file:line pointers outside the commit's diff; never blocks a review, a failure is `{ skipped }`. */
   impactSlice: (row: Row, head: PinnedHead | null, projectDir: string | null, maxEntries: number) => Promise<ImpactSlice>;
   /** Whether the previous reviewed head is an ancestor of the pinned head; never blocks a review, a failure is `{ skipped }`. */
@@ -313,10 +308,10 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
   const existingBranchReview = db.prepare<[string, string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND chief_thread_id=? AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
-  const reviewStarts = new Map<string, Promise<ReviewStarted | ReviewGated>>();
+  const reviewStarts = new Map<string, Promise<ReviewStarted>>();
 
   /** Runs one start under its key: a second call with the same key joins the first, and the entry goes once it settles. */
-  async function dedupe<T extends ReviewStarted | ReviewGated>(key: string, run: () => Promise<T>): Promise<T> {
+  async function dedupe<T extends ReviewStarted>(key: string, run: () => Promise<T>): Promise<T> {
     const inFlight = reviewStarts.get(key);
     if (inFlight) return inFlight as Promise<T>;
     const start = run();
@@ -345,7 +340,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     }
     const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && planWavesFor(worker.plan_thread_id).length > 0);
     const reviewKey = planReview ? `plan:${worker.plan_thread_id}` : workerThreadId;
-    return dedupe<ReviewStarted | ReviewGated>(reviewKey, async () => {
+    return dedupe<ReviewStarted>(reviewKey, async () => {
       const openReviews = [...new Set(targets.flatMap((target) => ledger.taskChain(target.thread_id)))]
         .flatMap((id) => { const open = ledger.openReview(id); return open ? [open] : []; })
         .filter((review, index, all) => all.findIndex((other) => other.thread_id === review.thread_id) === index)
@@ -375,20 +370,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           throw new Error(`Worker ${target.thread_id} has no readable pull request head and no branch, so the plan's one review cannot reach it. Retry once the forge answers.`);
         }
       }
-      // Deterministic gate before any reviewer exists: a failure spawns nothing and writes no ledger row.
-      const gateSkipped: string[] = [];
-      for (const target of targets) {
-        if (!target.verify_command) continue;
-        let gate: GateResult;
-        try {
-          gate = await deps.runGate(target, target.verify_command, heads.get(target.thread_id) ?? null, lives.get(target.thread_id)?.environmentId ?? null);
-        } catch (error) {
-          gate = { skipped: `the gate failed unexpectedly (${clip(String(error), 200)})` };
-        }
-        if ("failed" in gate) return { gated: true as const, ...gate.failed };
-        if ("skipped" in gate) gateSkipped.push(`${target.thread_id}: ${gate.skipped}`);
-      }
-      // Re-review scope, after the gate: each target ranges from its own chain's newest verdict head; any doubt reviews the whole change.
+      // Re-review scope: each target ranges from its own chain's newest verdict head; any doubt reviews the whole change.
       const since = new Map<string, string>();
       const scope: string[] = [];
       for (const target of targets) {
@@ -407,7 +389,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         since.set(target.thread_id, previousSha);
         scope.push(`${target.thread_id}: changes since ${previousSha.slice(0, 12)}`);
       }
-      // After the gate, so a failed gate computes nothing; sequential, each bounded by its own deadline.
+      // Sequential, each bounded by its own deadline.
       const impactSlices: NonNullable<ReviewBriefInput["impactSlices"]> = [];
       const sliceSkipped: string[] = [];
       let sliceBudget = 30; // total across targets; a target past it gets 0 entries and states them as omitted
@@ -427,7 +409,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const contractLines = waves.length === 1
         ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
         : chain.flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
-      const recorded = head ? null : await recordedCommands(workerThreadId);
+      const recorded = targets.length > 1 ? null : await recordedCommands(workerThreadId);
       const briefTarget = (row: Row): BriefTarget => ({
         threadId: row.thread_id, title: row.title, prUrl: row.pr_url, branch: row.branch, reportSeq: row.report_seq,
         hasResult: !!row.result, reportPath: row.report_path, head: heads.get(row.thread_id) ?? null,
@@ -473,7 +455,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           for (const old of openReviews) store.completeSuperseded(old.thread_id, now);
         });
       }
-      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id), gateSkipped, sliceSkipped, scope };
+      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id), sliceSkipped, scope };
     });
   }
 
