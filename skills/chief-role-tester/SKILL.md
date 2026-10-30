@@ -9,7 +9,7 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 
 ## 1. Role
 
-- You write and run tests for the change already on this branch. These rules override the shared skill's worker verification lines.
+- You write and run tests for the change already on this branch. These rules override the shared skill's worker verification lines and `chief-role-worker`'s test prohibitions.
 - Change only test files, fixtures, test helpers and test config. Never change product code.
 - A product defect, or a test-only production seam an audit would remove, is reported for a worker. You never fix it yourself.
 

@@ -2004,7 +2004,7 @@ export default async function plugin(bb: BbPluginApi) {
     const effectiveChiefId = (callerChief && callerChief.role === "chief")
       ? callerChief.thread_id
       : (row.chief_thread_id ?? undefined);
-    const handoff = `Hand it to a fresh worker instead: chief_delegate (replaces: ${threadId}) keeps the same worktree, branch, and pull request.`;
+    const handoff = `Hand it to a fresh worker instead: ${replacesCall(row)} keeps the same worktree, branch, and pull request.`;
     if (row.role === "worker" && (row.state === "ready" || row.state === "complete")) {
       throw new Error(`Worker ${threadId} already reported ${row.state}. chief_continue never reuses a finished worker for more work — deferred acceptance criteria, a rebase or restack, or a new task. ${handoff}`);
     }
@@ -3532,10 +3532,17 @@ export default async function plugin(bb: BbPluginApi) {
     return store.all().filter((row) => row.project_id === projectId && (includeComplete || row.state !== "complete"));
   }
 
+  /** A hand-off from a tester or a test-wave worker must name its kind (see explicitKind in startWorker). */
+  function replacesCall(row: ManagedRow): string {
+    return row.kind === "tester" || isTestWave(row)
+      ? `chief_delegate (replaces: ${row.thread_id}, kind: worker) for a product-code fix or chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test fix`
+      : `chief_delegate (replaces: ${row.thread_id})`;
+  }
+
   /** Said the same way in chief_stop's reply and both stall alerts. */
   function rerouteSteps(row: ManagedRow): string {
     if (row.role === "worker") {
-      return `Once it is idle, call chief_consult (workerThreadId: ${row.thread_id}) if the cause is unclear, then hand the work to a fresh worker with chief_delegate (replaces: ${row.thread_id}) and the advice in its context. Use chief_plan instead if the brief itself is wrong or too big.`;
+      return `Once it is idle, call chief_consult (workerThreadId: ${row.thread_id}) if the cause is unclear, then hand the work to a fresh worker with ${replacesCall(row)} and the advice in its context. Use chief_plan instead if the brief itself is wrong or too big.`;
     }
     if (row.role === "reviewer") {
       return row.worker_thread_id
