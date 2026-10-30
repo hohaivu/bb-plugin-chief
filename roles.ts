@@ -4,8 +4,8 @@ import { z } from "zod";
 export const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "researcher"]);
 export type Role = z.infer<typeof roleSchema>;
 
-/** A worker's kind: `designer` is a worker row for design-tool work, not a thread role. */
-export const workerKindSchema = z.enum(["worker", "designer"]);
+/** A worker's kind: `designer` (design-tool work) and `tester` (writes and runs tests) are worker rows, not thread roles. */
+export const workerKindSchema = z.enum(["worker", "designer", "tester"]);
 export type WorkerKind = z.infer<typeof workerKindSchema>;
 
 /** The role key chief_models stores a per-machine model pick under: the lifecycle roles plus
@@ -29,9 +29,9 @@ export const ROLE_SKILLS: Record<Exclude<Role, "chief">, string[]> = {
   researcher: [],
 };
 
-/** Every skill a managed thread loads: the shared core, its role's skills, and the designer skill for a designer worker. */
+/** Every skill a managed thread loads: the shared core, its role's skills, and the designer or tester skill for that worker kind. */
 export function managedSkills(role: Exclude<Role, "chief">, kind: WorkerKind | null | undefined): string[] {
-  return ["chief-worker", ...ROLE_SKILLS[role], ...(role === "worker" && kind === "designer" ? ["chief-role-designer"] : [])];
+  return ["chief-worker", ...ROLE_SKILLS[role], ...(role === "worker" && (kind === "designer" || kind === "tester") ? [`chief-role-${kind}`] : [])];
 }
 
 /** The one read-only rule every non-implementing role shares. Untracked build/test output is not a change. */

@@ -23,11 +23,12 @@ export function reviewerPrompt(opts: {
   return [
     REVIEW_ONLY,
     "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
-    "Review by reading the code. Never run builds, linters, typecheckers or tests yourself, at any commit: the worker owns that evidence. Judge its reported Automated Verification and the commands BB recorded; a check the brief, plan or project requires with no passing record is missing verification evidence.",
-    "Classify the change, then check it by type: a bug fix fixes the root cause, not the symptom, and has a regression test or a reproducing check; a refactor or migration leaves behaviour unchanged, with the base commit as the oracle: the worker's report should compare old and new code on the same inputs (the same command, test or fixture against the base); treat an unexplained behaviour difference as a regression, and a missing comparison where one was practical as missing verification evidence; a feature aligns with the contract and spec in the brief; a mixed change is checked part by part by each part's type.",
+    "Review by reading the code. Never run builds, linters, typecheckers or tests yourself, at any commit: the implementing worker owns the lint/analyze, build and Verify command evidence, and the tester owns the test evidence. Judge its reported Automated Verification and the commands BB recorded; a check the brief, plan or project requires with no passing record is missing verification evidence.",
+    "Classify the change, then check it by type: a bug fix fixes the root cause, not the symptom, and has a reproducing check from the worker or a regression test from the tester; a refactor or migration leaves behaviour unchanged, with the base commit as the oracle: the tester's report should compare old and new behaviour on the same inputs (the same test or fixture against the base); treat an unexplained behaviour difference as a regression, and a missing comparison where one was practical as missing verification evidence; a feature aligns with the contract and spec in the brief; a mixed change is checked part by part by each part's type.",
     "Evidence rules: a blocking finding needs a traced input → code path → failure; never reject on speculation. Never approve only because tests pass; read the change. Report only problems this diff introduced; a pre-existing problem is at most a nit, unless the diff makes it reachable. When a signature or exported contract changed, inspect its callers.",
     "Do not report, as blocking or nit: what a linter, typechecker or compiler would catch (when the worker's recorded or reported check failed, that failed check is the finding); code explicitly silenced by a lint-ignore, ts-ignore or similar comment; code that looks like a bug but is correct; nitpicks a senior engineer would not raise; an issue that depends on specific inputs or state when you have not traced an input that triggers it; subjective suggestions; general quality concerns such as test coverage, unless a guideline file or the brief requires them (the bug-fix regression check and the test audit still apply). If you are not certain a problem is real, leave it out: a false positive costs the worker a fix round.",
     "Guideline files are the CLAUDE.md and AGENTS.md files in the repository root and in each directory on a changed file's path; review-context.md lists them when it can, otherwise find them yourself. A guideline violation on a line this diff introduced is blocking only when the finding's message quotes the exact rule and the changed file sits inside that guideline file's directory; otherwise do not report it.",
+    "A missing test or test run is never a finding against a worker or designer: workers never test. Against a tester's work it is missing verification evidence.",
     "Test audit: when the diff adds or changes tests, check that each would fail on a plausible wrong implementation (an off-by-one, a missed boundary, a swapped branch, a dropped case). A test that asserts a tautology, a trivial constant, or only what the mock returns proves nothing. Vacuous tests count as missing verification evidence for the behaviour they claim to cover.",
     "A contract stated as a property (round-trip, idempotency, invariant or bound, equivalence, must-never-happen) holds for inputs beyond the worker's own examples: check at least one boundary or adversarial input the worker did not choose.",
     "Classify every finding as blocking or nit. Blocking means the change cannot ship as it stands. These are always blocking: a bug or incorrect behaviour, an unmet listed contract, a regression, missing or false verification evidence, a designer mismatch the brief does not accept, scope drift the worker did not state, and functional code replaced by a comment, TODO or placeholder. A nit is style, naming, a minor simplification, or an optional improvement.",
@@ -65,12 +66,15 @@ export interface BriefTarget {
   head: PinnedHead | null;
   /** Re-review: the previous reviewed head this round's range starts from; absent = review the whole change. */
   since?: string;
+  kind?: "designer" | "tester" | null;
+  /** The earlier workers of its replaces: chain that reported, newest first (at most 4); recorded is set for a single-target review. */
+  earlier?: { threadId: string; kind: "designer" | "tester" | null; reportPath: string | null; recorded?: string[] }[];
 }
 
 export interface ReviewBriefInput {
   /** The worker chief_review named; its head is `head`, and it is one of `targets` unless a plan review reaches it through another. */
   worker: BriefTarget & {
-    kind: "designer" | null;
+    kind: "designer" | "tester" | null;
     /** Its brief, already cut to fit; null when it has none. */
     brief: string | null;
     /** What it reported, already cut to fit: its summary, else the start of its result. */
@@ -150,13 +154,26 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ...slice.guidelines!,
     ]),
   ] : [];
-  const sections = [briefSection, recordedSection, reportSection, previousSection, planSection, sliceSection, guidelineSection].filter((lines) => lines.length);
+  const withEarlier = (many ? targets : [worker]).filter((target) => target.earlier?.length);
+  const earlierSection = withEarlier.length ? [
+    "## Earlier workers on this branch",
+    ...withEarlier.flatMap((target) => [
+      ...(many ? [`### Before worker ${target.threadId}`] : []),
+      ...target.earlier!.flatMap((earlier) => [
+        `- ${earlier.kind ?? "worker"} ${earlier.threadId}: ${earlier.reportPath ? `Full report: ${earlier.reportPath}; ` : ""}bb chief inspect ${earlier.threadId}`,
+        ...(earlier.recorded ?? []).map((line) => `  ${line}`),
+      ]),
+    ]),
+  ] : [];
+  const testerTargets = (many ? targets : [worker]).filter((target) => target.kind === "tester");
+  const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, sliceSection, guidelineSection].filter((lines) => lines.length);
   const context = sections.map((lines) => lines.join("\n")).join("\n\n");
   const summary = sections.length ? [
     "", "## Context",
     ...(briefSection.length ? ["- The brief this work was given."] : []),
     ...(recordedSection.length ? [`- ${input.recordedLines[0] ?? "Recorded commands"} (the worker's event log).`] : []),
     ...(reportSection.length ? [`- Where to read the worker report${plural}.`] : []),
+    ...(earlierSection.length ? ["- The earlier workers on each branch and where to read their reports."] : []),
     ...(previousSection.length ? [`- The previous review (${previous!.threadId}) with its findings.`] : []),
     ...(planSection.length ? [`- The plan wave file${chain.length > 1 ? "s" : ""} this review covers.`] : []),
     ...(sliceSection.length ? ["- The impact slice: pointers to code outside the diff that the change calls or that calls it."] : []),
@@ -192,6 +209,12 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ] : []),
       ...(worker.kind === "designer" ? [
         "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
+      ] : []),
+      ...(earlierSection.length ? [
+        "Read each earlier worker's report too: the implementing worker's lint/build evidence and Deviations from plan are there; the tester's report holds the test evidence.",
+      ] : []),
+      ...(testerTargets.length ? [
+        `A tester changes only tests, fixtures, test helpers and test config: check its commits since the Base commit its report names (git diff <base>..<head> --stat); a product-code change there is scope drift. The rest of the branch is the implementing workers' change.${many ? ` Testers here: ${testerTargets.map((target) => target.threadId).join(", ")}.` : ""}`,
       ] : []),
       ...(reportSection.length && (head || many) ? [
         `Read each worker report for its Deviations from plan and its Automated Verification; each pull request at its pinned commit is the change.`,
@@ -239,7 +262,7 @@ interface ReviewRow {
   chief_thread_id: string | null;
   title: string;
   state: string;
-  kind: "designer" | null;
+  kind: "designer" | "tester" | null;
   brief: string | null;
   result: string | null;
   summary: string | null;
@@ -410,10 +433,20 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
         : chain.flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
       const recorded = targets.length > 1 ? null : await recordedCommands(workerThreadId);
+      // Each target's earlier reported workers on its branch: the implementer's evidence when the target is a tester.
+      const earlier = new Map<string, NonNullable<BriefTarget["earlier"]>>();
+      for (const target of new Set([worker, ...targets])) {
+        const rows = ledger.taskChain(target.thread_id).slice(1).flatMap((id) => { const row = store.get(id); return row?.result ? [row] : []; }).slice(0, 4);
+        earlier.set(target.thread_id, await Promise.all(rows.map(async (row) => ({
+          threadId: row.thread_id, kind: row.kind, reportPath: row.report_path,
+          ...(targets.length > 1 ? {} : { recorded: recordedLines(await recordedCommands(row.thread_id)) }),
+        }))));
+      }
       const briefTarget = (row: Row): BriefTarget => ({
         threadId: row.thread_id, title: row.title, prUrl: row.pr_url, branch: row.branch, reportSeq: row.report_seq,
         hasResult: !!row.result, reportPath: row.report_path, head: heads.get(row.thread_id) ?? null,
         ...(since.has(row.thread_id) ? { since: since.get(row.thread_id) } : {}),
+        kind: row.kind, earlier: earlier.get(row.thread_id) ?? [],
       });
       const { prompt, context } = reviewBrief({
         worker: {

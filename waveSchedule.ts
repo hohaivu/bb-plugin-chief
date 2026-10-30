@@ -1,11 +1,13 @@
-export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean; title?: string };
+/** testsSkipped: Chief's recorded reason for going without this test wave (chief_skip_tests). absent is never persisted:
+ * planWavesFor sets it on a waived wave no worker was ever delegated on, and the graph helpers then skip that wave. */
+export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean; test?: boolean; testsSkipped?: string; title?: string; absent?: boolean };
 
 /** The first heading, else the first non-empty line, of a wave body: what the wave is about, for the tracking issue's schedule. */
 export function waveTitle(body: string): string | undefined {
   const line = body.split("\n").map((entry) => entry.replace(/^\s*(?:#+\s*|[-*]\s+)/, "").trim()).find(Boolean);
   return line ? line.slice(0, 120) : undefined;
 }
-export type WaveLink = { dependsOn?: number[] };
+export type WaveLink = { dependsOn?: number[]; absent?: boolean };
 
 /** Wave n's parent (1-based): its dependsOn, else the previous wave; null for a chain head. */
 export function parentOf(waves: WaveLink[], n: number): number | null {
@@ -14,7 +16,7 @@ export function parentOf(waves: WaveLink[], n: number): number | null {
 }
 /** The wave that builds on wave n, or null for a chain tip. */
 export function successorOf(waves: WaveLink[], n: number): number | null {
-  const index = waves.findIndex((_, i) => parentOf(waves, i + 1) === n);
+  const index = waves.findIndex((wave, i) => !wave.absent && parentOf(waves, i + 1) === n);
   return index < 0 ? null : index + 1;
 }
 /** Wave n's whole chain, head to tip. */
@@ -27,7 +29,7 @@ export function chainOf(waves: WaveLink[], n: number): number[] {
 }
 /** Every chain's tip. */
 export function tips(waves: WaveLink[]): number[] {
-  return waves.flatMap((_, index) => successorOf(waves, index + 1) === null ? [index + 1] : []);
+  return waves.flatMap((wave, index) => !wave.absent && successorOf(waves, index + 1) === null ? [index + 1] : []);
 }
 /** Every chain's head: the waves with no parent. */
 export function heads(waves: WaveLink[]): number[] {
@@ -50,11 +52,18 @@ interface WaveRow {
  * still pending, which workers one review covers, and whether a worker ends its plan. It returns data and
  * decisions, never sentences. rows reads the server's live row cache, which is reloaded after writes. */
 export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<string, Row>) {
-  /** A worker's linked planner's persisted wave schedule, or [] when unlinked. */
+  /** A worker's linked planner's persisted wave schedule, or [] when unlinked. A waived test wave no worker was
+   * ever delegated on is marked absent, so the graph helpers skip it. */
   function planWavesFor(planThreadId: string | null): PlanWave[] {
     if (!planThreadId) return [];
     const planner = rows().get(planThreadId);
-    return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as PlanWave[]) : [];
+    const waves = planner?.plan_waves ? (JSON.parse(planner.plan_waves) as PlanWave[]) : [];
+    return waves.map((wave, index) => wave.testsSkipped && !waveWorkers(planThreadId, index + 1).length ? { ...wave, absent: true } : wave);
+  }
+
+  /** True for a worker delegated on a plan wave marked test: true. */
+  function isTestWave(row: Row): boolean {
+    return row.role === "worker" && !!row.plan_thread_id && row.plan_wave != null && !!planWavesFor(row.plan_thread_id)[row.plan_wave - 1]?.test;
   }
 
   /** True for a worker delegated on a plan wave marked design: true. */
@@ -70,9 +79,11 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
   }
 
   /** The waves of a plan whose latest worker is not ready or complete (or does not exist yet). An idle worker
-   * whose latest report was ready counts as ready: a later non-report turn moves its row off ready, not its report. */
+   * whose latest report was ready counts as ready: a later non-report turn moves its row off ready, not its report.
+   * A waived test wave is never pending: absent, or done whatever its worker's state. */
   function pendingWaves(planThreadId: string, waves: PlanWave[]): number[] {
-    return waves.flatMap((_, index) => {
+    return waves.flatMap((wave, index) => {
+      if (wave.testsSkipped) return [];
       const latest = waveWorkers(planThreadId, index + 1).at(-1);
       const ready = latest?.state === "ready" || latest?.state === "complete"
         || (latest?.state === "idle" && latest.last_report_state === "ready");
@@ -112,5 +123,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(waveWorkers(worker.plan_thread_id!, tip).at(-1)?.state ?? ""));
   }
 
-  return { planWavesFor, isDesignWave, waveWorkers, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, isDesignWave, isTestWave, waveWorkers, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }

@@ -42,7 +42,9 @@ type PriorRow = VerdictRow & {
   pr_url: string | null;
   plan_thread_id: string | null;
   plan_wave: number | null;
-  kind: "designer" | null;
+  kind: "designer" | "tester" | null;
+  /** The brief the worker was given: an unplanned tester's source of truth is its chain head's. */
+  brief: string | null;
   verify_command: string | null;
   unplanned_reason: string | null;
   blocker: string | null;
@@ -109,12 +111,15 @@ export type WorkerBriefInput = {
   findings: (VerdictRow & { recommendation: string | null }) | undefined;
   structured: Finding[] | undefined;
   ruledOut: FailEntry[];
+  /** A tester's source-of-truth lines (plan files, contracts, approved design, or the head worker's brief); [] otherwise. */
+  specSources: string[];
 };
 
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources } = input;
+  const tester = kind === "tester";
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
   const render = (mission: string, contextText?: string) => [
     "## Mission", mission,
@@ -155,6 +160,11 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ...(implementsDesign !== null ? [`This wave implements the artboards that wave ${implementsDesign} drew and the owner approved. Read them through the design tool's MCP (read-only; never edit the design) and match them; the artboard names are in your mission or wave ${implementsDesign}'s report.`] : []),
       ...(designWave ? ["This is a design-only wave: the next wave implements it once the owner approves your artboards."] : []),
     ] : []),
+    ...(specSources.length ? [
+      "", "## Source of truth for test cases",
+      "Read each in full, with the docs they name. Derive every test case from these, never from the implementation.",
+      ...specSources,
+    ] : []),
     ...(contracts ? [
       "", "## Contracts to verify", clip(contracts, 3_000),
       "Keep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.",
@@ -164,6 +174,9 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       // Fence longer than any backtick run so a ``` line in the command cannot close it.
       ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
       "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
+      tester
+        ? "If this command runs the whole test suite and this brief does not say the owner asked for that, do not run it: list it as \"not run: full suite not asked for\" under Automated Verification."
+        : "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
     ] : []),
     ...(branch || issueUrl || prUrl ? [
       "", "## Git workflow",
@@ -188,22 +201,33 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
     "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
     ...(planContextLine !== undefined ? ["- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`."] : []),
-    "- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, run the old and new code on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression.",
+    ...(tester ? ["- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, compare old and new behaviour through tests on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression."] : []),
     "- A blocked report must include the blocker and your recommended decision or next action.",
     "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
-    "- When the change touches code, run the project's lint/analyze and build after your last commit (and the Verify command when given) and list each with its exit status under Automated Verification. Reviewers read code only and never run them, and Chief may complete without a review, so your recorded runs are the only build/lint evidence.",
+    ...(tester ? [] : [
+      "- Never write, edit or run tests of any kind (unit, integration, end-to-end, screenshot or golden); a tester does. Verify with lint/analyze, build and the Verify command.",
+      "- When the change touches code, run the project's lint/analyze and build after your last commit (and the Verify command when given) and list each with its exit status under Automated Verification. Reviewers read code only and never run them, and Chief may complete without a review, so your recorded runs are the only build/lint evidence.",
+    ]),
     "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ...(kind === "designer" ? [
       "", "## Design work",
       "- Pick the mode the brief describes; if it describes none, use No spec. Design tool: create or edit in a design tool (Paper, Figma, or similar). Design in code: implement a design-tool artboard in the UI files the brief names. No spec: decide and implement the look within the project's existing design system, in the UI files the brief names or, when it names none, the files that render that UI.",
       "- Design tool and design in code use the tool's MCP. If that tool is not connected here, report blocked naming the missing tool. Before any other call to it, load its guide (Paper: `get_guide({ topic: \"paper-mcp-instructions\" })`) and follow it.",
       "- Design tool: after each meaningful change, verify it with the tool's screenshot (Paper: `get_screenshot`), and when done creating or editing call its finish call (Paper: `finish_working_on_nodes`). Design tool work changes no code or files unless the brief names them.",
-      "- Design in code: read the artboard through the tool's MCP (read-only; do not edit the design), edit only the UI files the brief names, then compare a golden or simulator screenshot of the implemented UI with the artboard's screenshot.",
-      "- No spec: capture a golden or simulator screenshot of the implemented UI.",
+      "- Design in code: read the artboard through the tool's MCP (read-only; do not edit the design), edit only the UI files the brief names, then compare a simulator or browser screenshot of the running app with the artboard's screenshot. Never write golden or screenshot tests; a tester does.",
+      "- No spec: capture a simulator or browser screenshot of the running app.",
       "- In your ready result, put screenshot evidence under Automated: for each PNG, the command or tool call that produced it, its exit status when it has one, and the PNG path. For design in code, also list the differences that remain against the artboard. Taste and brand fit go under Manual.",
-      "- Design in code or No spec: if the repo has no golden or simulator screenshot tooling, report blocked naming what is missing; do not add screenshot tooling yourself.",
+      "- Design in code or No spec: if you cannot run the app to capture a screenshot, report blocked naming what is missing; do not add screenshot tooling yourself.",
       "- In your report prose, name design nodes by layer name, never by raw node ID.",
       ...(designWave ? ["- Design-only wave: use Design tool mode. Draw or edit the artboards only; write no app code and change no repo files. In your ready result, list each artboard by layer name with its screenshot path so the owner can approve it."] : []),
+    ] : []),
+    ...(tester ? [
+      "", "## Test work",
+      "- Follow the `chief-role-tester` skill: it is your testing policy and wins over the shared skill's verification lines.",
+      "- Change only test files, fixtures, test helpers and test config; never product code.",
+      "- When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report.",
+      "- Ready: tests committed and pushed; Automated Verification lists each filtered test command with its exit status and maps each test to the contract it proves.",
+      `- Blocked when a test fails because product code is wrong: commit and push the tests, name the failing tests, the filtered command, its exit status and an output excerpt, and recommend \`chief_delegate (replaces: <your thread id>, kind: worker)\` with the failures as its mission.`,
     ] : []),
   ].join("\n");
   return { prompt, brief, reviewerBrief };
@@ -248,13 +272,14 @@ export function plannerBrief(input: PlannerBriefInput): string {
     "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
     "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file. Keep that result under 800 characters and leave `summary` unset; the plan files are the full plan.",
     "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
-    `- Split the work into at most ${MAX_WAVES} waves, each a self-contained plan one worker finishes. One wave by default; split only where one worker cannot finish the work. Give each wave \`dependsOn\`: \`[k]\` only when it truly builds on wave k's changes, \`[]\` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), write that exact interface into both waves' \`## Contracts to verify\` and give the later wave \`dependsOn: []\` so they run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. Keep \`dependsOn\` only when it needs the earlier wave's implementation or branch. Waves contain no phases.`,
+    `- Split the work into at most ${MAX_WAVES} waves, each a self-contained plan one worker finishes. One implementation wave by default; split only where one worker cannot finish the work. Give each wave \`dependsOn\`: \`[k]\` only when it truly builds on wave k's changes, \`[]\` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), write that exact interface into both waves' \`## Contracts to verify\` and give the later wave \`dependsOn: []\` so they run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. Keep \`dependsOn\` only when it needs the earlier wave's implementation or branch. Waves contain no phases.`,
     "- When the task mixes UI that no approved design or explicit visual spec fixes with non-UI code (DB, notifications, OCR, …), split it: a design-only wave marked `design: true` (a Designer draws the artboards in the design tool, no app code), then the wave that builds on it with all the code, UI included, against the approved artboards. Never put both in one wave. Pure-UI work, pure non-UI work, and work whose look an approved design or spec already fixes stay as they are, with no `design` flag.",
-    "- Submit the plan through chief_report's `plan` field: one Markdown string for a single wave, or an array of `{body, dependsOn, design?}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
+    "- Workers never write or run tests: implementation waves hold no test work. End every chain with a test wave marked `test: true` (dependsOn the chain's last implementation wave), delegated to a tester on that branch. Its body names the docs, plan and design sources the test cases come from, the test levels under the project's rules, the filtered test commands, and the contracts each test proves. So every plan has at least two waves.",
+    "- Submit the plan through chief_report's `plan` field: always an array of `{body, dependsOn, design?, test?}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
     "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
     "- Give every wave a `## Contracts to verify` Markdown heading: a checklist that states contracts as falsifiable properties where they apply: round-trip (decode(encode(x)) == x, save then load), idempotency (running twice equals running once), invariants and state bounds (what holds after every step, value or count limits), equivalence (new path equals old path or a reference on the same inputs), and what must never happen; state each with the edge cases and existing behaviour the wave must keep — what a reviewer would otherwise catch only after the fact. Do not force a class that does not fit. The worker and the reviewer both receive this exact list.",
     ...(research ? ["- When the root cause is unclear, or before planning you need a broad multi-file scan or several independent questions (scoping a large issue, mapping many similar call sites or files), use chief_research instead of reading it all yourself: investigate (one sub-question per hypothesis or independent question); use survey when one question applies to many similar items (batchSize about items ÷ 10, so roughly 10 scan agents); check its findings against the code before relying on them."] : []),
-    ...(revision ? [] : ["- Set `complex: true` on your ready report when the plan is high-risk: cross-cutting work (3+ modules or 10+ files), a data or schema migration, security, auth or permissions, a public API, CLI or persisted-format change, or concurrency or lifecycle work. A multi-wave plan gets one advisor review either way."]),
+    ...(revision ? [] : ["- Set `complex: true` on your ready report when the plan is high-risk: cross-cutting work (3+ modules or 10+ files), a data or schema migration, security, auth or permissions, a public API, CLI or persisted-format change, or concurrency or lifecycle work. A plan with more than one implementation wave gets one advisor review either way; test waves do not count."]),
     "- A genuine product or scope decision is Chief's, not yours. If it blocks a sound plan, report blocked with the question as blocker and your recommended answer as recommendation. If the plan holds under a stated assumption, report ready and list the question and the assumption under `## Open questions` in the wave it affects. Never ask the user directly from this thread.",
     "- A blocked report must include the blocker and your recommended decision or next action.",
   ].join("\n");
@@ -322,6 +347,7 @@ export function advisorBrief(input: AdvisorBriefInput): string {
       "- Scope drift from the mission.",
       "- Migration or compatibility risk.",
       "- State transitions that are not total.",
+      "- A chain without a final test wave, or test work inside an implementation wave.",
     ] : []),
     "", "## Working contract",
     `- ${ADVISE_ONLY}`,

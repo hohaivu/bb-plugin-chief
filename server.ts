@@ -24,7 +24,7 @@ import {
 import { advisorBrief, plannerBrief, resolveDelegation, verdictPreview, workerBrief } from "./delegationBrief";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
 import { createPlanProgress, type SegmentState } from "./planProgress";
-import { createWaveSchedule, parentOf, successorOf, waveTitle } from "./waveSchedule";
+import { chainOf, createWaveSchedule, parentOf, successorOf, waveTitle } from "./waveSchedule";
 import {
   ADVISE_ONLY, CONTINUE_REMINDERS, MODEL_FALLBACK, PLAN_ONLY,
   managedSkills, modelRoleSchema, roleSchema, workerKindSchema,
@@ -277,9 +277,9 @@ const delegateShape = z.object({
   planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
   unplannedReason: z.string().trim().min(1).max(300).optional().describe("Required when planning is on and this work skips chief_plan: your reason for skipping the plan (your judgment; see the core rules). Not needed with planThreadId/wave or replaces."),
-  kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker."),
+  kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker. tester writes and runs tests, nothing else: a plan's test wave (test: true) defaults to tester on its first hand-off; on unplanned work it needs replaces:. Replacing a tester, or a worker on a test wave, needs an explicit kind: worker to change product code, tester to change tests."),
   userApprovedRound: z.boolean().optional().describe(`Set only with replaces: and only after the user explicitly approved another review round in this thread: a replaced worker whose reviewer has requested changes ${STOP_AFTER_REJECTIONS} times in a row is refused without it.`),
-  verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command the worker's brief tells it to run after its last commit and get exit 0 from before reporting ready, e.g. `npx tsc --noEmit && bb plugin build`. Nothing reruns it: reviewers read code only. Inherited through replaces:."),
+  verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command the worker's brief tells it to run after its last commit and get exit 0 from before reporting ready: a build/lint check for a worker, e.g. `npx tsc --noEmit && bb plugin build`; a tester's may be a filtered test command. Nothing reruns it: reviewers read code only. Inherited through replaces:."),
 });
 
 const delegateParams = delegateShape.superRefine((value, ctx) => {
@@ -373,6 +373,9 @@ const waveShape = z.object({
   design: z.boolean().optional().describe(
     "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
   ),
+  test: z.boolean().optional().describe(
+    "true for a test wave: a tester writes and runs the tests for its parent wave on that wave's branch. Every chain ends with one; its parent is an implementation wave (neither design nor test).",
+  ),
 });
 // One flat object, published without length limits: the validator's own errors cannot be customised, so checkReport()
 // in report() enforces every limit and per-state rule and names all failing fields in one error.
@@ -400,7 +403,7 @@ const reportParams = z.object({
     z.string().trim(),
     z.array(waveShape),
   ]).optional().describe(
-    `Ready only. A planner's ready report requires this: either the full plan body as Markdown (one wave), or an array of up to ${MAX_WAVES} {body, dependsOn?, design?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
+    `Ready only. A planner's ready report requires this: an array of 2 to ${MAX_WAVES} {body, dependsOn?, design?, test?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; test: true marks a test wave, and every chain ends with one. Chief receives each wave as its own file, not inline. No other role sets this.`,
   ),
   blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
   recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
@@ -537,12 +540,14 @@ export interface ManagedRow {
   report_path: string | null;
   /** Incremented when chief_complete replaces the result; guards the report_path publication in report(). */
   result_rev: number;
-  /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. */
-  kind: "designer" | null;
+  /** Worker row only: "designer" for design-tool work, "tester" for test work; null (pre-migration or plain) means worker. */
+  kind: "designer" | "tester" | null;
   /** legacy: workers delegated on the retired simple tag; read only by bb chief stats */
   simple: number | null;
   /** Worker row only: Chief's reason for completing it with skipReview, without a review; null otherwise. */
   review_skipped: string | null;
+  /** Worker row only: Chief's reason for completing unplanned work with no tester (chief_complete testsSkipped); null otherwise. */
+  tests_skipped: string | null;
   /** Worker row only: the command the worker's brief makes it run; nothing reruns it. */
   verify_command: string | null;
   /** Worker row only: 1/0 for planning on/off at delegation; null for rows from before the column. */
@@ -1041,6 +1046,8 @@ export const MIGRATIONS = [
     `CREATE TABLE IF NOT EXISTS artifact_fallbacks (thread_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
     // Worker row only: Chief's reason for completing it with chief_complete skipReview (no review); NULL otherwise.
     `ALTER TABLE managed_threads ADD COLUMN review_skipped TEXT`,
+    // Worker row only: Chief's reason for completing unplanned work with no tester (chief_complete testsSkipped); NULL otherwise.
+    `ALTER TABLE managed_threads ADD COLUMN tests_skipped TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1163,7 +1170,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const ledger = createReviewLedger<ManagedRow>(db, store.get, store);
   const schedule = createWaveSchedule<ManagedRow>(store.rows);
-  const { planWavesFor, isDesignWave, waveWorkers, reviewTargetsFor } = schedule;
+  const { planWavesFor, isDesignWave, isTestWave, waveWorkers, reviewTargetsFor } = schedule;
   let plannerActive = false;
   // The cleanupApproved setting, cached so chief_complete never reads settings: false until the first read, which fails closed.
   let cleanupActive = false;
@@ -1866,6 +1873,10 @@ export default async function plugin(bb: BbPluginApi) {
     let designWave = false;
     let implementsDesign: number | null = null;
     let contracts: string | undefined;
+    let specSources: string[] = [];
+    // Replacing a tester needs an explicit kind, so a product fix never lands on a tester by default.
+    const explicitKind = "Name the kind: kind: worker to change product code, kind: tester to change tests.";
+    if (prior?.kind === "tester" && params.kind === undefined) throw new Error(explicitKind);
     if (planThreadId !== undefined) {
       const planner = store.get(planThreadId);
       if (!planner || planner.role !== "planner" || !controlsThread(planner, chief.thread_id)) {
@@ -1888,6 +1899,40 @@ export default async function plugin(bb: BbPluginApi) {
       if (designWave && params.kind === undefined) kind = "designer";
       const parent = parentOf(waves, wave);
       if (parent !== null && waves[parent - 1]?.design) implementsDesign = parent;
+      if (scheduled.absent) throw new Error(`Wave ${wave}'s tests were skipped (${scheduled.testsSkipped}); nothing to delegate.`);
+      if (scheduled.test) {
+        // A test wave continues its parent's branch: its first hand-off replaces the parent wave's worker.
+        const onPlan = prior?.plan_thread_id === planThreadId;
+        const sameWave = onPlan && prior!.plan_wave === wave;
+        if (!onPlan || !(sameWave || prior!.plan_wave === parent)) {
+          const parentWorker = parent !== null ? waveWorkers(planThreadId, parent).at(-1) : undefined;
+          throw new Error(`Wave ${wave} is a test wave: it runs on wave ${parent}'s branch. Delegate it as chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${parentWorker?.thread_id ?? `<wave ${parent}'s latest worker>`}, kind: tester).`);
+        }
+        if (params.kind === undefined) {
+          if (sameWave) throw new Error(explicitKind);
+          kind = "tester";
+        }
+        if (kind === "designer") throw new Error(`Wave ${wave} is a test wave: a designer cannot run it. Use kind: tester, or kind: worker to fix product code on it.`);
+        if (kind === "worker" && !sameWave) throw new Error(`Wave ${wave} is a test wave: its first hand-off is kind: tester. kind: worker only replaces a worker on wave ${wave}, to fix product code.`);
+      } else if (kind === "tester" && waves.some((other) => other.test)) {
+        throw new Error(`Wave ${wave} is not a test wave: a tester runs only this plan's test waves (${waves.flatMap((other, index) => other.test ? [index + 1] : []).join(", ")}).`);
+      } else if (kind === "tester" && !prior) {
+        throw new Error("kind: tester on a plan with no test wave needs replaces: of the worker whose branch it tests.");
+      }
+      if (kind === "tester") {
+        for (const n of chainOf(waves, wave)) {
+          const entry = waves[n - 1]!;
+          specSources.push(`Wave ${n} of ${waves.length}: ${entry.path}`, ...(entry.contracts ? [clip(entry.contracts, 3_000)] : []));
+          if (entry.design) {
+            const designer = waveWorkers(planThreadId, n).at(-1);
+            specSources.push(`Approved design: wave ${n}'s artboards, owner's approval “${designer?.owner_approval ?? "none recorded"}”, designer report ${designer?.report_path ?? "none"}`);
+          }
+        }
+      }
+    } else if (kind === "tester") {
+      if (!prior) throw new Error("kind: tester on unplanned work needs replaces: of the worker whose branch it tests.");
+      const head = store.get(ledger.taskChain(prior.thread_id).at(-1)!);
+      if (head?.brief) specSources = [clipMiddle(head.brief, 4_000)];
     }
     if (implementsDesign !== null) {
       // The design worker whose artboards this wave builds on: the one being replaced, else the wave's latest.
@@ -1908,7 +1953,8 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
     const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
-    const prepared = await managedSpawn.prepare(projectId, { role: kind, hostId });
+    // shortcut: a tester spawns on the Worker pick; a tester pick needs a chief_models rebuild and an app.tsx row, upgrade when the owner asks.
+    const prepared = await managedSpawn.prepare(projectId, { role: kind === "tester" ? "worker" : kind, hostId });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
     // hands the fresh worker the review that prompted the handoff.
@@ -1918,7 +1964,7 @@ export default async function plugin(bb: BbPluginApi) {
     try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
     const { prompt, reviewerBrief } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign,
-      contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut,
+      contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources,
     });
     const thread = await managedSpawn.launch(prepared, {
       projectId,
@@ -1936,7 +1982,7 @@ export default async function plugin(bb: BbPluginApi) {
     }, {
       role: "worker", chiefThreadId: chief.thread_id, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
-      kind: kind === "designer" ? kind : null, plannerOn, verifyCommand,
+      kind: kind === "worker" ? null : kind, plannerOn, verifyCommand,
     });
     if (prior) {
       const now = Date.now();
@@ -2034,6 +2080,11 @@ export default async function plugin(bb: BbPluginApi) {
     ].filter((line) => line !== null).join("\n");
   }
 
+  /** The next call once a delegated test wave is waived: its latest worker still owns the branch. */
+  function waivedLine(owner: ManagedRow): string {
+    return `Tests on wave ${owner.plan_wave} waived. ${owner.thread_id} still owns the branch: review it — chief_review (workerThreadId: ${owner.thread_id}) — or complete it without one — chief_complete (threadId: ${owner.thread_id}, skipReview: your reason).`;
+  }
+
   /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready. */
   function reviewRefusal(worker: ManagedRow): string | null {
     const block = progress.reviewBlock(worker);
@@ -2043,11 +2094,13 @@ export default async function plugin(bb: BbPluginApi) {
       case "superseded":
         return `${worker.thread_id} is superseded by ${block.latest.thread_id}. The plan's one review starts from the latest workers: chief_review (workerThreadId: ${block.latest.thread_id}) once every wave is ready.`;
       case "restack":
-        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} is stacked on it and still builds on the old head: restack it first — chief_delegate (replaces: ${block.successor.thread_id}).`;
+        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} is stacked on it and still builds on the old head: restack it first — chief_delegate (replaces: ${block.successor.thread_id}${block.waves[block.next - 1]!.test ? ", kind: tester" : ""}).`;
       case "restacked":
         return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} was already restacked as ${block.successor.thread_id}; start the plan's one review from the latest chain-tip worker once every wave is ready.`;
       case "betweenWaves":
-        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}).`;
+        return block.waves[block.next - 1]!.test
+          ? `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate test wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, reason).`
+          : `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}).`;
       case "pending":
         return `One review covers the whole plan once every wave is ready; wave(s) ${block.pending.join(", ")} of ${block.waves.length} are not ready yet. Wait for their ready reports (delegate any wave not delegated yet), then start the review.`;
     }
@@ -2075,11 +2128,16 @@ export default async function plugin(bb: BbPluginApi) {
       case "designDone":
         return `Design wave ${row.plan_wave} of ${step.waves.length} is ready and nothing builds on it: its artboards need the owner's approval. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words), then chief_complete (threadId: ${row.thread_id}). Never chief_review it.`;
       case "restack":
-        return `Wave ${row.plan_wave} of ${step.waves.length} is ready after its fix. Wave ${step.next} is stacked on it and still builds on the old head: once this worker is idle, restack it — chief_delegate (replaces: ${step.successor.thread_id}), with a mission to rebase ${step.successor.branch ?? `wave ${step.next}'s branch`} onto ${row.branch ?? "this branch"} and fix what the rebase breaks; the review's findings are attached automatically. Do not review between waves.`;
+        return `Wave ${row.plan_wave} of ${step.waves.length} is ready after its fix. Wave ${step.next} is stacked on it and still builds on the old head: once this worker is idle, restack it — chief_delegate (replaces: ${step.successor.thread_id}${step.waves[step.next - 1]!.test ? ", kind: tester" : ""}), with a mission to rebase ${step.successor.branch ?? `wave ${step.next}'s branch`} onto ${row.branch ?? "this branch"} and fix what the rebase breaks; the review's findings are attached automatically. Do not review between waves.`;
       case "nextWave":
+        if (step.waves[step.next - 1]!.test) {
+          return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate test wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, reason). Do not review between waves.`;
+        }
         return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}). Do not review between waves.`;
+      case "retest":
+        return `A worker changed code on test wave ${row.plan_wave} after the tests ran: rerun them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review. If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
       case "unplanned":
-        return `Start its review now: chief_review (workerThreadId: ${row.thread_id}), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: ${row.thread_id}, skipReview: your reason).`;
+        return `${row.kind === "tester" ? "" : `Workers never test: delegate a tester on this branch first — chief_delegate (replaces: ${row.thread_id}, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. `}Start its review now: chief_review (workerThreadId: ${row.thread_id}), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: ${row.thread_id}, skipReview: your reason).`;
       case "review": {
         const branches = step.targets.map((target) => `${target.thread_id}${target.branch ? ` (${target.branch})` : ""}`).join(", ");
         return `${step.waves.length === 1 ? "The plan's only wave is" : `All ${step.waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${step.namer.thread_id}). It covers every branch (${branches}). Complete each worker on that reviewer's approve — or, if you judge a review unnecessary, complete each of them without one: chief_complete (threadId: <each>, skipReview: your reason).`;
@@ -2114,8 +2172,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (planner.plan_review === "required") {
       const { inFlight, abandoned } = planAdvisors(P);
       if (inFlight) return `Plan ${P} is in its one advisor review (${inFlight.thread_id}): wait for ${inFlight.thread_id}'s report before chief_forge_init or chief_delegate.`;
-      const waves = planWavesFor(P).length;
-      const why = waves > 1 ? `Plan ${P} has ${waves} waves` : `Plan ${P} is marked complex`;
+      const waves = planWavesFor(P).filter((wave) => !wave.test).length;
+      const why = waves > 1 ? `Plan ${P} has ${waves} implementation waves` : `Plan ${P} is marked complex`;
       const ended = abandoned ? `Advisor ${abandoned.thread_id} ended without advice (state ${abandoned.state}). ` : "";
       return `${ended}${why}: get its one advisor review first — chief_consult (planThreadId: ${P}, title, mission: review this plan before delegation). Do not chief_forge_init or chief_delegate it yet.`;
     }
@@ -2149,6 +2207,15 @@ export default async function plugin(bb: BbPluginApi) {
     if (row.role === "advisor" && row.plan_thread_id) return planAdvisorAction(row, forAlert);
     if (row.role === "planner" && row.replaces_thread_id && row.state === "blocked") {
       return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user, then chief_plan (revises: ${row.replaces_thread_id}) with the decision in context; it gets no review.`;
+    }
+    if (row.state === "blocked" && row.role === "worker") {
+      const testWave = isTestWave(row) ? planWavesFor(row.plan_thread_id)[row.plan_wave! - 1]! : undefined;
+      if (testWave?.testsSkipped) return waivedLine(row);
+      if (row.kind === "tester") {
+        return `Tests failed: ${clip(row.blocker ?? "", 200)}. Delegate a fresh worker to fix the product code: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${testWave
+          ? `If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason).`
+          : "If you judge the failures acceptable, complete it with testsSkipped (your reason)."}`;
+      }
     }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.`;
     if (row.state !== "ready") return null;
@@ -2200,6 +2267,15 @@ export default async function plugin(bb: BbPluginApi) {
       return `The reviewer approves. ${complete}. Nits listed with an approve are optional: start no worker round for them alone.`;
     }
     const flagged = row.regression ? " The reviewer reports this change introduced a new problem; make the fix's brief name it." : "";
+    // A tester's branch: a product fix goes to a worker, a test fix to a tester; replacing it needs the kind.
+    const tested = (id: string) => { const target = store.get(id); return !!target && (target.kind === "tester" || isTestWave(target)); };
+    const handoff = (id: string) => tested(id)
+      ? `chief_delegate (replaces: ${id}, kind: worker) for product-code findings or chief_delegate (replaces: ${id}, kind: tester) for test-only findings`
+      : `chief_delegate (replaces: ${id})`;
+    const testerIds = open.map((target) => target.worker_thread_id).filter(tested);
+    const mixed = testerIds.length
+      ? ` On ${testerIds.join(", ")} name the kind: kind: worker for product-code findings, kind: tester for test-only findings. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests.`
+      : "";
     const rung = ledger.rung(row.reject_streak);
     if (rung === "stop") {
       return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.${flagged}`;
@@ -2208,18 +2284,18 @@ export default async function plugin(bb: BbPluginApi) {
       if (plan) {
         return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult (workerThreadId: ${open[0]!.worker_thread_id}) now, before any further delegation, with every branch of the review (${workers}) in its context — one consult unlocks the fix for each. Then hand its advice to ${stacks.length
           ? `fresh workers with chief_delegate (replaces: …): on the stacked waves ${stacks.map((stack) => stack.map(wave).join(" → ")).join("; ")} one at a time in wave order, the earliest wave the findings name first, then each later wave restacked on it as its ready report directs; any other branch the findings name in this turn. Run exactly one more review once every wave is ready.`
-          : "one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review."} If that review still requires changes, stop and escalate to the user.${flagged}`;
+          : "one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review."}${mixed} If that review still requires changes, stop and escalate to the user.${flagged}`;
       }
-      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with ${row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : `chief_delegate (branch: ${row.branch})`} and run exactly one more review. If that review still requires changes, stop and escalate to the user.${flagged}`;
+      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with ${row.worker_thread_id ? handoff(row.worker_thread_id) : `chief_delegate (branch: ${row.branch})`} and run exactly one more review.${row.worker_thread_id && tested(row.worker_thread_id) ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} If that review still requires changes, stop and escalate to the user.${flagged}`;
     }
     if (plan && stacks.length) {
-      return `The reviewer requires changes.${flagged} ${stacks.map((stack) => `Waves ${stack.map(wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${wave(target)}: ${target.worker_thread_id}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${loose.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${loose.map((target) => `chief_delegate (replaces: ${target.worker_thread_id})`).join(" / ")}.` : ""} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`;
+      return `The reviewer requires changes.${flagged} ${stacks.map((stack) => `Waves ${stack.map(wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${wave(target)}: ${target.worker_thread_id}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${loose.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${loose.map((target) => handoff(target.worker_thread_id)).join(" / ")}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`;
     }
     if (plan) {
-      return `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map((target) => `chief_delegate (replaces: ${target.worker_thread_id})`).join(" / ")}; their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`;
+      return `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map((target) => handoff(target.worker_thread_id)).join(" / ")}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`;
     }
     return row.worker_thread_id
-      ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with chief_delegate (replaces: ${row.worker_thread_id}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`
+      ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with ${handoff(row.worker_thread_id)}; its findings are attached automatically.${tested(row.worker_thread_id) ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} Escalate if the disagreement is a genuine decision.`
       : `The reviewer requires changes, and no managed worker owns branch ${row.branch}.${flagged} Hand the fix to a fresh worker with chief_delegate (branch: ${row.branch}${row.pr_url ? `, prUrl: ${row.pr_url}` : ""}; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.`;
   }
 
@@ -2572,7 +2648,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** override is the one bypass of a worker's review requirement; its reason is recorded in the stored result.
    * skipReview completes a worker without a review by Chief's judgment: refused only for invalid state, never cleaned up. */
-  async function markComplete(threadId: string, result?: string, override?: string, skipReview?: string) {
+  async function markComplete(threadId: string, result?: string, override?: string, skipReview?: string, testsSkipped?: string) {
     const row = store.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker or reviewer ${threadId}.`);
     const live = await bb.sdk.threads.get({ threadId });
@@ -2582,6 +2658,18 @@ export default async function plugin(bb: BbPluginApi) {
     let overrideReason: string | null = null;
     let approved = false;
     let reviewSkipped: string | null = null;
+    let testsSkippedReason: string | null = null;
+    if (testsSkipped !== undefined) {
+      const reason = overrideSchema.safeParse(testsSkipped);
+      if (!reason.success || !reason.data) throw new Error(`Refusing to complete ${threadId}: testsSkipped needs a non-empty reason of at most the allowed length.`);
+      if (row.role !== "worker") throw new Error(`Refusing to complete ${threadId}: testsSkipped is only for a worker.`);
+      if (planWavesFor(row.plan_thread_id).some((wave) => wave.test)) {
+        throw new Error(`Refusing to complete ${threadId}: its plan has a test wave; go without it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave, reason), not testsSkipped.`);
+      }
+      testsSkippedReason = reason.data;
+    } else if (row.role === "worker" && !row.plan_thread_id && !ledger.taskChain(threadId).some((id) => store.get(id)?.kind === "tester")) {
+      throw new Error(`No tester ran on this work: delegate one first — chief_delegate (replaces: ${threadId}, kind: tester) — or pass testsSkipped: your reason.`);
+    }
     if (skipReview !== undefined) {
       const refuse = (why: string): never => { throw new Error(`Refusing to skip the review of ${threadId}: ${why}`); };
       const reason = overrideSchema.safeParse(skipReview);
@@ -2589,7 +2677,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (row.role !== "worker") refuse("only a worker's review can be skipped.");
       if (override !== undefined) refuse("pass skipReview or override, not both.");
       if (isDesignWave(row)) refuse("design-only work is approved by the owner only: record it with chief_owner_approval, or pass override.");
-      if (row.last_report_state !== "ready") refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
+      // A waived test wave is Chief's recorded decision to accept that branch, so its blocked report also counts.
+      const waived = row.last_report_state === "blocked" && isTestWave(row) && !!planWavesFor(row.plan_thread_id)[row.plan_wave! - 1]!.testsSkipped
+        && waveWorkers(row.plan_thread_id!, row.plan_wave!).at(-1)?.thread_id === row.thread_id;
+      if (row.last_report_state !== "ready" && !waived) refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
       const busy = ledger.taskChain(threadId).map((id) => ledger.openReview(id)).find((review) => review && BUSY_STATUSES.has(review.state));
       if (busy) refuse(`review ${busy.thread_id} is still running; wait for its verdict.`);
       reviewSkipped = reason.data!;
@@ -2608,7 +2699,7 @@ export default async function plugin(bb: BbPluginApi) {
     const replacement = result ? clip(result, MAX_RESULT_LENGTH) : null;
     // A replaced result drops the summary and report file that described the old one.
     const now = Date.now();
-    store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && cleanupActive ? now : null, reviewSkipped });
+    store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && cleanupActive ? now : null, reviewSkipped, testsSkipped: testsSkippedReason });
     const completed = store.get(threadId)!;
     enqueueCompletionComment(completed, overrideReason);
     const cleanup: "queued" | "override" | "unapproved" | "off" | null = row.role !== "worker" ? null
@@ -2916,6 +3007,10 @@ export default async function plugin(bb: BbPluginApi) {
           ...(overrideReason ? [`**Completed without a matching approve:** ${forgeText(overrideReason, 1_000)}`] : []),
           ...(row.unplanned_reason ? [`**Planning skipped:** ${forgeText(row.unplanned_reason, 500)}`] : []),
           ...(row.review_skipped ? [`**Review skipped:** ${forgeText(row.review_skipped, 500)}`] : []),
+          ...(row.tests_skipped ? [`**Tests skipped:** ${forgeText(row.tests_skipped, 500)}`] : []),
+          // The waived test waves of this worker's chain (an absent one is off the chain, so compare chain heads).
+          ...(row.plan_thread_id && row.plan_wave != null ? ((plan) => plan.flatMap((wave, index) => wave.testsSkipped && chainOf(plan, index + 1)[0] === chainOf(plan, row.plan_wave!)[0]
+            ? [`**Tests skipped (wave ${index + 1}):** ${forgeText(wave.testsSkipped, 500)}`] : []))(planWavesFor(row.plan_thread_id)) : []),
         ],
         details: { summary: "Result", body: details },
       }),
@@ -3052,7 +3147,7 @@ export default async function plugin(bb: BbPluginApi) {
     return row;
   }
 
-  type WaveInput = { body: string; dependsOn?: number[]; design?: boolean };
+  type WaveInput = { body: string; dependsOn?: number[]; design?: boolean; test?: boolean };
 
 
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
@@ -3082,7 +3177,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
     if (found.pending) store.insert(found.pending);
     const row = store.get(threadId)!;
-    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?}[], with bodies not yet trimmed if JSON-decoded.
+    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, test?}[], with bodies not yet trimmed if JSON-decoded.
     const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
     const verdict = params.state === "ready" ? params.verdict ?? null : null;
@@ -3092,7 +3187,8 @@ export default async function plugin(bb: BbPluginApi) {
       ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof planInput === "string" ? planInput : planInput[index]!.body)!,
         title: waveTitle(typeof planInput === "string" ? planInput : planInput[index]!.body),
         ...(typeof planInput !== "string" && planInput[index]!.dependsOn ? { dependsOn: planInput[index]!.dependsOn } : {}),
-        ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}) }))
+        ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}),
+        ...(typeof planInput !== "string" && planInput[index]!.test ? { test: true } : {}) }))
       : null;
     // Best-effort mirror into Chief's storage: inline-vis resolves paths against the rendering thread.
     let inlinePlans: string[] = [];
@@ -3139,7 +3235,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (row.plan_thread_id) store.resolvePlanReview(row.plan_thread_id, params.state === "ready" && verdict === "approve" ? "approved" : "changes");
       }
       if (plannerReady && scheduledWaves) {
-        store.setPlanReview(threadId, (scheduledWaves.length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
+        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.test).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
         const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }
@@ -3553,7 +3649,7 @@ export default async function plugin(bb: BbPluginApi) {
       return [
         `waves: ${done}/${total} done, ${segments.map((segment) => `wave ${segment.wave} ${segmentLabel(segment.state)}`).join(", ")}`,
         ...waves.map((wave, index) => `  wave ${index + 1} of ${waves.length}: ${wave.path}${
-          wave.dependsOn ? wave.dependsOn.length ? ` (after wave ${wave.dependsOn[0]})` : " (independent)" : ""}`),
+          wave.dependsOn ? wave.dependsOn.length ? ` (after wave ${wave.dependsOn[0]})` : " (independent)" : ""}${wave.testsSkipped ? `: tests skipped: ${clip(wave.testsSkipped, 200)}` : ""}`),
       ];
     }
     if (row.role === "worker" && row.plan_thread_id && row.plan_wave != null) {
@@ -3581,7 +3677,7 @@ export default async function plugin(bb: BbPluginApi) {
   function rosterRowLines(row: ManagedRow): string[] {
     return [
       `${row.role} | ${row.state} | live:${row.status ?? "unknown"} | ${row.title} | ${row.thread_id}`,
-      ...(row.kind === "designer" ? ["kind: designer"] : []),
+      ...(row.kind ? [`kind: ${row.kind}`] : []),
       ...(row.branch ? [`branch: ${row.branch}`] : []),
       ...(row.issue_url ? [`issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`pr: ${row.pr_url}`] : []),
@@ -3589,6 +3685,7 @@ export default async function plugin(bb: BbPluginApi) {
       ...planReviewLines(row),
       ...(row.unplanned_reason ? [`unplanned: ${clip(row.unplanned_reason, 200)}`] : []),
       ...(row.review_skipped ? [`review skipped: ${clip(row.review_skipped, 200)}`] : []),
+      ...(row.tests_skipped ? [`tests skipped: ${clip(row.tests_skipped, 200)}`] : []),
       ...(row.summary || row.result ? [`result: ${row.summary ?? clip(row.result!, 300)}`] : []),
       ...(row.report_path ? [`report: ${row.report_path}`] : []),
       ...(row.blocker ? [`blocker: ${clip(row.blocker, 200)}`] : []),
@@ -3963,12 +4060,14 @@ export default async function plugin(bb: BbPluginApi) {
     return [
       `Thread: ${row.title} (${threadId})`,
       `Role: ${row.role}`,
-      ...(row.kind === "designer" ? ["Kind: designer"] : []),
+      ...(row.kind ? [`Kind: ${row.kind}`] : []),
       ...(row.branch ? [`Branch: ${row.branch}`] : []),
       ...(row.issue_url ? [`Issue: ${row.issue_url}`] : []),
       ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
       ...(row.unplanned_reason ? [`Unplanned: ${clip(row.unplanned_reason, 300)}`] : []),
       ...(row.review_skipped ? [`Review skipped: ${clip(row.review_skipped, 300)}`] : []),
+      ...(row.tests_skipped ? [`Tests skipped: ${clip(row.tests_skipped, 300)}`] : []),
+      ...(row.role === "planner" ? planWavesFor(threadId).flatMap((wave, index) => wave.testsSkipped ? [`wave ${index + 1}: tests skipped: ${clip(wave.testsSkipped, 300)}`] : []) : []),
       `Persisted state: ${row.state}`,
       `Live status: ${liveStatus ?? "unknown"}`,
       ...(row.summary ? [`Summary: ${row.summary}`] : []),
@@ -4331,13 +4430,14 @@ export default async function plugin(bb: BbPluginApi) {
     presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
     description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. A worker completed with an approving review (or a design wave with the owner's approval) while the cleanupApproved setting is on is then cleaned up by a background cleanup worker: it archives the task's threads when nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; override and skipReview completions are never cleaned up. A design-only wave's worker completes only with the owner's approval recorded by chief_owner_approval. Any other worker with a pull request completes only when the newest review is an approve for the pull request's current head commit (a worker without one: for its current report); otherwise it is refused naming the reason. override (a reason) is the only bypass and is recorded in the result. skipReview (your reason) completes a worker without any review when you judge one unnecessary. After a worker completes, this call marks its draft pull request ready for review: never run gh pr ready or glab mr update --ready yourself for a worker's pull request.",
     parameters: z.object({ threadId: z.string(), result: z.string().trim().max(MAX_RESULT_LENGTH).optional(), override: overrideSchema.describe("Complete a worker even though no approve covers its pull request head (or current report). The reason is recorded in its result. Use only when the user or the evidence justifies skipping the review."),
-      skipReview: overrideSchema.describe("Complete a worker without a review, by your own judgment: your reason, shown in chief_roster, chief_inspect and on the pull request. Refused only while a review of the task is running, without a ready report, on a design wave (needs chief_owner_approval), or together with override. Never cleaned up.") }),
-    async execute({ threadId, result, override, skipReview }, context) {
+      skipReview: overrideSchema.describe("Complete a worker without a review, by your own judgment: your reason, shown in chief_roster, chief_inspect and on the pull request. Refused only while a review of the task is running, without a ready report, on a design wave (needs chief_owner_approval), or together with override. Never cleaned up."),
+      testsSkipped: overrideSchema.describe("Your reason for completing unplanned work with no tester: an unplanned worker whose task chain has no tester is refused without it. Shown in chief_roster, chief_inspect and on the pull request. A plan's test wave is waived with chief_skip_tests instead.") }),
+    async execute({ threadId, result, override, skipReview, testsSkipped }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       await controlledTarget(threadId, caller);
       touchCallerChief(caller);
-      const { row, overridden, skipped, cleanup } = await markComplete(threadId, result, override, skipReview);
+      const { row, overridden, skipped, cleanup } = await markComplete(threadId, result, override, skipReview, testsSkipped);
       const ready = await readyPullRequest(row);
       const todos = row.role === "worker" ? (todosForProject.all(caller.project_id) as TodoRow[]).filter((todo) => todo.chief_thread_id === caller.thread_id) : [];
       const todoLine = todos.length
@@ -4360,6 +4460,36 @@ export default async function plugin(bb: BbPluginApi) {
       const target = await controlledTarget(workerThreadId, caller);
       touchCallerChief(caller);
       return recordOwnerApproval(target, approval);
+    },
+  });
+  bb.agents.registerTool({
+    name: "chief_skip_tests",
+    presentation: { label: { pending: "Waiving tests…", completed: "Waived tests" } },
+    description: "Go without a plan's test wave (test: true), by your own judgment: your reason is recorded on that wave and shown in chief_roster and chief_inspect. Before the wave is delegated, the wave drops out of the plan and its parent's worker ends the chain. After a tester ran on it, that tester stays the branch owner and you review or complete it (a blocked report counts). Refused while the wave's latest worker is running, once it is complete, or for a wave that is not a test wave. Calling it again changes nothing.",
+    parameters: z.object({ planThreadId: z.string(), wave: z.number().int().min(1).max(MAX_WAVES), reason: overrideSchema.describe("Why this plan goes without that wave's tests.") }),
+    async execute({ planThreadId, wave, reason }, context) {
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
+      if (!isActiveChief(caller)) throw new Error(`No managed planner ${planThreadId} for this Chief.`);
+      const planner = store.get(planThreadId);
+      if (!planner || planner.role !== "planner" || !controlsThread(planner, caller.thread_id)) throw new Error(`No managed planner ${planThreadId} for this Chief.`);
+      if (!reason) throw new Error("reason is required: why this plan goes without that wave's tests.");
+      touchCallerChief(caller);
+      const refusal = planReviewRefusal(planner);
+      if (refusal) throw new Error(refusal);
+      const waves = planWavesFor(planThreadId);
+      if (!waves[wave - 1]?.test) throw new Error(`Wave ${wave} of planner ${planThreadId} is not a test wave (test: true).`);
+      const latest = waveWorkers(planThreadId, wave).at(-1);
+      if (latest) {
+        if (latest.state === "complete") throw new Error(`Wave ${wave}'s worker ${latest.thread_id} is complete: nothing left to waive.`);
+        const live = await bb.sdk.threads.get({ threadId: latest.thread_id });
+        if (BUSY_STATUSES.has(live.status)) throw new Error(`Wave ${wave}'s worker ${latest.thread_id} is ${live.status}: wait until it is idle, then waive.`);
+      }
+      if (!waves[wave - 1]!.testsSkipped) store.skipTestWave(planThreadId, wave, reason);
+      if (latest) return waivedLine(latest);
+      const parent = parentOf(waves, wave);
+      const owner = parent !== null ? waveWorkers(planThreadId, parent).at(-1) : undefined;
+      const next = owner?.state === "ready" ? workerReadyNextStep(owner, true) : null;
+      return next ?? `Wave ${parent} has not reported ready yet; its ready alert names the next call.`;
     },
   });
   bb.agents.registerTool({
@@ -4456,7 +4586,7 @@ export default async function plugin(bb: BbPluginApi) {
         tools: [
           ...(plannerActive ? ["chief_plan"] : []),
           "chief_consult", "chief_spawn",
-          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_escalate",
+          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_escalate",
           ...(researchTool ? ["chief_research"] : []),
         ],
         skills: ["chief"],
