@@ -4506,10 +4506,11 @@ describe("auto-completing absorbed supporting threads", () => {
   const call = (state: Awaited<ReturnType<typeof setup>>, tool: string, params: object, threadId: string) =>
     state.harness.behavior.callAgentTool(tool, params, { threadId, ...P });
   async function reviewed(state: Awaited<ReturnType<typeof setup>>, chiefId: string, workerId: string, verdict: "approve" | "request_changes") {
-    await call(state, "chief_report", { state: "ready", result: "Done" }, workerId);
+    await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, workerId);
     await call(state, "chief_review", { workerThreadId: workerId }, chiefId);
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer" && row.workerThreadId === workerId && row.state !== "complete")!;
-    await call(state, "chief_report", { state: "ready", result: "Checked", verdict }, reviewer.threadId);
+    const findings = verdict === "approve" ? [] : [{ file: "totals.ts", line: 3, severity: "blocking", message: "Wrong total", fix: "Fix it" }];
+    await call(state, "chief_report", { state: "ready", result: "Checked", verdict, findings }, reviewer.threadId);
     return reviewer.threadId;
   }
   async function consulted(state: Awaited<ReturnType<typeof setup>>, chiefId: string, workerId: string) {
@@ -4583,13 +4584,14 @@ describe("auto-completing absorbed supporting threads", () => {
     expect(stateOf(state, wave1)).toBe("complete");
     await settle();
     expect(stateOf(state, planner.threadId)).toBe("ready");
-    const fix = await cli(["--replaces", wave2]);
+    const fix = await cli(["--replaces", wave2, "--kind", "worker"]);
     await settle();
     expect(stateOf(state, wave2)).toBe("complete");
     await settle();
     expect(stateOf(state, planner.threadId)).toBe("ready");
     expect(state.archivedThreads).toEqual([]);
-    await call(state, "chief_complete", { threadId: fix }, chief.threadId);
+    await call(state, "chief_report", { state: "ready", result: `Fixed${NO_DEVIATIONS}` }, fix);
+    await call(state, "chief_complete", { threadId: fix, skipReview: "review is not under test" }, chief.threadId);
     await settle();
     expect(stateOf(state, planner.threadId)).toBe("complete");
     expect(state.archivedThreads).toEqual([]);
@@ -4756,11 +4758,15 @@ describe("auto-completing absorbed supporting threads", () => {
   test("chief_complete lists open todos for a worker; instructions name the close-todo rule", async () => {
     const state = await setup();
     const chief = await start(state);
+    // Completing an unplanned worker needs a ready report, a tester or testsSkipped, and a review or skipReview; none is under test here.
+    const closeOut = { testsSkipped: "todos are under test", skipReview: "todos are under test" };
     const quiet = await delegate(state, chief.threadId, "Quiet");
-    expect(String(await call(state, "chief_complete", { threadId: quiet.threadId }, chief.threadId))).not.toContain("Open todos");
+    await call(state, "chief_report", { state: "ready", result: "Done" }, quiet.threadId);
+    expect(String(await call(state, "chief_complete", { threadId: quiet.threadId, ...closeOut }, chief.threadId))).not.toContain("Open todos");
     await call(state, "chief_roster", { todo: { text: "Ship totals" } }, chief.threadId);
     const worker = await delegate(state, chief.threadId);
-    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
+    await call(state, "chief_report", { state: "ready", result: "Done" }, worker.threadId);
+    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId, ...closeOut }, chief.threadId));
     expect(reply).toContain(`Open todos: #1 Ship totals — close any this work finished with chief_roster todo { id, state: "done" }.`);
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(JSON.stringify(configured)).toContain("When work a todo tracks is finished, close that todo in the same turn");
