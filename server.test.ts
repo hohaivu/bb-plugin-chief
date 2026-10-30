@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,8 @@ import {
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
 import plugin, { MIGRATIONS, RESEARCH_SCRIPTS } from "./server";
+import { checkPlan } from "./reportIntake";
+import { managedSkills } from "./roles";
 import type { TodoItem } from "./server";
 
 // Stands in for git/gh/glab so pull-request resolution tests never shell out for real.
@@ -2047,8 +2049,9 @@ describe("Chief backend", () => {
 
     // The rest report a short result: only the total row count, not each one's
     // result text, is what needs to threaten the 6,000-char roster cap here.
+    // An unplanned ready worker's Pending line now carries the "delegate a tester" clause, so fewer rows fill the cap.
     let lastTitle = "First worker";
-    for (let i = 0; i < 18; i += 1) {
+    for (let i = 0; i < 11; i += 1) {
       lastTitle = `Worker ${i}`;
       const extra = await delegate(state, chief.threadId, lastTitle);
       await state.harness.behavior.callAgentTool("chief_report", {
@@ -2059,7 +2062,7 @@ describe("Chief backend", () => {
     const bigRoster = await state.harness.behavior.callAgentTool("chief_roster", {}, opts) as string;
     expect(bigRoster.length).toBeLessThanOrEqual(6_000);
     expect(bigRoster.indexOf(lastTitle)).toBeLessThan(bigRoster.indexOf("First worker"));
-    // The Pending block is built first and survives the cap even behind 19 rows of detail.
+    // The Pending block is built first and survives the cap even behind 12 rows of detail.
     expect(bigRoster.startsWith("Pending:")).toBe(true);
     expect(bigRoster).toContain(`“${lastTitle}”`);
   });
@@ -5252,4 +5255,340 @@ describe("chief_research", () => {
     expect(off).not.toContain("When a few known files answer the question, read them directly");
     expect(off).not.toContain("do not rerun the same fan-out");
   });
+});
+
+describe("tester role", () => {
+  type State = Awaited<ReturnType<typeof setup>>;
+  const TEST_WAVE = (n: number, dependsOn?: number[]) => ({ body: wave(n, "Write the tests."), test: true, ...(dependsOn ? { dependsOn } : {}) });
+  const ctxOf = (state: State, chiefThreadId: string) => ({ threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
+  const tool = (state: State, name: string, params: object, chiefThreadId: string) =>
+    state.harness.behavior.callAgentTool(name, params, ctxOf(state, chiefThreadId)) as Promise<any>;
+  const report = (state: State, threadId: string, params: object) =>
+    state.harness.behavior.callAgentTool("chief_report", params, { threadId, projectId: "proj_1" }) as Promise<any>;
+  const rowOf = (state: State, threadId: string) => state.db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(threadId) as any;
+  const setLive = (state: State, threadId: string, status: string) => state.live.set(threadId, { ...state.live.get(threadId)!, status } as any);
+
+  // Plan files are written through hosts.get and files.move, which the shared setup() does not stub.
+  async function setupTester() {
+    const state = await setup();
+    state.harness.sdk.stub("hosts.get", async () => ({ id: "host_storage", threadStorageRootPath: join(state.storageRoot, "thread-storage") }));
+    state.harness.sdk.stub("files.move", async ({ sourcePath, destinationPath }: { sourcePath: string; destinationPath: string }) => { await rename(sourcePath, destinationPath); return {}; });
+    return state;
+  }
+
+  /** A planner whose ready report carries `waves` (default: one implementation wave, then its test wave). */
+  async function plan(state: State, chiefThreadId: string, waves: object[] = [{ body: PLAN_FIXTURE }, TEST_WAVE(2)]) {
+    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chiefThreadId));
+    const planner = (await status(state)).threads.filter((row) => row.role === "planner" && row.chiefThreadId === chiefThreadId).at(-1)!;
+    await report(state, planner.threadId, { state: "ready", result: "Waves written.", plan: waves });
+    return planner;
+  }
+
+  const delegateWave = (state: State, chiefThreadId: string, planThreadId: string, waveNo: number, extra: object = {}) =>
+    tool(state, "chief_delegate", { title: `Wave ${waveNo}`, mission: "Do the wave.", planThreadId, wave: waveNo, ...extra }, chiefThreadId);
+
+  // A plan worker's ready report must carry a Deviations heading.
+  const READY = "Done.\n\n## Deviations from plan\nNone";
+  /** The newest worker row on a plan wave. */
+  const workerOn = (state: State, planThreadId: string, waveNo: number) =>
+    state.db.prepare(`SELECT * FROM managed_threads WHERE plan_thread_id=? AND plan_wave=? AND role='worker' ORDER BY rowid DESC`).get(planThreadId, waveNo) as any;
+  const planWaves = (state: State, planThreadId: string) =>
+    (state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planThreadId) as { plan_waves: string }).plan_waves;
+
+  /** Chief + a [implementation, test] plan with wave 1 delegated, ready and idle. */
+  async function readyImpl(state: State) {
+    const chief = await start(state);
+    const planner = await plan(state, chief.threadId);
+    await delegateWave(state, chief.threadId, planner.threadId, 1);
+    const impl = workerOn(state, planner.threadId, 1);
+    await report(state, impl.thread_id, { state: "ready", result: READY });
+    setLive(state, impl.thread_id, "idle");
+    return { chief, planner, impl: impl.thread_id as string };
+  }
+
+  /** The same plan with the tester delegated on wave 2 (still busy: the fake host starts it active). */
+  async function withTester(state: State) {
+    const ctx = await readyImpl(state);
+    await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ctx.impl });
+    return { ...ctx, tester: workerOn(state, ctx.planner.threadId, 2).thread_id as string };
+  }
+
+  // Contract: checkPlan accepts a plan iff it is an array, every chain tip is test: true, every test wave is a
+  // non-head tip whose parent is neither design nor test, and no wave is both. Regression: dropping any one rule
+  // (e.g. the tip check) lets a plan without a test wave through; the table pins each rule's own refusal.
+  // Existing checkPlan cases only cover plans without test waves, so none exercises these rules.
+  const planWave = (n: number, extra: object = {}) => ({ body: n === 1 ? PLAN_FIXTURE : wave(n), ...extra });
+  test.each<[string, string | unknown[], RegExp[]]>([
+    ["accepts an implementation wave then its test wave", [planWave(1), planWave(2, { test: true })], []],
+    ["accepts two chains that each end in a test wave", [planWave(1), planWave(2, { test: true }), planWave(3, { dependsOn: [] }), planWave(4, { dependsOn: [3], test: true })], []],
+    ["refuses a string plan", PLAN_FIXTURE, [/plan needs at least two waves: implementation wave\(s\), then a test wave \(test: true\)/]],
+    ["refuses a chain with no test tip", [planWave(1), planWave(2)], [/plan wave 2 ends a chain but is not test: true/]],
+    ["refuses a test wave that starts a chain", [planWave(1, { test: true })], [/plan wave 1 is test: true but starts a chain/]],
+    ["refuses a test wave in the middle of a chain", [planWave(1), planWave(2, { test: true }), planWave(3, { test: true })], [/plan wave 2 is test: true but a later wave builds on it/, /plan wave 3 is test: true but builds on test wave 2/]],
+    ["refuses a test wave after a design wave", [planWave(1, { design: true }), planWave(2, { test: true })], [/plan wave 2 is test: true but builds on design wave 1/]],
+    ["refuses a wave that is both design and test", [planWave(1), planWave(2, { design: true, test: true })], [/plan wave 2 is both design: true and test: true/]],
+    ["refuses a non-boolean test", [planWave(1), planWave(2, { test: "yes" })], [/plan wave 2 test is "yes" \(string\); allowed true or false/]],
+  ])("checkPlan %s", (_name, input, expected) => {
+    const errors = checkPlan(input);
+    if (!expected.length) expect(errors).toEqual([]);
+    for (const pattern of expected) expect(errors.join("\n")).toMatch(pattern);
+  });
+
+  // Contract (absent waiver): chief_skip_tests on an undelegated test wave drops it from the graph, so the parent's
+  // worker is the chain tip, the wave is not counted, delegating it is refused naming the reason, and completing the
+  // parent absorbs the planner. Regression: the skipped wave stays pending (progress 0/2, planner never absorbed).
+  // No existing test knows test waves or the waiver.
+  test("chief_skip_tests on an undelegated test wave makes the implementation worker the chain tip", async () => {
+    const state = await setupTester();
+    const { chief, planner, impl } = await readyImpl(state);
+    expect(state.sent.at(-1).input[0].text).toContain(
+      `chief_delegate (planThreadId: ${planner.threadId}, wave: 2, replaces: ${impl}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${planner.threadId}, wave: 2, reason).`);
+    const before = JSON.parse(planWaves(state, planner.threadId));
+
+    const text = await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: "docs only" }, chief.threadId);
+    expect(text).toContain(`Start the one review of the whole plan now: chief_review (workerThreadId: ${impl})`);
+    const after = JSON.parse(planWaves(state, planner.threadId));
+    expect(after[0]).toEqual(before[0]);
+    expect(after[1]).toEqual({ ...before[1], testsSkipped: "docs only" });
+
+    const roster = String(await tool(state, "chief_roster", {}, chief.threadId));
+    expect(roster).toContain("waves: 0/1 done, wave 1 ready");
+    expect(roster).toContain("tests skipped: docs only");
+    await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl })).rejects.toThrow("Wave 2's tests were skipped (docs only); nothing to delegate.");
+
+    await tool(state, "chief_complete", { threadId: impl, skipReview: "docs only change" }, chief.threadId);
+    expect(rowOf(state, planner.threadId).state).toBe("complete");
+  });
+
+  // Contract (delegated waiver): once a tester on the test wave is idle, blocked or stopped, chief_skip_tests succeeds,
+  // leaves that tester the branch owner with its row untouched, and its blocked report can still be completed with
+  // skipReview. Regression: the waiver deletes/rewrites the tester, or refuses a blocked tester, so Chief cannot accept
+  // failing tests it chose to waive.
+  test.each([
+    ["idle after a ready report", "ready", "idle"],
+    ["idle after a blocked report", "blocked", "idle"],
+    ["stopped after a blocked report", "blocked", "stopped"],
+  ])("chief_skip_tests on a delegated test wave succeeds for a tester that is %s", async (_label, reportState, liveStatus) => {
+    const state = await setupTester();
+    const { chief, planner, tester } = await withTester(state);
+    await report(state, tester, reportState === "ready" ? { state: "ready", result: READY } : { state: "blocked", result: "Two tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" });
+    setLive(state, tester, liveStatus);
+    const rowBefore = rowOf(state, tester);
+    const workersBefore = state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='worker'`).get();
+
+    const text = await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: "failures accepted" }, chief.threadId);
+    expect(text).toBe(`Tests on wave 2 waived. ${tester} still owns the branch: review it — chief_review (workerThreadId: ${tester}) — or complete it without one — chief_complete (threadId: ${tester}, skipReview: your reason).`);
+    expect(rowOf(state, tester)).toEqual(rowBefore);
+    expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='worker'`).get()).toEqual(workersBefore);
+    expect(JSON.parse(planWaves(state, planner.threadId))[1].testsSkipped).toBe("failures accepted");
+    expect(workerOn(state, planner.threadId, 2).thread_id).toBe(tester);
+
+    await tool(state, "chief_complete", { threadId: tester, skipReview: "waived" }, chief.threadId);
+    expect(rowOf(state, tester).state).toBe("complete");
+  });
+
+  // Contract (delegated waiver refusals): a busy tester is still working and a complete one has nothing left to waive.
+  test("chief_skip_tests refuses a busy tester and a complete tester", async () => {
+    const state = await setupTester();
+    const { chief, planner, tester } = await withTester(state);
+    const skip = () => tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: "no" }, chief.threadId);
+    setLive(state, tester, "active");
+    await expect(skip()).rejects.toThrow(`Wave 2's worker ${tester} is active: wait until it is idle, then waive.`);
+    await report(state, tester, { state: "ready", result: READY });
+    setLive(state, tester, "idle");
+    await tool(state, "chief_complete", { threadId: tester, skipReview: "reviewed elsewhere" }, chief.threadId);
+    await expect(skip()).rejects.toThrow(`Wave 2's worker ${tester} is complete: nothing left to waive.`);
+    expect(JSON.parse(planWaves(state, planner.threadId))[1].testsSkipped).toBeUndefined();
+  });
+
+  // Contract (idempotency): a second identical chief_skip_tests returns the same text and leaves plan_waves
+  // byte-identical. Regression: the second call rewrites the stored reason or reorders the wave fields.
+  test.each([["an undelegated", false], ["a delegated", true]])("chief_skip_tests twice on %s test wave is a no-op", async (_label, delegated) => {
+    const state = await setupTester();
+    const { chief, planner, tester } = delegated ? await withTester(state) : { ...(await readyImpl(state)), tester: "" };
+    if (delegated) { await report(state, tester, { state: "ready", result: READY }); setLive(state, tester, "idle"); }
+    const skip = (reason: string) => tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason }, chief.threadId);
+    const first = await skip("first reason");
+    const stored = planWaves(state, planner.threadId);
+    expect(await skip("first reason")).toBe(first);
+    expect(await skip("a different reason")).toBe(first);
+    expect(planWaves(state, planner.threadId)).toBe(stored);
+  });
+
+  // Contract (structural refusals): only this Chief's planner, only a test wave, and only once any required advisor
+  // review is resolved. Regression: a refusal is dropped so Chief waives a non-test wave or another Chief's plan.
+  test("chief_skip_tests refuses a non-test wave, another Chief's plan and an unreviewed plan", async () => {
+    const state = await setupTester();
+    const { chief, planner } = await readyImpl(state);
+    const stored = planWaves(state, planner.threadId);
+    await expect(tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 1, reason: "no" }, chief.threadId)).rejects.toThrow(`Wave 1 of planner ${planner.threadId} is not a test wave (test: true).`);
+    const other = await start(state, "proj_2");
+    await expect(tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: "no" }, other.threadId)).rejects.toThrow(`No managed planner ${planner.threadId} for this Chief.`);
+
+    const unreviewed = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, { body: wave(2) }, TEST_WAVE(3)]);
+    await expect(tool(state, "chief_skip_tests", { planThreadId: unreviewed.threadId, wave: 3, reason: "no" }, chief.threadId)).rejects.toThrow(`Plan ${unreviewed.threadId} has 2 implementation waves: get its one advisor review first`);
+    expect(planWaves(state, planner.threadId)).toBe(stored);
+    expect(JSON.parse(planWaves(state, unreviewed.threadId))[2].testsSkipped).toBeUndefined();
+  });
+
+  // Contract (#158 preserved): skipReview on a ready idle implementation worker whose test successor is undelegated is
+  // accepted, and the sequence skipReview -> tester replaces: -> tester ready -> complete absorbs the planner.
+  // Regression: a testing-related refusal on skipReview, or a tester that cannot continue a completed worker's branch,
+  // breaks the review-skipped-then-test path. No existing test has a test wave to run it against.
+  test("skipReview on the implementation, then a tester on its branch, completes the plan", async () => {
+    const state = await setupTester();
+    const { chief, planner, impl } = await readyImpl(state);
+    expect(await tool(state, "chief_complete", { threadId: impl, skipReview: "small change" }, chief.threadId)).toContain("without a review (reason recorded)");
+    expect(rowOf(state, planner.threadId).state).not.toBe("complete");
+
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+    const tester = workerOn(state, planner.threadId, 2);
+    expect(tester).toMatchObject({ kind: "tester", role: "worker", plan_wave: 2 });
+    await report(state, tester.thread_id, { state: "ready", result: READY });
+    setLive(state, tester.thread_id, "idle");
+    await tool(state, "chief_complete", { threadId: tester.thread_id, skipReview: "tests are the evidence" }, chief.threadId);
+    expect(rowOf(state, tester.thread_id).state).toBe("complete");
+    expect(rowOf(state, planner.threadId).state).toBe("complete");
+  });
+
+  // Contract (#161): a tester with a branch and no replaces may start fresh once the tested wave's worker is complete;
+  // before that, or without a branch, a test wave still must continue the tested worker's branch.
+  // Regression: afterMerge accepted while the tested worker is still open, or ignoring the branch.
+  test.each([
+    ["accepts a branch once the tested wave's worker is complete", true, "tests/after-merge", null],
+    ["refuses a branch while the tested wave's worker is not complete", false, "tests/after-merge", /Wave 2 is a test wave: it runs on wave 1's branch/],
+    ["refuses a complete tested worker with no branch", true, undefined, /Wave 2 is a test wave: it runs on wave 1's branch/],
+  ])("a tester with no replaces %s", async (_label, complete, branch, refusal) => {
+    const state = await setupTester();
+    const { chief, planner, impl } = await readyImpl(state);
+    if (complete) await tool(state, "chief_complete", { threadId: impl, skipReview: "merged" }, chief.threadId);
+    const call = delegateWave(state, chief.threadId, planner.threadId, 2, { kind: "tester", ...(branch ? { branch } : {}) });
+    if (refusal) { await expect(call).rejects.toThrow(refusal); return; }
+    await call;
+    expect(workerOn(state, planner.threadId, 2)).toMatchObject({ kind: "tester", branch, plan_wave: 2 });
+  });
+
+  // Contract (kinds): a test wave's first hand-off defaults to tester, which is a worker-role thread with the tester skill.
+  // Regression: the default is lost (a plain worker is spawned on the test wave) or the tester loads no tester policy.
+  test("a test wave's first hand-off with no kind spawns a tester worker whose kind loads the tester skill", async () => {
+    const state = await setupTester();
+    const { chief, planner, impl } = await readyImpl(state);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+    const tester = workerOn(state, planner.threadId, 2);
+    expect(tester).toMatchObject({ role: "worker", kind: "tester" });
+    expect(managedSkills("worker", "tester")).toEqual(["chief-worker", "chief-role-worker", "chief-role-tester"]);
+    expect(managedSkills("worker", null)).toEqual(["chief-worker", "chief-role-worker"]);
+    const chiefConfigured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(chiefConfigured.tools.map((entry: any) => entry.name)).toContain("chief_skip_tests");
+  });
+
+  // Contract (kind refusals on a new plan): designer and worker cannot take a test wave's first hand-off; a test wave
+  // needs a replaces: of its parent; after a tester the kind must be named; tester only runs test waves.
+  test.each<[string, (impl: string) => object, RegExp]>([
+    ["a designer on a test wave", (impl) => ({ replaces: impl, kind: "designer" }), /Wave 2 is a test wave: a designer cannot run it/],
+    ["a worker as the first hand-off of a test wave", (impl) => ({ replaces: impl, kind: "worker" }), /Wave 2 is a test wave: its first hand-off is kind: tester/],
+    ["a test wave with no replaces", () => ({}), /Wave 2 is a test wave: it runs on wave 1's branch\. Delegate it as chief_delegate \(planThreadId: thr_\d+, wave: 2, replaces: thr_\d+, kind: tester\)/],
+    ["a tester on an implementation wave of a new plan", (impl) => ({ replaces: impl, kind: "tester", wave: 1 }), /Wave 1 is not a test wave: a tester runs only this plan's test waves \(2\)/],
+  ])("kind rules refuse %s", async (_label, extra, refusal) => {
+    const state = await setupTester();
+    const { chief, planner, impl } = await readyImpl(state);
+    const { wave: waveNo = 2, ...rest } = extra(impl) as { wave?: number };
+    const rowsBefore = state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads`).get();
+    await expect(delegateWave(state, chief.threadId, planner.threadId, waveNo, rest)).rejects.toThrow(refusal);
+    expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads`).get()).toEqual(rowsBefore);
+  });
+
+  // Contract (explicit kind): replacing a tester, or a worker already on the test wave, must name worker or tester so a
+  // product fix never lands on a tester by default.
+  test("replacing a tester or a test-wave worker without a kind is refused until the kind is named", async () => {
+    const state = await setupTester();
+    const { chief, planner, tester } = await withTester(state);
+    await report(state, tester, { state: "ready", result: READY });
+    setLive(state, tester, "idle");
+    const explicit = "Name the kind: kind: worker to change product code, kind: tester to change tests.";
+    await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester })).rejects.toThrow(explicit);
+
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "worker" });
+    const fix = workerOn(state, planner.threadId, 2);
+    expect(fix).toMatchObject({ kind: null, role: "worker" });
+    await report(state, fix.thread_id, { state: "ready", result: READY });
+    setLive(state, fix.thread_id, "idle");
+    await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: fix.thread_id })).rejects.toThrow(explicit);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: fix.thread_id, kind: "tester" });
+    expect(workerOn(state, planner.threadId, 2).kind).toBe("tester");
+  });
+
+  // Contract (legacy plans): a plan persisted before test waves existed has no test marker; a tester runs on it only
+  // with replaces:. Regression: the bootstrap is refused (the plan that introduced testers cannot be tested) or a
+  // tester starts on a legacy plan with no worker to test.
+  test("kind tester on a legacy plan (no test wave) needs replaces:", async () => {
+    const state = await setupTester();
+    const { chief, planner, impl } = await readyImpl(state);
+    const legacy = JSON.parse(planWaves(state, planner.threadId)).map(({ test, ...rest }: any) => rest);
+    state.db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id=?`).run(JSON.stringify(legacy), planner.threadId);
+    // The store caches rows and reloads from the DB on its next write: a fresh ready report from the same worker is one.
+    await report(state, impl, { state: "ready", result: `${READY} (re-reported)` });
+    await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { kind: "tester" })).rejects.toThrow("kind: tester on a plan with no test wave needs replaces:");
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl, kind: "tester" });
+    expect(workerOn(state, planner.threadId, 2)).toMatchObject({ kind: "tester", plan_wave: 2 });
+  });
+
+  test("kind tester on unplanned work needs replaces:", async () => {
+    const state = await setupTester();
+    const chief = await start(state);
+    const call = (extra: object) => tool(state, "chief_delegate", { title: "Tests", mission: "Test it", unplannedReason: "Bounded", kind: "tester", ...extra }, chief.threadId);
+    await expect(call({})).rejects.toThrow("kind: tester on unplanned work needs replaces: of the worker whose branch it tests.");
+    const worker = await delegate(state, chief.threadId);
+    await report(state, worker.threadId, { state: "ready", result: "Done" });
+    setLive(state, worker.threadId, "idle");
+    await tool(state, "chief_delegate", { title: "Tests", mission: "Test it", replaces: worker.threadId, kind: "tester" }, chief.threadId);
+    expect(state.db.prepare(`SELECT kind FROM managed_threads WHERE title='Tests' AND role='worker'`).get()).toEqual({ kind: "tester" });
+  });
+
+  // Contract (unplanned testsSkipped): unplanned work with no tester in its task chain cannot complete without a recorded
+  // reason, whichever way it completes; the reason is stored apart from unplanned_reason and review_skipped and shown in
+  // the roster, inspect and the completion comment. Regression: the refusal is dropped, or the reason is written to
+  // another field or not shown.
+  test.each([["skipReview", { skipReview: "no review" }], ["override", { override: "no approve" }]])(
+    "completing unplanned work with %s and no tester is refused without testsSkipped and recorded with it", async (_label, how) => {
+      const state = await setupTester();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId, "Fix totals", { prUrl: "https://github.com/acme/shop/pull/8" });
+      await report(state, worker.threadId, { state: "ready", result: "Done" });
+      setLive(state, worker.threadId, "idle");
+      await expect(tool(state, "chief_complete", { threadId: worker.threadId, ...how }, chief.threadId)).rejects.toThrow(
+        `No tester ran on this work: delegate one first — chief_delegate (replaces: ${worker.threadId}, kind: tester) — or pass testsSkipped: your reason.`);
+      expect(rowOf(state, worker.threadId).state).toBe("ready");
+
+      await tool(state, "chief_complete", { threadId: worker.threadId, ...how, testsSkipped: "typo, no behaviour" }, chief.threadId);
+      const row = rowOf(state, worker.threadId);
+      expect(row).toMatchObject({ state: "complete", tests_skipped: "typo, no behaviour", unplanned_reason: "Bounded test fixture" });
+      expect(row.review_skipped).toBe(how.skipReview ?? null);
+      expect(String(await tool(state, "chief_roster", { includeComplete: true }, chief.threadId))).toContain("tests skipped: typo, no behaviour");
+      expect(String(await tool(state, "chief_inspect", { threadId: worker.threadId }, chief.threadId))).toContain("Tests skipped: typo, no behaviour");
+      const comment = state.db.prepare(`SELECT body FROM forge_comments WHERE dedupe_key=?`).get(`complete:${worker.threadId}`) as { body: string };
+      expect(comment.body).toContain("**Tests skipped:** typo, no behaviour");
+    });
+
+  test("completing unplanned work needs no testsSkipped when a tester is in its task chain", async () => {
+    const state = await setupTester();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await report(state, worker.threadId, { state: "ready", result: "Done" });
+    setLive(state, worker.threadId, "idle");
+    const tester = await delegate(state, chief.threadId, "Tests", { kind: "tester", replaces: worker.threadId });
+    await report(state, tester.threadId, { state: "ready", result: "Tested" });
+    setLive(state, tester.threadId, "idle");
+    await tool(state, "chief_complete", { threadId: tester.threadId, skipReview: "tests pass" }, chief.threadId);
+    expect(rowOf(state, tester.threadId)).toMatchObject({ state: "complete", tests_skipped: null });
+  });
+
+  test("testsSkipped is refused on a worker whose plan has a test wave", async () => {
+    const state = await setupTester();
+    const { chief, planner, impl } = await readyImpl(state);
+    await expect(tool(state, "chief_complete", { threadId: impl, skipReview: "x", testsSkipped: "no tests" }, chief.threadId)).rejects.toThrow(
+      `its plan has a test wave; go without it with chief_skip_tests (planThreadId: ${planner.threadId}, wave, reason), not testsSkipped.`);
+    expect(rowOf(state, impl)).toMatchObject({ state: "ready", tests_skipped: null });
+  });
+
 });
