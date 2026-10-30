@@ -2248,7 +2248,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (row.worker_thread_id && ledger.rung(ledger.taskRejections(row.worker_thread_id).streak) === "stop") {
         return `The advisor changed nothing. The reviewer has now requested changes ${STOP_AFTER_REJECTIONS} times in a row: start no new worker, and escalate to the user with both positions, this advice, and your recommendation.`;
       }
-      return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate${row.worker_thread_id ? ` (replaces: ${row.worker_thread_id})` : " (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
+      const advised = row.worker_thread_id ? store.get(row.worker_thread_id) : undefined;
+      return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with ${advised ? replacesCall(advised) : row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : "chief_delegate (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
     }
     if (row.role !== "reviewer" || !row.verdict) return null;
     // Null: replaces: re-pointed a covered worker to a fresh one (that branch's findings were handed off), or every covered worker is complete.
@@ -2752,7 +2753,7 @@ export default async function plugin(bb: BbPluginApi) {
     const live = await bb.sdk.threads.get({ threadId });
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Cannot stop ${threadId} because it is not a live thread.`);
     if (!BUSY_STATUSES.has(live.status)) {
-      throw new Error(`${threadId} is ${live.status}; nothing to stop.${row.role === "worker" ? ` Replace it with chief_delegate (replaces: ${threadId}).` : ""}`);
+      throw new Error(`${threadId} is ${live.status}; nothing to stop.${row.role === "worker" ? ` Replace it with ${replacesCall(row)}.` : ""}`);
     }
     await bb.sdk.threads.stop({ threadId });
     store.markStopped(threadId, clip(`Stopped by Chief${reason ? `: ${reason}` : "."}`, 4_000), rerouteSteps(row));
