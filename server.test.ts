@@ -5518,6 +5518,21 @@ describe("tester role", () => {
     expect(workerOn(state, planner.threadId, 2).kind).toBe("tester");
   });
 
+  // Contract (explicit kind, unplanned): the same rule outside a plan, where the wave-based check does not apply —
+  // replacing an unplanned tester without naming a kind is refused. Regression: the successor silently inherits
+  // kind tester, so a product fix lands on a tester. The plan test above is also guarded by the wave rule and cannot catch it.
+  test("replacing an unplanned tester without a kind is refused", async () => {
+    const state = await setupTester();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await readyIdle(state, worker.threadId, "Done");
+    await tool(state, "chief_delegate", { title: "Tests", mission: "Test it", replaces: worker.threadId, kind: "tester" }, chief.threadId);
+    const tester = (await status(state)).threads.filter((row) => row.role === "worker").at(-1)!;
+    await readyIdle(state, tester.threadId, "Tested");
+    await expect(tool(state, "chief_delegate", { title: "Fix", mission: "Fix it", replaces: tester.threadId }, chief.threadId))
+      .rejects.toThrow("Name the kind: kind: worker to change product code, kind: tester to change tests.");
+  });
+
   // Contract (legacy plans): a plan persisted before test waves existed has no test marker; a tester runs on it only
   // with replaces:. Regression: the bootstrap is refused (the plan that introduced testers cannot be tested) or a
   // tester starts on a legacy plan with no worker to test.
