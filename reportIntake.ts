@@ -178,8 +178,8 @@ export function checkPlan(plan: string | unknown[]): string[] {
     if (wave.design === true && wave.test === true) errors.push(`plan wave ${n} is both design: true and test: true; a wave is one or the other.`);
     if (wave.spec !== undefined && typeof wave.spec !== "boolean") {
       errors.push(`plan wave ${n} spec is ${JSON.stringify(wave.spec)} (${typeof wave.spec}); allowed true or false. Send a boolean, or drop spec.`);
-    } else if (wave.spec === true && wave.test !== true) {
-      errors.push(`plan wave ${n} is spec: true but not test: true; spec marks a test wave only.`);
+    } else if (wave.spec === true && (wave.test === true || wave.design === true)) {
+      errors.push(`plan wave ${n} is spec: true and ${wave.test === true ? "test" : "design"}: true; spec marks an implementation wave only.`);
     } else if (wave.spec === true && body && !/^[ \t]*#{1,6}[ \t]+spec delta/im.test(body)) {
       errors.push(`plan wave ${n} is spec: true but lacks a "## Spec delta" Markdown heading naming the docs the Spec Writer changes; add one, or drop spec.`);
     }

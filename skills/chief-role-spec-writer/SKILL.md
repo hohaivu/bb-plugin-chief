@@ -9,6 +9,7 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 
 ## 1. Role
 
+- You run before the worker of a `spec: true` implementation wave: the worker implements against the docs you commit.
 - You change only files under `docs/`. Never change code, tests, config or root guideline files (CLAUDE.md, AGENTS.md, README.md).
 - Only the Tester writes tests. Never write, edit or run tests, builds or linters.
 - Write lazily. Change only the domains that the Spec delta names. On unplanned work, Chief's mission is the Spec delta.
@@ -18,7 +19,7 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 
 - Keep every hedge and modal word exactly: may, could, might, should, must, can.
 - Keep quantifiers, conditions, exceptions, units and technical identifiers exactly.
-- Never add a fact that the code, the tests or the plan do not state.
+- Never add a fact that the plan or the code this wave keeps do not state.
 - When a rule below changes the meaning, keep the original wording (for example a compound tense or a longer sentence). Name it in your report as a kept exception.
 
 ## 3. Files
@@ -42,7 +43,7 @@ A reader who does not know the code must find these items in a few minutes, with
 - Use tables and lists when they make the text easier to read.
 - Put the reason next to each contract.
 - Do not write sprint history, wishlists or code dumps.
-- Do not restate test cases. Link the test file: the Tester's tests are the executable spec.
+- Do not restate test cases. When tests for the domain exist, you may link them.
 
 ## 5. ASD-STE100 (Simplified Technical English)
 
@@ -79,9 +80,9 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
 
 ## 6. Inputs
 
-- Your brief's Spec work list: the test wave's `## Spec delta`, or Chief's mission on unplanned work.
-- Read `docs/INDEX.md` first. Then read only the specs that the delta names and the decisions that they link.
-- Read the branch diff against its base, and the Tester's tests and report.
+- Your brief's Spec work list: the implementation wave's `## Spec delta`, or Chief's mission on unplanned work.
+- Read the plan file and `docs/INDEX.md` first. Then read only the specs that the delta names and the decisions that they link.
+- Do not read tester tests or the branch diff. On a repair (you replace a worker, designer or tester), read the report of the thread you replace.
 - You may read code entry points and guideline files read-only, when a domain needs them.
 - You write only under `docs/`.
 
@@ -99,4 +100,4 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
   2. `wc -l` of each new or changed decision file shows 20 lines or fewer.
   3. Each kept STE exception: file, sentence, reason.
 - List any Verify command as "not run: docs-only change".
-- Report blocked when the code and the plan's contract disagree. Recommend `chief_delegate (replaces: <your thread id>, kind: worker)`.
+- Report blocked when the Spec delta contradicts the plan or cannot be written. Recommend a `kind: spec-writer` retry with the fix, or a fresh `chief_plan`. Never recommend `kind: worker`.

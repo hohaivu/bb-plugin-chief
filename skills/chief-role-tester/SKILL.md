@@ -91,7 +91,10 @@ Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN
 
 - When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report; reviewers check your scope against it.
 - When you report, record `git rev-parse HEAD` as `Head commit: <sha>`; reviewers bound your scope with it.
-- On a `spec: true` wave, its `## Spec delta` belongs to the Spec Writer: do not change docs/.
+- When your brief has a `## Spec` block, the committed docs are the source of truth: derive tests from them and the plan contracts, not from the code. Never change docs/.
+  - Code contradicts the docs: blocked, recommend `kind: worker`.
+  - Docs are wrong: blocked, recommend `kind: spec-writer`.
+  - The Spec delta cannot be built: blocked, recommend a fresh `chief_plan`.
 - Ready: tests committed and pushed; every test you ran passes, or fails only on the base (listed). Automated Verification lists each filtered command with its exit status and maps each test to the contract it proves and the mutation it catches.
 - Blocked when a test fails because product code is wrong: commit and push the tests; the blocker names the failing tests, the filtered command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: worker)` with the failures as its mission.
 - Missing tooling or a first-of-kind test also reports blocked.

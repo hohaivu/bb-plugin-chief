@@ -88,8 +88,12 @@ export interface ReviewBriefInput {
   contractLines: string[];
   /** Chief's waived test waves this review covers, one line each with the reason, already cut to fit. Optional: older callers omit it. */
   waiverLines?: string[];
-  /** The chain's spec: true waves with neither testsSkipped nor specsSkipped: a Spec Writer updated docs/ on each. Optional: older callers omit it. */
+  /** Chief's bypassed Spec Writer steps (chief_skip_specs), one line each with the reason, already cut to fit. Optional: older callers omit it. */
+  specWaiverLines?: string[];
+  /** The chain's spec: true implementation waves Chief did not bypass: a Spec Writer committed docs/ before each one's worker. Optional: older callers omit it. */
   specWaves?: number[];
+  /** Unplanned work whose task chain holds a Spec Writer. Optional: older callers omit it. */
+  specUnplanned?: boolean;
   /** The recorded-commands lines (BB's own event log), already rendered. */
   recordedLines: string[];
   /** The newest open reviewer with a result, its verdict already rendered; null when none. */
@@ -103,7 +107,8 @@ export interface ReviewBriefInput {
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
  * Pure: it renders what startReview gathered and reads nothing else. */
 export function reviewBrief(input: ReviewBriefInput): { prompt: string; context: string } {
-  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], specWaves = [] } = input;
+  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], specWaiverLines = [], specWaves = [], specUnplanned = false } = input;
+  const specGate = specWaves.length > 0 || specUnplanned;
   const head = worker.head;
   const many = targets.length > 1;
   const plural = many ? "s" : "";
@@ -170,12 +175,12 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     ]),
   ] : [];
   const waiverSection = waiverLines.length ? ["## Waived test waves", ...waiverLines] : [];
+  const specWaiverSection = specWaiverLines.length ? ["## Bypassed Spec Writer steps", ...specWaiverLines] : [];
   const testerTargets = (many ? targets : [worker]).filter((target) => target.kind === "tester");
   const specWriterTargets = (many ? targets : [worker]).filter((target) => target.kind === "spec-writer");
-  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.kind === "tester" || earlier.kind === "spec-writer"));
-  const specWaived = waiverLines.some((line) => line.includes("specs skipped by Chief"));
-  const specOnly = waiverLines.some((line) => !line.includes("tests skipped by Chief"));
-  const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, waiverSection, sliceSection, guidelineSection].filter((lines) => lines.length);
+  // On a spec-bearing chain every earlier worker is checked on its own interval: a docs/ path outside a Spec Writer's is scope drift.
+  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => specGate || earlier.kind === "tester" || earlier.kind === "spec-writer"));
+  const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, waiverSection, specWaiverSection, sliceSection, guidelineSection].filter((lines) => lines.length);
   const context = sections.map((lines) => lines.join("\n")).join("\n\n");
   const summary = sections.length ? [
     "", "## Context",
@@ -186,6 +191,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     ...(previousSection.length ? [`- The previous review (${previous!.threadId}) with its findings.`] : []),
     ...(planSection.length ? [`- The plan wave file${chain.length > 1 ? "s" : ""} this review covers.`] : []),
     ...(waiverSection.length ? ["- The test waves Chief waived, with Chief's reason for each."] : []),
+    ...(specWaiverSection.length ? ["- The Spec Writer steps Chief bypassed, with Chief's reason for each."] : []),
     ...(sliceSection.length ? ["- The impact slice: pointers to code outside the diff that the change calls or that calls it."] : []),
     ...(guidelineSection.length ? ["- The guideline files (CLAUDE.md, AGENTS.md) in the repository root and on the changed files' paths."] : []),
     "Read `$BB_THREAD_STORAGE/review-context.md` in full before reviewing. If it is missing, wait 10 seconds and read again; if still missing, report blocked naming it.",
@@ -230,14 +236,18 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
         `A Spec Writer changes only docs/: check its commits from the Base commit its report names to the reviewed head (git diff <base>..<head> --stat); any other path is scope drift.${many ? ` Spec Writers here: ${specWriterTargets.map((target) => target.threadId).join(", ")}.` : ""}`,
       ] : []),
       ...(earlierScoped.length ? [
-        `Check each earlier tester and Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind} ${earlier.threadId}`))].join(", ")}.`,
+        specGate
+          ? `Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, a Spec Writer's path outside docs/, or a docs/ path in a worker's, designer's or tester's own range is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind ?? "worker"} ${earlier.threadId}`))].join(", ")}.`
+          : `Check each earlier tester and Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind} ${earlier.threadId}`))].join(", ")}.`,
       ] : []),
-      ...(specWaves.length ? [
-        "", `Wave${specWaves.length > 1 ? "s" : ""} ${specWaves.join(", ")} ${specWaves.length > 1 ? "are" : "is"} marked spec: true: a Spec Writer updated docs/ from each wave's \`## Spec delta\`. Block only on:`,
-        "(1) a named Spec delta item whose final docs content is missing or wrong (content already correct needs no new commit);",
-        "(2) new or changed docs that contradict the code or the tests;",
-        "(3) in new or changed docs/specs, docs/INDEX.md or docs/decisions content only: a spec with no lead sentence saying what the domain is for; a domain term or abbreviation the reader needs, used before it is defined; sprint history, a wishlist or a code dump; restated test cases or GIVEN/WHEN/THEN; a new or changed decision file over 20 lines or with a sequential number; a newly added docs/active folder or per-branch plan file; a new spec with no INDEX row; a mandatory STE structural rule broken in new or changed prose that the Spec Writer's report does not name as a kept exception.",
-        "Unchanged existing docs are out of scope. A missing spec for a domain no Spec delta names is never a finding. Other prose style is a nit.",
+      ...(specGate ? [
+        "", `${specWaves.length ? `Wave${specWaves.length > 1 ? "s" : ""} ${specWaves.join(", ")} ${specWaves.length > 1 ? "are" : "is"} marked spec: true` : "This task ran a Spec Writer"}: a Spec Writer committed docs/ from the \`## Spec delta\` before the worker implemented against them. Judge the code and the tests against those docs. Block only on:`,
+        "(1) code that contradicts the committed docs;",
+        "(2) a test that contradicts them;",
+        "(3) a named Spec delta item that is missing or wrong in the final docs;",
+        "(4) a docs/ change in a worker's, designer's or tester's own commit range;",
+        "(5) in new or changed docs prose only: no lead sentence saying what the domain is for; a domain term used before it is defined (common words need no definition); sprint history, a wishlist or a code dump; a contract with no reason next to it.",
+        "Content already correct needs no new commit. Unchanged existing docs are out of scope. A bypass never excuses landed docs that contradict the code. ASD-STE100 sentence rules (Simplified Technical English) are nits, never blocking.",
       ] : []),
       ...(reportSection.length && (head || many) ? [
         `Read each worker report for its Deviations from plan and its Automated Verification; each pull request at its pinned commit is the change.`,
@@ -257,10 +267,10 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
         "Read each worker's full report (its Full report path in review-context.md, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
       ] : []),
       ...(waiverLines.length ? [
-        // A spec-only line (chief_skip_specs) waives docs only: never grant it the test exemption.
-        (specOnly
-          ? "Chief waived the waves listed under `## Waived test waves` in review-context.md, each with its reason. Only a wave whose line says \"tests skipped by Chief\" (chief_skip_tests) has its planned test work, test runs and contracts as authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. A wave whose line says only \"specs skipped by Chief\" (chief_skip_specs) keeps its planned test work, test runs and contracts fully under review. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them."
-          : "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them.") + (specWaived ? " A specs-skipped wave's Spec delta and docs work are authorized omissions too. Docs commits that did land stay under review: a waiver never excuses a contradiction they introduce." : ""),
+        "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them.",
+      ] : []),
+      ...(specWaiverLines.length ? [
+        "Chief bypassed the Spec Writer on the waves listed under `## Bypassed Spec Writer steps` in review-context.md (chief_skip_specs), each with its reason. Review those waves against their plan: missing docs/ for them is not a finding, and they get no spec gate. The bypass never covers tests, and it never excuses landed docs/ that contradict the code.",
       ] : []),
     ],
   });
@@ -462,10 +472,17 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
         : chain.filter((n) => !waves[n - 1]!.testsSkipped).flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
       const recorded = targets.length > 1 ? null : await recordedCommands(workerThreadId);
+      const specWaves = chain.filter((n) => !!waves[n - 1]!.spec && !waves[n - 1]!.test && !waves[n - 1]!.design && !waves[n - 1]!.specsSkipped);
+      const specUnplanned = !waves.length && ledger.taskChain(worker.thread_id).some((id) => store.get(id)?.kind === "spec-writer");
+      const specChain = specWaves.length > 0 || specUnplanned;
       // Each target's earlier reported workers on its branch: the implementer's evidence when the target is a tester.
       const earlier = new Map<string, NonNullable<BriefTarget["earlier"]>>();
       for (const target of new Set([worker, ...targets])) {
-        const rows = ledger.taskChain(target.thread_id).slice(1).flatMap((id) => { const row = store.get(id); return row?.result ? [row] : []; }).slice(0, 4);
+        const reported = ledger.taskChain(target.thread_id).slice(1).flatMap((id) => { const row = store.get(id); return row?.result ? [row] : []; });
+        // A spec-bearing chain keeps every Spec Writer and Tester report; the 4-row cap applies to the others.
+        const keep = (row: Row) => specChain && (row.kind === "spec-writer" || row.kind === "tester");
+        const others = new Set(reported.filter((row) => !keep(row)).slice(0, 4));
+        const rows = reported.filter((row) => keep(row) || others.has(row));
         earlier.set(target.thread_id, await Promise.all(rows.map(async (row) => ({
           threadId: row.thread_id, kind: row.kind, reportPath: row.report_path,
           ...(targets.length > 1 ? {} : { recorded: recordedLines(await recordedCommands(row.thread_id)) }),
@@ -487,12 +504,12 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         wavePaths: waves.map((wave) => wave.path),
         chain,
         contractLines,
-        waiverLines: chain.filter((n) => waves[n - 1]!.testsSkipped || waves[n - 1]!.specsSkipped)
-          .map((n) => { const wave = waves[n - 1]!; return `Wave ${n} of ${waves.length}: ${wave.path}: ${[
-            ...(wave.testsSkipped ? [`tests skipped by Chief: ${clip(wave.testsSkipped, 500)}`] : []),
-            ...(wave.specsSkipped ? [`specs skipped by Chief: ${clip(wave.specsSkipped, 500)}`] : []),
-          ].join("; ")}`; }),
-        specWaves: chain.filter((n) => waves[n - 1]!.spec && !waves[n - 1]!.testsSkipped && !waves[n - 1]!.specsSkipped),
+        waiverLines: chain.filter((n) => waves[n - 1]!.testsSkipped)
+          .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: tests skipped by Chief: ${clip(waves[n - 1]!.testsSkipped!, 500)}`),
+        specWaiverLines: chain.filter((n) => waves[n - 1]!.specsSkipped)
+          .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: specs skipped by Chief: ${clip(waves[n - 1]!.specsSkipped!, 500)}`),
+        specWaves,
+        specUnplanned,
         recordedLines: recordedLines(recorded),
         previous: previous?.result ? {
           threadId: previous.thread_id,

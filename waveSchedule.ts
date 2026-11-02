@@ -1,5 +1,5 @@
-/** spec: a test wave whose chain changes documented behaviour; after its tests a Spec Writer updates docs/ from its `## Spec delta`.
- * specsSkipped: Chief's reason for going without that spec step, set by chief_skip_specs, or by chief_skip_tests on a spec: true wave.
+/** spec: an implementation wave whose `## Spec delta` a Spec Writer turns into docs/ before the wave's worker runs.
+ * specsSkipped: Chief's reason for going without that Spec Writer (chief_skip_specs, before the wave's first delegation).
  * testsSkipped: Chief's recorded reason for going without this test wave (chief_skip_tests). absent is never persisted:
  * planWavesFor sets it on a waived wave no worker was ever delegated on, and the graph helpers then skip that wave. */
 export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean; test?: boolean; testsSkipped?: string; spec?: boolean; specsSkipped?: string; title?: string; absent?: boolean };
@@ -81,22 +81,38 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
       .sort((a, b) => a.created_at - b.created_at);
   }
 
-  /** True while wave n's spec step is pending: a spec: true test wave with neither waiver whose latest worker is a
-   * tester that reported ready (ready, or idle after a ready report). */
-  function awaitsSpec(planThreadId: string, waves: PlanWave[], n: number): boolean {
+  /** Wave n runs a Spec Writer before its worker: an implementation wave marked spec, not bypassed. */
+  function specWave(waves: PlanWave[], n: number): boolean {
     const wave = waves[n - 1];
-    if (!wave?.test || !wave.spec || wave.testsSkipped || wave.specsSkipped) return false;
-    const latest = waveWorkers(planThreadId, n).at(-1);
-    return latest?.kind === "tester" && (latest.state === "ready" || (latest.state === "idle" && latest.last_report_state === "ready"));
+    return !!wave?.spec && !wave.test && !wave.design && !wave.specsSkipped;
+  }
+
+  /** Implementation is owed on wave n: a spec wave whose latest row is a Spec Writer, in any state (complete included). */
+  function specOwed(planThreadId: string, waves: PlanWave[], n: number): boolean {
+    return specWave(waves, n) && waveWorkers(planThreadId, n).at(-1)?.kind === "spec-writer";
+  }
+
+  /** specOwed, and its Spec Writer reported ready (ready, or idle after a ready report): the worker may take over. */
+  function specReady(planThreadId: string, waves: PlanWave[], n: number): boolean {
+    if (!specOwed(planThreadId, waves, n)) return false;
+    const latest = waveWorkers(planThreadId, n).at(-1)!;
+    return latest.state === "ready" || (latest.state === "idle" && latest.last_report_state === "ready");
+  }
+
+  /** Wave n's chain is spec-bearing: some unbypassed spec wave on it has had a Spec Writer. */
+  function specChain(planThreadId: string, waves: PlanWave[], n: number): boolean {
+    return chainOf(waves, n).some((m) => !!waves[m - 1]?.spec && !waves[m - 1]!.specsSkipped
+      && waveWorkers(planThreadId, m).some((row) => row.kind === "spec-writer"));
   }
 
   /** The waves of a plan whose latest worker is not ready or complete (or does not exist yet). An idle worker
    * whose latest report was ready counts as ready: a later non-report turn moves its row off ready, not its report.
-   * A waived test wave is never pending: absent, or done whatever its worker's state. */
+   * A wave whose latest row is a Spec Writer is pending first, whatever that row's state or the test waiver.
+   * A waived test wave is otherwise never pending: absent, or done whatever its worker's state. */
   function pendingWaves(planThreadId: string, waves: PlanWave[]): number[] {
     return waves.flatMap((wave, index) => {
+      if (specOwed(planThreadId, waves, index + 1)) return [index + 1];
       if (wave.testsSkipped) return [];
-      if (awaitsSpec(planThreadId, waves, index + 1)) return [index + 1];
       const latest = waveWorkers(planThreadId, index + 1).at(-1);
       const ready = latest?.state === "ready" || latest?.state === "complete"
         || (latest?.state === "idle" && latest.last_report_state === "ready");
@@ -136,5 +152,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(waveWorkers(worker.plan_thread_id!, tip).at(-1)?.state ?? ""));
   }
 
-  return { planWavesFor, isDesignWave, isTestWave, waveWorkers, awaitsSpec, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, isDesignWave, isTestWave, waveWorkers, specWave, specOwed, specReady, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }
