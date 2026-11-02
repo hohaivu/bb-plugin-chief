@@ -66,15 +66,15 @@ export interface BriefTarget {
   head: PinnedHead | null;
   /** Re-review: the previous reviewed head this round's range starts from; absent = review the whole change. */
   since?: string;
-  kind?: "designer" | "tester" | null;
+  kind?: "designer" | "tester" | "spec-writer" | null;
   /** The earlier workers of its replaces: chain that reported, newest first (at most 4); recorded is set for a single-target review. */
-  earlier?: { threadId: string; kind: "designer" | "tester" | null; reportPath: string | null; recorded?: string[] }[];
+  earlier?: { threadId: string; kind: "designer" | "tester" | "spec-writer" | null; reportPath: string | null; recorded?: string[] }[];
 }
 
 export interface ReviewBriefInput {
   /** The worker chief_review named; its head is `head`, and it is one of `targets` unless a plan review reaches it through another. */
   worker: BriefTarget & {
-    kind: "designer" | "tester" | null;
+    kind: "designer" | "tester" | "spec-writer" | null;
     /** Its brief, already cut to fit; null when it has none. */
     brief: string | null;
     /** What it reported, already cut to fit: its summary, else the start of its result. */
@@ -88,6 +88,8 @@ export interface ReviewBriefInput {
   contractLines: string[];
   /** Chief's waived test waves this review covers, one line each with the reason, already cut to fit. Optional: older callers omit it. */
   waiverLines?: string[];
+  /** The chain's spec: true waves with neither testsSkipped nor specsSkipped: a Spec Writer updated docs/ on each. Optional: older callers omit it. */
+  specWaves?: number[];
   /** The recorded-commands lines (BB's own event log), already rendered. */
   recordedLines: string[];
   /** The newest open reviewer with a result, its verdict already rendered; null when none. */
@@ -101,7 +103,7 @@ export interface ReviewBriefInput {
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
  * Pure: it renders what startReview gathered and reads nothing else. */
 export function reviewBrief(input: ReviewBriefInput): { prompt: string; context: string } {
-  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [] } = input;
+  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], specWaves = [] } = input;
   const head = worker.head;
   const many = targets.length > 1;
   const plural = many ? "s" : "";
@@ -169,6 +171,10 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
   ] : [];
   const waiverSection = waiverLines.length ? ["## Waived test waves", ...waiverLines] : [];
   const testerTargets = (many ? targets : [worker]).filter((target) => target.kind === "tester");
+  const specWriterTargets = (many ? targets : [worker]).filter((target) => target.kind === "spec-writer");
+  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.kind === "tester" || earlier.kind === "spec-writer"));
+  const specWaived = waiverLines.some((line) => line.includes("specs skipped by Chief"));
+  const specOnly = waiverLines.some((line) => !line.includes("tests skipped by Chief"));
   const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, waiverSection, sliceSection, guidelineSection].filter((lines) => lines.length);
   const context = sections.map((lines) => lines.join("\n")).join("\n\n");
   const summary = sections.length ? [
@@ -220,6 +226,19 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ...(testerTargets.length ? [
         `A tester changes only tests, fixtures, test helpers and test config: check its commits since the Base commit its report names (git diff <base>..<head> --stat); a product-code change there is scope drift. The rest of the branch is the implementing workers' change.${many ? ` Testers here: ${testerTargets.map((target) => target.threadId).join(", ")}.` : ""}`,
       ] : []),
+      ...(specWriterTargets.length ? [
+        `A Spec Writer changes only docs/: check its commits from the Base commit its report names to the reviewed head (git diff <base>..<head> --stat); any other path is scope drift.${many ? ` Spec Writers here: ${specWriterTargets.map((target) => target.threadId).join(", ")}.` : ""}`,
+      ] : []),
+      ...(earlierScoped.length ? [
+        `Check each earlier tester and Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind} ${earlier.threadId}`))].join(", ")}.`,
+      ] : []),
+      ...(specWaves.length ? [
+        "", `Wave${specWaves.length > 1 ? "s" : ""} ${specWaves.join(", ")} ${specWaves.length > 1 ? "are" : "is"} marked spec: true: a Spec Writer updated docs/ from each wave's \`## Spec delta\`. Block only on:`,
+        "(1) a named Spec delta item whose final docs content is missing or wrong (content already correct needs no new commit);",
+        "(2) new or changed docs that contradict the code or the tests;",
+        "(3) in new or changed docs/specs, docs/INDEX.md or docs/decisions content only: a spec with no lead sentence saying what the domain is for; a domain term or abbreviation the reader needs, used before it is defined; sprint history, a wishlist or a code dump; restated test cases or GIVEN/WHEN/THEN; a new or changed decision file over 20 lines or with a sequential number; a newly added docs/active folder or per-branch plan file; a new spec with no INDEX row; a mandatory STE structural rule broken in new or changed prose that the Spec Writer's report does not name as a kept exception.",
+        "Unchanged existing docs are out of scope. A missing spec for a domain no Spec delta names is never a finding. Other prose style is a nit.",
+      ] : []),
       ...(reportSection.length && (head || many) ? [
         `Read each worker report for its Deviations from plan and its Automated Verification; each pull request at its pinned commit is the change.`,
       ] : []),
@@ -238,7 +257,10 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
         "Read each worker's full report (its Full report path in review-context.md, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
       ] : []),
       ...(waiverLines.length ? [
-        "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them.",
+        // A spec-only line (chief_skip_specs) waives docs only: never grant it the test exemption.
+        (specOnly
+          ? "Chief waived the waves listed under `## Waived test waves` in review-context.md, each with its reason. Only a wave whose line says \"tests skipped by Chief\" (chief_skip_tests) has its planned test work, test runs and contracts as authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. A wave whose line says only \"specs skipped by Chief\" (chief_skip_specs) keeps its planned test work, test runs and contracts fully under review. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them."
+          : "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them.") + (specWaived ? " A specs-skipped wave's Spec delta and docs work are authorized omissions too. Docs commits that did land stay under review: a waiver never excuses a contradiction they introduce." : ""),
       ] : []),
     ],
   });
@@ -269,7 +291,7 @@ interface ReviewRow {
   chief_thread_id: string | null;
   title: string;
   state: string;
-  kind: "designer" | "tester" | null;
+  kind: "designer" | "tester" | "spec-writer" | null;
   brief: string | null;
   result: string | null;
   summary: string | null;
@@ -465,8 +487,12 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         wavePaths: waves.map((wave) => wave.path),
         chain,
         contractLines,
-        waiverLines: chain.filter((n) => waves[n - 1]!.testsSkipped)
-          .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: tests skipped by Chief: ${clip(waves[n - 1]!.testsSkipped!, 500)}`),
+        waiverLines: chain.filter((n) => waves[n - 1]!.testsSkipped || waves[n - 1]!.specsSkipped)
+          .map((n) => { const wave = waves[n - 1]!; return `Wave ${n} of ${waves.length}: ${wave.path}: ${[
+            ...(wave.testsSkipped ? [`tests skipped by Chief: ${clip(wave.testsSkipped, 500)}`] : []),
+            ...(wave.specsSkipped ? [`specs skipped by Chief: ${clip(wave.specsSkipped, 500)}`] : []),
+          ].join("; ")}`; }),
+        specWaves: chain.filter((n) => waves[n - 1]!.spec && !waves[n - 1]!.testsSkipped && !waves[n - 1]!.specsSkipped),
         recordedLines: recordedLines(recorded),
         previous: previous?.result ? {
           threadId: previous.thread_id,

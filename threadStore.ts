@@ -250,13 +250,14 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       db.prepare(`UPDATE managed_threads SET plan_review=? WHERE thread_id=? AND (plan_review IS NULL OR plan_review='required')`).run(value, threadId);
       wrote();
     },
-    /** chief_skip_tests: sets one wave's testsSkipped in plan_waves and touches no other field. */
-    skipTestWave(plannerThreadId: string, wave: number, reason: string) {
+    /** chief_skip_tests and chief_skip_specs: sets the given waiver reasons on one wave in plan_waves, in one write,
+     * and touches no other field. */
+    skipWave(plannerThreadId: string, wave: number, fields: { testsSkipped?: string; specsSkipped?: string }) {
       db.transaction(() => {
         const row = db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(plannerThreadId) as { plan_waves: string | null } | undefined;
         const waves = JSON.parse(row?.plan_waves ?? "[]") as Record<string, unknown>[];
         if (!waves[wave - 1]) throw new Error(`Planner ${plannerThreadId} has no wave ${wave}.`);
-        waves[wave - 1]!.testsSkipped = reason;
+        Object.assign(waves[wave - 1]!, fields);
         db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id=?`).run(JSON.stringify(waves), plannerThreadId);
       })();
       wrote();

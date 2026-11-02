@@ -160,7 +160,7 @@ export function checkPlan(plan: string | unknown[]): string[] {
       bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false); tests.push(false);
       return;
     }
-    const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown; test?: unknown };
+    const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown; test?: unknown; spec?: unknown };
     const name = multi ? `plan wave ${n} body` : "plan";
     const body = typeof wave.body === "string" ? wave.body.trim() : undefined;
     bodies.push(body);
@@ -176,6 +176,13 @@ export function checkPlan(plan: string | unknown[]): string[] {
     }
     tests.push(wave.test === true);
     if (wave.design === true && wave.test === true) errors.push(`plan wave ${n} is both design: true and test: true; a wave is one or the other.`);
+    if (wave.spec !== undefined && typeof wave.spec !== "boolean") {
+      errors.push(`plan wave ${n} spec is ${JSON.stringify(wave.spec)} (${typeof wave.spec}); allowed true or false. Send a boolean, or drop spec.`);
+    } else if (wave.spec === true && wave.test !== true) {
+      errors.push(`plan wave ${n} is spec: true but not test: true; spec marks a test wave only.`);
+    } else if (wave.spec === true && body && !/^[ \t]*#{1,6}[ \t]+spec delta/im.test(body)) {
+      errors.push(`plan wave ${n} is spec: true but lacks a "## Spec delta" Markdown heading naming the docs the Spec Writer changes; add one, or drop spec.`);
+    }
     const deps = wave.dependsOn;
     const bad = (what: string, fix: string) => errors.push(`plan wave ${n} dependsOn is ${JSON.stringify(deps)}, ${what}; ${fix}`);
     if (deps === undefined) { maybeParents.push(n > 1 ? [n - 1] : []); parents.push(n > 1 ? n - 1 : null); return; }

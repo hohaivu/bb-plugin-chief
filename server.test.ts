@@ -5921,7 +5921,7 @@ describe("tester role", () => {
     const { chief, planner, tester } = await withTester(state);
     await report(state, tester, { state: "ready", result: READY });
     setLive(state, tester, "idle");
-    const explicit = "Name the kind: kind: worker to change product code, kind: tester to change tests.";
+    const explicit = "Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.";
     await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester })).rejects.toThrow(explicit);
 
     await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "worker" });
@@ -5946,7 +5946,7 @@ describe("tester role", () => {
     const tester = (await status(state)).threads.filter((row) => row.role === "worker").at(-1)!;
     await readyIdle(state, tester.threadId, "Tested");
     await expect(tool(state, "chief_delegate", { title: "Fix", mission: "Fix it", replaces: tester.threadId }, chief.threadId))
-      .rejects.toThrow("Name the kind: kind: worker to change product code, kind: tester to change tests.");
+      .rejects.toThrow("Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.");
   });
 
   // Contract (legacy plans): a plan persisted before test waves existed has no test marker; a tester runs on it only
@@ -6301,5 +6301,718 @@ describe("tester role", () => {
       "    npm run lint → exit 1",
       "    npm run build → exit 0",
     ].join("\n"));
+  });
+
+  describe("Spec Writer role", () => {
+    const SPEC_DELTA = "## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative";
+    const specWave = (n = 2, extra: object = {}) => ({ body: wave(n, `Write the tests.\n\n${SPEC_DELTA}`), test: true, spec: true, ...extra });
+    const specCall = (planThreadId: string, tester: string, waveNo = 2) => `chief_delegate (planThreadId: ${planThreadId}, wave: ${waveNo}, replaces: ${tester}, kind: spec-writer)`;
+    const skipCall = (planThreadId: string, waveNo = 2) => `chief_skip_specs (planThreadId: ${planThreadId}, wave: ${waveNo}, reason)`;
+    const specLine = (planThreadId: string, tester: string, waveNo = 2) =>
+      `Tests on wave ${waveNo} are ready. Once the tester is idle, delegate its Spec Writer: ${specCall(planThreadId, tester, waveNo)}. To go without, record why: ${skipCall(planThreadId, waveNo)}. Do not review yet.`;
+    const lastAlert = (state: State) => state.sent.at(-1).input[0].text as string;
+    const roster = async (state: State, chiefThreadId: string) => String(await tool(state, "chief_roster", { includeComplete: true }, chiefThreadId));
+
+    /** Chief + a plan whose wave 2 is a spec: true test wave; wave 1 ready and idle, wave 2's tester delegated and still busy. */
+    async function specChain(state: State, waves: object[] = [{ body: PLAN_FIXTURE }, specWave()], wave1: object = {}) {
+      const chief = await start(state);
+      const planner = await plan(state, chief.threadId, waves);
+      await delegateWave(state, chief.threadId, planner.threadId, 1, wave1);
+      const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+      await readyIdle(state, impl);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+      return { chief, planner, impl, tester: workerOn(state, planner.threadId, 2).thread_id as string };
+    }
+    /** specChain with the tester ready and idle: the spec step is pending. */
+    async function specPending(state: State) {
+      const ctx = await specChain(state);
+      await readyIdle(state, ctx.tester);
+      return ctx;
+    }
+    /** specPending with the Spec Writer delegated (still busy). */
+    async function withSpecWriter(state: State) {
+      const ctx = await specPending(state);
+      await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ctx.tester, kind: "spec-writer" });
+      return { ...ctx, writer: workerOn(state, ctx.planner.threadId, 2).thread_id as string };
+    }
+    const storedWave = (state: State, planThreadId: string, waveNo = 2) => JSON.parse(planWaves(state, planThreadId))[waveNo - 1];
+
+    // Contract (model fallback): MODEL_FALLBACK["spec-writer"]="worker" — with no Spec Writer pick a Spec Writer spawns on
+    // the Worker pick, with one on its own pick, a stored pick the machine cannot serve goes to the BB default (and Settings
+    // flags it unusable), and a pick stored for another machine changes nothing here. Regression: dropping the fallback sends
+    // the unset spawn to the BB default; reading the wrong role's row sends the plain worker to the Spec Writer model.
+    test("spec writer model: the Spec Writer pick when set, else the Worker pick, else the BB default when unservable", async () => {
+      const state = await setup();
+      const set = (hostId: string, role: string, model: string) =>
+        state.harness.behavior.callRpc("setRoleModel", { hostId, role, selection: { providerId: "codex", model, reasoningLevel: "high" } });
+      await set("host_1", "worker", "gpt-6-mini");
+      await set("host_2", "spec-writer", "gpt-6-astra");
+      const { chief, planner, writer } = await withSpecWriter(state);
+      expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
+
+      await set("host_1", "spec-writer", "gpt-6-astra");
+      await readyIdle(state, writer);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: writer, kind: "spec-writer" });
+      const repair = workerOn(state, planner.threadId, 2).thread_id as string;
+      expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-astra" });
+      // The Spec Writer pick is not the Worker pick: a plain worker stays on the Worker model.
+      await readyIdle(state, repair);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: repair, kind: "worker" });
+      expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
+      const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
+      expect(configuration.hosts[0]!.selections["spec-writer"]).toMatchObject({ providerId: "codex", model: "gpt-6-astra" });
+      expect(configuration.hosts[0]!.unusable).toEqual([]);
+
+      await set("host_1", "spec-writer", "gpt-5-retired");
+      const fix = workerOn(state, planner.threadId, 2).thread_id as string;
+      await readyIdle(state, fix);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: fix, kind: "tester" });
+      const retest = workerOn(state, planner.threadId, 2).thread_id as string;
+      await readyIdle(state, retest);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: retest, kind: "spec-writer" });
+      expect(state.spawned.at(-1)).not.toHaveProperty("providerId");
+      expect(state.spawned.at(-1)).not.toHaveProperty("model");
+      expect((await state.harness.behavior.callRpc("modelConfiguration", null)).hosts[0]!.unusable).toEqual(["spec-writer"]);
+    });
+
+    // Contract (model resolution is per machine): a Spec Writer spawns on the picks of the machine its worktree lives on. Two
+    // machines with different Worker and Spec Writer picks, each spawn made through chief_delegate on that machine's
+    // environment: host_1 has its own Spec Writer pick, host_2 has none and inherits host_2's Worker pick, so neither
+    // machine's pick reaches the other. Regression: a resolver that always reads the first machine sends host_2's Spec Writer
+    // to host_1's Spec Writer model; one that reads the Worker row of the wrong machine sends it to host_1's Worker model.
+    test("spec writer model: each spawn uses the picks of its own machine", async () => {
+      const state = await setup();
+      const set = (hostId: string, role: string, providerId: string, model: string) =>
+        state.harness.behavior.callRpc("setRoleModel", { hostId, role, selection: { providerId, model, reasoningLevel: "medium" } });
+      await set("host_1", "worker", "codex", "gpt-6-mini");
+      await set("host_1", "spec-writer", "codex", "gpt-6-astra");
+      await set("host_2", "worker", "claude-code", "claude-opus-5");
+      const hostTwo = new Set<string>();
+      state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
+        id: environmentId, hostId: hostTwo.has(environmentId) ? "host_2" : "host_1", workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
+      }));
+      const chief = await start(state);
+      const chains = [];
+      for (const host of ["host_1", "host_2"]) {
+        const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave()]);
+        await delegateWave(state, chief.threadId, planner.threadId, 1);
+        const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+        if (host === "host_2") hostTwo.add(state.live.get(impl)!.environmentId as string);
+        await readyIdle(state, impl);
+        await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+        const tester = workerOn(state, planner.threadId, 2).thread_id as string;
+        await readyIdle(state, tester);
+        chains.push({ planner, tester });
+      }
+      const spawnWriter = async ({ planner, tester }: (typeof chains)[number]) => {
+        await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "spec-writer" });
+        return state.spawned.at(-1);
+      };
+      expect(await spawnWriter(chains[0]!)).toMatchObject({ providerId: "codex", model: "gpt-6-astra" });
+      expect(await spawnWriter(chains[1]!)).toMatchObject({ providerId: "claude-code", model: "claude-opus-5" });
+    });
+
+    // Contract (chief_models_v8 migration, storage): a v7 database keeps all seven roles on two machines unchanged, then
+    // accepts a spec-writer row and still refuses an unknown role. Regression: the rebuild drops a role or machine's row,
+    // or leaves the old CHECK list so a Spec Writer pick cannot be saved.
+    test("chief_models_v8 migration keeps every v7 model row and accepts a Spec Writer pick", async () => {
+      const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-spec-writer" });
+      disposals.push(() => harness.lifecycle.dispose());
+      const db = bb.storage.database();
+      bb.storage.migrate(db, MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("chief_models_v8"))));
+      const insert = db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at) VALUES (?, ?, ?, ?, ?, ?)`);
+      expect(() => insert.run("host_1", "spec-writer", "codex", "gpt-6-mini", "low", 0)).toThrow();
+      const roles = ["chief", "planner", "worker", "reviewer", "advisor", "designer", "tester"];
+      for (const host of ["host_1", "host_2"]) roles.forEach((role, i) => insert.run(host, role, "codex", `model-${host}-${role}`, "high", i + 1));
+      const before = db.prepare(`SELECT * FROM chief_models ORDER BY host_id, role`).all();
+      expect(before).toHaveLength(14);
+
+      bb.storage.migrate(db, MIGRATIONS);
+
+      expect(db.prepare(`SELECT * FROM chief_models ORDER BY host_id, role`).all()).toEqual(before);
+      expect(() => insert.run("host_1", "spec-writer", "codex", "gpt-6-mini", "low", 100)).not.toThrow();
+      expect(db.prepare(`SELECT model FROM chief_models WHERE host_id='host_1' AND role='spec-writer'`).get()).toEqual({ model: "gpt-6-mini" });
+      expect(() => insert.run("host_1", "junior", "codex", "gpt-6-mini", "low", 101)).toThrow();
+    });
+
+    // Contract (checkPlan, byte-stable errors): a plan with no `spec` key gets exactly the errors it got before the flag
+    // existed; the strings were captured by running checkPlan at the pre-wave-1 commit 783efcb on these inputs.
+    // Regression: the spec branch reorders or rewords an old plan's errors, so a planner's retry loop sees new text.
+    test("checkPlan returns byte-identical errors for plans that do not use spec", () => {
+      const W = (n: number, extra: object = {}) => ({ body: `# Wave ${n}\nx\n\n## Contracts to verify\n- c${n}\n\n## What we're NOT doing\n- x`, ...extra });
+      expect(checkPlan([W(1), W(2, { test: "yes" })])).toEqual([
+        "plan wave 2 test is \"yes\" (string); allowed true or false. Send a boolean, or drop test.",
+        "plan wave 2 ends a chain but is not test: true; follow it with a test wave (test: true, dependsOn [2]) that tests it.",
+      ]);
+      expect(checkPlan([W(1), W(2, { design: true, test: true })])).toEqual([
+        "plan wave 2 is both design: true and test: true; a wave is one or the other.",
+        "plan wave 2 is design: true but no wave builds on it; follow it with the wave that implements it (dependsOn [2] or the next wave), or drop design.",
+      ]);
+      expect(checkPlan([W(1), W(2, { test: true }), W(3, { test: true })])).toEqual([
+        "plan wave 2 is test: true but a later wave builds on it; a test wave ends its chain.",
+        "plan wave 3 is test: true but builds on test wave 2; build it on the chain's last implementation wave.",
+      ]);
+    });
+
+    // Contract (checkPlan accepts/refuses spec, persisted flag): spec is a boolean on a test wave whose body has a Spec delta
+    // heading; the accepted flag is stored on that wave only. Regression: dropping the heading or test-wave rule lets a
+    // docs step with no work list through; dropping the copy loses the flag so no spec step ever opens.
+    test.each<[string, object[], RegExp[]]>([
+      ["accepts spec: true on a test wave with a Spec delta heading", [planWave(1), specWave()], []],
+      ["accepts a Spec delta heading at any level", [planWave(1), specWave(2, { body: wave(2, "Tests.\n\n### spec delta\n- docs/x.md") })], []],
+      ["refuses a non-boolean spec", [planWave(1), planWave(2, { test: true, spec: "yes" })], [/plan wave 2 spec is "yes" \(string\); allowed true or false\. Send a boolean, or drop spec\./]],
+      ["refuses spec: true on an implementation wave", [planWave(1, { spec: true }), planWave(2, { test: true })], [/plan wave 1 is spec: true but not test: true; spec marks a test wave only\./]],
+      ["refuses spec: true with no Spec delta heading", [planWave(1), planWave(2, { test: true, spec: true })], [/plan wave 2 is spec: true but lacks a "## Spec delta" Markdown heading naming the docs the Spec Writer changes/]],
+      ["refuses a Spec delta named only in bold text", [planWave(1), planWave(2, { body: wave(2, "**Spec delta**\n- docs/x.md"), test: true, spec: true })], [/plan wave 2 is spec: true but lacks a "## Spec delta"/]],
+    ])("checkPlan %s", (_name, input, expected) => {
+      const errors = checkPlan(input);
+      if (!expected.length) expect(errors).toEqual([]);
+      for (const pattern of expected) expect(errors.join("\n")).toMatch(pattern);
+    });
+
+    test("a planner's spec flag is stored on the flagged test wave only", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave(), { body: wave(3), dependsOn: [] }, TEST_WAVE(4, [3])]);
+      expect(JSON.parse(planWaves(state, planner.threadId)).map((entry: any) => entry.spec)).toEqual([undefined, true, undefined, undefined]);
+    });
+
+    const skipSpecs = (state: State, chiefThreadId: string, planThreadId: string, reason = "docs are unchanged", waveNo = 2) =>
+      tool(state, "chief_skip_specs", { planThreadId, wave: waveNo, reason }, chiefThreadId);
+
+    // Contract (spec-step lifecycle): a ready tester on a spec: true wave names the Spec Writer call and the waiver, in its
+    // alert, the roster and the review refusal, and no reviewer starts; the Spec Writer's ready names the review with the Spec
+    // Writer as target, never a retest; approving and completing it absorbs the planner. Regression: dropping the
+    // readyStep/reviewBlock "spec" branch offers the review straight after the tests; dropping the retest exclusion
+    // for kind spec-writer offers a rerun after the docs commit.
+    test("a ready tester on a spec wave must hand off to a Spec Writer before the review, which then targets the Spec Writer", async () => {
+      const state = await setup();
+      const { chief, planner, tester } = await specChain(state);
+      await report(state, tester, { state: "ready", result: READY });
+      expect(lastAlert(state)).toContain(specLine(planner.threadId, tester));
+      expect(lastAlert(state)).not.toContain("Start the one review");
+      setLive(state, tester, "idle");
+      expect(await roster(state, chief.threadId)).toContain(specLine(planner.threadId, tester));
+      await expect(tool(state, "chief_review", { workerThreadId: tester }, chief.threadId)).rejects.toThrow(specLine(planner.threadId, tester));
+      expect((await status(state)).threads.filter((row) => row.role === "reviewer")).toEqual([]);
+
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "spec-writer" });
+      const writer = workerOn(state, planner.threadId, 2);
+      expect(writer).toMatchObject({ kind: "spec-writer", role: "worker", plan_wave: 2, replaces_thread_id: tester });
+      await readyIdle(state, writer.thread_id);
+      expect(lastAlert(state)).toContain(`Start the one review of the whole plan now: chief_review (workerThreadId: ${writer.thread_id})`);
+      expect(lastAlert(state)).not.toContain("rerun them");
+      expect(await roster(state, chief.threadId)).not.toContain("after the tests ran");
+
+      await reviewed(state, chief.threadId, writer.thread_id, "approve");
+      await tool(state, "chief_complete", { threadId: writer.thread_id }, chief.threadId);
+      expect(rowOf(state, writer.thread_id).state).toBe("complete");
+      expect(rowOf(state, planner.threadId).state).toBe("complete");
+    });
+
+    // Contract (pendingWaves, multi-chain): while one chain's spec step is pending the plan is not fully ready, so another
+    // chain's ready tip waits instead of naming the one whole-plan review; the Spec Writer's ready releases it.
+    // Regression: dropping the awaitsSpec rule from pendingWaves lets chain 2's tip name the review while chain 1's docs are missing.
+    test("another chain's tip does not name the review while a spec step is pending", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave(2), { body: wave(3), dependsOn: [] }, TEST_WAVE(4, [3])]);
+      await approvePlan(state, chief.threadId, planner.threadId);
+      const handOff = async (waveNo: number, extra: object = {}) => {
+        await delegateWave(state, chief.threadId, planner.threadId, waveNo, extra);
+        return workerOn(state, planner.threadId, waveNo).thread_id as string;
+      };
+      const w1 = await handOff(1, { branch: "feature/a" });
+      const w3 = await handOff(3, { branch: "feature/b" });
+      await readyIdle(state, w1);
+      await readyIdle(state, w3);
+      const t2 = await handOff(2, { replaces: w1 });
+      const t4 = await handOff(4, { replaces: w3 });
+      await readyIdle(state, t2);
+      await readyIdle(state, t4);
+      expect(lastAlert(state)).toContain("waits until wave(s) 2 are ready");
+      expect(lastAlert(state)).not.toContain("Start the one review");
+      await expect(tool(state, "chief_review", { workerThreadId: t4 }, chief.threadId)).rejects.toThrow("wave(s) 2 of 4 are not ready yet");
+
+      const writer = await handOff(2, { replaces: t2, kind: "spec-writer" });
+      await readyIdle(state, writer);
+      expect(lastAlert(state)).toContain("Start the one review of the whole plan now: chief_review (workerThreadId:");
+      await tool(state, "chief_review", { workerThreadId: writer }, chief.threadId);
+    });
+
+    // Contract (completion guard): a worker whose spec step is pending cannot complete — normally, with skipReview or with
+    // override — and the refusal names both calls; a complete tester's wave absorbs no planner. Only a waiver passes it.
+    // Regression: dropping the markComplete guard lets skipReview complete the tester and absorb the planner with no docs.
+    test.each([["no review argument", {}], ["skipReview", { skipReview: "small change" }], ["override", { override: "no approve" }]])(
+      "completing a tester with a pending spec step is refused with %s", async (_label, how) => {
+        const state = await setup();
+        const { chief, planner, tester } = await specPending(state);
+        await expect(tool(state, "chief_complete", { threadId: tester, ...how }, chief.threadId)).rejects.toThrow(
+          `Refusing to complete ${tester}: wave 2's spec step is pending. Delegate its Spec Writer — ${specCall(planner.threadId, tester)} — or waive it: ${skipCall(planner.threadId)}.`);
+        expect(rowOf(state, tester).state).toBe("ready");
+        expect(rowOf(state, planner.threadId).state).not.toBe("complete");
+
+        await skipSpecs(state, chief.threadId, planner.threadId);
+        await tool(state, "chief_complete", { threadId: tester, skipReview: "small change" }, chief.threadId);
+        expect(rowOf(state, tester).state).toBe("complete");
+      });
+
+    // Contract (chief_skip_specs refusals): only a spec: true test wave whose latest worker is an idle tester with a ready
+    // report; each other state names why it is not pending. Regression: a dropped refusal lets Chief record a waiver on a
+    // non-spec wave, on a wave with no tester, with a failing tester, or over a running worker or an existing Spec Writer.
+    test("chief_skip_specs refuses a non-spec wave and any wave whose spec step is not pending", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const plain = await plan(state, chief.threadId);
+      const unflagged = `Wave 2 of planner ${plain.threadId} is not a spec: true test wave.`;
+      await expect(skipSpecs(state, chief.threadId, plain.threadId)).rejects.toThrow(unflagged);
+      await expect(skipSpecs(state, chief.threadId, plain.threadId, "r", 1)).rejects.toThrow(`Wave 1 of planner ${plain.threadId} is not a spec: true test wave.`);
+
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave()]);
+      const notPending = `Wave 2's spec step is not pending: it opens when its tester reports ready.`;
+      await expect(skipSpecs(state, chief.threadId, planner.threadId)).rejects.toThrow(notPending);
+      await delegateWave(state, chief.threadId, planner.threadId, 1);
+      const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+      await readyIdle(state, impl);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+      const tester = workerOn(state, planner.threadId, 2).thread_id as string;
+      await report(state, tester, { state: "blocked", result: "Tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" });
+      setLive(state, tester, "idle");
+      await expect(skipSpecs(state, chief.threadId, planner.threadId)).rejects.toThrow(notPending);
+
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "worker" });
+      const fix = workerOn(state, planner.threadId, 2).thread_id as string;
+      await readyIdle(state, fix);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: fix, kind: "tester" });
+      const retest = workerOn(state, planner.threadId, 2).thread_id as string;
+      await report(state, retest, { state: "ready", result: READY });
+      setLive(state, retest, "active");
+      await expect(skipSpecs(state, chief.threadId, planner.threadId)).rejects.toThrow(`Wave 2's worker ${retest} is active: wait until it is idle, then waive.`);
+      setLive(state, retest, "idle");
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: retest, kind: "spec-writer" });
+      await expect(skipSpecs(state, chief.threadId, planner.threadId)).rejects.toThrow(notPending);
+      expect(storedWave(state, planner.threadId).specsSkipped).toBeUndefined();
+    });
+
+    // Contract (chief_skip_specs record): the waiver is stored on its wave alone, leaves the tests alone, returns the review
+    // call, is a no-op the second time, and shows in the roster, inspect, the completion forge comment and the reviewer's
+    // waiver section. Regression: the reason is written to testsSkipped, rewritten by the second call, or missing from any reader.
+    test("chief_skip_specs records the waiver, is idempotent, and reaches every reader", async () => {
+      const state = await setup();
+      const { chief, planner, tester } = await specChain(state, undefined, { prUrl: "https://github.com/acme/shop/pull/8" });
+      await readyIdle(state, tester);
+      const before = JSON.parse(planWaves(state, planner.threadId));
+      const text = await skipSpecs(state, chief.threadId, planner.threadId, "docs already describe this");
+      expect(text).toContain(`chief_review (workerThreadId: ${tester})`);
+      const after = JSON.parse(planWaves(state, planner.threadId));
+      expect(after[0]).toEqual(before[0]);
+      expect(after[1]).toEqual({ ...before[1], specsSkipped: "docs already describe this" });
+      expect(after[1].testsSkipped).toBeUndefined();
+      const stored = planWaves(state, planner.threadId);
+      expect(await skipSpecs(state, chief.threadId, planner.threadId, "a different reason")).toBe(text);
+      expect(planWaves(state, planner.threadId)).toBe(stored);
+
+      expect(await roster(state, chief.threadId)).toContain("specs skipped: docs already describe this");
+      expect(String(await tool(state, "chief_inspect", { threadId: planner.threadId }, chief.threadId))).toContain("wave 2: specs skipped: docs already describe this");
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "spec-writer" }))
+        .rejects.toThrow("Specs on wave 2 were waived (docs already describe this); nothing to delegate.");
+
+      await reviewed(state, chief.threadId, tester, "approve");
+      const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
+      const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+      expect(context).toContain(`## Waived test waves\nWave 2 of 2: ${planFile(state, planner.threadId, 2)}: specs skipped by Chief: docs already describe this`);
+      expect(context).not.toContain("tests skipped by Chief");
+      expect(state.spawned.at(-1).prompt).toContain("A specs-skipped wave's Spec delta and docs work are authorized omissions too.");
+      expect(state.spawned.at(-1).prompt).not.toContain("is marked spec: true");
+
+      await tool(state, "chief_complete", { threadId: tester, skipReview: "reviewed above" }, chief.threadId);
+      const comment = state.db.prepare(`SELECT body FROM forge_comments WHERE dedupe_key=?`).get(`complete:${tester}`) as { body: string };
+      expect(comment.body).toContain("**Specs skipped (wave 2):** docs already describe this");
+    });
+
+    // Contract (reviewer authorization, spec-only waiver): chief_skip_specs excuses a wave's missing docs only. The reviewer is
+    // never told that wave's planned test work, test runs or contracts are authorized omissions; only a wave Chief waived with
+    // chief_skip_tests gets that sentence, also in a plan that holds both kinds of waiver. Regression (fails at 54ad928, before
+    // 689694b): any waiver line switches on the test-waiver paragraph, so a docs-only waiver excuses missing test evidence.
+    const TEST_EXEMPTION = "Their planned test work, test runs and contracts are authorized omissions";
+    const SPEC_ONLY_RULE = "A wave whose line says only \"specs skipped by Chief\" (chief_skip_specs) keeps its planned test work, test runs and contracts fully under review.";
+    const DOCS_EXEMPTION = "A specs-skipped wave's Spec delta and docs work are authorized omissions too.";
+    test("a spec-only waiver reaches the reviewer without the test-work exemption", async () => {
+      const state = await setup();
+      const { chief, planner, tester } = await specChain(state);
+      await readyIdle(state, tester);
+      await skipSpecs(state, chief.threadId, planner.threadId);
+      await tool(state, "chief_review", { workerThreadId: tester }, chief.threadId);
+      const prompt = state.spawned.at(-1).prompt as string;
+      expect(prompt).not.toContain(TEST_EXEMPTION);
+      expect(prompt).toContain(SPEC_ONLY_RULE);
+      expect(prompt).toContain(DOCS_EXEMPTION);
+      expect(prompt).toContain("Wave 2 keeps its invariant");
+    });
+
+    test("mixed waivers: the test exemption names only the tests-skipped wave and its contracts leave the review", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave(2), { body: wave(3), dependsOn: [] }, TEST_WAVE(4, [3])]);
+      await approvePlan(state, chief.threadId, planner.threadId);
+      const handOff = async (waveNo: number, extra: object = {}) => {
+        await delegateWave(state, chief.threadId, planner.threadId, waveNo, extra);
+        return workerOn(state, planner.threadId, waveNo).thread_id as string;
+      };
+      const w1 = await handOff(1, { branch: "feature/a" });
+      const w3 = await handOff(3, { branch: "feature/b" });
+      await readyIdle(state, w1);
+      await readyIdle(state, w3);
+      const t2 = await handOff(2, { replaces: w1 });
+      const t4 = await handOff(4, { replaces: w3 });
+      await readyIdle(state, t2);
+      await readyIdle(state, t4);
+      await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
+      await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 4, reason: "flaky suite" }, chief.threadId);
+      await tool(state, "chief_review", { workerThreadId: t4 }, chief.threadId);
+      const prompt = state.spawned.at(-1).prompt as string;
+      const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
+      const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+      expect(context).toContain(`Wave 2 of 4: ${planFile(state, planner.threadId, 2)}: specs skipped by Chief: docs are unchanged`);
+      expect(context).toContain(`Wave 4 of 4: ${planFile(state, planner.threadId, 4)}: tests skipped by Chief: flaky suite`);
+      expect(prompt).not.toContain(TEST_EXEMPTION);
+      expect(prompt).toContain("Only a wave whose line says \"tests skipped by Chief\" (chief_skip_tests) has its planned test work, test runs and contracts as authorized omissions");
+      expect(prompt).toContain(SPEC_ONLY_RULE);
+      expect(prompt).toContain(DOCS_EXEMPTION);
+      expect(prompt).toContain("Wave 2 keeps its invariant");
+      expect(prompt).not.toContain("Wave 4 keeps its invariant");
+    });
+
+    // Contract (waiver totality): chief_skip_tests on a spec: true wave waives its spec step too, with the same reason, before
+    // or after delegation and whatever state the tester is in, so a waived tester never leaves an unreachable spec step.
+    // Regression: dropping the specsSkipped coupling leaves awaitsSpec true, so the waived tester can be neither reviewed nor completed.
+    test.each([
+      ["undelegated", null, null],
+      ["blocked and idle", { state: "blocked", result: "Two tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" }, "idle"],
+      ["ready and idle", { state: "ready", result: READY }, "idle"],
+      ["ready and stopped", { state: "ready", result: READY }, "stopped"],
+    ])("chief_skip_tests on a spec wave with a tester that is %s waives both steps", async (_label, tail, liveStatus) => {
+      const state = await setup();
+      const ctx = tail ? await specChain(state) : { ...(await (async () => {
+        const chief = await start(state);
+        const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave()]);
+        await delegateWave(state, chief.threadId, planner.threadId, 1);
+        const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+        await readyIdle(state, impl);
+        return { chief, planner, impl };
+      })()), tester: "" };
+      if (tail) { await report(state, ctx.tester, tail); setLive(state, ctx.tester, liveStatus!); }
+      const text = await tool(state, "chief_skip_tests", { planThreadId: ctx.planner.threadId, wave: 2, reason: "accepted" }, ctx.chief.threadId);
+      expect(text).toContain("Its Spec Writer step is waived with it (specsSkipped, same reason).");
+      expect(storedWave(state, ctx.planner.threadId)).toMatchObject({ testsSkipped: "accepted", specsSkipped: "accepted" });
+      if (!tail) return;
+      // Not pending: the tester is reviewable and completable with the plan's usual calls.
+      await expect(tool(state, "chief_roster", {}, ctx.chief.threadId)).resolves.toContain("tests skipped: accepted");
+      await tool(state, "chief_complete", { threadId: ctx.tester, skipReview: "waived" }, ctx.chief.threadId);
+      expect(rowOf(state, ctx.tester).state).toBe("complete");
+    });
+
+    // Contract (wave-lifetime waiver): a spec waiver outlives a product fix and retest, so no later tester re-offers the
+    // spec step. Regression: awaitsSpec ignores specsSkipped, or the waiver is stored on a worker instead of the wave.
+    test("a spec waiver survives a product fix and a retest", async () => {
+      const state = await setup();
+      const { chief, planner, tester } = await specPending(state);
+      await skipSpecs(state, chief.threadId, planner.threadId, "no docs change");
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "worker" });
+      const fix = workerOn(state, planner.threadId, 2).thread_id as string;
+      await readyIdle(state, fix);
+      expect(lastAlert(state)).toContain(`rerun them — chief_delegate (replaces: ${fix}, kind: tester)`);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: fix, kind: "tester" });
+      const retest = workerOn(state, planner.threadId, 2).thread_id as string;
+      await readyIdle(state, retest);
+      expect(lastAlert(state)).toContain(`Start the one review of the whole plan now: chief_review (workerThreadId: ${retest})`);
+      expect(lastAlert(state)).not.toContain("Spec Writer");
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: retest, kind: "spec-writer" })).rejects.toThrow("Specs on wave 2 were waived (no docs change); nothing to delegate.");
+    });
+
+    // Contract (delegation rules, predecessor): a plan's Spec Writer replaces its wave's latest worker, which must be a ready
+    // tester (initial hand-off) or a Spec Writer (docs repair); the refusal names the exact call. Regression: dropping the
+    // latest-worker rule lets a Spec Writer branch from the implementation worker, skipping the tests it documents.
+    test("a plan's Spec Writer must replace the wave's latest worker, a ready tester or a Spec Writer", async () => {
+      const state = await setup();
+      const { chief, planner, impl, tester } = await specChain(state);
+      const exact = (latest: string) => `Wave 2's Spec Writer replaces its latest worker: chief_delegate (planThreadId: ${planner.threadId}, wave: 2, replaces: ${latest}, kind: spec-writer).`;
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { kind: "spec-writer" })).rejects.toThrow(exact(tester));
+      await readyIdle(state, tester);
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl, kind: "spec-writer" })).rejects.toThrow(exact(tester));
+      const rows = state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads`).get();
+
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "spec-writer" });
+      const writer = workerOn(state, planner.threadId, 2).thread_id as string;
+      expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads`).get()).toEqual({ n: (rows as { n: number }).n + 1 });
+      await readyIdle(state, writer);
+      // Docs repair: a Spec Writer replaces its own predecessor.
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: writer, kind: "spec-writer" });
+      expect(workerOn(state, planner.threadId, 2)).toMatchObject({ kind: "spec-writer", replaces_thread_id: writer });
+    });
+
+    test("a Spec Writer cannot follow a tester that has not reported ready", async () => {
+      const state = await setup();
+      const { chief, planner, tester } = await specChain(state);
+      await report(state, tester, { state: "blocked", result: "Tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" });
+      setLive(state, tester, "idle");
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "spec-writer" })).rejects.toThrow("Wave 2's Spec Writer follows a ready tester.");
+    });
+
+    // Contract (post-product-fix routing): after a Spec Writer's product-code finding, a worker fix goes to a tester rerun
+    // (retest line), a Spec Writer cannot follow the fix directly, and the rerun reopens the spec step. Regression: the retest
+    // exclusion also hides the rerun after a fix, or awaitsSpec stays false so the second docs round never opens.
+    test("a product fix after a Spec Writer routes to a retest, then back to a Spec Writer", async () => {
+      const state = await setup();
+      const { chief, planner, writer } = await withSpecWriter(state);
+      await readyIdle(state, writer);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: writer, kind: "worker" });
+      const fix = workerOn(state, planner.threadId, 2).thread_id as string;
+      await readyIdle(state, fix);
+      expect(lastAlert(state)).toContain(`rerun them — chief_delegate (replaces: ${fix}, kind: tester)`);
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: fix, kind: "spec-writer" })).rejects.toThrow(
+        `Wave 2's Spec Writer follows a ready tester. Its latest worker ${fix} is a worker: after a product fix, rerun the tests first — chief_delegate (replaces: ${fix}, kind: tester).`);
+
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: fix, kind: "tester" });
+      const retest = workerOn(state, planner.threadId, 2).thread_id as string;
+      await readyIdle(state, retest);
+      expect(lastAlert(state)).toContain(specLine(planner.threadId, retest));
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: retest, kind: "spec-writer" });
+      expect(workerOn(state, planner.threadId, 2).kind).toBe("spec-writer");
+    });
+
+    // Contract (replacesCall): a stopped Spec Writer's reroute names all three kinds in order — worker, tester, spec-writer —
+    // while a tester's names two. Regression: the spec-writer clause is dropped so a docs repair has no named route.
+    test("stopping a running Spec Writer names the worker, tester and spec-writer reroutes", async () => {
+      const state = await setup();
+      const { chief, writer } = await withSpecWriter(state);
+      setLive(state, writer, "active");
+      const stopped = await state.harness.behavior.runCli(["stop", writer, "--reason", "stuck"], ctxOf(state, chief.threadId));
+      expect(stopped.exitCode).toBe(0);
+      expect(stopped.stdout).toContain(`chief_delegate (replaces: ${writer}, kind: worker) for a product-code fix, chief_delegate (replaces: ${writer}, kind: tester) for a test fix or chief_delegate (replaces: ${writer}, kind: spec-writer) for a docs fix`);
+    });
+
+    // Contract (where a Spec Writer may run): only a spec: true test wave. The refusal names the plan's spec waves, or says
+    // it marks none. Regression: a Spec Writer is accepted on an implementation or unflagged test wave.
+    test.each<[string, object[], number, RegExp]>([
+      ["an implementation wave of a plan with a spec wave", [{ body: PLAN_FIXTURE }, specWave()], 1, /Wave 1 is not a test wave: a Spec Writer runs only on this plan's spec: true waves \(2\)\./],
+      ["an implementation wave of a plan with no spec wave", [{ body: PLAN_FIXTURE }, TEST_WAVE(2)], 1, /Wave 1 is not a test wave: a Spec Writer runs only on a spec: true test wave, and this plan marks none\./],
+      ["a test wave that is not marked spec", [{ body: PLAN_FIXTURE }, TEST_WAVE(2)], 2, /Wave 2 is not marked spec: true: no Spec Writer runs on it\./],
+    ])("kind spec-writer is refused on %s", async (_label, waves, waveNo, refusal) => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await plan(state, chief.threadId, waves);
+      await delegateWave(state, chief.threadId, planner.threadId, 1);
+      const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+      await readyIdle(state, impl);
+      const rows = state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads`).get();
+      await expect(delegateWave(state, chief.threadId, planner.threadId, waveNo, { replaces: impl, kind: "spec-writer" })).rejects.toThrow(refusal);
+      expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads`).get()).toEqual(rows);
+    });
+
+    // Contract (unplanned work): a Spec Writer needs replaces: of the worker whose branch it documents, and replacing a Spec Writer
+    // needs an explicit kind like replacing a tester. Regression: an unplanned Spec Writer starts on no branch, or a docs
+    // successor silently inherits kind spec-writer after a product fix.
+    test("unplanned Spec Writers need replaces: and an explicit kind to be replaced", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const call = (extra: object) => tool(state, "chief_delegate", { title: "Docs", mission: "Update docs/specs/totals.md", unplannedReason: "Bounded", kind: "spec-writer", ...extra }, chief.threadId);
+      await expect(call({})).rejects.toThrow("kind: spec-writer on unplanned work needs replaces: of the worker whose branch it documents.");
+      const worker = await delegate(state, chief.threadId);
+      await readyIdle(state, worker.threadId, "Done");
+      await tool(state, "chief_delegate", { title: "Docs", mission: "Update docs/specs/totals.md", replaces: worker.threadId, kind: "spec-writer" }, chief.threadId);
+      const writer = (await status(state)).threads.filter((row) => row.role === "worker").at(-1)!;
+      expect(rowOf(state, writer.threadId)).toMatchObject({ kind: "spec-writer", role: "worker" });
+      expect(state.spawned.at(-1).prompt).toContain("Unplanned: Chief's mission is your Spec delta");
+      await readyIdle(state, writer.threadId, "Docs done");
+      await expect(tool(state, "chief_delegate", { title: "Fix", mission: "Fix it", replaces: writer.threadId }, chief.threadId))
+        .rejects.toThrow("Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.");
+    });
+
+    // Contract (briefs, Spec Writer): a Spec Writer built from a realistic spec-wave chain is told the docs-only contract and sees
+    // the tester's plan files and contracts as read-only context; none of the worker/tester work orders that would conflict with
+    // it reach the prompt, even though the chain carries tests-only contracts and a Verify command.
+    // Regression: dropping the `!specWriter` guards leaves the Implement/Contracts/Verify/lint orders next to the docs-only rule.
+    test("a Spec Writer's brief carries the docs-only contract and none of the conflicting work orders", async () => {
+      const state = await setup();
+      const { chief, planner, tester } = await specChain(state, [{ body: PLAN_FIXTURE }, specWave(2, { body: wave(2, `Write the tests.\n\n${SPEC_DELTA}`) })], { verifyCommand: "npx vitest run server.test.ts -t totals" });
+      expect(state.spawned.at(-1).prompt).toContain("## Verify command");
+      await readyIdle(state, tester);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "spec-writer" });
+      const prompt = state.spawned.at(-1).prompt as string;
+      const [path1, path2] = wavePaths(state, planner.threadId);
+      for (const present of [
+        "Wave 2 of 2 is a test wave whose tester already reported ready. Your work is only its `## Spec delta` and the docs rules in the `chief-role-spec-writer` skill.",
+        "## Read-only context (the tester's work, not yours)",
+        `Wave 1 of 2: ${path1}\n- Totals stay non-negative\nWave 2 of 2: ${path2}\n- Wave 2 keeps its invariant`,
+        "## Spec work",
+        "- Follow the `chief-role-spec-writer` skill.",
+        "- Only the Tester writes tests. Never write, edit or run tests, builds or linters. Change only files under docs/: never code, tests, config or root guideline files.",
+        "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
+      ]) expect(prompt).toContain(present);
+      for (const absent of [
+        "Implement only this wave's plan file",
+        "## Contracts to verify",
+        "Your ready result confirms each one",
+        "## Verify command",
+        "npx vitest run server.test.ts -t totals",
+        "## Source of truth for test cases",
+        "Never write, edit or run tests of any kind (unit, integration, end-to-end, screenshot or golden); a tester does.",
+        "run the project's lint/analyze and build after your last commit",
+        "## Test work",
+      ]) expect(prompt).not.toContain(absent);
+    });
+
+    // Contract (briefs, byte equivalence with the pre-feature base): the complete worker, designer and tester prompts that
+    // chief_delegate builds are, on identical fixtures, the bytes base 8250f0c built. Worker and designer prompts are equal
+    // as they are; a tester's differs only by the Head commit line and, on a spec: true wave, the Spec delta line. The oracle
+    // file was captured by running this same fixture (the marked block below) against 8250f0c; only the storage root is
+    // normalized. Regression: any unrelated work order added, reworded or dropped in these prompts.
+    // <brief-oracle-fixture>
+    const briefFixture = async (state: State, spec: boolean) => {
+      const chief = await start(state);
+      const out: Record<string, string> = {};
+      const last = () => state.spawned.at(-1).prompt as string;
+      const unplanned = await delegate(state, chief.threadId, "Plain");
+      out["worker, unplanned"] = last();
+      await delegate(state, chief.threadId, "Design", { kind: "designer" });
+      out["designer, unplanned"] = last();
+      await readyIdle(state, unplanned.threadId, "Done");
+      await delegate(state, chief.threadId, "Tests", { replaces: unplanned.threadId, kind: "tester" });
+      out["tester, unplanned"] = last();
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE },
+        { body: wave(2, "Write the tests.\n\n## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative"), test: true, ...(spec ? { spec: true } : {}) }]);
+      await delegateWave(state, chief.threadId, planner.threadId, 1, { verifyCommand: "npx vitest run server.test.ts -t totals" });
+      out["worker, planned"] = last();
+      const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+      await readyIdle(state, impl);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+      out["tester, planned"] = last();
+      return Object.entries(out).map(([name, prompt]) => `=== ${name} ===\n${prompt.replaceAll(state.storageRoot, "<storage>")}\n`).join("");
+    };
+    // </brief-oracle-fixture>
+
+    test.each([["a plain test wave", false], ["a spec: true wave", true]])(
+      "worker and designer prompts are byte-identical to base 8250f0c and a tester's differs by the authorized lines only (%s)", async (_label, spec) => {
+        const state = await setup();
+        const head = await briefFixture(state, spec);
+        const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "briefs-base-8250f0c.txt"), "utf8");
+        const authorized = [
+          "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.",
+          ...(spec ? ["- This wave's `## Spec delta` belongs to the Spec Writer who runs after you: do not change docs/."] : []),
+        ];
+        const lines = head.split("\n");
+        // The Head commit line is in both tester prompts, the Spec delta line only in the planned spec tester's, and nowhere else.
+        expect(lines.filter((line) => line === authorized[0])).toHaveLength(2);
+        if (spec) expect(lines.filter((line) => line === authorized[1])).toHaveLength(1);
+        expect(lines.filter((line) => !authorized.includes(line)).join("\n")).toBe(oracle);
+      });
+
+    // Contract (planner brief): the planner is told the spec flag and the `{body, dependsOn, design?, test?, spec?}` shape.
+    // Regression: the planner never learns spec: true exists, so no plan ever opens the spec step.
+    test("the planner's brief names the spec flag and the Spec delta heading", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chief.threadId));
+      const prompt = state.spawned.at(-1).prompt as string;
+      expect(prompt).toContain("`{body, dependsOn, design?, test?, spec?}`");
+      expect(prompt).toContain("mark its test wave `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, not the tester.");
+    });
+
+    // Contract (reviewer docs gate): a whole-plan review whose chain has a spec: true wave carries the docs gate (named wave,
+    // three block rules, nits); an unflagged wave in the same plan is not named; a waived docs step drops the gate. The gate
+    // does not depend on whether the Spec Writer committed, so an already-correct docs wave still gets it.
+    // Regression: specWaves is dropped (no docs gate) or includes waived/unflagged waves.
+    test("a review of a spec chain carries the docs gate for the flagged wave only", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave(2), { body: wave(3), dependsOn: [] }, TEST_WAVE(4, [3])]);
+      await approvePlan(state, chief.threadId, planner.threadId);
+      const handOff = async (waveNo: number, extra: object = {}) => {
+        await delegateWave(state, chief.threadId, planner.threadId, waveNo, extra);
+        return workerOn(state, planner.threadId, waveNo).thread_id as string;
+      };
+      const w1 = await handOff(1, { branch: "feature/a" });
+      const w3 = await handOff(3, { branch: "feature/b" });
+      await readyIdle(state, w1);
+      await readyIdle(state, w3);
+      const t2 = await handOff(2, { replaces: w1 });
+      const t4 = await handOff(4, { replaces: w3 });
+      await readyIdle(state, t2);
+      await readyIdle(state, t4);
+      const writer = await handOff(2, { replaces: t2, kind: "spec-writer" });
+      await readyIdle(state, writer, `${READY}\nDocs already describe this; no commit.`);
+      await tool(state, "chief_review", { workerThreadId: writer }, chief.threadId);
+      const prompt = state.spawned.at(-1).prompt as string;
+      expect(prompt).toContain("Wave 2 is marked spec: true: a Spec Writer updated docs/ from each wave's `## Spec delta`. Block only on:");
+      expect(prompt).toContain("(1) a named Spec delta item whose final docs content is missing or wrong (content already correct needs no new commit);");
+      expect(prompt).toContain("(2) new or changed docs that contradict the code or the tests;");
+      expect(prompt).toContain("a new or changed decision file over 20 lines or with a sequential number");
+      expect(prompt).toContain("Unchanged existing docs are out of scope. A missing spec for a domain no Spec delta names is never a finding.");
+      expect(prompt).not.toMatch(/Wave 4 is marked|Waves 2, 4/);
+      expect(prompt).toContain("A Spec Writer changes only docs/: check its commits from the Base commit its report names to the reviewed head (git diff <base>..<head> --stat); any other path is scope drift.");
+      expect(prompt).not.toContain("authorized omissions too");
+    });
+
+    // Contract (reviewer scope): a Spec Writer target with an earlier tester keeps both scope instructions with their own ranges,
+    // and a tester target with an earlier Spec Writer keeps the earlier-worker scope line without the docs-only target line.
+    // Regression: the tester's scope line is dropped when a Spec Writer is the target, or a later worker's commits are
+    // attributed to an earlier one (the "own commits only" sentence).
+    test("review scope lines cover a Spec Writer after a tester and a tester after a Spec Writer", async () => {
+      const state = await setup();
+      const { chief, planner, tester, writer } = await withSpecWriter(state);
+      await readyIdle(state, writer);
+      await tool(state, "chief_review", { workerThreadId: writer }, chief.threadId);
+      const forWriter = state.spawned.at(-1).prompt as string;
+      const earlier = "Check each earlier tester and Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift.";
+      expect(forWriter).toContain("A Spec Writer changes only docs/: check its commits from the Base commit its report names to the reviewed head");
+      expect(forWriter).toContain(`${earlier} Earlier here: tester ${tester}.`);
+
+      const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
+      await report(state, reviewer.threadId, { state: "ready", result: "Docs cite a test that is missing", verdict: "request_changes",
+        findings: [{ file: "docs/specs/totals.md", line: 3, severity: "blocking", message: "The cited test does not exist", fix: "Add the test" }] });
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: writer, kind: "tester" });
+      const retest = workerOn(state, planner.threadId, 2).thread_id as string;
+      await readyIdle(state, retest);
+      expect(lastAlert(state)).toContain(specLine(planner.threadId, retest));
+      await skipSpecs(state, chief.threadId, planner.threadId, "docs are covered elsewhere");
+      await tool(state, "chief_review", { workerThreadId: retest }, chief.threadId);
+      const forTester = state.spawned.at(-1).prompt as string;
+      expect(forTester).toContain("A tester changes only tests, fixtures, test helpers and test config");
+      expect(forTester).not.toContain("A Spec Writer changes only docs/");
+      expect(forTester).toContain(`${earlier} Earlier here: `);
+      expect(forTester).toMatch(new RegExp(`Earlier here: [^.]*spec-writer ${writer}`));
+      expect(forTester).toMatch(new RegExp(`Earlier here: [^.]*tester ${tester}`));
+      expect(forTester).toContain("A specs-skipped wave's Spec delta and docs work are authorized omissions too.");
+      // The waived docs step keeps the tester's contracts under review.
+      expect(forTester).toContain("Wave 2 keeps its invariant");
+    });
+
+    // Contract (reviewBrief, byte-compat): an empty specWaves renders what an older caller (no specWaves) renders, so a plan with no
+    // docs step gets the pre-wave-1 reviewer text (the existing review-no-waiver oracles pin it end to end); waiver lines name the
+    // test and spec waivers on one wave, and the authorized-omission sentence for specs appears only with a specs waiver.
+    // Regression: the gate renders for an empty list, or the waiver wording drops the specs part.
+    test("reviewBrief renders no docs gate for an empty specWaves and the combined waiver lines", () => {
+      const target = { threadId: "thr_w", title: "Fix totals", prUrl: "https://github.com/acme/shop/pull/8", branch: "feature/x", reportSeq: 1, hasResult: true, reportPath: "/r/report-1.md",
+        head: { branch: "feature/x", sha: "abc123", base: "main" } };
+      const input: ReviewBriefInput = {
+        worker: { ...target, kind: null, brief: null, reported: "Done" }, targets: [target], wavePaths: ["/p/plan-1.md", "/p/plan-2.md"], chain: [1, 2],
+        contractLines: ["Wave 1 of 2:", "- Totals stay non-negative"], recordedLines: ["npm test → exit 0"], previous: null, chiefThreadId: "thr_c",
+      };
+      const omitted = reviewBrief(input);
+      expect(reviewBrief({ ...input, specWaves: [] })).toEqual(omitted);
+      expect(omitted.prompt).not.toContain("spec: true");
+      expect(reviewBrief({ ...input, specWaves: [2, 4] }).prompt).toContain("Waves 2, 4 are marked spec: true:");
+      const both = reviewBrief({ ...input, waiverLines: ["Wave 2 of 2: /p/plan-2.md: tests skipped by Chief: flaky; specs skipped by Chief: flaky"] });
+      expect(both.context).toContain("## Waived test waves\nWave 2 of 2: /p/plan-2.md: tests skipped by Chief: flaky; specs skipped by Chief: flaky");
+      expect(both.prompt).toContain("A specs-skipped wave's Spec delta and docs work are authorized omissions too.");
+      const testsOnly = reviewBrief({ ...input, waiverLines: ["Wave 2 of 2: /p/plan-2.md: tests skipped by Chief: flaky"] });
+      expect(testsOnly.prompt).toContain("Chief waived the test waves listed under `## Waived test waves`");
+      expect(testsOnly.prompt).not.toContain("authorized omissions too");
+      // A test waiver, alone or with a spec waiver on the same wave, keeps its original exemption text.
+      expect(testsOnly.prompt).toContain(TEST_EXEMPTION);
+      expect(both.prompt).toContain(TEST_EXEMPTION);
+      expect(both.prompt).not.toContain(SPEC_ONLY_RULE);
+    });
   });
 });
