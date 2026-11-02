@@ -174,6 +174,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
   const specWriterTargets = (many ? targets : [worker]).filter((target) => target.kind === "spec-writer");
   const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.kind === "tester" || earlier.kind === "spec-writer"));
   const specWaived = waiverLines.some((line) => line.includes("specs skipped by Chief"));
+  const specOnly = waiverLines.some((line) => !line.includes("tests skipped by Chief"));
   const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, waiverSection, sliceSection, guidelineSection].filter((lines) => lines.length);
   const context = sections.map((lines) => lines.join("\n")).join("\n\n");
   const summary = sections.length ? [
@@ -256,7 +257,10 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
         "Read each worker's full report (its Full report path in review-context.md, not the summary) for its Deviations from plan section. Judge each stated deviation on its merits. A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding.",
       ] : []),
       ...(waiverLines.length ? [
-        "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them." + (specWaived ? " A specs-skipped wave's Spec delta and docs work are authorized omissions too. Docs commits that did land stay under review: a waiver never excuses a contradiction they introduce." : ""),
+        // A spec-only line (chief_skip_specs) waives docs only: never grant it the test exemption.
+        (specOnly
+          ? "Chief waived the waves listed under `## Waived test waves` in review-context.md, each with its reason. Only a wave whose line says \"tests skipped by Chief\" (chief_skip_tests) has its planned test work, test runs and contracts as authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. A wave whose line says only \"specs skipped by Chief\" (chief_skip_specs) keeps its planned test work, test runs and contracts fully under review. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them."
+          : "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them.") + (specWaived ? " A specs-skipped wave's Spec delta and docs work are authorized omissions too. Docs commits that did land stay under review: a waiver never excuses a contradiction they introduce." : ""),
       ] : []),
     ],
   });
