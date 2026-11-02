@@ -1930,18 +1930,34 @@ export default async function plugin(bb: BbPluginApi) {
           const writer = waveWorkers(prior.plan_thread_id, owed).at(-1)!;
           const ready = specReady(prior.plan_thread_id, priorWaves, owed);
           const same = prior.plan_thread_id === planThreadId && wave === owed && prior.thread_id === writer.thread_id;
-          if (!same || !(kind === "spec-writer" || ((kind === "worker" || kind === "designer") && ready))) {
+          // The one cross-plan exception: a fresh plan's wave-1 Spec Writer takes over a blocked Spec Writer's branch.
+          const blocked = writer.state === "blocked" || (writer.state === "idle" && writer.last_report_state === "blocked");
+          const freshPlan = kind === "spec-writer" && wave === 1 && prior.plan_thread_id !== planThreadId && prior.thread_id === writer.thread_id && blocked;
+          if (!freshPlan && (!same || !(kind === "spec-writer" || ((kind === "worker" || kind === "designer") && ready)))) {
             const call = `chief_delegate (planThreadId: ${prior.plan_thread_id}, wave: ${owed}, replaces: ${writer.thread_id}`;
             throw new Error(ready
               ? `Wave ${owed}'s Spec Writer ${writer.thread_id} is ready: the wave's worker implements against its docs first — ${call}, kind: worker).`
-              : `Wave ${owed}'s Spec Writer ${writer.thread_id} has not reported ready: retry it with the fix — ${call}, kind: spec-writer) — or, when the Spec delta cannot be written, start a fresh chief_plan with its report in context.`);
+              : `Wave ${owed}'s Spec Writer ${writer.thread_id} has not reported ready: retry it with the fix — ${call}, kind: spec-writer) — or, when the Spec delta cannot be written, start a fresh chief_plan with its report in context, then delegate its wave 1 with replaces: ${writer.thread_id}, kind: spec-writer.`);
           }
         }
       }
-      // (b) A wave that builds on a spec wave waits for that wave's worker.
-      if (parent !== null && specOwed(planThreadId, waves, parent)) {
-        const writer = waveWorkers(planThreadId, parent).at(-1)!;
-        throw new Error(`Wave ${parent} still owes its implementation: its Spec Writer ${writer.thread_id} hands off to its worker first — chief_delegate (planThreadId: ${planThreadId}, wave: ${parent}, replaces: ${writer.thread_id}, kind: worker).`);
+      // (a2) An owed wave admits only its Spec Writer's retry, or a ready Spec Writer's own worker or designer, whatever replaces: says.
+      if (specOwed(planThreadId, waves, wave)) {
+        const writer = waveRows.at(-1)!;
+        const ready = specReady(planThreadId, waves, wave);
+        if (prior?.thread_id !== writer.thread_id || !(kind === "spec-writer" || ((kind === "worker" || kind === "designer") && ready))) {
+          const call = `chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${writer.thread_id}`;
+          throw new Error(ready
+            ? `Wave ${wave}'s Spec Writer ${writer.thread_id} is ready: the wave's worker implements against its docs first — ${call}, kind: worker).`
+            : `Wave ${wave}'s Spec Writer ${writer.thread_id} has not reported ready: retry it with the fix — ${call}, kind: spec-writer).`);
+        }
+      }
+      // (b) A wave that builds on a spec wave, at any depth, waits for that wave's worker.
+      let owedAncestor = parent;
+      while (owedAncestor !== null && !specOwed(planThreadId, waves, owedAncestor)) owedAncestor = parentOf(waves, owedAncestor);
+      if (owedAncestor !== null) {
+        const writer = waveWorkers(planThreadId, owedAncestor).at(-1)!;
+        throw new Error(`Wave ${owedAncestor} still owes its implementation: its Spec Writer ${writer.thread_id} hands off to its worker first — chief_delegate (planThreadId: ${planThreadId}, wave: ${owedAncestor}, replaces: ${writer.thread_id}, kind: worker).`);
       }
       // (c) A spec wave's first delegation is its Spec Writer, unless Chief bypassed it.
       if (specWave(waves, wave) && !waveRows.length) {
@@ -2334,7 +2350,7 @@ export default async function plugin(bb: BbPluginApi) {
           : "If you judge the failures acceptable, complete it with testsSkipped (your reason)."}`;
       }
       if (row.kind === "spec-writer") {
-        return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer). If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context.`;
+        return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer). If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}, kind: spec-writer.`;
       }
       if (row.kind !== "tester" && onSpecChain(row)) return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user. ${specRoutes(row)}`;
       if (row.kind === "tester") {
