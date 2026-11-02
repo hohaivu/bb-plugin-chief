@@ -4,21 +4,22 @@ import { z } from "zod";
 export const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "researcher"]);
 export type Role = z.infer<typeof roleSchema>;
 
-/** A worker's kind: `designer` (design-tool work) and `tester` (writes and runs tests) are worker rows, not thread roles. */
-export const workerKindSchema = z.enum(["worker", "designer", "tester"]);
+/** A worker's kind: `designer` (design-tool work), `tester` (writes and runs tests) and `spec-writer` (changes docs/ only)
+ * are worker rows, not thread roles. */
+export const workerKindSchema = z.enum(["worker", "designer", "tester", "spec-writer"]);
 export type WorkerKind = z.infer<typeof workerKindSchema>;
 
 /** The role key chief_models stores a per-machine model pick under: the lifecycle roles plus
  * `designer` (a worker kind, not a thread role). Explicit, not derived from roleSchema: the researcher's
  * model is the mode's research pick, and chief_models' CHECK would refuse it. */
-export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "tester"]);
+export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "tester", "spec-writer"]);
 export type ModelRole = z.infer<typeof modelRoleSchema>;
 
 export const researchRoleSchema = z.enum(["chief", "planner", "researcher"]);
 export type ResearchRole = z.infer<typeof researchRoleSchema>;
 
-/** A model role with no pick of its own reads another role's pick: no Designer or Tester row inherits the Worker pick. */
-export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker", tester: "worker" };
+/** A model role with no pick of its own reads another role's pick: no Designer, Tester or Spec Writer row inherits the Worker pick. */
+export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker", tester: "worker", "spec-writer": "worker" };
 
 /** The role skill each managed role loads next to the shared chief-worker core. */
 export const ROLE_SKILLS: Record<Exclude<Role, "chief">, string[]> = {
@@ -29,9 +30,9 @@ export const ROLE_SKILLS: Record<Exclude<Role, "chief">, string[]> = {
   researcher: [],
 };
 
-/** Every skill a managed thread loads: the shared core, its role's skills, and the designer or tester skill for that worker kind. */
+/** Every skill a managed thread loads: the shared core, its role's skills, and the designer, tester or spec-writer skill for that worker kind. */
 export function managedSkills(role: Exclude<Role, "chief">, kind: WorkerKind | null | undefined): string[] {
-  return ["chief-worker", ...ROLE_SKILLS[role], ...(role === "worker" && (kind === "designer" || kind === "tester") ? [`chief-role-${kind}`] : [])];
+  return ["chief-worker", ...ROLE_SKILLS[role], ...(role === "worker" && kind && kind !== "worker" ? [`chief-role-${kind}`] : [])];
 }
 
 /** The one read-only rule every non-implementing role shares. Untracked build/test output is not a change. */
@@ -56,4 +57,4 @@ export const CONTINUE_REMINDERS: Partial<Record<Role, string>> = {
 // A new role needs a NEW appended migration (never an edit to an existing one) that rebuilds both tables whose
 // role list is a CHECK constraint in MIGRATIONS (server.ts):
 //   - managed_threads: the latest rebuild is managed_threads_v4 (role IN chief, planner, worker, reviewer, advisor, researcher).
-//   - chief_models: the latest rebuild is chief_models_v7 (role IN chief, planner, worker, reviewer, advisor, designer, tester).
+//   - chief_models: the latest rebuild is chief_models_v8 (role IN chief, planner, worker, reviewer, advisor, designer, tester, spec-writer).

@@ -228,6 +228,7 @@ const modelConfigurationSchema = z.object({
       worker: modelSelectionSchema.nullable(),
       designer: modelSelectionSchema.nullable(),
       tester: modelSelectionSchema.nullable(),
+      "spec-writer": modelSelectionSchema.nullable(),
       reviewer: modelSelectionSchema.nullable(),
       advisor: modelSelectionSchema.nullable(),
     }),
@@ -278,7 +279,7 @@ const delegateShape = z.object({
   planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
   unplannedReason: z.string().trim().min(1).max(300).optional().describe("Required when planning is on and this work skips chief_plan: your reason for skipping the plan (your judgment; see the core rules). Not needed with planThreadId/wave or replaces."),
-  kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker. tester writes and runs tests, nothing else: a plan's test wave (test: true) defaults to tester on its first hand-off; on unplanned work it needs replaces:. Replacing a tester, or a worker on a test wave, needs an explicit kind: worker to change product code, tester to change tests."),
+  kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker. tester writes and runs tests, nothing else: a plan's test wave (test: true) defaults to tester on its first hand-off; on unplanned work it needs replaces:. Replacing a tester, or a worker on a test wave, needs an explicit kind: worker to change product code, tester to change tests. spec-writer changes docs/ only: on a plan's spec: true test wave it replaces that wave's ready tester (or its latest Spec Writer); on unplanned work it needs replaces:."),
   userApprovedRound: z.boolean().optional().describe(`Set only with replaces: and only after the user explicitly approved another review round in this thread: a replaced worker whose reviewer has requested changes ${STOP_AFTER_REJECTIONS} times in a row is refused without it.`),
   verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command the worker's brief tells it to run after its last commit and get exit 0 from before reporting ready: a build/lint check for a worker, e.g. `npx tsc --noEmit && bb plugin build`; a tester's may be a filtered test command. Nothing reruns it: reviewers read code only. Inherited through replaces:."),
 });
@@ -376,6 +377,9 @@ const waveShape = z.object({
   ),
   test: z.boolean().optional().describe(
     "true for a test wave: a tester writes and runs the tests for its parent wave on that wave's branch. Every chain ends with one; its parent is an implementation wave (neither design nor test).",
+  ),
+  spec: z.boolean().optional().describe(
+    "true only on a test wave whose chain changes documented behaviour: after its tests, a Spec Writer updates docs/ on that branch from the wave's `## Spec delta`.",
   ),
 });
 // One flat object, published without length limits: the validator's own errors cannot be customised, so checkReport()
@@ -542,7 +546,7 @@ export interface ManagedRow {
   /** Incremented when chief_complete replaces the result; guards the report_path publication in report(). */
   result_rev: number;
   /** Worker row only: "designer" for design-tool work, "tester" for test work; null (pre-migration or plain) means worker. */
-  kind: "designer" | "tester" | null;
+  kind: "designer" | "tester" | "spec-writer" | null;
   /** legacy: workers delegated on the retired simple tag; read only by bb chief stats */
   simple: number | null;
   /** Worker row only: Chief's reason for completing it with skipReview, without a review; null otherwise. */
@@ -1055,6 +1059,11 @@ export const MIGRATIONS = [
     `INSERT INTO chief_models_v7 SELECT * FROM chief_models`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_v7 RENAME TO chief_models`,
+    // A Spec Writer model pick; no row inherits the Worker pick.
+    `CREATE TABLE chief_models_v8 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','designer','tester','spec-writer')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
+    `INSERT INTO chief_models_v8 SELECT * FROM chief_models`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_v8 RENAME TO chief_models`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1177,7 +1186,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const ledger = createReviewLedger<ManagedRow>(db, store.get, store);
   const schedule = createWaveSchedule<ManagedRow>(store.rows);
-  const { planWavesFor, isDesignWave, isTestWave, waveWorkers, reviewTargetsFor } = schedule;
+  const { planWavesFor, isDesignWave, isTestWave, waveWorkers, awaitsSpec, reviewTargetsFor } = schedule;
   let plannerActive = false;
   // The cleanupApproved setting, cached so chief_complete never reads settings: false until the first read, which fails closed.
   let cleanupActive = false;
@@ -1881,9 +1890,10 @@ export default async function plugin(bb: BbPluginApi) {
     let implementsDesign: number | null = null;
     let contracts: string | undefined;
     let specSources: string[] = [];
-    // Replacing a tester needs an explicit kind, so a product fix never lands on a tester by default.
-    const explicitKind = "Name the kind: kind: worker to change product code, kind: tester to change tests.";
-    if (prior?.kind === "tester" && params.kind === undefined) throw new Error(explicitKind);
+    let specWave = false;
+    // Replacing a tester or Spec Writer needs an explicit kind, so a product fix never lands on one by default.
+    const explicitKind = "Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.";
+    if ((prior?.kind === "tester" || prior?.kind === "spec-writer") && params.kind === undefined) throw new Error(explicitKind);
     if (planThreadId !== undefined) {
       const planner = store.get(planThreadId);
       if (!planner || planner.role !== "planner" || !controlsThread(planner, chief.thread_id)) {
@@ -1910,7 +1920,18 @@ export default async function plugin(bb: BbPluginApi) {
       const testedWorker = waveWorkers(planThreadId, parent ?? wave).at(-1);
       const afterMerge = !prior && kind === "tester" && !!params.branch && testedWorker?.state === "complete";
       if (scheduled.absent) throw new Error(`Wave ${wave}'s tests were skipped (${scheduled.testsSkipped}); nothing to delegate.`);
-      if (scheduled.test) {
+      if (scheduled.test && kind === "spec-writer") {
+        // A Spec Writer follows its wave's ready tester (initial hand-off) or its latest Spec Writer (docs repair).
+        if (!scheduled.spec) throw new Error(`Wave ${wave} is not marked spec: true: no Spec Writer runs on it.`);
+        if (scheduled.specsSkipped) throw new Error(`Specs on wave ${wave} were waived (${scheduled.specsSkipped}); nothing to delegate.`);
+        const latest = waveWorkers(planThreadId, wave).at(-1);
+        if (!prior || !latest || prior.thread_id !== latest.thread_id) {
+          throw new Error(`Wave ${wave}'s Spec Writer replaces its latest worker: chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${latest?.thread_id ?? `<wave ${wave}'s ready tester>`}, kind: spec-writer).`);
+        }
+        if (prior.kind !== "spec-writer" && !(prior.kind === "tester" && awaitsSpec(planThreadId, waves, wave))) {
+          throw new Error(`Wave ${wave}'s Spec Writer follows a ready tester. Its latest worker ${prior.thread_id} is a ${prior.kind ?? "worker"}: after a product fix, rerun the tests first — chief_delegate (replaces: ${prior.thread_id}, kind: tester).`);
+        }
+      } else if (scheduled.test) {
         // A test wave continues its parent's branch: its first hand-off replaces the parent wave's worker.
         const onPlan = prior?.plan_thread_id === planThreadId;
         const sameWave = onPlan && prior!.plan_wave === wave;
@@ -1924,12 +1945,16 @@ export default async function plugin(bb: BbPluginApi) {
         }
         if (kind === "designer") throw new Error(`Wave ${wave} is a test wave: a designer cannot run it. Use kind: tester, or kind: worker to fix product code on it.`);
         if (kind === "worker" && !sameWave) throw new Error(`Wave ${wave} is a test wave: its first hand-off is kind: tester. kind: worker only replaces a worker on wave ${wave}, to fix product code.`);
+      } else if (kind === "spec-writer") {
+        const specWaves = waves.flatMap((other, index) => other.spec ? [index + 1] : []);
+        throw new Error(`Wave ${wave} is not a test wave: a Spec Writer runs only on ${specWaves.length ? `this plan's spec: true waves (${specWaves.join(", ")})` : "a spec: true test wave, and this plan marks none"}.`);
       } else if (kind === "tester" && waves.some((other) => other.test)) {
         throw new Error(`Wave ${wave} is not a test wave: a tester runs only this plan's test waves (${waves.flatMap((other, index) => other.test ? [index + 1] : []).join(", ")}).`);
       } else if (kind === "tester" && !prior && !afterMerge) {
         throw new Error("kind: tester on a plan with no test wave needs replaces: of the worker whose branch it tests, or a new branch once that worker is complete.");
       }
-      if (kind === "tester") {
+      specWave = !!scheduled.spec;
+      if (kind === "tester" || kind === "spec-writer") {
         for (const n of chainOf(waves, wave)) {
           const entry = waves[n - 1]!;
           specSources.push(`Wave ${n} of ${waves.length}: ${entry.path}`, ...(entry.contracts ? [clip(entry.contracts, 3_000)] : []));
@@ -1939,8 +1964,8 @@ export default async function plugin(bb: BbPluginApi) {
           }
         }
       }
-    } else if (kind === "tester") {
-      if (!prior) throw new Error("kind: tester on unplanned work needs replaces: of the worker whose branch it tests.");
+    } else if (kind === "tester" || kind === "spec-writer") {
+      if (!prior) throw new Error(`kind: ${kind} on unplanned work needs replaces: of the worker whose branch it ${kind === "tester" ? "tests" : "documents"}.`);
       const head = store.get(ledger.taskChain(prior.thread_id).at(-1)!);
       if (head?.brief) specSources = [clipMiddle(head.brief, 4_000)];
     }
@@ -1963,7 +1988,6 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
     const hostId = prior ? await environmentHostId(priorLive!.environmentId!) : (await projectHostId(projectId)) ?? await defaultHostId();
-    // shortcut: a tester spawns on the Worker pick; a tester pick needs a chief_models rebuild and an app.tsx row, upgrade when the owner asks.
     const prepared = await managedSpawn.prepare(projectId, { role: kind, hostId });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
@@ -1974,7 +1998,7 @@ export default async function plugin(bb: BbPluginApi) {
     try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
     const { prompt, reviewerBrief } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign,
-      contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources,
+      contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specWave,
     });
     const thread = await managedSpawn.launch(prepared, {
       projectId,
@@ -2095,6 +2119,12 @@ export default async function plugin(bb: BbPluginApi) {
     return `Tests on wave ${owner.plan_wave} waived. ${owner.thread_id} still owns the branch: review it — chief_review (workerThreadId: ${owner.thread_id}) — or complete it without one — chief_complete (threadId: ${owner.thread_id}, skipReview: your reason).`;
   }
 
+  /** The next call while a spec: true test wave's spec step is pending: its ready tester hands off to a Spec Writer. */
+  function specStepLine(tester: ManagedRow): string {
+    const wave = tester.plan_wave;
+    return `Tests on wave ${wave} are ready. Once the tester is idle, delegate its Spec Writer: chief_delegate (planThreadId: ${tester.plan_thread_id}, wave: ${wave}, replaces: ${tester.thread_id}, kind: spec-writer). To go without, record why: chief_skip_specs (planThreadId: ${tester.plan_thread_id}, wave: ${wave}, reason). Do not review yet.`;
+  }
+
   /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready. */
   function reviewRefusal(worker: ManagedRow): string | null {
     const block = progress.reviewBlock(worker);
@@ -2111,6 +2141,8 @@ export default async function plugin(bb: BbPluginApi) {
         return block.waves[block.next - 1]!.test
           ? `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate test wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, reason).`
           : `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}).`;
+      case "spec":
+        return specStepLine(worker);
       case "pending":
         return `One review covers the whole plan once every wave is ready; wave(s) ${block.pending.join(", ")} of ${block.waves.length} are not ready yet. Wait for their ready reports (delegate any wave not delegated yet), then start the review.`;
     }
@@ -2144,6 +2176,8 @@ export default async function plugin(bb: BbPluginApi) {
           return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate test wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, reason). Do not review between waves.`;
         }
         return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}). Do not review between waves.`;
+      case "spec":
+        return specStepLine(row);
       case "retest":
         return `A worker changed code on test wave ${row.plan_wave} after the tests ran: rerun them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review. If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
       case "unplanned":
@@ -3544,6 +3578,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** A hand-off from a tester or a test-wave worker must name its kind (see explicitKind in startWorker). */
   function replacesCall(row: ManagedRow): string {
+    if (row.kind === "spec-writer") return `chief_delegate (replaces: ${row.thread_id}, kind: worker) for a product-code fix, chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test fix or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
     return row.kind === "tester" || isTestWave(row)
       ? `chief_delegate (replaces: ${row.thread_id}, kind: worker) for a product-code fix or chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test fix`
       : `chief_delegate (replaces: ${row.thread_id})`;
@@ -4661,6 +4696,7 @@ export default async function plugin(bb: BbPluginApi) {
           worker: readRoleModel(host.id, "worker"),
           designer: readRoleModel(host.id, "designer"),
           tester: readRoleModel(host.id, "tester"),
+          "spec-writer": readRoleModel(host.id, "spec-writer"),
           reviewer: readRoleModel(host.id, "reviewer"),
           advisor: readRoleModel(host.id, "advisor"),
         };

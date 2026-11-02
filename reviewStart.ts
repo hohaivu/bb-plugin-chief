@@ -66,15 +66,15 @@ export interface BriefTarget {
   head: PinnedHead | null;
   /** Re-review: the previous reviewed head this round's range starts from; absent = review the whole change. */
   since?: string;
-  kind?: "designer" | "tester" | null;
+  kind?: "designer" | "tester" | "spec-writer" | null;
   /** The earlier workers of its replaces: chain that reported, newest first (at most 4); recorded is set for a single-target review. */
-  earlier?: { threadId: string; kind: "designer" | "tester" | null; reportPath: string | null; recorded?: string[] }[];
+  earlier?: { threadId: string; kind: "designer" | "tester" | "spec-writer" | null; reportPath: string | null; recorded?: string[] }[];
 }
 
 export interface ReviewBriefInput {
   /** The worker chief_review named; its head is `head`, and it is one of `targets` unless a plan review reaches it through another. */
   worker: BriefTarget & {
-    kind: "designer" | "tester" | null;
+    kind: "designer" | "tester" | "spec-writer" | null;
     /** Its brief, already cut to fit; null when it has none. */
     brief: string | null;
     /** What it reported, already cut to fit: its summary, else the start of its result. */
@@ -269,7 +269,7 @@ interface ReviewRow {
   chief_thread_id: string | null;
   title: string;
   state: string;
-  kind: "designer" | "tester" | null;
+  kind: "designer" | "tester" | "spec-writer" | null;
   brief: string | null;
   result: string | null;
   summary: string | null;
