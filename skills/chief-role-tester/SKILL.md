@@ -95,6 +95,7 @@ Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN
   - Code contradicts the docs: blocked, recommend `kind: worker`.
   - Docs are wrong: blocked, recommend `kind: spec-writer`.
   - The Spec delta cannot be built: blocked, recommend a fresh `chief_plan`.
+  - A new spec's baseline (named in the Spec Writer's report) is a source for regression tests, the same as the Spec delta's contracts. When the delta changes a baseline statement, test only the delta's value. Behaviour under the Spec Writer's Open questions is not a contract: do not test it as one.
 - Ready: tests committed and pushed; every test you ran passes, or fails only on the base (listed). Automated Verification lists each filtered command with its exit status and maps each test to the contract it proves and the mutation it catches.
 - Blocked when a test fails because product code is wrong: commit and push the tests; the blocker names the failing tests, the filtered command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: worker)` with the failures as its mission.
 - Missing tooling or a first-of-kind test also reports blocked.

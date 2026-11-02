@@ -6467,6 +6467,10 @@ describe("tester role", () => {
       ["refuses spec: true on a design wave", [planWave(1, { design: true, spec: true, body: wave(1, `Draw.\n\n${SPEC_DELTA}`) }), planWave(2), planWave(3, { test: true })], [/plan wave 1 is spec: true and design: true; spec marks an implementation wave only\./]],
       ["refuses spec: true with no Spec delta heading", [planWave(1, { spec: true }), planWave(2, { test: true })], [/plan wave 1 is spec: true but lacks a "## Spec delta" Markdown heading naming the docs the Spec Writer changes/]],
       ["refuses a Spec delta named only in bold text", [specImpl(1, { body: wave(1, "**Spec delta**\n- docs/x.md") + NOT_DOING }), TEST_WAVE(2)], [/plan wave 1 is spec: true but lacks a "## Spec delta"/]],
+      ["accepts a Spec baseline heading on a spec wave", [specImpl(1, { body: wave(1, `Build.\n\n${SPEC_DELTA}\n\n## Spec baseline\n- docs/specs/totals.md (new): totals.ts`) + NOT_DOING }), TEST_WAVE(2)], []],
+      ["accepts a Spec baseline heading at another level on a spec wave", [specImpl(1, { body: wave(1, `Build.\n\n${SPEC_DELTA}\n\n#### spec baseline\n- docs/specs/totals.md (new): totals.ts`) + NOT_DOING }), TEST_WAVE(2)], []],
+      ["refuses a Spec baseline heading on a wave that is not spec: true", [planWave(1, { body: wave(1, "Build.\n\n## Spec baseline\n- docs/specs/totals.md (new): totals.ts") + NOT_DOING }), TEST_WAVE(2)], [/plan wave 1 has a "## Spec baseline" heading but is not spec: true; a baseline belongs to the spec wave that creates a new docs\/specs file\. Mark the wave spec: true, or drop the heading\./]],
+      ["ignores Spec baseline in bold text on a wave that is not spec: true", [planWave(1, { body: wave(1, "Build.\n\n**Spec baseline**\n- docs/x.md") + NOT_DOING }), TEST_WAVE(2)], []],
     ])("checkPlan %s", (_name, input, expected) => {
       const errors = checkPlan(input);
       if (!expected.length) expect(errors).toEqual([]);
@@ -7327,6 +7331,290 @@ describe("tester role", () => {
       await approvePlan(state, chief.threadId, planner.threadId);
       const advisorPrompt = state.spawned.at(-1).prompt as string;
       expect(advisorPrompt).toContain("A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.");
+    });
+
+    // ---- First-touch baseline specs (wave 2 tests) ----
+    // <baseline-oracle-begin>
+    // The oracle fixtures below were run unchanged against base 6d288a2 to capture __snapshots__/*-6d288a2.txt; only the storage
+    // root is normalized. On 6d288a2 the baseline heading is plain text, so `baseImpl` is a plain spec wave there.
+    const BASELINE = "## Spec baseline\n- docs/specs/totals.md (new): totals.ts `computeTotal`";
+    /** A spec wave whose body names a new spec file's baseline. */
+    const baseImpl = (n = 1, extra: object = {}) => ({ body: wave(n, `Build the totals.\n\n${SPEC_DELTA}\n\n${BASELINE}`) + NOT_DOING, spec: true, ...extra });
+    const hop = async (state: State, chiefThreadId: string, planThreadId: string, waveNo: number, extra: object = {}) => {
+      await delegateWave(state, chiefThreadId, planThreadId, waveNo, extra);
+      return { id: workerOn(state, planThreadId, waveNo).thread_id as string, prompt: state.spawned.at(-1).prompt as string };
+    };
+    /** Spec chain of two spec waves then a test wave, run to the end: every row ready and idle. */
+    async function mixedChain(state: State, waves: object[]) {
+      const { chief, planner } = await specPlan(state, waves, true);
+      const go = async (waveNo: number, extra: object) => {
+        const row = await hop(state, chief.threadId, planner.threadId, waveNo, extra);
+        await readyIdle(state, row.id);
+        return row;
+      };
+      const w1Writer = await go(1, {});
+      const w1Worker = await go(1, { replaces: w1Writer.id, kind: "worker" });
+      const w2Writer = await go(2, { replaces: w1Worker.id });
+      const w2Worker = await go(2, { replaces: w2Writer.id, kind: "worker" });
+      const tester = await go(3, { replaces: w2Worker.id, kind: "tester" });
+      return { chief, planner, w1Writer, w1Worker, w2Writer, w2Worker, tester };
+    }
+    const asOracle = (state: State, entries: Array<[string, string]>) =>
+      entries.map(([name, text]) => `=== ${name} ===\n${text.replaceAll(state.storageRoot, "<storage>")}\n`).join("");
+
+    /** Spec Writer, worker, tester, a test-wave docs repair and the reviewer of a spec chain with no baseline, plus their alerts. */
+    const existingOnlyFixture = async (state: State) => {
+      const out: Array<[string, string]> = [];
+      const { chief, planner } = await specPlan(state);
+      const writer = await hop(state, chief.threadId, planner.threadId, 1);
+      out.push(["spec writer prompt", writer.prompt]);
+      await readyIdle(state, writer.id);
+      out.push(["spec writer ready alert", lastAlert(state)], ["roster after writer", await roster(state, chief.threadId)]);
+      const worker = await hop(state, chief.threadId, planner.threadId, 1, { replaces: writer.id, kind: "worker" });
+      out.push(["worker prompt", worker.prompt]);
+      await readyIdle(state, worker.id);
+      out.push(["worker ready alert", lastAlert(state)]);
+      const tester = await hop(state, chief.threadId, planner.threadId, 2, { replaces: worker.id, kind: "tester" });
+      out.push(["tester prompt", tester.prompt]);
+      await readyIdle(state, tester.id);
+      out.push(["tester ready alert", lastAlert(state)]);
+      const docs = await hop(state, chief.threadId, planner.threadId, 2, { replaces: tester.id, kind: "spec-writer" });
+      out.push(["test-wave spec writer prompt", docs.prompt]);
+      await readyIdle(state, docs.id);
+      out.push(["test-wave spec writer ready alert", lastAlert(state)]);
+      const review = await reviewPrompt(state, chief.threadId, docs.id);
+      out.push(["reviewer prompt", review.prompt], ["reviewer context", review.context]);
+      return asOracle(state, out);
+    };
+
+    /** Wave 1's Spec Writer and worker prompts of a chain whose wave 2 (not wave 1) has a baseline. */
+    const mixedWaveOneFixture = async (state: State) => {
+      const chain = await mixedChain(state, [specImpl(1), baseImpl(2), TEST_WAVE(3)]);
+      return asOracle(state, [["wave 1 spec writer prompt", chain.w1Writer.prompt], ["wave 1 worker prompt", chain.w1Worker.prompt]]);
+    };
+
+    /** The planner prompt for a plain brief and for a revision of a plan whose one advisor review asked for changes. */
+    const plannerFixture = async (state: State) => {
+      const chief = await start(state);
+      const cli = (args: string[]) => state.harness.behavior.runCli(args, ctxOf(state, chief.threadId));
+      await cli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--context", "Totals went negative last week."]);
+      const plain = state.spawned.at(-1).prompt as string;
+      const first = await plan(state, chief.threadId, [planWave(1), planWave(2), TEST_WAVE(3)]);
+      await tool(state, "chief_consult", { planThreadId: first.threadId, title: "Plan", mission: "Review this plan before delegation" }, chief.threadId);
+      const advisor = (await status(state)).threads.filter((row) => row.role === "advisor").at(-1)!;
+      await report(state, advisor.threadId, { state: "ready", result: "Merge the two waves", verdict: "request_changes" });
+      await cli(["plan", "--title", "Rework checkout", "--mission", "Revise per the advisor", "--revises", first.threadId]);
+      return asOracle(state, [["plain planner prompt", plain], ["revision planner prompt", state.spawned.at(-1).prompt as string]]);
+    };
+    // <baseline-oracle-end>
+
+    const oracleFile = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", name), "utf8");
+    const WRITER_BASELINE = "- Baseline: this wave's plan has a `## Spec baseline` heading.";
+    const TESTER_BASELINE = "- A new spec's baseline (the current behaviour a Spec Writer documented";
+    const gateOf = (prompt: string) => prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!.split("\n");
+
+    // Contract (existing-only equivalence, base oracle): a spec chain whose waves have no baseline spawns the Spec Writer, worker,
+    // tester, test-wave Spec Writer and reviewer, and sends the alerts, with the bytes base 6d288a2 produced. Regression: a baseline
+    // line, reworded line or extra gate item leaks into a chain that has no baseline.
+    test("a spec chain with no baseline produces the prompts and alerts base 6d288a2 produced", async () => {
+      const state = await setup();
+      expect(await existingOnlyFixture(state)).toBe(await oracleFile("spec-chain-6d288a2.txt"));
+    });
+
+    // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief.
+    // Regression: the baseline rule lands in the planner brief instead of the read-only skill.
+    test("the planner prompt equals base 6d288a2's for a plain and a revision brief", async () => {
+      const state = await setup();
+      expect(await plannerFixture(state)).toBe(await oracleFile("planner-6d288a2.txt"));
+    });
+
+    // Contract (mixed chain, existing-only first): wave 1's Spec Writer and worker prompts are base 6d288a2's bytes although wave 2 has
+    // a baseline; wave 2's Spec Writer has the Baseline line, its worker does not, and the wave 3 tester has the tester line.
+    // Regression: an unconditional line; a Spec Writer flag read from any wave of the chain (wave 1's writer would get wave 2's
+    // line); a worker or designer that gets the Spec Writer line; a tester flag read from its own wave only.
+    test("a baseline on wave 2 reaches wave 2's Spec Writer and the tester, not wave 1's prompts or wave 2's worker", async () => {
+      const state = await setup();
+      const chain = await mixedChain(state, [specImpl(1), baseImpl(2), TEST_WAVE(3)]);
+      expect(chain.w1Writer.prompt).not.toContain(WRITER_BASELINE);
+      expect(chain.w1Worker.prompt).not.toContain(WRITER_BASELINE);
+      expect(chain.w2Writer.prompt).toContain(WRITER_BASELINE);
+      expect(chain.w2Worker.prompt).not.toMatch(/baseline/i);
+      expect(chain.tester.prompt).toContain(TESTER_BASELINE);
+      expect(chain.tester.prompt).not.toContain(WRITER_BASELINE);
+    });
+
+    // Contract (mixed chain, byte identity): wave 1's Spec Writer and worker prompts are the bytes base 6d288a2 produced although wave 2
+    // of the chain has a baseline. Regression: a Spec Writer or worker flag read from any wave of the chain.
+    test("wave 1's prompts of a chain whose wave 2 has a baseline equal base 6d288a2's", async () => {
+      const state = await setup();
+      expect(await mixedWaveOneFixture(state)).toBe(await oracleFile("spec-chain-mixed-wave-1-6d288a2.txt"));
+    });
+
+    // Contract (mixed chain, reversed order): wave 1 has the baseline, wave 2 does not: wave 2's Spec Writer gets no line, and the
+    // tester gets its line from ancestor wave 1. Regression: a Spec Writer that reads its ancestors' flag; a tester that reads only
+    // its own wave.
+    test("a baseline on wave 1 reaches wave 1's Spec Writer and the tester, not wave 2's Spec Writer", async () => {
+      const state = await setup();
+      const chain = await mixedChain(state, [baseImpl(1), specImpl(2), TEST_WAVE(3)]);
+      expect(chain.w1Writer.prompt).toContain(WRITER_BASELINE);
+      expect(chain.w1Worker.prompt).not.toMatch(/baseline/i);
+      expect(chain.w2Writer.prompt).not.toMatch(/baseline/i);
+      expect(chain.w2Worker.prompt).not.toMatch(/baseline/i);
+      expect(chain.tester.prompt).toContain(TESTER_BASELINE);
+    });
+
+    // Contract (isolation): a baseline wave on another chain gives the other chain's Spec Writer and tester no line, and its own chain
+    // still gets both. Regression: a flag read from any wave of the plan.
+    test("a baseline on another chain reaches only that chain's Spec Writer and tester", async () => {
+      const state = await setup();
+      const { chief, planner } = await specPlan(state, [specImpl(1), TEST_WAVE(2), baseImpl(3, { dependsOn: [] }), TEST_WAVE(4, [3])], true);
+      const go = async (waveNo: number, extra: object) => {
+        const row = await hop(state, chief.threadId, planner.threadId, waveNo, extra);
+        await readyIdle(state, row.id);
+        return row;
+      };
+      const bWriter = await go(3, { branch: "feature/b" });
+      const aWriter = await go(1, { branch: "feature/a" });
+      const bWorker = await go(3, { replaces: bWriter.id, kind: "worker" });
+      const aWorker = await go(1, { replaces: aWriter.id, kind: "worker" });
+      const bTester = await go(4, { replaces: bWorker.id, kind: "tester" });
+      const aTester = await go(2, { replaces: aWorker.id, kind: "tester" });
+      expect(bWriter.prompt).toContain(WRITER_BASELINE);
+      expect(bTester.prompt).toContain(TESTER_BASELINE);
+      expect(aWriter.prompt).not.toMatch(/baseline/i);
+      expect(aTester.prompt).not.toMatch(/baseline/i);
+    });
+
+    // Contract (bypass): a baseline wave with chief_skip_specs sets no tester line and does not count in the reviewer's spec waves,
+    // while the unbypassed spec wave that follows still renders the gate, without item (6). Regression: a flag read from a bypassed
+    // wave (tester line or item (6) appears); item (6) read from every wave instead of the reviewed, unbypassed ones.
+    test("a bypassed baseline wave gives the tester no line and the reviewer no item (6)", async () => {
+      const state = await setup();
+      const { chief, planner } = await specPlan(state, [baseImpl(1), specImpl(2), TEST_WAVE(3)], true);
+      await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
+      const go = async (waveNo: number, extra: object) => {
+        const row = await hop(state, chief.threadId, planner.threadId, waveNo, extra);
+        await readyIdle(state, row.id);
+        return row;
+      };
+      const w1 = await go(1, {});
+      const w2Writer = await go(2, { replaces: w1.id });
+      const w2Worker = await go(2, { replaces: w2Writer.id, kind: "worker" });
+      const tester = await go(3, { replaces: w2Worker.id, kind: "tester" });
+      expect(rowOf(state, w1.id).kind).toBeNull();
+      for (const row of [w1, w2Writer, w2Worker, tester]) expect(row.prompt).not.toMatch(/baseline/i);
+      const { prompt } = await reviewPrompt(state, chief.threadId, tester.id);
+      const gate = gateOf(prompt);
+      expect(gate).toHaveLength(6);
+      expect(gate.map((line) => line.slice(0, 3))).not.toContain("(6)");
+    });
+
+    // Contract (repairs): a Spec Writer that replaces the worker of a baseline wave, or repairs on the test wave, gets no Baseline
+    // line; a retry of a writer that has not handed off gets it. Regression: the flag is set after the worker ran (repair gets the
+    // line); the test-wave repair reads its ancestor's flag; the retry loses the line.
+    test("a Spec Writer repair after the worker or on the test wave gets no baseline line, a retry before the worker does", async () => {
+      const waves = () => [baseImpl(1), TEST_WAVE(2)];
+      const afterWorker = await setup();
+      const first = await withWriter(afterWorker, waves());
+      await readyIdle(afterWorker, first.writer);
+      const worker = await swap(afterWorker, first.chief, first.planner.threadId, 1, first.writer, "worker");
+      await readyIdle(afterWorker, worker);
+      await swap(afterWorker, first.chief, first.planner.threadId, 1, worker, "spec-writer");
+      expect(afterWorker.spawned.at(-1).prompt).not.toMatch(/baseline/i);
+
+      const onTestWave = await setup();
+      const chain = await fullChain(onTestWave, waves());
+      await swap(onTestWave, chain.chief, chain.planner.threadId, 2, chain.tester, "spec-writer");
+      expect(onTestWave.spawned.at(-1).prompt).not.toMatch(/baseline/i);
+
+      const retry = await setup();
+      const stalled = await withWriter(retry, waves());
+      expect(retry.spawned.at(-1).prompt).toContain(WRITER_BASELINE);
+      await putWriter(retry, stalled.chief.threadId, stalled.writer, "blocked");
+      await swap(retry, stalled.chief, stalled.planner.threadId, 1, stalled.writer, "spec-writer");
+      expect(retry.spawned.at(-1).prompt).toContain(WRITER_BASELINE);
+    });
+
+    // Contract (replaces: alone): a retry that names only `replaces:` resolves the plan and wave from the replaced row and renders the
+    // prompt of the call that names them. Regression: the bare call falls back to the unplanned branch (no line) or another wave's flag.
+    test("a Spec Writer retry with replaces alone renders the same prompt as one naming the plan and wave", async () => {
+      const prompts: string[] = [];
+      for (const bare of [false, true]) {
+        const state = await setup();
+        const { chief, planner, writer } = await withWriter(state, [baseImpl(1), TEST_WAVE(2)]);
+        await putWriter(state, chief.threadId, writer, "blocked");
+        if (bare) await tool(state, "chief_delegate", { title: "Wave 1", mission: "Do the wave.", replaces: writer, kind: "spec-writer" }, chief.threadId);
+        else await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: writer, kind: "spec-writer" });
+        prompts.push((state.spawned.at(-1).prompt as string).replaceAll(state.storageRoot, "<storage>"));
+      }
+      expect(prompts[0]).toContain(WRITER_BASELINE);
+      expect(prompts[1]).toBe(prompts[0]);
+    });
+
+    // Contract (cross-plan recovery): a fresh plan's wave 1 writer that replaces a blocked writer of another plan reads the fresh
+    // plan's flag, in both directions. Regression: the flag is read from the replaced row's plan.
+    test.each<[string, object[], object[], boolean]>([
+      ["a fresh baseline plan replacing a plain plan's writer", [specImpl(1), TEST_WAVE(2)], [baseImpl(1), TEST_WAVE(2)], true],
+      ["a fresh plain plan replacing a baseline plan's writer", [baseImpl(1), TEST_WAVE(2)], [specImpl(1), TEST_WAVE(2)], false],
+    ])("cross-plan recovery reads the fresh plan's flag: %s", async (_label, oldWaves, freshWaves, expected) => {
+      const state = await setup();
+      const old = await withWriter(state, oldWaves, { branch: "feature/a" });
+      await putWriter(state, old.chief.threadId, old.writer, "blocked");
+      const fresh = await plan(state, old.chief.threadId, freshWaves);
+      await delegateWave(state, old.chief.threadId, fresh.threadId, 1, { replaces: old.writer, kind: "spec-writer" });
+      expect((state.spawned.at(-1).prompt as string).includes(WRITER_BASELINE)).toBe(expected);
+    });
+
+    // Contract (persist round-trip): intake stores `baseline: true` only on a spec wave whose body has the heading; every other wave
+    // has no `baseline` key, so the old JSON shape stays. Regression: the key is not stored (no wave gets a line); it is stored on
+    // every spec wave; bold text or a non-spec wave gets it.
+    test("intake stores baseline: true only on the spec wave that has the heading", async () => {
+      const state = await setup();
+      const boldOnly = specImpl(3, { dependsOn: [], body: wave(3, `Build.\n\n${SPEC_DELTA}\n\n**Spec baseline**\n- docs/x.md`) + NOT_DOING });
+      const { planner } = await specPlan(state, [baseImpl(1), TEST_WAVE(2), boldOnly, TEST_WAVE(4, [3]), specImpl(5, { dependsOn: [] }), TEST_WAVE(6, [5])]);
+      const stored = JSON.parse(planWaves(state, planner.threadId));
+      expect(stored[0].baseline).toBe(true);
+      for (const index of [1, 2, 3, 4, 5]) expect(stored[index]).not.toHaveProperty("baseline");
+      expect(stored.map((entry: any) => entry.spec)).toEqual([true, undefined, true, undefined, true, undefined]);
+    });
+
+    // Contract (legacy row): a plan stored before this change has no `baseline` key; its body still has the heading, and no baseline
+    // line renders for its Spec Writer or its tester. Regression: a runtime heading parse (the writer and tester get the lines).
+    test("a stored plan without the baseline key renders no baseline line although its wave body has the heading", async () => {
+      const state = await setup();
+      const { chief, planner } = await specPlan(state, [baseImpl(1), TEST_WAVE(2)]);
+      expect(await readFile(planFile(state, planner.threadId, 1), "utf8")).toContain("## Spec baseline");
+      const legacy = JSON.parse(planWaves(state, planner.threadId)).map(({ baseline: _dropped, ...rest }: any) => rest);
+      state.db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id=?`).run(JSON.stringify(legacy), planner.threadId);
+      await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, chief.threadId);
+      expect(storedWave(state, planner.threadId)).not.toHaveProperty("baseline");
+      const writer = await hop(state, chief.threadId, planner.threadId, 1);
+      await readyIdle(state, writer.id);
+      const worker = await hop(state, chief.threadId, planner.threadId, 1, { replaces: writer.id, kind: "worker" });
+      await readyIdle(state, worker.id);
+      const tester = await hop(state, chief.threadId, planner.threadId, 2, { replaces: worker.id, kind: "tester" });
+      for (const row of [writer, worker, tester]) expect(row.prompt).not.toMatch(/baseline/i);
+    });
+
+    // Contract (reviewer item (6)): on a plan with a baseline the spec gate lists items (1)-(6) blocking, then the "Content already
+    // correct" line that carries the STE nit; item (6) is absent when no reviewed spec wave has a baseline. Regression: item (6)
+    // placed after the STE line (the nit line is no longer last); item (6) shown for every spec plan.
+    test("the spec gate puts item (6) between item (5) and the Content already correct line, for a baseline plan only", async () => {
+      const state = await setup();
+      const chain = await mixedChain(state, [specImpl(1), baseImpl(2), TEST_WAVE(3)]);
+      const { prompt } = await reviewPrompt(state, chain.chief.threadId, chain.tester.id);
+      const items = gateOf(prompt);
+      expect(items).toHaveLength(7);
+      expect(items.slice(0, 5).map((line) => line.slice(0, 3))).toEqual(["(1)", "(2)", "(3)", "(4)", "(5)"]);
+      expect(items[5]).toMatch(/^\(6\) a baseline statement /);
+      expect(items[6]).toMatch(/^Content already correct needs no new commit\..*ASD-STE100 sentence rules .*nits, never blocking\.$/);
+      expect(items.slice(0, 6).join("\n")).not.toMatch(/STE|Simplified Technical English/);
+
+      const plain = await setup();
+      const noBaseline = await mixedChain(plain, [specImpl(1), specImpl(2), TEST_WAVE(3)]);
+      const plainItems = gateOf((await reviewPrompt(plain, noBaseline.chief.threadId, noBaseline.tester.id)).prompt);
+      expect(plainItems).toHaveLength(6);
+      expect(plainItems.join("\n")).not.toContain("(6)");
     });
   });
 });

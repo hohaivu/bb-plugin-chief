@@ -29,6 +29,11 @@ export function contractsOf(body: string): string | undefined {
   return (end ? rest.slice(0, end.index) : rest).trim() || undefined;
 }
 
+/** Whether a spec wave body has a `## Spec baseline` heading (any level). Read at intake only. */
+export function hasSpecBaseline(body: string): boolean {
+  return /^[ \t]*#{1,6}[ \t]+spec baseline\b/im.test(body);
+}
+
 /** Every reason a report cannot be saved, one line per failing field: the field, its actual size or value, the limit, and the fix. */
 export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, params: ReportParams, plan: string | unknown[] | undefined): string[] {
   const errors: string[] = [];
@@ -182,6 +187,9 @@ export function checkPlan(plan: string | unknown[]): string[] {
       errors.push(`plan wave ${n} is spec: true and ${wave.test === true ? "test" : "design"}: true; spec marks an implementation wave only.`);
     } else if (wave.spec === true && body && !/^[ \t]*#{1,6}[ \t]+spec delta/im.test(body)) {
       errors.push(`plan wave ${n} is spec: true but lacks a "## Spec delta" Markdown heading naming the docs the Spec Writer changes; add one, or drop spec.`);
+    }
+    if (body && hasSpecBaseline(body) && wave.spec !== true) {
+      errors.push(`plan wave ${n} has a "## Spec baseline" heading but is not spec: true; a baseline belongs to the spec wave that creates a new docs/specs file. Mark the wave spec: true, or drop the heading.`);
     }
     const deps = wave.dependsOn;
     const bad = (what: string, fix: string) => errors.push(`plan wave ${n} dependsOn is ${JSON.stringify(deps)}, ${what}; ${fix}`);
