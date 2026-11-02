@@ -115,12 +115,14 @@ export type WorkerBriefInput = {
   specSources: string[];
   /** On a spec-bearing chain: one line per Spec Writer whose docs a product worker, designer or tester follows; [] or absent otherwise. */
   specDocs?: string[];
+  /** Spec Writer: its own wave has a `## Spec baseline` before that wave's worker ran. Tester: its wave or an ancestor has one. Optional: older callers omit it. */
+  baseline?: boolean;
 };
 
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [] } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false } = input;
   const tester = kind === "tester";
   const specWriter = kind === "spec-writer";
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
@@ -183,6 +185,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- Never change docs/: only a Spec Writer does.",
       ...(tester ? [
         "- Code that contradicts the docs: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: worker)`. Docs that are wrong: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.",
+        ...(baseline ? ["- A new spec's baseline (the current behaviour a Spec Writer documented, listed in its report) is a source for regression tests, the same as the Spec delta's contracts. When the Spec delta changes a baseline statement, test only the delta's value. Behaviour under a Spec Writer's Open questions is not a contract."] : []),
       ] : [
         "- If the spec is wrong, report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`. If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.",
         "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
@@ -258,6 +261,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- Follow the `chief-role-spec-writer` skill.",
       "- Planned: the wave's `## Spec delta` is your work list. Unplanned: Chief's mission is your Spec delta; it names the docs and domains to change.",
       "- Inputs: the plan file, docs/INDEX.md first, then only the specs the delta names and the decisions they link. You may read the code entry points and guideline files those domains need, read-only.",
+      ...(baseline ? ["- Baseline: this wave's plan has a `## Spec baseline` heading. It names each new docs/specs file and the code paths it covers. For each named file that does not exist at your Base commit, first document the current behaviour of that code as the `chief-role-spec-writer` skill's baseline section says, then apply the Spec delta. Behaviour that looks like a bug goes under `## Open questions` in your report, never into the docs as a contract."] : []),
       ...(prior && prior.kind !== "spec-writer" ? [`- Repair: Chief's mission is the docs fix. Read the report of the ${prior.kind ?? "worker"} you replace: bb chief inspect ${prior.thread_id}.`] : []),
       "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
       "- Ready: docs committed and pushed. A delta item the docs already reflect needs no commit: say so. Automated Verification: `git diff --name-only <base>..HEAD` showing only `docs/` paths, with exit status; `wc -l` of each new or changed decision file (20 lines or fewer); each kept STE exception (file, sentence, reason). List any Verify command as \"not run: docs-only change\".",

@@ -12,7 +12,7 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 - You run before the worker of a `spec: true` implementation wave: the worker implements against the docs you commit.
 - You change only files under `docs/`. Never change code, tests, config or root guideline files (CLAUDE.md, AGENTS.md, README.md).
 - Only the Tester writes tests. Never write, edit or run tests, builds or linters.
-- Write lazily. Change only the domains that the Spec delta names. On unplanned work, Chief's mission is the Spec delta.
+- Write lazily. Change only the domains that the Spec delta names. On unplanned work, Chief's mission is the Spec delta. The one exception is a baseline for a new spec file that your brief's Baseline line names (section 7).
 - Never create a `docs/active` folder or a plan file for one branch.
 
 ## 2. Meaning preservation (wins over every rule below)
@@ -84,14 +84,24 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
 - Read the plan file and `docs/INDEX.md` first. Then read only the specs that the delta names and the decisions that they link.
 - Do not read tester tests or the branch diff. On a repair (you replace a worker, designer or tester), read the report of the thread you replace.
 - You may read code entry points and guideline files read-only, when a domain needs them.
+- For a baseline, read the code paths that the plan's baseline heading names.
 - You write only under `docs/`.
 
-## 7. Lessons
+## 7. Baseline (new spec files only)
+
+- It applies only when your brief has a Baseline line, and only to a file that the plan's baseline heading names and that does not exist at your Base commit. If the file exists, write only the delta and say so.
+- Read the named code paths in full, read-only, at your Base commit. Document their current behaviour: entry points, flows and states, contracts and invariants, each with its reason. Do not document other parts of the domain.
+- Then apply the Spec delta on top, so the file states the behaviour after this wave.
+- Describe the behaviour the code has. When code looks like a bug, do not write it as a contract. List it in your report under `## Open questions` with file:line, what the code does, and why it looks wrong.
+- When neither the code nor its comments give a reason for a contract, write "Reason: not stated in the code." Never invent one (section 2).
+- The section 3 limits and the section 4 and 5 rules apply to baseline prose as they do to delta prose.
+
+## 8. Lessons
 
 - Change an injected lesson into a decision file only when the lesson records a lasting code trade-off in a domain that this plan touches.
 - Reviewer lessons never become decisions.
 
-## 8. Report
+## 9. Report
 
 - Record `git rev-parse HEAD` as `Base commit: <sha>` when you start, and as `Head commit: <sha>` when you report.
 - List each changed docs file by path. When the docs already show a delta item, say so: it needs no commit.
@@ -100,4 +110,5 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
   2. `wc -l` of each new or changed decision file shows 20 lines or fewer.
   3. Each kept STE exception: file, sentence, reason.
 - List any Verify command as "not run: docs-only change".
+- For each new spec file with a baseline, list its baseline sections and the code paths each one describes, so the reviewer can check them at your Base commit. List `## Open questions`, or `None`. Name the open-question count in `summary`.
 - Report blocked when the Spec delta contradicts the plan or cannot be written. Recommend a `kind: spec-writer` retry with the fix, or a fresh `chief_plan`. Never recommend `kind: worker`.

@@ -94,6 +94,8 @@ export interface ReviewBriefInput {
   specWaves?: number[];
   /** Unplanned work whose task chain holds a Spec Writer. Optional: older callers omit it. */
   specUnplanned?: boolean;
+  /** A reviewed, unbypassed spec wave has a `## Spec baseline`. Optional: older callers omit it. */
+  specBaseline?: boolean;
   /** The recorded-commands lines (BB's own event log), already rendered. */
   recordedLines: string[];
   /** The newest open reviewer with a result, its verdict already rendered; null when none. */
@@ -107,7 +109,7 @@ export interface ReviewBriefInput {
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
  * Pure: it renders what startReview gathered and reads nothing else. */
 export function reviewBrief(input: ReviewBriefInput): { prompt: string; context: string } {
-  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], specWaiverLines = [], specWaves = [], specUnplanned = false } = input;
+  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], specWaiverLines = [], specWaves = [], specUnplanned = false, specBaseline = false } = input;
   const specGate = specWaves.length > 0 || specUnplanned;
   const head = worker.head;
   const many = targets.length > 1;
@@ -247,6 +249,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
         "(3) a named Spec delta item that is missing or wrong in the final docs;",
         "(4) a docs/ change in a worker's, designer's or tester's own commit range;",
         "(5) in new or changed docs prose only: no lead sentence saying what the domain is for; a domain term used before it is defined (common words need no definition); sprint history, a wishlist or a code dump; a contract with no reason next to it.",
+        ...(specBaseline ? ["(6) a baseline statement (current behaviour a wave's first Spec Writer documented for a new spec file, named in its report) that the Spec delta does not change and that contradicts the code at that Spec Writer's Base commit. Baseline prose is new docs prose for (5); a baseline contract marked \"Reason: not stated in the code\" meets (5)'s reason rule. Behaviour that a Spec Writer listed under Open questions is not a contract."] : []),
         "Content already correct needs no new commit. Unchanged existing docs are out of scope. A bypass never excuses landed docs that contradict the code. ASD-STE100 sentence rules (Simplified Technical English) are nits, never blocking.",
       ] : []),
       ...(reportSection.length && (head || many) ? [
@@ -473,6 +476,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         : chain.filter((n) => !waves[n - 1]!.testsSkipped).flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
       const recorded = targets.length > 1 ? null : await recordedCommands(workerThreadId);
       const specWaves = chain.filter((n) => !!waves[n - 1]!.spec && !waves[n - 1]!.test && !waves[n - 1]!.design && !waves[n - 1]!.specsSkipped);
+      const specBaseline = specWaves.some((n) => !!waves[n - 1]!.baseline);
       const specUnplanned = !waves.length && ledger.taskChain(worker.thread_id).some((id) => store.get(id)?.kind === "spec-writer");
       const specChain = specWaves.length > 0 || specUnplanned;
       // Each target's earlier reported workers on its branch: the implementer's evidence when the target is a tester.
@@ -510,6 +514,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: specs skipped by Chief: ${clip(waves[n - 1]!.specsSkipped!, 500)}`),
         specWaves,
         specUnplanned,
+        specBaseline,
         recordedLines: recordedLines(recorded),
         previous: previous?.result ? {
           threadId: previous.thread_id,

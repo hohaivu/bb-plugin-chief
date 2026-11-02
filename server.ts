@@ -19,7 +19,7 @@ import { createReviewStart, type PinnedHead } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import {
   LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX,
-  checkReport, contractsOf, findingLines, reportAlert, reportFileBody, verdictFileBody, type Pointer,
+  checkReport, contractsOf, findingLines, hasSpecBaseline, reportAlert, reportFileBody, verdictFileBody, type Pointer,
 } from "./reportIntake";
 import { advisorBrief, plannerBrief, resolveDelegation, verdictPreview, workerBrief } from "./delegationBrief";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
@@ -1892,6 +1892,8 @@ export default async function plugin(bb: BbPluginApi) {
     let specSources: string[] = [];
     // Spec Writer reports a product worker, designer or tester on a spec-bearing chain reads; [] otherwise.
     const specDocs: string[] = [];
+    // Baseline is read only for the wave this role works on (tester: plus its ancestors), never the whole chain.
+    let baseline = false;
     // Replacing a tester or Spec Writer needs an explicit kind, so a product fix never lands on one by default.
     const explicitKind = "Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.";
     if ((prior?.kind === "tester" || prior?.kind === "spec-writer") && params.kind === undefined) throw new Error(explicitKind);
@@ -2000,6 +2002,12 @@ export default async function plugin(bb: BbPluginApi) {
       } else if (kind === "tester" && !prior && !afterMerge) {
         throw new Error("kind: tester on a plan with no test wave needs replaces: of the worker whose branch it tests, or a new branch once that worker is complete.");
       }
+      if (kind === "spec-writer") baseline = !!scheduled.baseline && waveRows.every((row) => row.kind === "spec-writer");
+      if (kind === "tester") {
+        for (let n: number | null = wave; n !== null; n = parentOf(waves, n)) {
+          if (waves[n - 1]!.spec && waves[n - 1]!.baseline && !waves[n - 1]!.specsSkipped) baseline = true;
+        }
+      }
       if (specChain(planThreadId, waves, wave)) {
         for (const n of chainOf(waves, wave)) {
           const writer = waves[n - 1]!.spec && !waves[n - 1]!.specsSkipped ? waveWorkers(planThreadId, n).filter((row) => row.kind === "spec-writer").at(-1) : undefined;
@@ -2063,7 +2071,7 @@ export default async function plugin(bb: BbPluginApi) {
     try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
     const { prompt, reviewerBrief } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign,
-      contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources,
+      contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
       specDocs: kind === "spec-writer" ? [] : specDocs,
     });
     const thread = await managedSpawn.launch(prepared, {
@@ -3347,7 +3355,8 @@ export default async function plugin(bb: BbPluginApi) {
         ...(typeof planInput !== "string" && planInput[index]!.dependsOn ? { dependsOn: planInput[index]!.dependsOn } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.test ? { test: true } : {}),
-        ...(typeof planInput !== "string" && planInput[index]!.spec ? { spec: true } : {}) }))
+        ...(typeof planInput !== "string" && planInput[index]!.spec ? { spec: true } : {}),
+        ...(typeof planInput !== "string" && planInput[index]!.spec && hasSpecBaseline(planInput[index]!.body) ? { baseline: true } : {}) }))
       : null;
     // Best-effort mirror into Chief's storage: inline-vis resolves paths against the rendering thread.
     let inlinePlans: string[] = [];
