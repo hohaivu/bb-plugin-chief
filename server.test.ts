@@ -6593,6 +6593,59 @@ describe("tester role", () => {
       expect(comment.body).toContain("**Specs skipped (wave 2):** docs already describe this");
     });
 
+    // Contract (reviewer authorization, spec-only waiver): chief_skip_specs excuses a wave's missing docs only. The reviewer is
+    // never told that wave's planned test work, test runs or contracts are authorized omissions; only a wave Chief waived with
+    // chief_skip_tests gets that sentence, also in a plan that holds both kinds of waiver. Regression (fails at 54ad928, before
+    // 689694b): any waiver line switches on the test-waiver paragraph, so a docs-only waiver excuses missing test evidence.
+    const TEST_EXEMPTION = "Their planned test work, test runs and contracts are authorized omissions";
+    const SPEC_ONLY_RULE = "A wave whose line says only \"specs skipped by Chief\" (chief_skip_specs) keeps its planned test work, test runs and contracts fully under review.";
+    const DOCS_EXEMPTION = "A specs-skipped wave's Spec delta and docs work are authorized omissions too.";
+    test("a spec-only waiver reaches the reviewer without the test-work exemption", async () => {
+      const state = await setup();
+      const { chief, planner, tester } = await specChain(state);
+      await readyIdle(state, tester);
+      await skipSpecs(state, chief.threadId, planner.threadId);
+      await tool(state, "chief_review", { workerThreadId: tester }, chief.threadId);
+      const prompt = state.spawned.at(-1).prompt as string;
+      expect(prompt).not.toContain(TEST_EXEMPTION);
+      expect(prompt).toContain(SPEC_ONLY_RULE);
+      expect(prompt).toContain(DOCS_EXEMPTION);
+      expect(prompt).toContain("Wave 2 keeps its invariant");
+    });
+
+    test("mixed waivers: the test exemption names only the tests-skipped wave and its contracts leave the review", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave(2), { body: wave(3), dependsOn: [] }, TEST_WAVE(4, [3])]);
+      await approvePlan(state, chief.threadId, planner.threadId);
+      const handOff = async (waveNo: number, extra: object = {}) => {
+        await delegateWave(state, chief.threadId, planner.threadId, waveNo, extra);
+        return workerOn(state, planner.threadId, waveNo).thread_id as string;
+      };
+      const w1 = await handOff(1, { branch: "feature/a" });
+      const w3 = await handOff(3, { branch: "feature/b" });
+      await readyIdle(state, w1);
+      await readyIdle(state, w3);
+      const t2 = await handOff(2, { replaces: w1 });
+      const t4 = await handOff(4, { replaces: w3 });
+      await readyIdle(state, t2);
+      await readyIdle(state, t4);
+      await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
+      await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 4, reason: "flaky suite" }, chief.threadId);
+      await tool(state, "chief_review", { workerThreadId: t4 }, chief.threadId);
+      const prompt = state.spawned.at(-1).prompt as string;
+      const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
+      const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+      expect(context).toContain(`Wave 2 of 4: ${planFile(state, planner.threadId, 2)}: specs skipped by Chief: docs are unchanged`);
+      expect(context).toContain(`Wave 4 of 4: ${planFile(state, planner.threadId, 4)}: tests skipped by Chief: flaky suite`);
+      expect(prompt).not.toContain(TEST_EXEMPTION);
+      expect(prompt).toContain("Only a wave whose line says \"tests skipped by Chief\" (chief_skip_tests) has its planned test work, test runs and contracts as authorized omissions");
+      expect(prompt).toContain(SPEC_ONLY_RULE);
+      expect(prompt).toContain(DOCS_EXEMPTION);
+      expect(prompt).toContain("Wave 2 keeps its invariant");
+      expect(prompt).not.toContain("Wave 4 keeps its invariant");
+    });
+
     // Contract (waiver totality): chief_skip_tests on a spec: true wave waives its spec step too, with the same reason, before
     // or after delegation and whatever state the tester is in, so a waived tester never leaves an unreachable spec step.
     // Regression: dropping the specsSkipped coupling leaves awaitsSpec true, so the waived tester can be neither reviewed nor completed.
@@ -6900,6 +6953,10 @@ describe("tester role", () => {
       const testsOnly = reviewBrief({ ...input, waiverLines: ["Wave 2 of 2: /p/plan-2.md: tests skipped by Chief: flaky"] });
       expect(testsOnly.prompt).toContain("Chief waived the test waves listed under `## Waived test waves`");
       expect(testsOnly.prompt).not.toContain("authorized omissions too");
+      // A test waiver, alone or with a spec waiver on the same wave, keeps its original exemption text.
+      expect(testsOnly.prompt).toContain(TEST_EXEMPTION);
+      expect(both.prompt).toContain(TEST_EXEMPTION);
+      expect(both.prompt).not.toContain(SPEC_ONLY_RULE);
     });
   });
 });
