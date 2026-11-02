@@ -1,4 +1,4 @@
-import { chainOf, heads, successorOf, tips, type PlanWave } from "./waveSchedule";
+import { chainOf, heads, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
 import type { createWaveSchedule } from "./waveSchedule";
 import type { createReviewLedger, ReviewTarget } from "./reviewLedger";
 
@@ -38,7 +38,7 @@ export function createPlanProgress<Row extends ProgressRow>(
   ledger: ReturnType<typeof createReviewLedger<Row>>,
   states: ProgressStates,
 ) {
-  const { planWavesFor, isDesignWave, waveWorkers, awaitsSpec, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
+  const { planWavesFor, isDesignWave, waveWorkers, specOwed, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
 
   /** A same-wave fix worker's later wave to restack, or null. Set only when the worker replaces a worker of its own
    * wave (a fix round, not a first-time hand-off between waves) and the wave that builds on it has a live worker.
@@ -60,7 +60,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     | { kind: "superseded"; latest: Row }
     | { kind: "restack" | "restacked"; waves: PlanWave[]; next: number; successor: Row }
     | { kind: "betweenWaves"; waves: PlanWave[]; next: number }
-    | { kind: "spec"; waves: PlanWave[]; wave: number }
+    | { kind: "implement"; waves: PlanWave[]; wave: number }
     | { kind: "pending"; waves: PlanWave[]; pending: number[] } {
     if (isDesignWave(worker)) return { kind: "design" };
     const waves = planWavesFor(worker.plan_thread_id);
@@ -68,11 +68,15 @@ export function createPlanProgress<Row extends ProgressRow>(
     const planThreadId = worker.plan_thread_id!;
     const latest = waveWorkers(planThreadId, worker.plan_wave).at(-1);
     if (latest && latest.thread_id !== worker.thread_id) return { kind: "superseded", latest };
+    // Implementation is owed on this wave (its Spec Writer is latest), or on the wave a test wave tests.
+    const parent = waves[worker.plan_wave - 1]?.test ? parentOf(waves, worker.plan_wave) : null;
+    for (const wave of [worker.plan_wave, ...(parent !== null ? [parent] : [])]) {
+      if (specOwed(planThreadId, waves, wave)) return { kind: "implement", waves, wave };
+    }
     const stack = restackOf(worker, waves);
     if (stack) return { kind: stack.restacked ? "restacked" : "restack", waves, next: stack.next, successor: stack.successor };
     const next = successorOf(waves, worker.plan_wave);
     if (next !== null) return { kind: "betweenWaves", waves, next };
-    if (awaitsSpec(planThreadId, waves, worker.plan_wave)) return { kind: "spec", waves, wave: worker.plan_wave };
     const pending = pendingWaves(planThreadId, waves);
     return pending.length ? { kind: "pending", waves, pending } : null;
   }
@@ -95,7 +99,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     | { kind: "restack"; waves: PlanWave[]; next: number; successor: Row }
     | { kind: "nextWave"; waves: PlanWave[]; next: number }
     | { kind: "unplanned" }
-    | { kind: "spec"; waves: PlanWave[] }
+    | { kind: "implement"; waves: PlanWave[] }
     | { kind: "retest"; waves: PlanWave[] }
     | { kind: "review"; waves: PlanWave[]; namer: Row; targets: Row[] } {
     const waves = planWavesFor(row.plan_thread_id);
@@ -103,15 +107,16 @@ export function createPlanProgress<Row extends ProgressRow>(
     const design = !!waves[row.plan_wave! - 1]?.design;
     if (next !== null && design) return { kind: "designNext", waves, next };
     if (design) return { kind: "designDone", waves };
+    // A Spec Writer that is its spec wave's latest row (or an unplanned one) hands off to the worker.
+    if (row.kind === "spec-writer" && (!row.plan_thread_id || row.plan_wave == null || !waves.length
+      || (specOwed(row.plan_thread_id, waves, row.plan_wave) && waveWorkers(row.plan_thread_id, row.plan_wave).at(-1)?.thread_id === row.thread_id))) return { kind: "implement", waves };
     const stack = restackOf(row, waves);
     if (stack) return stack.restacked ? null : { kind: "restack", waves, next: stack.next, successor: stack.successor };
     if (next !== null) return { kind: "nextWave", waves, next };
     if (!row.plan_thread_id || row.plan_wave == null || !waves.length) return { kind: "unplanned" };
-    if (awaitsSpec(row.plan_thread_id, waves, row.plan_wave) && waveWorkers(row.plan_thread_id, row.plan_wave).at(-1)?.thread_id === row.thread_id) return { kind: "spec", waves };
-    // A Spec Writer follows only a ready tester or another Spec Writer (startWorker), so it never needs a retest.
     // A worker changed code on a test wave after the tests ran: offer a rerun until a review covers that report.
     const wave = waves[row.plan_wave - 1];
-    if (wave?.test && !wave.testsSkipped && row.kind !== "tester" && row.kind !== "spec-writer" && !ledger.isCurrent(row)) return { kind: "retest", waves };
+    if (wave?.test && !wave.testsSkipped && row.kind !== "tester" && !ledger.isCurrent(row)) return { kind: "retest", waves };
     if (waitingOn(row)) return null;
     const targets = reviewTargetsFor(row);
     // The targets whose current report no review covers yet. The plan's one call is named on the first of them
@@ -190,7 +195,9 @@ export function createPlanProgress<Row extends ProgressRow>(
   /** Whether a planner is absorbed: every chain's tip has a complete worker, and every linked worker is terminal. */
   function plannerAbsorbed(planner: Row): boolean {
     const linked = waveWorkers(planner.thread_id);
-    return tips(planWavesFor(planner.thread_id)).every((tip) => linked.some((w) => w.plan_wave === tip && w.state === "complete"))
+    const waves = planWavesFor(planner.thread_id);
+    return tips(waves).every((tip) => !chainOf(waves, tip).some((n) => specOwed(planner.thread_id, waves, n)))
+      && tips(planWavesFor(planner.thread_id)).every((tip) => linked.some((w) => w.plan_wave === tip && w.state === "complete"))
       && linked.every((w) => states.terminal(w.state));
   }
 

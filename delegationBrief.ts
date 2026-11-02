@@ -113,14 +113,14 @@ export type WorkerBriefInput = {
   ruledOut: FailEntry[];
   /** A tester's or Spec Writer's source lines (plan files, contracts, approved design, or the head worker's brief); [] otherwise. */
   specSources: string[];
-  /** The wave is marked spec: true: its tester leaves the `## Spec delta` to the Spec Writer. */
-  specWave?: boolean;
+  /** On a spec-bearing chain: one line per Spec Writer whose docs a product worker, designer or tester follows; [] or absent otherwise. */
+  specDocs?: string[];
 };
 
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specWave } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [] } = input;
   const tester = kind === "tester";
   const specWriter = kind === "spec-writer";
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
@@ -158,7 +158,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ...(wave !== undefined && waveTotal !== undefined ? [
       "", "## Wave",
       specWriter
-        ? `Wave ${wave} of ${waveTotal} is a test wave whose tester already reported ready. Your work is only its \`## Spec delta\` and the docs rules in the \`chief-role-spec-writer\` skill. Name "Wave ${wave} of ${waveTotal}" in your ready result.`
+        ? `Wave ${wave} of ${waveTotal}: you run before its worker. Your work is only its \`## Spec delta\` and the docs rules in the \`chief-role-spec-writer\` skill. Name "Wave ${wave} of ${waveTotal}" in your ready result.`
         : `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
       waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
       ...(waveIndependent ? ["This wave is independent: it has its own branch and PR from the default base; do not build on another wave's branch."] : []),
@@ -166,13 +166,27 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ...(designWave ? ["This is a design-only wave: the next wave implements it once the owner approves your artboards."] : []),
     ] : []),
     ...(specSources.length && specWriter ? [
-      "", "## Read-only context (the tester's work, not yours)",
-      "Read each plan file in full; the test wave's `## Spec delta` is your work list. Its test work and its contracts below belong to the tester, who proved them: never write, edit or run tests for them.",
+      "", "## Read-only context",
+      "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below belong to the worker and the tester: never write code or tests for them.",
       ...specSources,
     ] : specSources.length ? [
       "", "## Source of truth for test cases",
       "Read each in full, with the docs they name. Derive every test case from these, never from the implementation.",
       ...specSources,
+    ] : []),
+    ...(specDocs.length && !specWriter ? [
+      "", "## Spec",
+      tester
+        ? "The committed docs are the source of truth. Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed. Derive tests from those docs and the plan contracts, not from the code."
+        : "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
+      ...specDocs,
+      "- Never change docs/: only a Spec Writer does.",
+      ...(tester ? [
+        "- Code that contradicts the docs: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: worker)`. Docs that are wrong: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.",
+      ] : [
+        "- If the spec is wrong, report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`. If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.",
+        "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
+      ]),
     ] : []),
     ...(contracts && !specWriter ? [
       "", "## Contracts to verify", clip(contracts, 3_000),
@@ -238,16 +252,16 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- Ready: tests committed and pushed; Automated Verification lists each filtered test command with its exit status and maps each test to the contract it proves.",
       `- Blocked when a test fails because product code is wrong: commit and push the tests, name the failing tests, the filtered command, its exit status and an output excerpt, and recommend \`chief_delegate (replaces: <your thread id>, kind: worker)\` with the failures as its mission.`,
       "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.",
-      ...(specWave ? ["- This wave's `## Spec delta` belongs to the Spec Writer who runs after you: do not change docs/."] : []),
     ] : []),
     ...(specWriter ? [
       "", "## Spec work",
       "- Follow the `chief-role-spec-writer` skill.",
-      "- Planned: the test wave's `## Spec delta` is your work list. Unplanned: Chief's mission is your Spec delta; it names the docs and domains to change.",
-      "- Read docs/INDEX.md first, then only the specs the delta names and the decisions they link, the branch diff against its base, and the tester's tests and report. You may read the code entry points and guideline files those domains need, read-only.",
+      "- Planned: the wave's `## Spec delta` is your work list. Unplanned: Chief's mission is your Spec delta; it names the docs and domains to change.",
+      "- Inputs: the plan file, docs/INDEX.md first, then only the specs the delta names and the decisions they link. You may read the code entry points and guideline files those domains need, read-only.",
+      ...(prior && prior.kind !== "spec-writer" ? [`- Repair: Chief's mission is the docs fix. Read the report of the ${prior.kind ?? "worker"} you replace: bb chief inspect ${prior.thread_id}.`] : []),
       "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
       "- Ready: docs committed and pushed. A delta item the docs already reflect needs no commit: say so. Automated Verification: `git diff --name-only <base>..HEAD` showing only `docs/` paths, with exit status; `wc -l` of each new or changed decision file (20 lines or fewer); each kept STE exception (file, sentence, reason). List any Verify command as \"not run: docs-only change\".",
-      "- Blocked when the code contradicts the plan's contract: recommend `chief_delegate (replaces: <your thread id>, kind: worker)`.",
+      "- Blocked when the Spec delta contradicts the plan or cannot be written: recommend a fresh chief_plan with this report in context. Never recommend kind: worker.",
     ] : []),
   ].join("\n");
   return { prompt, brief, reviewerBrief };
@@ -293,10 +307,10 @@ export function plannerBrief(input: PlannerBriefInput): string {
     "- Write the full plan as Markdown: the files and functions to change, the steps in order, real constraints, and the risks.",
     "- Report with chief_report state ready. Its result is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline. Chief receives each wave as its own file. Keep that result under 800 characters and leave `summary` unset; the plan files are the full plan.",
     "- Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm).",
-    `- Split the work into at most ${MAX_WAVES} waves, each a self-contained plan one worker finishes. One implementation wave by default; split only where one worker cannot finish the work. Give each wave \`dependsOn\`: \`[k]\` only when it truly builds on wave k's changes, \`[]\` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), write that exact interface into both waves' \`## Contracts to verify\` and give the later wave \`dependsOn: []\` so they run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. Keep \`dependsOn\` only when it needs the earlier wave's implementation or branch. Waves contain no phases.`,
+    `- Split the work into at most ${MAX_WAVES} waves, each a self-contained plan one worker finishes. One implementation wave by default; split only where one worker cannot finish the work. Give each wave \`dependsOn\`: \`[k]\` only when it truly builds on wave k's changes, \`[]\` when it is independent and can run in parallel on its own branch and pull request. Prefer independent waves to long chains, because one failure in a chain blocks every wave after it. When a later wave needs only an earlier wave's interface (types, API, schema, CLI shape), write that exact interface into both waves' \`## Contracts to verify\` and give the later wave \`dependsOn: []\` so they run in parallel — only when (a) every independent wave builds and verifies from the default base without importing a declaration another wave adds (the interface already exists on the base, or each wave codes against a local stub the merge order resolves; the plan names which) and (b) each shared file or declaration has exactly one owning wave, named in the plan; otherwise keep it chained. Keep \`dependsOn\` only when it needs the earlier wave's implementation or branch. Waves contain no phases, except that a \`spec: true\` implementation wave runs its Spec Writer before its worker.`,
     "- When the task mixes UI that no approved design or explicit visual spec fixes with non-UI code (DB, notifications, OCR, …), split it: a design-only wave marked `design: true` (a Designer draws the artboards in the design tool, no app code), then the wave that builds on it with all the code, UI included, against the approved artboards. Never put both in one wave. Pure-UI work, pure non-UI work, and work whose look an approved design or spec already fixes stay as they are, with no `design` flag.",
     "- Workers never write or run tests: implementation waves hold no test work. End every chain with a test wave marked `test: true` (dependsOn the chain's last implementation wave), delegated to a tester on that branch. Its body names the docs, plan and design sources the test cases come from, the test levels under the project's rules, the filtered test commands, and the contracts each test proves. So every plan has at least two waves.",
-    "- When a chain changes something a reader of docs/specs needs (an entry point, flow or state, contract, invariant, or a non-obvious trade-off), mark its test wave `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, not the tester. List each docs/specs/<domain>.md to create or update and its docs/INDEX.md row. State the change in present tense as ADDED / CHANGED / REMOVED contracts and invariants, with reasons, and name any trade-off worth a docs/decisions file. Never restate test cases. Otherwise leave `spec` off: specs are written lazily, never backfilled.",
+    "- When a chain changes something a reader of docs/specs needs (an entry point, flow or state, contract, invariant, or a non-obvious trade-off), mark the implementation wave that makes the change `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs before the wave's worker runs. Test waves are never `spec: true`. List each docs/specs/<domain>.md to create or update and its docs/INDEX.md row. State the change in present tense as ADDED / CHANGED / REMOVED contracts and invariants, with reasons, and name any trade-off worth a docs/decisions file. Never restate test cases. Otherwise leave `spec` off: specs are written lazily, never backfilled.",
     "- Submit the plan through chief_report's `plan` field: always an array of `{body, dependsOn, design?, test?, spec?}`, one entry per wave in order. `dependsOn` holds the 1-based number of the earlier wave it builds on (`[2]` = wave 2); `[]` = independent; omitted = builds on the previous wave.",
     "- Add an explicit `## What we're NOT doing` Markdown heading naming what this plan leaves out of scope — a heading, not bold text.",
     "- Give every wave a `## Contracts to verify` Markdown heading: a checklist that states contracts as falsifiable properties where they apply: round-trip (decode(encode(x)) == x, save then load), idempotency (running twice equals running once), invariants and state bounds (what holds after every step, value or count limits), equivalence (new path equals old path or a reference on the same inputs), and what must never happen; state each with the edge cases and existing behaviour the wave must keep — what a reviewer would otherwise catch only after the fact. Do not force a class that does not fit. The worker and the reviewer both receive this exact list.",
@@ -370,7 +384,7 @@ export function advisorBrief(input: AdvisorBriefInput): string {
       "- Migration or compatibility risk.",
       "- State transitions that are not total.",
       "- A chain without a final test wave, or test work inside an implementation wave.",
-      "- A chain that changes documented behaviour with no `spec: true` test wave, or a `## Spec delta` that names no docs file or restates test cases.",
+      "- A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.",
     ] : []),
     "", "## Working contract",
     `- ${ADVISE_ONLY}`,
