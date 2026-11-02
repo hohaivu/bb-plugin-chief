@@ -6375,6 +6375,43 @@ describe("tester role", () => {
       expect((await state.harness.behavior.callRpc("modelConfiguration", null)).hosts[0]!.unusable).toEqual(["spec-writer"]);
     });
 
+    // Contract (model resolution is per machine): a Spec Writer spawns on the picks of the machine its worktree lives on. Two
+    // machines with different Worker and Spec Writer picks, each spawn made through chief_delegate on that machine's
+    // environment: host_1 has its own Spec Writer pick, host_2 has none and inherits host_2's Worker pick, so neither
+    // machine's pick reaches the other. Regression: a resolver that always reads the first machine sends host_2's Spec Writer
+    // to host_1's Spec Writer model; one that reads the Worker row of the wrong machine sends it to host_1's Worker model.
+    test("spec writer model: each spawn uses the picks of its own machine", async () => {
+      const state = await setup();
+      const set = (hostId: string, role: string, providerId: string, model: string) =>
+        state.harness.behavior.callRpc("setRoleModel", { hostId, role, selection: { providerId, model, reasoningLevel: "medium" } });
+      await set("host_1", "worker", "codex", "gpt-6-mini");
+      await set("host_1", "spec-writer", "codex", "gpt-6-astra");
+      await set("host_2", "worker", "claude-code", "claude-opus-5");
+      const hostTwo = new Set<string>();
+      state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
+        id: environmentId, hostId: hostTwo.has(environmentId) ? "host_2" : "host_1", workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
+      }));
+      const chief = await start(state);
+      const chains = [];
+      for (const host of ["host_1", "host_2"]) {
+        const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, specWave()]);
+        await delegateWave(state, chief.threadId, planner.threadId, 1);
+        const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+        if (host === "host_2") hostTwo.add(state.live.get(impl)!.environmentId as string);
+        await readyIdle(state, impl);
+        await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+        const tester = workerOn(state, planner.threadId, 2).thread_id as string;
+        await readyIdle(state, tester);
+        chains.push({ planner, tester });
+      }
+      const spawnWriter = async ({ planner, tester }: (typeof chains)[number]) => {
+        await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "spec-writer" });
+        return state.spawned.at(-1);
+      };
+      expect(await spawnWriter(chains[0]!)).toMatchObject({ providerId: "codex", model: "gpt-6-astra" });
+      expect(await spawnWriter(chains[1]!)).toMatchObject({ providerId: "claude-code", model: "claude-opus-5" });
+    });
+
     // Contract (chief_models_v8 migration, storage): a v7 database keeps all seven roles on two machines unchanged, then
     // accepts a spec-writer row and still refuses an unknown role. Regression: the rebuild drops a role or machine's row,
     // or leaves the old CHECK list so a Spec Writer pick cannot be saved.
@@ -6826,31 +6863,50 @@ describe("tester role", () => {
       ]) expect(prompt).not.toContain(absent);
     });
 
-    // Contract (briefs, tester and others): only a tester gets the Head commit line, and the Spec delta line only on a spec: true
-    // wave; workers and designers gain neither. Regression: the Head commit line leaks to workers, or the Spec delta line is
-    // missing so the tester writes the docs the Spec Writer owns. Everything else in these prompts is the pre-wave-1 text,
-    // checked against 783efcb by the wave 2 report's controlled comparison.
-    test.each([
-      ["a tester on a spec wave", true],
-      ["a tester on a test wave that is not spec", false],
-    ])("%s gets the Head commit line, and the Spec delta line only on a spec wave", async (_label, spec) => {
-      const state = await setup();
-      const { tester } = await specChain(state, [{ body: PLAN_FIXTURE }, spec ? specWave() : TEST_WAVE(2)]);
-      const prompt = state.spawned.at(-1).prompt as string;
-      expect(rowOf(state, tester).kind).toBe("tester");
-      expect(prompt).toContain("- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.");
-      expect(prompt.includes("- This wave's `## Spec delta` belongs to the Spec Writer who runs after you: do not change docs/.")).toBe(spec);
-    });
-
-    test.each([["worker", undefined], ["designer", "designer"]])("a %s's brief has no Head commit or Spec delta line", async (_label, kind) => {
-      const state = await setup();
+    // Contract (briefs, byte equivalence with the pre-feature base): the complete worker, designer and tester prompts that
+    // chief_delegate builds are, on identical fixtures, the bytes base 8250f0c built. Worker and designer prompts are equal
+    // as they are; a tester's differs only by the Head commit line and, on a spec: true wave, the Spec delta line. The oracle
+    // file was captured by running this same fixture (the marked block below) against 8250f0c; only the storage root is
+    // normalized. Regression: any unrelated work order added, reworded or dropped in these prompts.
+    // <brief-oracle-fixture>
+    const briefFixture = async (state: State, spec: boolean) => {
       const chief = await start(state);
-      await delegate(state, chief.threadId, "Plain", kind ? { kind } : {});
-      const prompt = state.spawned.at(-1).prompt as string;
-      expect(prompt).not.toContain("Head commit");
-      expect(prompt).not.toContain("Spec delta");
-      expect(prompt).not.toContain("Spec Writer");
-    });
+      const out: Record<string, string> = {};
+      const last = () => state.spawned.at(-1).prompt as string;
+      const unplanned = await delegate(state, chief.threadId, "Plain");
+      out["worker, unplanned"] = last();
+      await delegate(state, chief.threadId, "Design", { kind: "designer" });
+      out["designer, unplanned"] = last();
+      await readyIdle(state, unplanned.threadId, "Done");
+      await delegate(state, chief.threadId, "Tests", { replaces: unplanned.threadId, kind: "tester" });
+      out["tester, unplanned"] = last();
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE },
+        { body: wave(2, "Write the tests.\n\n## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative"), test: true, ...(spec ? { spec: true } : {}) }]);
+      await delegateWave(state, chief.threadId, planner.threadId, 1, { verifyCommand: "npx vitest run server.test.ts -t totals" });
+      out["worker, planned"] = last();
+      const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+      await readyIdle(state, impl);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+      out["tester, planned"] = last();
+      return Object.entries(out).map(([name, prompt]) => `=== ${name} ===\n${prompt.replaceAll(state.storageRoot, "<storage>")}\n`).join("");
+    };
+    // </brief-oracle-fixture>
+
+    test.each([["a plain test wave", false], ["a spec: true wave", true]])(
+      "worker and designer prompts are byte-identical to base 8250f0c and a tester's differs by the authorized lines only (%s)", async (_label, spec) => {
+        const state = await setup();
+        const head = await briefFixture(state, spec);
+        const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "briefs-base-8250f0c.txt"), "utf8");
+        const authorized = [
+          "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.",
+          ...(spec ? ["- This wave's `## Spec delta` belongs to the Spec Writer who runs after you: do not change docs/."] : []),
+        ];
+        const lines = head.split("\n");
+        // The Head commit line is in both tester prompts, the Spec delta line only in the planned spec tester's, and nowhere else.
+        expect(lines.filter((line) => line === authorized[0])).toHaveLength(2);
+        if (spec) expect(lines.filter((line) => line === authorized[1])).toHaveLength(1);
+        expect(lines.filter((line) => !authorized.includes(line)).join("\n")).toBe(oracle);
+      });
 
     // Contract (planner brief): the planner is told the spec flag and the `{body, dependsOn, design?, test?, spec?}` shape.
     // Regression: the planner never learns spec: true exists, so no plan ever opens the spec step.
