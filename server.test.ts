@@ -6963,5 +6963,236 @@ describe("tester role", () => {
         `Spec Writer ${writer} hands off to its worker: chief_delegate (replaces: ${writer}, kind: worker).`);
       expect(rowOf(state, writer).state).toBe("ready");
     });
+
+    const reviewPrompt = async (state: State, chiefThreadId: string, workerThreadId: string) => {
+      await tool(state, "chief_review", { workerThreadId }, chiefThreadId);
+      const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
+      const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+      return { prompt: state.spawned.at(-1).prompt as string, context };
+    };
+    /** Wave 1 (spec: true) bypassed before any row; its worker and wave 2's tester ready: the whole plan is reviewable. */
+    async function bypassedChain(state: State, reasons: { specs: string; tests?: string }) {
+      const { chief, planner } = await specPlan(state);
+      await skipSpecs(state, chief.threadId, planner.threadId, reasons.specs);
+      await delegateWave(state, chief.threadId, planner.threadId, 1);
+      const worker = workerOn(state, planner.threadId, 1).thread_id as string;
+      await readyIdle(state, worker);
+      if (reasons.tests) {
+        await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: reasons.tests }, chief.threadId);
+        return { chief, planner, worker, last: worker };
+      }
+      const tester = await swap(state, chief, planner.threadId, 2, worker, "tester");
+      await readyIdle(state, tester);
+      return { chief, planner, worker, last: tester };
+    }
+
+    // Contract 12 (waiver type from the flags): a test waiver whose reason says "specs skipped by Chief" renders only under
+    // `## Waived test waves`, and a spec bypass whose reason says "tests skipped by Chief" only under `## Bypassed Spec Writer
+    // steps`; the prompt names each rule once. Regression: the waiver type is read from the line's text, so either reason files
+    // its wave under the other waiver and exempts or gates the wrong work.
+    test("a waiver's type comes from its flag, not from the words in its reason", async () => {
+      const state = await setup();
+      const { chief, planner, last } = await bypassedChain(state, { specs: "tests skipped by Chief: docs are unchanged", tests: "specs skipped by Chief: flaky suite" });
+      const { prompt, context } = await reviewPrompt(state, chief.threadId, last);
+      const testLine = `Wave 2 of 2: ${planFile(state, planner.threadId, 2)}: tests skipped by Chief: specs skipped by Chief: flaky suite`;
+      const specLine = `Wave 1 of 2: ${planFile(state, planner.threadId, 1)}: specs skipped by Chief: tests skipped by Chief: docs are unchanged`;
+      expect(section(context, "Waived test waves").trim()).toBe(testLine);
+      expect(section(context, "Bypassed Spec Writer steps").trim()).toBe(specLine);
+      expect(context.split(testLine)).toHaveLength(2);
+      expect(context.split(specLine)).toHaveLength(2);
+      expect(prompt).toContain("Chief waived the test waves listed under `## Waived test waves`");
+      expect(prompt).toContain("Chief bypassed the Spec Writer on the waves listed under `## Bypassed Spec Writer steps`");
+    });
+
+    test("reviewBrief files each waiver line by its list, whatever its text says", () => {
+      const target = { threadId: "thr_w", title: "Fix totals", prUrl: "https://github.com/acme/shop/pull/8", branch: "feature/x", reportSeq: 1, hasResult: true, reportPath: "/r/report-1.md",
+        head: { branch: "feature/x", sha: "abc123", base: "main" } };
+      const input: ReviewBriefInput = {
+        worker: { ...target, kind: null, brief: null, reported: "Done" }, targets: [target], wavePaths: ["/p/plan-1.md", "/p/plan-2.md"], chain: [1, 2],
+        contractLines: ["Wave 1 of 2:", "- Totals stay non-negative"], recordedLines: ["npm test → exit 0"], previous: null, chiefThreadId: "thr_c",
+      };
+      const asTests = reviewBrief({ ...input, waiverLines: ["Wave 2 of 2: /p/plan-2.md: tests skipped by Chief: specs skipped by Chief: flaky"] });
+      expect(asTests.context).toContain("## Waived test waves\nWave 2 of 2: /p/plan-2.md: tests skipped by Chief: specs skipped by Chief: flaky");
+      expect(asTests.context).not.toContain("## Bypassed Spec Writer steps");
+      expect(asTests.prompt).toContain("Chief waived the test waves listed under `## Waived test waves`");
+      expect(asTests.prompt).not.toContain("Chief bypassed the Spec Writer");
+      const asSpecs = reviewBrief({ ...input, specWaiverLines: ["Wave 1 of 2: /p/plan-1.md: specs skipped by Chief: tests skipped by Chief: docs"] });
+      expect(asSpecs.context).toContain("## Bypassed Spec Writer steps\nWave 1 of 2: /p/plan-1.md: specs skipped by Chief: tests skipped by Chief: docs");
+      expect(asSpecs.context).not.toContain("## Waived test waves");
+      expect(asSpecs.prompt).toContain("Chief bypassed the Spec Writer");
+      expect(asSpecs.prompt).not.toContain("Chief waived the test waves");
+    });
+
+    // Contract 13 (bypassed wave's review): missing docs is not a finding, landed docs that contradict the code still are, and no
+    // spec gate (no "marked spec: true", no blocking list) renders. Regression: a bypass leaves the gate on, so a review blocks
+    // on docs nobody was asked to write, or the bypass sentence drops the contradiction rule.
+    test("a bypassed spec wave's review excuses missing docs, keeps contradicting docs and renders no spec gate", async () => {
+      const state = await setup();
+      const { chief, last } = await bypassedChain(state, { specs: "docs are unchanged" });
+      const { prompt } = await reviewPrompt(state, chief.threadId, last);
+      expect(prompt).toContain("Review those waves against their plan: missing docs/ for them is not a finding, and they get no spec gate. The bypass never covers tests, and it never excuses landed docs/ that contradict the code.");
+      expect(prompt).not.toMatch(/marked spec: true|This task ran a Spec Writer|\(1\) code that contradicts the committed docs/);
+    });
+
+    // Contract 14 (provenance): on a spec-bearing chain the reviewer's earlier-rows list keeps every Spec Writer and Tester row
+    // even past four earlier rows, plus the worker interval line; a no-spec chain keeps the four-row cap. Regression: the
+    // `.slice(0, 4)` cap drops the oldest Spec Writer (and the implementing worker's evidence) once the chain has a few fix rounds.
+    test("a spec-bearing chain keeps every Spec Writer and Tester row in the review's earlier rows, a no-spec chain keeps the cap", async () => {
+      const state = await setup();
+      const { chief, planner, writer, tester } = await fullChain(state);
+      const f1 = await swap(state, chief, planner.threadId, 2, tester, "worker");
+      await readyIdle(state, f1);
+      const t2 = await swap(state, chief, planner.threadId, 2, f1, "tester");
+      await readyIdle(state, t2);
+      const f2 = await swap(state, chief, planner.threadId, 2, t2, "worker");
+      await readyIdle(state, f2);
+      const t3 = await swap(state, chief, planner.threadId, 2, f2, "tester");
+      await readyIdle(state, t3);
+      const { prompt, context } = await reviewPrompt(state, chief.threadId, t3);
+      const rows = context.split("\n").filter((line) => /^- (worker|tester|spec-writer|designer) thr_/.test(line));
+      expect(rows.length).toBeGreaterThan(4);
+      for (const row of [`spec-writer ${writer}`, `tester ${tester}`, `tester ${t2}`]) expect(rows.some((line) => line.startsWith(`- ${row}:`))).toBe(true);
+      expect(prompt).toContain("Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names");
+      expect(prompt).toMatch(new RegExp(`Earlier here: [^.]*spec-writer ${writer}[^.]*`));
+
+      const plainState = await setup();
+      const chief2 = await start(plainState);
+      let head = (await delegate(plainState, chief2.threadId, "Step 0")).threadId;
+      const firstStep = head;
+      for (let i = 1; i <= 5; i++) {
+        await readyIdle(plainState, head, `Done ${i}`);
+        head = (await delegate(plainState, chief2.threadId, `Step ${i}`, { replaces: head })).threadId;
+      }
+      await readyIdle(plainState, head, "Done 6");
+      const plain = await reviewPrompt(plainState, chief2.threadId, head);
+      const plainRows = plain.context.split("\n").filter((line) => /^- (worker|tester|spec-writer|designer) thr_/.test(line));
+      expect(plainRows).toHaveLength(4);
+      expect(plainRows.some((line) => line.includes(firstStep))).toBe(false);
+      expect(plain.prompt).not.toContain("Check each earlier worker on its own commits only");
+    });
+
+    // Contract 15 (gate): the spec gate blocks on items (1)-(5) only, limits (5) to new or changed prose, needs no new commit for
+    // correct content, and puts the ASD-STE100 rules in a trailing nit line. Regression: STE moves into the blocking list, or
+    // the "no commit for correct content" / new-or-changed-prose limits are dropped, so reviews block on style or unchanged docs.
+    test("the spec gate lists blocking items 1-5, the prose and no-commit limits, and the STE nit line", async () => {
+      const state = await setup();
+      const { chief, tester } = await fullChain(state);
+      const { prompt } = await reviewPrompt(state, chief.threadId, tester);
+      const gate = prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!;
+      const items = gate.split("\n");
+      expect(items.slice(0, 5).map((line) => line.slice(0, 3))).toEqual(["(1)", "(2)", "(3)", "(4)", "(5)"]);
+      expect(items[0]).toBe("(1) code that contradicts the committed docs;");
+      expect(items[1]).toBe("(2) a test that contradicts them;");
+      expect(items[2]).toBe("(3) a named Spec delta item that is missing or wrong in the final docs;");
+      expect(items[3]).toBe("(4) a docs/ change in a worker's, designer's or tester's own commit range;");
+      expect(items[4]).toMatch(/^\(5\) in new or changed docs prose only: no lead sentence saying what the domain is for;/);
+      expect(items).toHaveLength(6);
+      expect(items[5]).toBe("Content already correct needs no new commit. Unchanged existing docs are out of scope. A bypass never excuses landed docs that contradict the code. ASD-STE100 sentence rules (Simplified Technical English) are nits, never blocking.");
+      expect(items.slice(0, 5).join("\n")).not.toMatch(/STE|Simplified Technical English/);
+    });
+
+    // Contract 17 (no-spec preservation, strings): for a plan with no spec wave, the alerts, Pending/roster text, review refusal,
+    // stop reroute and reviewer hand-off Chief reads equal what #164's head (7c3a89d) produced on the same fixture. The oracle file
+    // was captured by running this marked block unchanged against 7c3a89d; only the storage root is normalized.
+    // Regression: a spec-first change that leaks a Spec Writer route, wording or ordering into a plan with no spec wave.
+    // <strings-oracle-fixture>
+    const stringsFixture = async (state: State) => {
+      const out: string[] = [];
+      const alertOf = () => state.sent.at(-1).input[0].text as string;
+      const rosterOf = async (chiefThreadId: string) => String(await tool(state, "chief_roster", { includeComplete: true }, chiefThreadId));
+      const chief = await start(state);
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, TEST_WAVE(2)]);
+      const next = async (waveNo: number, extra: object) => {
+        await delegateWave(state, chief.threadId, planner.threadId, waveNo, extra);
+        return workerOn(state, planner.threadId, waveNo).thread_id as string;
+      };
+      const w1 = await next(1, {});
+      await readyIdle(state, w1);
+      out.push(`worker ready alert:\n${alertOf()}`, `roster:\n${await rosterOf(chief.threadId)}`);
+      const t1 = await next(2, { replaces: w1, kind: "tester" });
+      await report(state, t1, { state: "blocked", result: "Two tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" });
+      setLive(state, t1, "idle");
+      out.push(`blocked tester alert:\n${alertOf()}`, `roster:\n${await rosterOf(chief.threadId)}`);
+      const stopped = await (async () => {
+        setLive(state, t1, "active");
+        const reply = await state.harness.behavior.runCli(["stop", t1, "--reason", "stuck"], ctxOf(state, chief.threadId));
+        return reply.stdout as string;
+      })();
+      out.push(`stop reply:\n${stopped}`);
+      const fix = await next(2, { replaces: t1, kind: "worker" });
+      await readyIdle(state, fix);
+      out.push(`fix ready alert:\n${alertOf()}`);
+      const t2 = await next(2, { replaces: fix, kind: "tester" });
+      await readyIdle(state, t2);
+      out.push(`tester ready alert:\n${alertOf()}`, `roster:\n${await rosterOf(chief.threadId)}`);
+      out.push(`review refusal:\n${await tool(state, "chief_review", { workerThreadId: w1 }, chief.threadId).then(() => "started", (error: Error) => error.message)}`);
+      await reviewed(state, chief.threadId, t2, "request_changes");
+      out.push(`request_changes alert:\n${alertOf()}`);
+      return out.map((block) => `=== ${block.split(":\n")[0]} ===\n${block.replaceAll(state.storageRoot, "<storage>")}\n`).join("");
+    };
+    // </strings-oracle-fixture>
+
+    test("a plan with no spec wave produces the strings #164's head produced", async () => {
+      const state = await setup();
+      const head = await stringsFixture(state);
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "strings-no-spec-7c3a89d.txt"), "utf8");
+      expect(head).toBe(oracle);
+    });
+
+    // Contract 17 (no-spec preservation, briefs): the worker, designer and tester prompts chief_delegate builds on the oracle fixture
+    // are the bytes base 8250f0c built, apart from #164's tester `Head commit` line, normalized by name. The oracle file was
+    // captured by running the marked block against 8250f0c; only the storage root is normalized.
+    // Regression: any unrelated work order added, reworded or dropped in these prompts by the spec-first change.
+    // <brief-oracle-fixture>
+    const briefFixture = async (state: State) => {
+      const chief = await start(state);
+      const out: Record<string, string> = {};
+      const last = () => state.spawned.at(-1).prompt as string;
+      const unplanned = await delegate(state, chief.threadId, "Plain");
+      out["worker, unplanned"] = last();
+      await delegate(state, chief.threadId, "Design", { kind: "designer" });
+      out["designer, unplanned"] = last();
+      await readyIdle(state, unplanned.threadId, "Done");
+      await delegate(state, chief.threadId, "Tests", { replaces: unplanned.threadId, kind: "tester" });
+      out["tester, unplanned"] = last();
+      const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE },
+        { body: wave(2, "Write the tests.\n\n## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative"), test: true }]);
+      await delegateWave(state, chief.threadId, planner.threadId, 1, { verifyCommand: "npx vitest run server.test.ts -t totals" });
+      out["worker, planned"] = last();
+      const impl = workerOn(state, planner.threadId, 1).thread_id as string;
+      await readyIdle(state, impl);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+      out["tester, planned"] = last();
+      return Object.entries(out).map(([name, prompt]) => `=== ${name} ===\n${prompt.replaceAll(state.storageRoot, "<storage>")}\n`).join("");
+    };
+    // </brief-oracle-fixture>
+
+    test("worker, designer and tester prompts equal base 8250f0c's apart from the tester Head commit line", async () => {
+      const state = await setup();
+      const head = await briefFixture(state);
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "briefs-base-8250f0c.txt"), "utf8");
+      const headCommit = "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.";
+      const lines = head.split("\n");
+      expect(lines.filter((line) => line === headCommit)).toHaveLength(2);
+      expect(lines.filter((line) => line !== headCommit).join("\n")).toBe(oracle);
+    });
+
+    // Contract 17 (planner and advisor briefs): they change on purpose, so assert the changed lines only. The planner is told the
+    // spec flag, the `## Spec delta` heading and that the Spec Writer runs before the wave's worker; the advisor's plan review
+    // checks a docs-changing chain for a missing spec: true wave.
+    test("the planner's and the advisor's briefs carry the spec-first lines", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chief.threadId));
+      const planPrompt = state.spawned.at(-1).prompt as string;
+      expect(planPrompt).toContain("`{body, dependsOn, design?, test?, spec?}`");
+      expect(planPrompt).toContain("mark the implementation wave that makes the change `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs before the wave's worker runs. Test waves are never `spec: true`.");
+      expect(planPrompt).not.toContain("mark its test wave `spec: true`");
+
+      const planner = await plan(state, chief.threadId, [specImpl(1), planWave(2), TEST_WAVE(3)]);
+      await approvePlan(state, chief.threadId, planner.threadId);
+      const advisorPrompt = state.spawned.at(-1).prompt as string;
+      expect(advisorPrompt).toContain("A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.");
+    });
   });
 });
