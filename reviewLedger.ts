@@ -130,6 +130,10 @@ export function createReviewLedger<Row extends LedgerRow>(
     return { open, previous: open[0] as Row | undefined, inFlight: open.find((review) => states.busy(review.state)) };
   }
 
+  /** The first still-busy open review down the worker's own task chain, own review first, not newest first: chief_complete
+   * names this one when it refuses skipReview. reviewStart's openReviews.inFlight orders by age instead. */
+  const busyReview = (workerThreadId: string) => taskChain(workerThreadId).map(openReview).find((review) => review && states.busy(review.state));
+
   /** replaces: re-points an open review at the fresh worker: the reviewer row and every target of an open review. */
   function repoint(priorThreadId: string, successorThreadId: string, now: number) {
     writes.repointReviewer(priorThreadId, successorThreadId, now);
@@ -194,5 +198,5 @@ export function createReviewLedger<Row extends LedgerRow>(
     return { approved: true } as const;
   }
 
-  return { targets, openReview, openReviews, covering, isCurrent, taskChain, ladder, rung, replacement, headApproval, repoint, addTargets, carriedStreak, seedStreak, recordVerdict, newestVerdict };
+  return { targets, openReview, openReviews, busyReview, covering, isCurrent, taskChain, ladder, rung, replacement, headApproval, repoint, addTargets, carriedStreak, seedStreak, recordVerdict, newestVerdict };
 }

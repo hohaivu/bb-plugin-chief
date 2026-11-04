@@ -2680,7 +2680,7 @@ export default async function plugin(bb: BbPluginApi) {
       const waived = row.last_report_state === "blocked" && isTestWave(row) && !!planWavesFor(row.plan_thread_id)[row.plan_wave! - 1]!.testsSkipped
         && waveWorkers(row.plan_thread_id!, row.plan_wave!).at(-1)?.thread_id === row.thread_id;
       if (row.last_report_state !== "ready" && !waived) refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
-      const busy = ledger.openReviews([threadId]).inFlight;
+      const busy = ledger.busyReview(threadId);
       if (busy) refuse(`review ${busy.thread_id} is still running; wait for its verdict.`);
       reviewSkipped = reason.data!;
     } else if (row.role === "worker") {
