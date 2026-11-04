@@ -380,7 +380,7 @@ const terminal = (state: string) => ["complete", "archived", "deleted"].includes
  * (retries, then a Chief alert) and retiring the reviews it supersedes, and it answers with the reply text.
  *
  * Impact slices and ancestry are optional enrichment: they never throw and never refuse a review, but the launch waits for them
- * (sequential, at most 30 s per slice; ancestry's git step at most 20 s, its host lookup unbounded). Required local results
+ * (sequential, at most 30 s per slice and 20 s per ancestry check, host lookup included). Required local results
  * (the Report, the Chief alert) never pass through this module.
  *
  * `caller` is the active Chief's row; the handler has already checked it. */
@@ -406,14 +406,22 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
 
   /** Whether the previous reviewed head is an ancestor of the pinned head, from the project checkout; never throws. */
   async function reviewedAncestryOf(row: Row, previousSha: string, head: PinnedHead, projectDir: string | null): Promise<{ ancestor: true } | { skipped: string }> {
-    try {
-      if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
-      // shortcut: the host lookup has no overall deadline (pending host = pending review); bound it if chief_review hangs in practice.
+    if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
+    // One 20 s deadline covers the host lookup and the git ancestry check.
+    const deadline = Date.now() + 20_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<{ skipped: string }>((resolve) => { timer = setTimeout(() => resolve({ skipped: "deadline (20 s) passed" }), 20_000); });
+    const work = async (): Promise<{ ancestor: true } | { skipped: string }> => {
       const hostSkip = await host.checkoutSkip(row.project_id);
       if (hostSkip) return { skipped: hostSkip };
-      return await reviewedAncestry({ cwd: projectDir, env: deps.git.env(), previousSha, head, deadlineMs: 20_000 });
+      return await reviewedAncestry({ cwd: projectDir, env: deps.git.env(), previousSha, head, deadlineMs: deadline - Date.now() });
+    };
+    try {
+      return await Promise.race([work(), expired]);
     } catch (error) {
       return { skipped: clip(String(error), 200) };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
