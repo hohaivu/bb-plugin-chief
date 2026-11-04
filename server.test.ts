@@ -3000,7 +3000,7 @@ describe("Chief backend", () => {
     ["rejects", "What we're NOT doing appears only in prose", [{ body: wave(1, "We have not added a What we're NOT doing section to this plan.") }]],
     ["rejects", "What we are not doing follows a hash across a newline", [{ body: "# Plan\n#\nWhat we are not doing is documented elsewhere." }]],
     ["rejects", "a string plan's What we are not doing follows a hash across a newline", "# Plan\n#\nWhat we are not doing is documented elsewhere."],
-    ["accepts", "What we are not doing is a markdown heading", [{ body: wave(1, "\n## What we are not doing\n- No extra scope.") }]],
+    ["accepts", "What we are not doing is a markdown heading", [{ body: wave(1, "\n## What we are not doing\n- No extra scope.") }, TEST_WAVE(2)]],
   ])("%s a planner's ready report when %s", async (outcome, _name, plan) => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
@@ -3022,15 +3022,15 @@ describe("Chief backend", () => {
     } else {
       await report;
       expect(state.sent).toHaveLength(sentBefore + 1);
-      expect(state.sent.at(-1).input[0].text).toContain("Delegate wave 1 now: chief_delegate");
+      expect(state.sent.at(-1).input[0].text).toContain("Delegate wave 1 now: run chief_forge_init");
     }
   });
 
   test.each([
-    ["rejects", "wave 2 has no Contracts to verify heading", [{ body: PLAN_FIXTURE }, { body: "# Wave 2\nDo the work." }], /Wave 2 lacks a "## Contracts to verify"/],
-    ["rejects", "Contracts to verify is bold text", "# Plan\n\n**Contracts to verify**\n- x\n\n## What we're NOT doing\n- x", /Wave 1 lacks a "## Contracts to verify"/],
-    ["rejects", "the Contracts to verify section is empty", "# Plan\n\n## Contracts to verify\n\n## What we're NOT doing\n- x", /Wave 1 lacks a "## Contracts to verify"/],
-    ["accepts", "Contracts to verify is a ### heading", "# Plan\n\n### Contracts to verify\n- x\n\n## What we're NOT doing\n- x", undefined],
+    ["rejects", "wave 2 has no Contracts to verify heading", [{ body: PLAN_FIXTURE }, { body: "# Wave 2\nWrite the tests.", test: true }], /plan wave 2 lacks a "## Contracts to verify"/],
+    ["rejects", "Contracts to verify is bold text", [{ body: "# Plan\n\n**Contracts to verify**\n- x\n\n## What we're NOT doing\n- x" }, TEST_WAVE(2)], /plan wave 1 lacks a "## Contracts to verify"/],
+    ["rejects", "the Contracts to verify section is empty", [{ body: "# Plan\n\n## Contracts to verify\n\n## What we're NOT doing\n- x" }, TEST_WAVE(2)], /plan wave 1 lacks a "## Contracts to verify"/],
+    ["accepts", "Contracts to verify is a ### heading", [{ body: "# Plan\n\n### Contracts to verify\n- x\n\n## What we're NOT doing\n- x" }, TEST_WAVE(2)], undefined],
   ])("%s a planner's ready report when %s", async (outcome, _name, plan, error) => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
