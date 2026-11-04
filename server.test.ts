@@ -2495,12 +2495,15 @@ describe("Chief backend", () => {
     }, { threadId: "thr_untrusted_insert", projectId: "proj_1" })).rejects.toThrow("available only in managed");
   });
 
+  // Without planThreadId the pull request body is the reviewer's whole brief (06f4b0d), so the mission is required.
+  const FORGE_PARAMS = { title: "Fix checkout totals", mission: "Correct and verify totals", successCriteria: "Regression passes" };
+
   test("hands Chief a forge script instead of the plumbing to reassemble", async () => {
     const state = await setup();
     const chief = await start(state);
     const script = await state.harness.behavior.callAgentTool(
       "chief_forge_init",
-      { title: "Fix checkout totals" },
+      FORGE_PARAMS,
       { threadId: chief.threadId, projectId: "proj_1" },
     ) as string;
     expect(script).toContain("TITLE='Fix checkout totals'");
@@ -2518,7 +2521,7 @@ describe("Chief backend", () => {
     const state = await setup({ projectPath: "/repo/proj1" });
     const chief = await start(state);
     const result = await state.harness.behavior.callAgentTool(
-      "chief_forge_init", { title: "Fix checkout totals" }, { threadId: chief.threadId, projectId: "proj_1" },
+      "chief_forge_init", FORGE_PARAMS, { threadId: chief.threadId, projectId: "proj_1" },
     ) as string;
     expect(result).toContain("branch=feature/x");
     expect(result).toContain("https://p/2");
@@ -2538,7 +2541,7 @@ describe("Chief backend", () => {
     const state = await setup({ projectPath });
     const chief = await start(state);
     const result = await state.harness.behavior.callAgentTool(
-      "chief_forge_init", { title: "Fix checkout totals" }, { threadId: chief.threadId, projectId: "proj_1" },
+      "chief_forge_init", FORGE_PARAMS, { threadId: chief.threadId, projectId: "proj_1" },
     ) as string;
     expect(result).toContain("```sh");
     expect(result).toContain("CHIEF_FORGE");
@@ -2677,7 +2680,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configured.instructions).toContain("well-specified");
-    expect(configured.instructions).toContain("chief_plan → chief_forge_init → chief_delegate");
+    expect(configured.instructions).toContain("chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
   });
 
   test("keeps planning off when the setting is turned off", async () => {
