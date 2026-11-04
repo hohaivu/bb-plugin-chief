@@ -6673,7 +6673,7 @@ describe("tester role", () => {
         await report(state, reviewer, { state: "ready", result: "Looks right", ...APPROVE });
         return { reviewer, environment, prompt: String(prompt) };
       };
-      return { state, round, worker };
+      return { state, round, worker, chief };
     }
     const fresh = { type: "host", workspace: { type: "managed-worktree" } };
 
@@ -6704,6 +6704,50 @@ describe("tester role", () => {
       arrange(state, first.reviewer);
       const second = await round(2);
       expect(second.environment).toMatchObject(fresh);
+    });
+
+    // Contract (wave 2.3): a reusableEnvironment lookup that never settles times out (CLEANUP_READ_MS = 15 s per bb read) and
+    // round 2 still launches a fresh worktree. Mutation caught: dropping bounded() from either read in the server adapter
+    // hangs chief_review forever on a host that never answers.
+    test.each([
+      ["the earlier reviewer's thread lookup", "threads.get"],
+      ["the earlier reviewer's environment lookup", "environments.get"],
+    ] as const)("round 2 completes on a fresh worktree after %s never settles", async (_name, hungRead) => {
+      const { state, round, worker, chief } = await setupRounds();
+      const first = await round(1);
+      let pendingCalls = 0;
+      const never = () => { pendingCalls += 1; return new Promise<never>(() => {}); };
+      if (hungRead === "threads.get") {
+        state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+          if (threadId === first.reviewer) return never();
+          const thread = state.live.get(threadId);
+          if (!thread) throw new Error("not found");
+          return thread;
+        });
+      } else {
+        state.harness.sdk.stub("environments.get", async () => never());
+      }
+      const spawnedBefore = state.spawned.length;
+      execFileMock.mockImplementation(async (file: string, args: string[]) => {
+        if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: shaOf(2), baseRefName: "main" }), stderr: "" };
+        throw new Error(`unexpected CLI ${file}`);
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+      try {
+        let settled = false;
+        const review = tool(state, "chief_review", { workerThreadId: worker }, chief).finally(() => { settled = true; });
+        await vi.advanceTimersByTimeAsync(14_000);
+        expect(pendingCalls).toBe(1);
+        expect(settled).toBe(false);
+        expect(state.spawned).toHaveLength(spawnedBefore);
+        await vi.advanceTimersByTimeAsync(1_500);
+        await review;
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(state.spawned).toHaveLength(spawnedBefore + 1);
+      expect(state.spawned.at(-1).environment).toMatchObject(fresh);
+      expect(String(state.spawned.at(-1).prompt)).toContain(`git checkout --detach ${shaOf(2)}`);
     });
   });
 
