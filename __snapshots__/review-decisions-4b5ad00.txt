@@ -1,0 +1,381 @@
+=== replacement at streak 0 ===
+--- replace at streak 0
+reply: Started worker “Fix totals” in thread thr_3. Track it with chief_roster.
+launched: 1
+
+=== replacement at streak 1 ===
+--- replace at streak 1
+reply: Started worker “Fix totals” in thread thr_4. Track it with chief_roster.
+launched: 1
+
+=== replacement at streak 2 with no consult ===
+--- replace
+refused: The reviewer has requested changes 2 times in a row on thr_4. Call chief_consult (workerThreadId: thr_4) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.
+launched: 0
+
+=== replacement at streak 2: consult after the latest rejection ===
+--- replace
+reply: Started worker “Fix totals” in thread thr_7. Track it with chief_roster.
+launched: 1
+
+=== replacement at streak 2: consult before the latest rejection ===
+--- replace
+refused: The reviewer has requested changes 2 times in a row on thr_5. Call chief_consult (workerThreadId: thr_5) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.
+launched: 0
+
+=== replacement at streak 2: status-only consult ===
+--- replace
+refused: The reviewer has requested changes 2 times in a row on thr_4. Call chief_consult (workerThreadId: thr_4) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.
+launched: 0
+
+=== replacement at streak 2: consult created before the prior worker ===
+--- replace
+refused: The reviewer has requested changes 2 times in a row on thr_4. Call chief_consult (workerThreadId: thr_4) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.
+launched: 0
+
+=== replacement at streak 2: consult on another branch of the same plan review ===
+--- rounds: streak 1
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_4) / chief_delegate (replaces: thr_5); their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_6
+Result: The discount is still applied twice
+--- rounds: streak 2
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_9)
+State: ready
+Full report: <storage>/chief/proj_1/thr_9/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_9/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_7) now, before any further delegation, with every branch of the review (thr_7, thr_8) in its context — one consult unlocks the fix for each. Then hand its advice to one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review…
+Full report and last output: bb chief inspect thr_9
+Result: The discount is still applied twice
+--- replace branch 1's worker on the consult of branch 3's worker
+reply: Started worker “Fix totals” in thread thr_11. Track it with chief_roster.
+launched: 1
+
+=== replacement at streak 3 ===
+--- replace without userApprovedRound
+refused: The reviewer has requested changes 3 times in a row on thr_7. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).
+launched: 0
+--- replace with userApprovedRound: false
+refused: The reviewer has requested changes 3 times in a row on thr_7. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).
+launched: 0
+
+=== replacement at streak 3 with userApprovedRound, no consult after the rejection ===
+--- replace with userApprovedRound
+reply: Started worker “Fix totals” in thread thr_9. Track it with chief_roster.
+launched: 1
+
+=== replacement: an approve between rejections resets the streak ===
+--- replace after reject, approve, reject, reject
+refused: The reviewer has requested changes 2 times in a row on thr_8. Call chief_consult (workerThreadId: thr_8) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.
+launched: 0
+
+=== order: stop rung, prior busy ===
+--- replace a busy prior at the stop rung
+refused: The reviewer has requested changes 3 times in a row on thr_7. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).
+launched: 0
+
+=== order: consult rung, prior busy ===
+--- replace a busy prior at the consult rung
+refused: The reviewer has requested changes 2 times in a row on thr_4. Call chief_consult (workerThreadId: thr_4) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.
+launched: 0
+
+=== order: stop rung, tester prior with no kind ===
+--- replace a tester without kind at the stop rung
+refused: The reviewer has requested changes 3 times in a row on thr_8. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).
+launched: 0
+--- replace a tester without kind at the stop rung, user approved
+refused: Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.
+launched: 0
+
+=== order: stop rung, planner refusal ===
+--- replace on a wave out of range at the stop rung
+refused: The reviewer has requested changes 3 times in a row on thr_8. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).
+launched: 0
+--- replace on a wave out of range at the stop rung, user approved
+refused: Wave 5 is out of range: planner thr_2 scheduled 2 wave(s).
+launched: 0
+
+=== advisor line at streak 1 ===
+--- the advisor's alert at streak 1
+[Chief lifecycle alert]
+Advisor report from Consult · Advice (thr_4)
+State: ready
+The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate (replaces: thr_2) with the advice in its context, or escalate to the user if it names a genuine decision.
+Result: Try X
+
+=== advisor line at streak 2 ===
+--- the advisor's alert at streak 2
+[Chief lifecycle alert]
+Advisor report from Consult · Advice (thr_6)
+State: ready
+The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with chief_delegate (replaces: thr_4) with the advice in its context, or escalate to the user if it names a genuine decision.
+Result: Try X
+
+=== advisor line at streak 3 ===
+--- the advisor's alert at streak 3
+[Chief lifecycle alert]
+Advisor report from Consult · Advice (thr_9)
+State: ready
+The advisor changed nothing. The reviewer has now requested changes 3 times in a row: start no new worker, and escalate to the user with both positions, this advice, and your recommendation.
+Result: Try X
+
+=== reviewer lines: plain ===
+--- plain: streak 1
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is still applied twice
+--- plain: streak 2
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_5)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_5/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_4) and run exactly one more review. If that review still requires changes, stop and escalate to the user.
+Full report and last output: bb chief inspect thr_5
+Result: The discount is still applied twice
+--- plain: streak 3
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_8)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_8/verdict-1.md
+The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+Full report and last output: bb chief inspect thr_8
+Result: The discount is still applied twice
+
+=== reviewer lines: a plan ===
+--- plan: streak 1
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_4) / chief_delegate (replaces: thr_5); their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_6
+Result: The discount is still applied twice
+--- plan: streak 2
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_9)
+State: ready
+Full report: <storage>/chief/proj_1/thr_9/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_9/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_7) now, before any further delegation, with every branch of the review (thr_7, thr_8) in its context — one consult unlocks the fix for each. Then hand its advice to one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review…
+Full report and last output: bb chief inspect thr_9
+Result: The discount is still applied twice
+--- plan: streak 3
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_13)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_13/verdict-1.md
+The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+Full report and last output: bb chief inspect thr_13
+Result: The discount is still applied twice
+
+=== reviewer lines: stacks ===
+--- stacks: streak 1
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Full report: <storage>/chief/proj_1/thr_6/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — wave 1: thr_4, wave 2: thr_5 — then restack each later wave on it as each ready report directs, even one the findings do not name. Their findings are attached automatically, and t…
+Full report and last output: bb chief inspect thr_6
+Result: The discount is still applied twice
+--- stacks: streak 2
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_9)
+State: ready
+Full report: <storage>/chief/proj_1/thr_9/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_9/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_7) now, before any further delegation, with every branch of the review (thr_7, thr_8) in its context — one consult unlocks the fix for each. Then hand its advice to fresh workers with chief_delegate (replaces: …): on the stacked waves 1 → 2 one at a time in wave order, the earliest wave the fin…
+Full report and last output: bb chief inspect thr_9
+Result: The discount is still applied twice
+--- stacks: streak 3
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_13)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_13/verdict-1.md
+The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+Full report and last output: bb chief inspect thr_13
+Result: The discount is still applied twice
+
+=== complete: no verdict ===
+--- no review
+refused: Refusing to complete thr_2: thr_2 has no review verdict. Start a fresh review with chief_review (workerThreadId: thr_2), complete it without a review with skipReview (your reason), or pass override with a reason to complete anyway.
+state: ready
+gh pr view calls: 0
+
+=== complete: request_changes ===
+--- newest review is request_changes
+refused: Refusing to complete thr_2: The newest review of thr_2 is request_changes, not an approve. Start a fresh review with chief_review (workerThreadId: thr_2), complete it without a review with skipReview (your reason), or pass override with a reason to complete anyway.
+state: ready
+gh pr view calls: 0
+
+=== complete: an approve whose head matches the PR head ===
+--- approve at the PR head
+reply: Marked “Fix totals” complete.
+Its pull request is marked ready for review.
+Cleanup queued: a background cleanup worker archives this task's threads (worker, reviewers, advisors, and the planner after its last wave) once nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; any failure alerts you.
+state: complete
+gh pr view calls: 1
+
+=== complete: an approve whose head does not match ===
+--- approve, the PR moved on
+refused: Refusing to complete thr_2: The approve covers aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa but https://github.com/acme/shop/pull/8 is now at bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb. Start a fresh review with chief_review (workerThreadId: thr_2), complete it without a review with skipReview (your reason), or pass override with a reason to complete anyway.
+state: ready
+gh pr view calls: 1
+
+=== complete: an uppercase recorded head_sha ===
+--- approve recorded in uppercase
+reply: Marked “Fix totals” complete.
+Its pull request is marked ready for review.
+Cleanup queued: a background cleanup worker archives this task's threads (worker, reviewers, advisors, and the planner after its last wave) once nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; any failure alerts you.
+state: complete
+gh pr view calls: 1
+
+=== complete: an unreadable PR head ===
+--- approve, gh fails
+refused: Refusing to complete thr_2: Cannot read the current head of https://github.com/acme/shop/pull/8 from the forge, so the approve cannot be matched to it. Retry, or pass override with a reason to complete anyway.
+state: ready
+gh pr view calls: 1
+
+=== complete: an approve with no PR ===
+--- approve, report unchanged
+reply: Marked “Fix totals” complete.
+Cleanup queued: a background cleanup worker archives this task's threads (worker, reviewers, advisors, and the planner after its last wave) once nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; any failure alerts you.
+state: complete
+gh pr view calls: 0
+
+=== complete: an approve with no PR, the report moved on ===
+--- approve, newer report
+refused: Refusing to complete thr_2: The newest approve does not cover thr_2's current report (report 2). Start a fresh review with chief_review (workerThreadId: thr_2), complete it without a review with skipReview (your reason), or pass override with a reason to complete anyway.
+state: ready
+gh pr view calls: 0
+
+=== complete: the newest approve was recorded on an older chain member, no PR ===
+--- the replacement, never reviewed (no PR)
+refused: Refusing to complete thr_4: The newest approve does not cover thr_4's current report (report 1). Start a fresh review with chief_review (workerThreadId: thr_4), complete it without a review with skipReview (your reason), or pass override with a reason to complete anyway.
+state: ready
+gh pr view calls: 0
+
+=== complete: the newest approve was recorded on an older chain member, a PR ===
+--- the replacement, never reviewed (a PR)
+reply: Marked “Fix totals” complete.
+Its pull request is marked ready for review.
+Cleanup queued: a background cleanup worker archives this task's threads (worker, reviewers, advisors, and the planner after its last wave) once nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; any failure alerts you.
+state: complete
+gh pr view calls: 1
+
+=== complete: override with a reason ===
+--- override, no review
+reply: Marked “Fix totals” complete without a matching approve (override recorded in its result).
+Its pull request is marked ready for review.
+No cleanup: completed with override.
+state: complete
+gh pr view calls: 0
+
+=== complete: a design wave ===
+--- design wave, no owner approval
+refused: Refusing to complete thr_4: thr_4 is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: thr_4), or pass override with a reason to complete anyway.
+state: ready
+gh pr view calls: 0
+--- design wave, owner approved
+reply: Marked “Fix totals” complete.
+Cleanup queued: a background cleanup worker archives this task's threads (worker, reviewers, advisors, and the planner after its last wave) once nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; any failure alerts you.
+state: complete
+gh pr view calls: 0
+
+=== complete: cleanup line, queued ===
+--- approved, cleanup on
+reply: Marked “Fix totals” complete.
+Cleanup queued: a background cleanup worker archives this task's threads (worker, reviewers, advisors, and the planner after its last wave) once nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; any failure alerts you.
+state: complete
+gh pr view calls: 0
+
+=== complete: cleanup line, unapproved ===
+--- skipReview
+reply: Marked “Fix totals” complete without a review (reason recorded).
+No cleanup: no approving review.
+state: complete
+gh pr view calls: 0
+
+=== complete: cleanup line, off ===
+--- approved, cleanup off
+reply: Marked “Fix totals” complete.
+No cleanup: the cleanupApproved setting is off.
+state: complete
+gh pr view calls: 0
+
+=== skipReview: a busy open review ===
+--- skipReview while the reviewer runs
+refused: Refusing to skip the review of thr_2: review thr_3 is still running; wait for its verdict.
+state: ready
+gh pr view calls: 0
+
+=== skipReview: a busy open review on the replaced chain's head ===
+--- skipReview of the replacement while the re-pointed reviewer runs
+refused: Refusing to skip the review of thr_4: review thr_3 is still running; wait for its verdict.
+state: ready
+gh pr view calls: 0
+
+=== skipReview: an idle open review ===
+--- skipReview after the reviewer reported
+reply: Marked “Fix totals” complete without a review (reason recorded).
+No cleanup: no approving review.
+state: complete
+gh pr view calls: 0
+
+=== chief_review: an in-flight review ===
+--- first call
+created: true
+threadId: thr_3
+title: Review · Fix totals
+launched: 1
+--- second call, the reviewer still running
+created: false
+threadId: thr_3
+title: Review · Fix totals
+launched: 0
+Using existing “Review · Fix totals” in thread thr_3. It reviews the worker's own environment (no pull request).
+
+=== chief_review: an in-flight plan review ===
+--- first call, from branch 1
+created: true
+threadId: thr_6
+title: Review · Fix totals
+launched: 1
+--- second call, from branch 1
+created: false
+threadId: thr_6
+title: Review · Fix totals
+launched: 0
+Using existing “Review · Fix totals” in thread thr_6. One review covers the whole plan: thr_4, thr_5, each pull request pinned to its own head commit where the forge answered. Complete each worker only on its approve.
+--- third call, from branch 3
+created: false
+threadId: thr_6
+title: Review · Fix totals
+launched: 0
+Using existing “Review · Fix totals” in thread thr_6. One review covers the whole plan: thr_4, thr_5, each pull request pinned to its own head commit where the forge answered. Complete each worker only on its approve.
+
+=== chief_review: an idle open review is superseded ===
+--- call after the reviewer reported
+created: true
+threadId: thr_4
+title: Review · Fix totals
+launched: 1

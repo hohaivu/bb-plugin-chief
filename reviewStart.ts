@@ -406,12 +406,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && planWavesFor(worker.plan_thread_id).length > 0);
     const reviewKey = planReview ? `plan:${worker.plan_thread_id}` : workerThreadId;
     return dedupe<ReviewStarted>(reviewKey, async () => {
-      const openReviews = [...new Set(targets.flatMap((target) => ledger.taskChain(target.thread_id)))]
-        .flatMap((id) => { const open = ledger.openReview(id); return open ? [open] : []; })
-        .filter((review, index, all) => all.findIndex((other) => other.thread_id === review.thread_id) === index)
-        .sort((a, b) => b.created_at - a.created_at);
-      const previous = openReviews[0];
-      const busy = openReviews.find((review) => busyStatuses.has(review.state));
+      const { open: openReviews, previous, inFlight: busy } = ledger.openReviews(targets.map((target) => target.thread_id));
       if (busy) {
         return { threadId: busy.thread_id, title: busy.title, workerThreadId, created: false, pinnedSha: busy.reviewed_head_sha, covers: targets.map((target) => target.thread_id) };
       }

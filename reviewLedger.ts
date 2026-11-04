@@ -23,6 +23,8 @@ interface LedgerRow {
   thread_id: string;
   replaces_thread_id: string | null;
   report_seq: number;
+  created_at: number;
+  state: string;
 }
 
 /** The managed_threads writes the ledger makes; the thread store owns them and they run in the caller's store.batch. */
@@ -39,6 +41,7 @@ export function createReviewLedger<Row extends LedgerRow>(
   db: ReturnType<BbPluginApi["storage"]["database"]>,
   getRow: (threadId: string) => Row | undefined,
   writes: LedgerWrites,
+  states: { busy: (status: string) => boolean },
 ) {
   // A worker's reviewers are found through review_targets: one plan review covers the latest worker of every branch.
   const openReviewOf = db.prepare<[string]>(
@@ -104,6 +107,33 @@ export function createReviewLedger<Row extends LedgerRow>(
           AND advised_at IS NOT NULL AND created_at >= ? LIMIT 1`).get(...group, Math.max(lastAt, prior.created_at));
   }
 
+  /** Advice: the task's streak and its rung. nextAction's advisor line reads this; it never asks permission. */
+  const ladder = (workerThreadId: string) => {
+    const { streak } = taskRejections(workerThreadId);
+    return { streak, rung: rung(streak) };
+  };
+
+  /** Permission: what replaces: of `prior` still needs, or null when it may go ahead. The consult check runs only on the consult rung. */
+  function replacement(prior: { thread_id: string; created_at: number }, userApprovedRound: boolean): null | { needs: "user" | "consult"; streak: number } {
+    const { streak, rung: at } = ladder(prior.thread_id);
+    if (at === "stop" && !userApprovedRound) return { needs: "user", streak };
+    if (at === "consult" && !consultGate(prior)) return { needs: "consult", streak };
+    return null;
+  }
+
+  /** Every open review of these workers' task chains, newest first; inFlight is the first one still busy. */
+  function openReviews(workerThreadIds: string[]) {
+    const open = [...new Set(workerThreadIds.flatMap(taskChain))]
+      .flatMap((id) => { const review = openReview(id); return review ? [review] : []; })
+      .filter((review, index, all) => all.findIndex((other) => other.thread_id === review.thread_id) === index)
+      .sort((a, b) => b.created_at - a.created_at);
+    return { open, previous: open[0] as Row | undefined, inFlight: open.find((review) => states.busy(review.state)) };
+  }
+
+  /** The first still-busy open review down the worker's own task chain, own review first, not newest first: chief_complete
+   * names this one when it refuses skipReview. reviewStart's openReviews.inFlight orders by age instead. */
+  const busyReview = (workerThreadId: string) => taskChain(workerThreadId).map(openReview).find((review) => review && states.busy(review.state));
+
   /** replaces: re-points an open review at the fresh worker: the reviewer row and every target of an open review. */
   function repoint(priorThreadId: string, successorThreadId: string, now: number) {
     writes.repointReviewer(priorThreadId, successorThreadId, now);
@@ -152,5 +182,21 @@ export function createReviewLedger<Row extends LedgerRow>(
       { verdict: string; head_sha: string | null; worker_thread_id: string | null; reviewed_report_seq: number | null } | undefined;
   }
 
-  return { targets, openReview, covering, isCurrent, taskChain, taskRejections, rung, consultGate, repoint, addTargets, carriedStreak, seedStreak, recordVerdict, newestVerdict };
+  /** Whether the newest verdict is an approve for what the worker would ship. With a pull request that is the head
+   * currentHead reports now (read only when an approve exists and pr_url is set); without one, the worker's current report. */
+  async function headApproval(worker: { thread_id: string; report_seq: number; pr_url: string | null }, currentHead: () => Promise<{ sha: string } | null>) {
+    const newest = newestVerdict(worker);
+    if (!newest) return { approved: false, reason: "no-verdict" } as const;
+    if (newest.verdict !== "approve") return { approved: false, reason: "not-approve", verdict: newest.verdict } as const;
+    if (worker.pr_url) {
+      const head = await currentHead();
+      if (!head) return { approved: false, reason: "head-unreadable" } as const;
+      if (newest.head_sha?.toLowerCase() !== head.sha) return { approved: false, reason: "head-moved", approvedSha: newest.head_sha, headSha: head.sha } as const;
+      return { approved: true } as const;
+    }
+    if (newest.worker_thread_id !== worker.thread_id || newest.reviewed_report_seq !== worker.report_seq) return { approved: false, reason: "report-moved" } as const;
+    return { approved: true } as const;
+  }
+
+  return { targets, openReview, openReviews, busyReview, covering, isCurrent, taskChain, ladder, rung, replacement, headApproval, repoint, addTargets, carriedStreak, seedStreak, recordVerdict, newestVerdict };
 }
