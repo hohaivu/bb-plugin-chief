@@ -349,6 +349,20 @@ async function waiveTests(state: Awaited<ReturnType<typeof setup>>, chiefThreadI
   }
 }
 
+// A plan wave delegated the way the server stored one before a chain shared one branch: a worker row of its own, on its own branch.
+// chief_delegate now refuses to build one (a later wave of a chain replaces its chain's worker), so a test of the legacy stacked
+// graph seeds the row directly: an unplanned worker, stamped with its plan wave. The thread store reloads its row cache on its
+// next write (the next delegate or report), which every caller below makes before it reads the row back.
+async function legacyWave(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, planThreadId: string, n: number, branch: string, title = `Wave ${n} work`) {
+  const result = await state.harness.behavior.runCli([
+    "delegate", "--title", title, "--mission", "Do it", "--unplanned-reason", "Legacy stacked fixture", "--branch", branch, "--json",
+  ], { threadId: chiefThreadId, projectId: "proj_1" });
+  expect(result.exitCode).toBe(0);
+  const { threadId } = JSON.parse(result.stdout!) as { threadId: string };
+  state.db.prepare("UPDATE managed_threads SET plan_thread_id=?, plan_wave=?, unplanned_reason=NULL WHERE thread_id=?").run(planThreadId, n, threadId);
+  return { threadId };
+}
+
 // chief_review answers `Started|Using existing “<title>” in thread <id>.`: the retired `bb chief review` CLI answered JSON with these fields.
 async function chiefReview(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, params: { workerThreadId?: string; branch?: string; pullRequest?: string }) {
   const text = await state.harness.behavior.callAgentTool("chief_review", params, { threadId: chiefThreadId, projectId: "proj_1" }) as string;
@@ -4112,7 +4126,7 @@ describe("Chief backend", () => {
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain("waves: 2/4 done, wave 1 starting, wave 2 starting");
     expect(roster).toContain(`: ${path2} (independent)`);
-    expect(state.spawned.at(-1).prompt).toContain("This wave is independent");
+    expect(state.spawned.at(-1).prompt).toContain("This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch.");
 
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 1 done${NO_DEVIATIONS}` }, { threadId: w1.threadId, projectId: "proj_1" });
     let alert = state.sent.at(-1).input[0].text as string;
@@ -4181,12 +4195,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Two waves.", plan }, { threadId: planner.threadId, projectId: "proj_1" });
     await approvePlan(state, chief.threadId, planner.threadId);
     await waiveTests(state, chief.threadId, planner.threadId, [3]);
-    const delegate = async (n: number, branch: string) => JSON.parse((await state.harness.behavior.runCli([
-      "delegate", "--title", `Wave ${n} work`, "--mission", "Do it",
-      "--plan-thread", planner.threadId, "--wave", String(n), "--branch", branch, "--json",
-    ], opts)).stdout!) as { threadId: string };
-    await delegate(1, "feature/a");
-    const w2 = await delegate(2, "feature/b");
+    // Rows of a plan written before chains shared a branch: wave 2 is stacked on wave 1's own branch, wave 1 still active.
+    await legacyWave(state, chief.threadId, planner.threadId, 1, "feature/a");
+    const w2 = await legacyWave(state, chief.threadId, planner.threadId, 2, "feature/b");
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 2 done${NO_DEVIATIONS}` }, { threadId: w2.threadId, projectId: "proj_1" });
     const alert = state.sent.at(-1).input[0].text as string;
     expect(alert).toContain("the one review of the whole plan waits until wave(s) 1 are ready");
@@ -6080,7 +6091,8 @@ describe("tester role", () => {
     expect(next).toContain(`chief_delegate (planThreadId: ${planner.threadId}, wave: 2`);
     expect(next).not.toMatch(/tester|chief_skip_tests/);
 
-    await delegateWave(state, chief.threadId, planner.threadId, 2);
+    // The plan row is a pre-chain one: its wave 2 is a stacked worker of its own, which chief_delegate no longer builds.
+    await legacyWave(state, chief.threadId, planner.threadId, 2, "feature/two");
     const last = workerOn(state, planner.threadId, 2);
     expect(last.kind).toBeNull();
     await readyIdle(state, last.thread_id);
@@ -6919,8 +6931,8 @@ describe("tester role", () => {
       await readyIdle(state, writer);
       const w1 = await swap(state, chief, planner.threadId, 1, writer, "worker");
       await readyIdle(state, w1);
-      await delegateWave(state, chief.threadId, planner.threadId, 2, { branch: "feature/b" });
-      const w2 = workerOn(state, planner.threadId, 2).thread_id as string;
+      // Wave 2 is a legacy stacked row on its own branch B: a chain's wave 2 now replaces wave 1's worker on branch A.
+      const { threadId: w2 } = await legacyWave(state, chief.threadId, planner.threadId, 2, "feature/b");
       await readyIdle(state, w2);
       const repair = await swap(state, chief, planner.threadId, 1, w1, "spec-writer");
       await putWriter(state, chief.threadId, repair, how);
