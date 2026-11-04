@@ -938,12 +938,12 @@ describe("Chief backend", () => {
     expect(state.sent[0].senderThreadId).toBe(worker.threadId);
   });
 
-  test("sends no plugin alert on a plain idle or failed event", async () => {
+  test("stays silent on a plain idle event and alerts Chief once on a failed one", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    // BB's own native parent notice already covers a plain idle or failed
-    // thread; the plugin must stay silent here with nothing pending.
+    // BB's own native parent notice already covers a plain idle thread; the
+    // plugin stays silent there. A failure with no transient cause is Chief's to reroute.
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "idle result",
@@ -954,7 +954,12 @@ describe("Chief backend", () => {
       thread: state.live.get(worker.threadId)!,
       error: "boom",
     });
-    expect(state.sent).toHaveLength(0);
+    expect(state.sent).toHaveLength(1);
+    expect(state.sent[0].threadId).toBe(chief.threadId);
+    const text = state.sent[0].input[0].text;
+    expect(text).toContain(`worker “Fix checkout totals” (${worker.threadId}) failed.`);
+    expect(text).toContain("No provider error was recorded.");
+    expect(text).toContain("chief_consult");
   });
 
   async function failWith(state: Awaited<ReturnType<typeof setup>>, threadId: string, detail: string) {
@@ -990,12 +995,16 @@ describe("Chief backend", () => {
     expect(text).not.toContain("usage limit");
   });
 
-  test("transient provider: a non-transient error stays silent", async () => {
+  test("transient provider: a non-transient error alerts Chief to reroute, with no retry", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await failWith(state, worker.threadId, "context window exceeded");
-    expect(state.sent).toHaveLength(0);
+    expect(state.sent).toHaveLength(1);
+    const text = state.sent[0].input[0].text;
+    expect(text).toContain(`(${worker.threadId}) failed.`);
+    expect(text).toMatch(/Provider error: .*context window exceeded/);
+    expect(text).not.toContain("bb thread retry");
   });
 
   const MODEL_COOLDOWN = `cpa API error (429): {"code":"model_cooldown","model":"gpt-6-astra","reset_seconds":2194}`;
@@ -1031,15 +1040,15 @@ describe("Chief backend", () => {
     expect(state.spawned).toHaveLength(spawnedBefore + 1);
   });
 
-  test("cooldown: a provider-wide limit blocks delegate, plan, consult and branch review until it expires", async () => {
+  test("cooldown: a model limit blocks delegate, plan, consult and branch review on that model until it expires", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await coolDown(state, worker.threadId, "429 usage_limit_reached");
-    expect(state.db.prepare("SELECT provider_id, model FROM provider_cooldowns").all()).toEqual([{ provider_id: "codex", model: "" }]);
+    expect(state.db.prepare("SELECT provider_id, model FROM provider_cooldowns").all()).toEqual([{ provider_id: "codex", model: "gpt-6-astra" }]);
     // No role pick: the spawn would run on the project default.
-    state.setProjectDefaults({ providerId: "codex", model: "gpt-6-mini" });
+    state.setProjectDefaults({ providerId: "codex", model: "gpt-6-astra" });
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const spawnedBefore = state.spawned.length;
     const tools: [string, Record<string, unknown>][] = [
@@ -1052,7 +1061,7 @@ describe("Chief backend", () => {
     for (const [tool, params] of tools) {
       // The gate runs before ensureSection: a refused call writes no section row.
       state.db.prepare("DELETE FROM plugin_meta WHERE key='section_id'").run();
-      await expect(state.harness.behavior.callAgentTool(tool, params, opts)).rejects.toThrow(/Provider codex hit its usage limit/);
+      await expect(state.harness.behavior.callAgentTool(tool, params, opts)).rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
       expect(sectionRow()).toBeUndefined();
     }
     expect(state.spawned).toHaveLength(spawnedBefore);
@@ -1136,13 +1145,13 @@ describe("Chief backend", () => {
     expect((state.db.prepare("SELECT state FROM managed_threads WHERE thread_id=?").get(first.threadId) as { state: string }).state).not.toBe("complete");
   });
 
-  test("cooldown: worker, planner, advisor and branch review on a cooling project default are refused", async () => {
+  test("cooldown: worker, planner, advisor and branch review on a cooling project-default model are refused", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await coolDown(state, worker.threadId, "429 usage_limit_reached");
-    state.setProjectDefaults({ providerId: "codex", model: "gpt-6-mini" });
+    state.setProjectDefaults({ providerId: "codex", model: "gpt-6-astra" });
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     for (const [tool, params] of [
       ["chief_delegate", { title: "Next", mission: "Do it", unplannedReason: "Bounded test fixture" }],
@@ -1150,7 +1159,7 @@ describe("Chief backend", () => {
       ["chief_consult", { title: "Diagnose", mission: "Explore" }],
       ["chief_review", { branch: "feature/x" }],
     ] as const) {
-      await expect(state.harness.behavior.callAgentTool(tool, params, opts)).rejects.toThrow(/Provider codex hit its usage limit/);
+      await expect(state.harness.behavior.callAgentTool(tool, params, opts)).rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
     }
   });
 
