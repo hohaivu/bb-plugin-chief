@@ -7536,6 +7536,7 @@ describe("tester role", () => {
 
     // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief.
     // Regression: the baseline rule lands in the planner brief instead of the read-only skill.
+    // Plan chains changed one bullet of both prompts (the `dependsOn: []` sentence now says an independent wave runs as its own chain); the rest is base's bytes.
     test("the planner prompt equals base 6d288a2's for a plain and a revision brief", async () => {
       const state = await setup();
       expect(await plannerFixture(state)).toBe(await oracleFile("planner-6d288a2.txt"));
@@ -7736,6 +7737,10 @@ describe("tester role", () => {
     // received. The real handlers run; nothing is observed through a production seam; only the storage root is normalized.
     // Regression: a refactor of admission or the waiver predicates changes a refusal sentence or its order, a worker prompt
     // field, an idempotent repeat, or tightens a loose path (a terminal prior, a review after a worker fix on a test wave).
+    // Plan chains (this branch) changed exactly these outcomes of the base snapshot, nothing else: wave 2 of a legacy plan, a second
+    // worker on a started head, and a replaces: across chains now refuse with the chain sentences (a later wave continues its chain's
+    // worker; the design-owner-approval refusal of a wave with no replaces is pre-empted by the same rule and still holds on replaces:);
+    // the independent-wave brief line names the chain. Every other block is the base's bytes.
     // <plan-admission-oracle-begin>
     const admissionFixture = async () => {
       const blocks: string[] = [];
@@ -8346,6 +8351,14 @@ describe("tester role", () => {
           },
           /** Delegates a plan wave, reports ready, goes idle: its id. */
           wave: (c: any, wave: number, extra: object = {}) => k.worker(c.chief, { planThreadId: c.planner, wave, ...extra }),
+          /** A plan wave as the server stored one before chains shared a branch: a worker of its own on its own branch, which chief_delegate no longer builds (see legacyWave). */
+          legacyWave: async (c: any, wave: number, branch: string) => {
+            await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded oracle fixture", branch }, c.chief);
+            const id = newestWorker();
+            state.db.prepare("UPDATE managed_threads SET plan_thread_id=?, plan_wave=?, unplanned_reason=NULL WHERE thread_id=?").run(c.planner, wave, id);
+            await readyIdle(state, id);
+            return id;
+          },
           replace: (chief: string, id: string, extra: object = {}) => tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", replaces: id, ...extra }, chief),
           /** Runs a call: its reply or its refusal, and how many threads it launched. */
           attempt: async (label: string, call: () => Promise<unknown>) => {
@@ -8408,7 +8421,7 @@ describe("tester role", () => {
       const fixBranches = (k: any, c: any) => async ([a, b]: string[]) => [await k.wave(c, 1, { replaces: a }), await k.wave(c, 3, { replaces: b })];
       /** Two stacked waves (2 builds on 1), tests waived: one review covers both, reviewed from the tip. */
       const stack = (k: any) => k.mk([P(1), P(2), TEST_WAVE(3)], [3]);
-      const stacked = async (k: any, c: any) => { const base = await k.wave(c, 1, { branch: "feature/a" }); return [await k.wave(c, 2, { branch: "feature/b" }), base]; };
+      const stacked = async (k: any, c: any) => { const base = await k.wave(c, 1, { branch: "feature/a" }); return [await k.legacyWave(c, 2, "feature/b"), base]; };
       const fixStack = (k: any, c: any) => async ([tip, base]: string[]) => { const fresh = await k.wave(c, 1, { replaces: base }); return [await k.wave(c, 2, { replaces: tip }), fresh]; };
 
       // 1. Replacement: the ladder.
@@ -9158,6 +9171,7 @@ describe("tester role", () => {
     };
     // <review-attempt-oracle-end>
 
+    // Plan chains changed one thing of the base snapshot: a pinned reviewer's fetch line now also checks the pinned commit out detached (`git fetch origin <branch> && git checkout --detach <sha>`).
     test("review attempt oracle", async () => {
       const head = await reviewAttemptFixture();
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "review-attempt-cf92d9c.txt"), "utf8");
