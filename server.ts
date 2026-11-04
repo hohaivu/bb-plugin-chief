@@ -10,7 +10,7 @@ import {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
-import { classify, composeComment, errorText, hasMarker, ownerHandle, parseForgeTarget, postComment, sanitizeForge, withMention } from "./forgeComments";
+import { cliAdapters, createForgeComments, FORGE_COMMENTS_TABLE, sanitizeForge } from "./forgeComments";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
@@ -1034,8 +1034,8 @@ export const MIGRATIONS = [
        CASE WHEN dedupe_key LIKE '%:failed:%' THEN CASE WHEN instr(message, 'usage limit') > 0 THEN 'usage_limit' ELSE 'connection' END END,
        1, created_at
      FROM alert_outbox WHERE dedupe_key LIKE '%:failed:%' OR dedupe_key LIKE '%:stall:%'`,
-    // Comments to post on a task's pull request or tracking issue. A row is written with the state change it describes and posted off the tool-call path; attempts is persisted before each post, so a crash is read as "maybe posted" and the marker check runs first.
-    `CREATE TABLE forge_comments (dedupe_key TEXT PRIMARY KEY, project_id TEXT NOT NULL, thread_id TEXT NOT NULL, target TEXT NOT NULL, body TEXT NOT NULL, mention INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, posted_at INTEGER, gave_up_at INTEGER, created_at INTEGER NOT NULL)`,
+    // forge comments outbox: text lives in forgeComments.ts; never edit it (hashed by index)
+    FORGE_COMMENTS_TABLE,
     // Planner row only: the tracking issue shared by every wave of its plan.
     `ALTER TABLE managed_threads ADD COLUMN plan_issue_url TEXT`,
     // Planner row only: its one advisor review — NULL (none needed), 'required', 'approved' or 'changes'.
@@ -3018,91 +3018,15 @@ export default async function plugin(bb: BbPluginApi) {
     for (const alert of pendingAlerts.all(Date.now() - 60_000) as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
 
-  interface ForgeCommentRow {
-    dedupe_key: string; project_id: string; thread_id: string; target: string; body: string; mention: number; attempts: number;
-  }
-  const FORGE_COMMENT_MAX_ATTEMPTS = 5;
-  /** A transient failure waits this long before the next try; the supervisor tick (30 s) is the retry clock. */
-  const FORGE_COMMENT_RETRY_MS = 25_000;
-  const forgeTried = new Map<string, number>();
-
-  /** Queues a comment for the target's pull request or issue; the post happens off the caller's path.
-   * Never throws and never blocks: a forge comment is an extra copy of the local record, so the state change
-   * that triggered it always completes. A target that is no forge URL means no forge to post to: logged, not an error.
-   * Safe inside store.batch: the drain starts after the batch commits. */
-  function enqueueForgeComment(input: { key: string; row: ManagedRow; target: string | null | undefined; body: string; mention?: boolean }) {
-    try {
-      if (!parseForgeTarget(input.target)) {
-        bb.log.info(`No forge comment for ${input.key}: ${input.target ? "its target is not a full pull request or issue URL" : "there is no pull request or issue to post on"}.`);
-        return false;
-      }
-      db.prepare(`INSERT OR IGNORE INTO forge_comments (dedupe_key, project_id, thread_id, target, body, mention, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .run(input.key, input.row.project_id, input.row.thread_id, input.target, input.body, input.mention ? 1 : 0, Date.now());
-      queueMicrotask(() => { void drainForge(); });
-      return true;
-    } catch (error) {
-      const message = `Could not queue the forge comment ${input.key.split(":")[0]} for ${input.target}: ${errorText(error)}. The local record is intact.`;
-      bb.log.warn(message);
-      // Deferred so a failure inside store.batch does not write the alert into the transaction that may roll back.
-      queueMicrotask(() => { void Promise.resolve().then(() => alertChief(input.row, `forge-comment:${input.key}`, message)).catch((alertError) => bb.log.error(`${message} The Chief alert also failed: ${String(alertError)}`)); });
-      return false;
-    }
-  }
-
-  /** One attempt for one row. attempts is persisted before any network call, so a crash mid-post reads as "maybe posted"
-   * on the next try, which looks for the marker before posting again. */
-  async function postForgeComment(comment: ForgeCommentRow) {
-    const key = comment.dedupe_key;
-    const prior = comment.attempts;
-    db.prepare(`UPDATE forge_comments SET attempts=attempts+1 WHERE dedupe_key=?`).run(key);
-    forgeTried.set(key, Date.now());
-    try {
-      const target = parseForgeTarget(comment.target);
-      if (!target) throw Object.assign(new Error("the target is not a pull request or issue URL"), { code: "ENOENT" });
-      const env = forgeEnv();
-      if (!(prior > 0 && await hasMarker(target, key, env))) {
-        const body = comment.mention ? withMention(comment.body, await ownerHandle(target, (await settings.get()).forgeOwnerHandle ?? "", env)) : comment.body;
-        await postComment(target, body, env);
-      }
-      db.prepare(`UPDATE forge_comments SET posted_at=?, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
-      forgeTried.delete(key);
-    } catch (error) {
-      const reason = errorText(error);
-      const permanent = classify(error) === "permanent";
-      const exhausted = !permanent && prior + 1 >= FORGE_COMMENT_MAX_ATTEMPTS;
-      db.prepare(`UPDATE forge_comments SET last_error=?, gave_up_at=? WHERE dedupe_key=?`).run(reason, permanent || exhausted ? Date.now() : null, key);
-      if (permanent) bb.log.info(`Forge comment ${key.split(":")[0]} on ${comment.target} not posted (the forge CLI is missing, not logged in, or the target is gone): ${reason}`);
-      if (permanent || exhausted) forgeTried.delete(key);
-      if (!exhausted) return;
-      const row = store.get(comment.thread_id);
-      const message = `Could not post the ${key.split(":")[0]} comment to ${comment.target} after ${FORGE_COMMENT_MAX_ATTEMPTS} attempts: ${reason}. The local record is intact.`;
-      if (!row?.chief_thread_id) bb.log.error(message);
-      else await alertChief(row, `forge-comment:${key}`, message).catch((alertError) => bb.log.error(`${message} The Chief alert also failed: ${String(alertError)}`));
-    }
-  }
-
-  async function postPendingForgeComments() {
-    const now = Date.now();
-    const pending = db.prepare(`SELECT * FROM forge_comments WHERE posted_at IS NULL AND gave_up_at IS NULL ORDER BY created_at LIMIT 20`).all() as ForgeCommentRow[];
-    for (const comment of pending) {
-      if (now - (forgeTried.get(comment.dedupe_key) ?? 0) < FORGE_COMMENT_RETRY_MS) continue;
-      await postForgeComment(comment);
-    }
-  }
-
-  let forgeDraining: Promise<void> | null = null;
-  let forgeAgain = false;
-  /** Single-flight, like sweep(): an enqueue during a drain queues exactly one more pass. Callers never await it. */
-  function drainForge() {
-    if (forgeDraining) { forgeAgain = true; return forgeDraining; }
-    forgeDraining = (async () => {
-      do {
-        forgeAgain = false;
-        await postPendingForgeComments();
-      } while (forgeAgain);
-    })().catch((error) => bb.log.warn(`Forge comment drain failed; the supervisor tick retries: ${String(error)}`)).finally(() => { forgeDraining = null; });
-    return forgeDraining;
-  }
+  const forgeComments = createForgeComments({
+    db, adapters: cliAdapters(forgeEnv), log: bb.log,
+    ownerHandle: async () => (await settings.get()).forgeOwnerHandle ?? "",
+    escalate: async (threadId, alertKey, message) => {
+      const row = store.get(threadId);
+      if (!row?.chief_thread_id) { bb.log.error(message); return; }
+      await alertChief(row, alertKey, message);
+    },
+  });
 
   /** Which attempt at a task this is: the worker's position in its replaces: chain. */
   const taskRound = (workerThreadId: string) => ledger.taskChain(workerThreadId).length;
@@ -3124,17 +3048,17 @@ export default async function plugin(bb: BbPluginApi) {
       ...(recommendation ? ["### Recommendation", "", recommendation] : []),
     ].join("\n"));
     for (const entry of covered) {
-      enqueueForgeComment({
+      forgeComments.enqueue({
         key: entry.id, row, target: entry.url,
-        body: composeComment({
-          key: entry.id, title: "Review verdict", round: entry.worker ? taskRound(entry.worker) : undefined,
+        comment: {
+          title: "Review verdict", round: entry.worker ? taskRound(entry.worker) : undefined,
           lines: [
             verdict === "approve" ? "**Approved**" : "**Changes requested**",
             ...(entry.sha ? [`Reviewed head: \`${entry.sha.slice(0, 12)}\``] : []),
             `${blocking.length} blocking finding${blocking.length === 1 ? "" : "s"}, ${nits.length} nit${nits.length === 1 ? "" : "s"}`,
           ],
           details: { summary: "Findings and recommendation", body: details },
-        }),
+        },
       });
     }
   }
@@ -3142,11 +3066,11 @@ export default async function plugin(bb: BbPluginApi) {
   /** A worker's blocked report, on its pull request (its issue when it has none). Runs inside report()'s store.batch. */
   function enqueueBlockedComment(row: ManagedRow, seq: number, blocker: string | undefined, recommendation: string | undefined) {
     const id = `blocked:${row.thread_id}:${seq}`;
-    enqueueForgeComment({
+    forgeComments.enqueue({
       key: id, row, target: row.pr_url ?? row.issue_url,
-      body: composeComment({ key: id, title: "Blocked", round: taskRound(row.thread_id), lines: [
+      comment: { title: "Blocked", round: taskRound(row.thread_id), lines: [
         `**Blocker:** ${forgeText(blocker ?? "", 1_500)}`, ...(recommendation ? [`**Recommendation:** ${forgeText(recommendation, 1_500)}`] : []),
-      ] }),
+      ] },
     });
   }
 
@@ -3159,10 +3083,10 @@ export default async function plugin(bb: BbPluginApi) {
       ...(row.result ? [forgeText(row.result, 4_000)] : []),
       ...(row.owner_approval ? ["", `Owner's approval: “${forgeText(row.owner_approval, 1_000)}”`] : []),
     ].join("\n");
-    enqueueForgeComment({
+    forgeComments.enqueue({
       key: id, row, target: row.issue_url ?? row.pr_url,
-      body: composeComment({
-        key: id, title: "Completed", round: taskRound(row.thread_id),
+      comment: {
+        title: "Completed", round: taskRound(row.thread_id),
         lines: [
           `**${forgeText(row.title, 160)}**${row.plan_wave && waves ? ` · wave ${row.plan_wave} of ${waves}` : ""}`,
           ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
@@ -3177,7 +3101,7 @@ export default async function plugin(bb: BbPluginApi) {
             ? [`**Specs skipped (wave ${index + 1}):** ${forgeText(wave.specsSkipped, 500)}`] : []))(planWavesFor(row.plan_thread_id)) : []),
         ],
         details: { summary: "Result", body: details },
-      }),
+      },
     });
   }
 
@@ -3675,7 +3599,7 @@ export default async function plugin(bb: BbPluginApi) {
           // pending delivery is attempted.
           await retryAlerts();
           await observeCleanup();
-          void drainForge();
+          void forgeComments.drain();
         } catch (error) {
           bb.log.warn(`Supervisor reconciliation failed: ${String(error)}`);
         }
@@ -4717,9 +4641,9 @@ export default async function plugin(bb: BbPluginApi) {
         ?? (concerned.role === "planner" ? concerned.plan_issue_url : undefined);
       if (!url) return chatOnly;
       const id = `escalate:${threadId}:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;
-      const queued = enqueueForgeComment({
+      const queued = forgeComments.enqueue({
         key: id, row: concerned, target: url, mention: true,
-        body: composeComment({ key: id, title: "Need you", lines: [forgeText(request, 12_000)] }),
+        comment: { title: "Need you", lines: [forgeText(request, 12_000)] },
       });
       return queued ? `Queued for ${url}. Now write the same request in chat under **Need you**.` : chatOnly;
     },
