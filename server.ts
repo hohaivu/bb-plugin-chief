@@ -253,7 +253,7 @@ const managedThreadSchema = z.object({
 export type ManagedThread = z.infer<typeof managedThreadSchema>;
 
 const delegateShape = z.object({
-  title: z.string().trim().min(1).max(160).describe("Exact concise title for the worker thread."),
+  title: z.string().trim().min(1).max(160).optional().describe("Exact concise title for the worker thread. Optional: defaults to the first line of mission, clipped to 160 characters."),
   mission: z.string().trim().min(1).max(12_000).describe("What to achieve, in the user's terms. State a cause only when evidence already states it (see the core rules), naming its source; never your own guess."),
   successCriteria: z.array(z.string().trim().min(1).max(1_000)).max(30).optional().describe("Observable outcomes: each one checked by a command with its exit status, or named for Manual Verification."),
   constraints: z.array(z.string().trim().min(1).max(1_000)).max(30).optional().describe("Limits the work must respect: scope, files or behaviour to leave alone, user rules."),
@@ -272,33 +272,36 @@ const delegateShape = z.object({
   verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command the worker's brief tells it to run after its last commit and get exit 0 from before reporting ready: a build/lint check for a worker, e.g. `npx tsc --noEmit && bb plugin build`; a tester's may be a filtered test command. Nothing reruns it: reviewers read code only. Inherited through replaces:."),
 });
 
+/** Fills an omitted title from the first line of its source field. The title is display-only, so a missing one is not worth a refusal. */
+const titled = <T extends { title?: string }>(source: (value: T) => string) => (value: T) => ({ ...value, title: value.title ?? clip(source(value).split("\n")[0]!.trim(), 160) });
+
 const delegateParams = delegateShape.superRefine((value, ctx) => {
   if (value.unplannedReason && value.planThreadId) {
     ctx.addIssue({ code: "custom", path: ["unplannedReason"], message: "unplannedReason cannot be combined with planThreadId." });
   }
-});
+}).transform(titled((v) => v.mission));
 
 /** A planner is briefed on the same problem as a worker, minus the criteria and
  * constraints it is being asked to propose. */
 const planParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
   revises: z.string().trim().min(1).optional().describe("A planner whose plan its one advisor review sent back with changes: the new planner revises that plan with the advice attached, and its plan is delegated with no second review."),
-});
+}).transform(titled((v) => v.mission));
 
 interface ChiefHandoff { fromChiefThreadId: string; title: string; request: string; context: string }
 
 // Oversize input is refused, never clipped. With a todo attached, `\n\nTodo #<id>: <text>` (text <= 500) is
 // appended to context, so the handoff's context is at most 12_000 + that prefix + 500 characters.
 const spawnParams = z.object({
-  title: z.string().trim().min(1).max(160).describe("A literal task label, used in the new Chief's thread title."),
+  title: z.string().trim().min(1).max(160).optional().describe("A literal task label, used in the new Chief's thread title. Optional: defaults to the first line of request, clipped to 160 characters."),
   request: z.string().trim().min(1).max(4_000).describe("The owner's words asking for this task, verbatim."),
   context: z.string().trim().min(1).max(12_000).describe("Goal and success criteria, evidence, linked threads/issues/PRs/branches, plan and verdict file paths, and open decisions."),
   todoId: z.number().int().optional().describe("Your own open todo to move to the new Chief."),
-});
+}).transform(titled((v) => v.request));
 
 const consultParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
   workerThreadId: z.string().trim().min(1).optional().describe("The managed worker whose change keeps failing review: the advisor runs in its worktree and gets its brief, reviewer verdicts, and branch."),
   planThreadId: z.string().trim().min(1).optional().describe("A planner whose multi-wave or complex plan needs its one read-only advisor review before chief_forge_init or chief_delegate. Not with workerThreadId."),
-});
+}).transform(titled((v) => v.mission));
 
 const reviewParams = z.object({
   workerThreadId: z.string().trim().min(1).optional().describe("An existing managed worker's thread id."),
@@ -610,6 +613,13 @@ const ROSTER_CHIEF_INSTRUCTIONS =
 /** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
 const WAIT_CHIEF_INSTRUCTIONS =
   "Lifecycle alerts wake you when a managed thread reports, fails transiently, or stalls. After you act, end your turn and wait: never poll managed threads with `bb thread wait`, `bb thread show`, or sleep loops.";
+
+/** Claude Code defers MCP tools until ToolSearch loads them; an agent that calls one first guesses its arguments and is refused. */
+function toolSchemaLine(tools: string[], compact: boolean) {
+  // shortcut: Chief's full select: list (~610 chars) does not fit its 4096-char cut, so Chief gets the keyword form; switch back if Chief's instructions shrink.
+  const call = compact ? `query "+chief", max_results ${tools.length}` : `select:${tools.map((name) => `mcp__bb-bridge__${name}`).join(",")}`;
+  return `If your chief_* tools are deferred (listed by name only), load their schemas before calling any, once per session and again after compaction, with one ToolSearch call: ${call}`;
+}
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -4496,17 +4506,20 @@ export default async function plugin(bb: BbPluginApi) {
     const research = researchLine(role, researchActive);
     // A researcher's brief says how to use chief_research, so it has no line but still needs the tool while research is on.
     const researchTool = !!research || (role === "researcher" && !!researchActive?.enabled);
+    const claudeCode = context.provider.id === "claude-code";
     if (role === "chief") {
+      const tools = [
+        ...(plannerActive ? ["chief_plan"] : []),
+        "chief_consult", "chief_spawn",
+        "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate",
+        ...(researchTool ? ["chief_research"] : []),
+      ];
       return {
-        tools: [
-          ...(plannerActive ? ["chief_plan"] : []),
-          "chief_consult", "chief_spawn",
-          "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate",
-          ...(researchTool ? ["chief_research"] : []),
-        ],
+        tools,
         skills: ["chief"],
         instructions: [
           `You are the registered Chief supervisor for ${clip(context.project.name, 100)}. Use ordinary visible BB threads and drive managed work through completion.`,
+          ...(claudeCode ? [toolSchemaLine(tools, true)] : []),
           "",
           ROSTER_CHIEF_INSTRUCTIONS,
           WAIT_CHIEF_INSTRUCTIONS,
@@ -4527,13 +4540,15 @@ export default async function plugin(bb: BbPluginApi) {
     const reviewLessons = role === "reviewer" ? newestLessons(`role='reviewer'`) : [];
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skills cover the rest.
+    const tools = ["chief_report", ...(role === "worker" && (row?.plan_thread_id ?? (seeded?.success ? seeded.data.planThreadId : undefined)) ? ["chief_log"] : []), ...(researchTool ? ["chief_research"] : [])];
     return {
-      tools: ["chief_report", ...(role === "worker" && (row?.plan_thread_id ?? (seeded?.success ? seeded.data.planThreadId : undefined)) ? ["chief_log"] : []), ...(researchTool ? ["chief_research"] : [])],
+      tools,
       // A designer is a worker row with kind "designer"; seeded metadata covers the pre-insertThread race.
       skills: managedSkills(role, row?.kind ?? (seeded?.success ? seeded.data.kind : undefined)),
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: follow the chief-worker skill's report contract; after reporting, end with one line.`,
         "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
+        ...(claudeCode ? [toolSchemaLine(tools, false)] : []),
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
         ...(lessons.length ? ["", clip(["## Lessons from earlier review rounds", ...lessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
@@ -4541,6 +4556,10 @@ export default async function plugin(bb: BbPluginApi) {
       ].join("\n"),
     };
   });
+
+  // Best-effort: another plugin's ENABLE_TOOL_SEARCH (account-pool) may win, and a session before insertThread gets none; the preload line is the fallback.
+  bb.providers.experimental_contributeEnv("claude-code", ({ threadId }) =>
+    store.get(threadId) ? [{ name: "ENABLE_TOOL_SEARCH", value: "false", reason: "Chief-managed threads call chief_* tools before a deferred schema loads" }] : []);
 
   bb.rpc.register(rpcContract, {
     status: () => ({ sectionId: storedSectionId(), threads: store.all().map(toManaged) }),
@@ -4644,9 +4663,9 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb chief start [--project proj_id] [--json]",
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
-    "  bb chief plan --title \"…\" --mission \"…\" [--context \"…\"] [--revises thr_id] [--json]",
-    "  bb chief consult --title \"…\" --mission \"…\" [--context \"…\"] [--worker thr_id | --plan-thread thr_id] [--json]",
-    "  bb chief delegate --title \"…\" --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|tester|spec-writer] [--json]",
+    "  bb chief plan [--title \"…\"] --mission \"…\" [--context \"…\"] [--revises thr_id] [--json]",
+    "  bb chief consult [--title \"…\"] --mission \"…\" [--context \"…\"] [--worker thr_id | --plan-thread thr_id] [--json]",
+    "  bb chief delegate [--title \"…\"] --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|tester|spec-writer] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
@@ -4663,9 +4682,9 @@ export default async function plugin(bb: BbPluginApi) {
       { name: "start", summary: "Start or return the latest Chief for a project", usage: "bb chief start [--project proj_id] [--json]" },
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
-      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan --title \"…\" --mission \"…\" [--revises thr_id] [--json]" },
-      { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult --title \"…\" --mission \"…\" [--worker thr_id | --plan-thread thr_id] [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate --title \"…\" --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|tester|spec-writer] [--json]" },
+      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan [--title \"…\"] --mission \"…\" [--revises thr_id] [--json]" },
+      { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult [--title \"…\"] --mission \"…\" [--worker thr_id | --plan-thread thr_id] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate [--title \"…\"] --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|tester|spec-writer] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },

@@ -29,6 +29,8 @@ Put `chief.md` at the project root. Chief reads it through BB's project file API
 
 Every managed thread loads the shared `chief-worker` skill (brief, scope, `chief_report`, the report contract reviewers check) plus its role's skill: `chief-role-worker` (workers; designers also get `chief-role-designer`, testers `chief-role-tester`, Spec Writers `chief-role-spec-writer`), `chief-role-reviewer`, or `chief-role-read-only` (planners and advisors); researchers get the core only.
 
+For managed Claude Code threads, Chief contributes `ENABLE_TOOL_SEARCH=false` so that MCP tool schemas load up front. This is best-effort: another plugin's provider-env value for the same name (such as account-pool's) may win, and a thread's first session can start before Chief records the thread. In those cases the schema-preload instruction line is the fallback.
+
 ## Configuration
 
 ```sh
@@ -215,9 +217,9 @@ bb chief stats [--project proj_...] [--chief thr_...] [--json]   # tasks, repair
 bb chief start [--project proj_...] [--json]
 bb chief create [--project proj_...] [--json]
 bb chief adopt --thread thr_... [--json]
-bb chief plan --title "Fix checkout totals" --mission "..." [--context "..."] [--revises thr_...] [--json]
-bb chief consult --title "Fix checkout totals" --mission "..." [--worker thr_... | --plan-thread thr_...] [--context "..."] [--json]
-bb chief delegate --title "Fix checkout totals" --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--kind worker|designer|tester|spec-writer] [--json]
+bb chief plan [--title "Fix checkout totals"] --mission "..." [--context "..."] [--revises thr_...] [--json]
+bb chief consult [--title "Fix checkout totals"] --mission "..." [--worker thr_... | --plan-thread thr_...] [--context "..."] [--json]
+bb chief delegate [--title "Fix checkout totals"] --mission "..." --criteria "..." [--branch feature/...] [--issue-url ...] [--pr-url ...] [--unplanned-reason "..."] [--kind worker|designer|tester|spec-writer] [--json]
 bb chief inspect thr_...
 bb chief continue thr_... --instruction "..." [--json]
 bb chief stop thr_... [--reason "..."] [--json]
