@@ -1183,7 +1183,7 @@ export default async function plugin(bb: BbPluginApi) {
       publishPending();
     },
   });
-  const ledger = createReviewLedger<ManagedRow>(db, store.get, store);
+  const ledger = createReviewLedger<ManagedRow>(db, store.get, store, { busy: (status) => BUSY_STATUSES.has(status) });
   const schedule = createWaveSchedule<ManagedRow>(store.rows);
   const { planWavesFor, isDesignWave, isTestWave, waveWorkers, specWave, specChain, reviewTargetsFor } = schedule;
   let plannerActive = false;
@@ -1856,13 +1856,12 @@ export default async function plugin(bb: BbPluginApi) {
       // The escalation ladder: round 2 needs a consult that gave its advice on this task, round 3 needs the user.
       // Read from the task's verdict history, not the open reviewer: a fresh or completed reviewer,
       // a re-pointed snapshot, or a second replaces: before the next review must not reset it.
-      const { streak } = ledger.taskRejections(prior.thread_id);
-      const rung = ledger.rung(streak);
-      if (rung === "stop" && !params.userApprovedRound) {
-        throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
+      const needs = ledger.replacement(prior, !!params.userApprovedRound);
+      if (needs?.needs === "user") {
+        throw new Error(`The reviewer has requested changes ${needs.streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
       }
-      if (rung === "consult" && !ledger.consultGate(prior)) {
-        throw new Error(`The reviewer has requested changes ${streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.`);
+      if (needs?.needs === "consult") {
+        throw new Error(`The reviewer has requested changes ${needs.streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.`);
       }
     }
     let priorLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
@@ -2236,7 +2235,7 @@ export default async function plugin(bb: BbPluginApi) {
       return workerReadyNextStep(row, forAlert);
     }
     if (row.role === "advisor") {
-      if (row.worker_thread_id && ledger.rung(ledger.taskRejections(row.worker_thread_id).streak) === "stop") {
+      if (row.worker_thread_id && ledger.ladder(row.worker_thread_id).rung === "stop") {
         return `The advisor changed nothing. The reviewer has now requested changes ${STOP_AFTER_REJECTIONS} times in a row: start no new worker, and escalate to the user with both positions, this advice, and your recommendation.`;
       }
       const advised = row.worker_thread_id ? store.get(row.worker_thread_id) : undefined;
@@ -2624,22 +2623,16 @@ export default async function plugin(bb: BbPluginApi) {
     if (isDesignWave(row)) {
       return row.owner_approval ? null : `${row.thread_id} is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: ${row.thread_id}), or pass override with a reason to complete anyway.`;
     }
-    const newest = ledger.newestVerdict(row);
     const next = `Start a fresh review with chief_review (workerThreadId: ${row.thread_id}${row.plan_thread_id ? "; on a plan it covers every branch, once every wave is ready" : ""}), complete it without a review with skipReview (your reason), or pass override with a reason to complete anyway.`;
-    if (!newest) return `${row.thread_id} has no review verdict. ${next}`;
-    if (newest.verdict !== "approve") return `The newest review of ${row.thread_id} is ${newest.verdict}, not an approve. ${next}`;
-    if (row.pr_url) {
-      const head = await prHead(row.pr_url, await projectPath(row.project_id));
-      if (!head) return `Cannot read the current head of ${row.pr_url} from the forge, so the approve cannot be matched to it. Retry, or pass override with a reason to complete anyway.`;
-      if (newest.head_sha?.toLowerCase() !== head.sha) {
-        return `The approve covers ${newest.head_sha ?? "no recorded commit"} but ${row.pr_url} is now at ${head.sha}. ${next}`;
-      }
-      return null;
+    const approval = await ledger.headApproval(row, async () => prHead(row.pr_url!, await projectPath(row.project_id)));
+    if (approval.approved) return null;
+    switch (approval.reason) {
+      case "no-verdict": return `${row.thread_id} has no review verdict. ${next}`;
+      case "not-approve": return `The newest review of ${row.thread_id} is ${approval.verdict}, not an approve. ${next}`;
+      case "head-unreadable": return `Cannot read the current head of ${row.pr_url} from the forge, so the approve cannot be matched to it. Retry, or pass override with a reason to complete anyway.`;
+      case "head-moved": return `The approve covers ${approval.approvedSha ?? "no recorded commit"} but ${row.pr_url} is now at ${approval.headSha}. ${next}`;
+      case "report-moved": return `The newest approve does not cover ${row.thread_id}'s current report (report ${row.report_seq}). ${next}`;
     }
-    if (newest.worker_thread_id !== row.thread_id || newest.reviewed_report_seq !== row.report_seq) {
-      return `The newest approve does not cover ${row.thread_id}'s current report (report ${row.report_seq}). ${next}`;
-    }
-    return null;
   }
 
   /** override is the one bypass of a worker's review requirement; its reason is recorded in the stored result.
@@ -2687,13 +2680,12 @@ export default async function plugin(bb: BbPluginApi) {
       const waived = row.last_report_state === "blocked" && isTestWave(row) && !!planWavesFor(row.plan_thread_id)[row.plan_wave! - 1]!.testsSkipped
         && waveWorkers(row.plan_thread_id!, row.plan_wave!).at(-1)?.thread_id === row.thread_id;
       if (row.last_report_state !== "ready" && !waived) refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
-      const busy = ledger.taskChain(threadId).map((id) => ledger.openReview(id)).find((review) => review && BUSY_STATUSES.has(review.state));
+      const busy = ledger.openReviews([threadId]).inFlight;
       if (busy) refuse(`review ${busy.thread_id} is still running; wait for its verdict.`);
       reviewSkipped = reason.data!;
     } else if (row.role === "worker") {
       const refusal = await completionRefusal(row);
-      // A null refusal is a positive approval only with a verdict behind it (an approve) or on a design wave (the owner's approval).
-      approved = refusal === null && (isDesignWave(row) || !!ledger.newestVerdict(row));
+      approved = refusal === null;
       if (refusal) {
         const reason = overrideSchema.safeParse(override);
         if (!reason.success || !reason.data) throw new Error(`Refusing to complete ${threadId}: ${refusal}`);
