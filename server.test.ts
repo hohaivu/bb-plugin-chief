@@ -6640,6 +6640,73 @@ describe("tester role", () => {
     });
   });
 
+  // Contracts (reviewer reuse, wave 2): repeated pinned review rounds of one task review in one worktree, checked out
+  // detached at each round's pinned commit; a reviewer whose worktree is gone, busy or not a worktree is never reused.
+  describe("reviewer worktree reuse across rounds", () => {
+    const PR = "https://github.com/acme/shop/pull/8";
+    const shaOf = (round: number) => String(round).repeat(40);
+    type Mode = { destroyed?: boolean; removed?: boolean; notWorktree?: boolean; unreadable?: boolean };
+    async function setupRounds(mode: Mode = {}) {
+      const state = await setup({ projectPath: "/oracle/checkout", system: { usageLimits: async () => ({}), config: async () => ({ primaryHostId: "host_1" }) } });
+      let sha = shaOf(1);
+      execFileMock.mockImplementation(async (file: string, args: string[]) => {
+        if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: sha, baseRefName: "main" }), stderr: "" };
+        throw new Error(`unexpected CLI ${file}`);
+      });
+      state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => {
+        if (mode.unreadable) throw new Error("host unreachable");
+        return {
+          id: environmentId, hostId: "host_1", workspaceProvisionType: "managed-worktree", isWorktree: !mode.notWorktree,
+          status: mode.destroyed ? "destroyed" : "ready", hostLifecycle: mode.removed ? "removed" : "ready", lifecycle: { phase: "idle" },
+        };
+      });
+      const chief = (await start(state)).threadId;
+      await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", prUrl: PR }, chief);
+      const worker = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker'`).get() as any).thread_id as string;
+      await readyIdle(state, worker);
+      /** One review round at `round`'s pinned commit, approved; returns its reviewer and how it was launched. */
+      const round = async (n: number) => {
+        sha = shaOf(n);
+        await tool(state, "chief_review", { workerThreadId: worker }, chief);
+        const reviewer = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='reviewer' ORDER BY rowid DESC`).get() as any).thread_id as string;
+        const { environment, prompt } = state.spawned.at(-1);
+        await report(state, reviewer, { state: "ready", result: "Looks right", ...APPROVE });
+        return { reviewer, environment, prompt: String(prompt) };
+      };
+      return { state, round, worker };
+    }
+    const fresh = { type: "host", workspace: { type: "managed-worktree" } };
+
+    test("four pinned rounds review in one worktree, each checked out detached at its own pinned commit", async () => {
+      const { state, round } = await setupRounds();
+      const rounds = [await round(1), await round(2), await round(3), await round(4)];
+      expect(rounds[0]!.environment).toMatchObject(fresh);
+      const first = state.live.get(rounds[0]!.reviewer)!.environmentId;
+      for (const [index, entry] of rounds.slice(1).entries()) {
+        expect(entry.environment).toEqual({ type: "reuse", environmentId: first });
+        expect(entry.prompt).toContain(`git checkout --detach ${shaOf(index + 2)}`);
+      }
+      expect(new Set(rounds.map((entry) => state.live.get(entry.reviewer)!.environmentId))).toEqual(new Set([first]));
+      expect(state.spawned.filter((args) => args.environment?.type === "host" && args.title?.startsWith("Review"))).toHaveLength(1);
+    });
+
+    test.each<[string, Mode, (state: State, reviewer: string) => void]>([
+      ["its worktree is destroyed", { destroyed: true }, () => {}],
+      ["its worktree is removed from the host", { removed: true }, () => {}],
+      ["its environment is not a worktree", { notWorktree: true }, () => {}],
+      ["its environment cannot be read", { unreadable: true }, () => {}],
+      ["the reviewer thread is archived", {}, (state, id) => state.live.set(id, { ...state.live.get(id)!, archivedAt: Date.now() } as any)],
+      ["the reviewer thread is deleted", {}, (state, id) => state.live.set(id, { ...state.live.get(id)!, deletedAt: Date.now() } as any)],
+      ["the reviewer thread is still active", {}, (state, id) => setLive(state, id, "active")],
+    ])("round 2 starts a fresh worktree when the earlier reviewer's worktree cannot be reused: %s", async (_name, mode, arrange) => {
+      const { state, round } = await setupRounds(mode);
+      const first = await round(1);
+      arrange(state, first.reviewer);
+      const second = await round(2);
+      expect(second.environment).toMatchObject(fresh);
+    });
+  });
+
   describe("Spec Writer role", () => {
     const SPEC_DELTA = "## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative";
     /** An implementation wave that runs a Spec Writer before its worker. */
