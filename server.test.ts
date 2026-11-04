@@ -2599,14 +2599,15 @@ describe("Chief backend", () => {
 
     // The built-in rules are Chief's own; a managed thread would only be told to call tools it lacks.
     const chiefInstructions = (await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId))).instructions;
-    expect(chiefInstructions).toContain("Chief operating rules");
-    expect(chiefInstructions).toContain("In a managed thread's worktree, Chief only reads");
-    expect(chiefInstructions).toContain("never a retry loop");
+    expect(chiefInstructions).toContain("# Chief operating rules");
+    expect(chiefInstructions).toContain("# Chief core rules (always apply)");
+    expect(chiefInstructions).toContain("Chief never edits code and never runs anything in a worktree");
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     for (const threadId of [worker.threadId, planner.threadId, workerReview.threadId, branchReview.threadId]) {
       const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
       expect(configured.instructions).not.toContain("Chief operating rules");
-      expect(configured.instructions).not.toContain("Chief only reads");
+      expect(configured.instructions).not.toContain("Chief core rules");
+      expect(configured.instructions).not.toContain("Chief never edits code");
     }
   });
 
@@ -2619,7 +2620,7 @@ describe("Chief backend", () => {
     expect(prompt.indexOf("chief_plan")).toBeLessThan(prompt.indexOf("chief_forge_init"));
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configured.instructions).toContain("chief_plan first");
-    expect(configured.instructions).toContain("delegate every wave the ready alert lists right away, one chief_delegate per wave in the same turn, without waiting for user sign-off");
+    expect(configured.instructions).toContain("delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off");
   });
 
   test("refuses chief_delegate with no plan or unplannedReason when planning is on", async () => {
@@ -2759,7 +2760,7 @@ describe("Chief backend", () => {
     // The planner opens on a plain prompt, not the provider's own /plan action.
     expect(spawned.input).toBeUndefined();
     const planPrompt = spawned.prompt as string;
-    expect(planPrompt).toContain("do not create, modify, or delete any file it tracks");
+    expect(planPrompt).toContain("do not create, modify, or delete any file the repository tracks, and do not commit or push");
     // The plan body goes through chief_report's plan field, never a direct file write.
     expect(planPrompt).toContain("chief_report's `plan` field");
     expect(planPrompt).not.toContain("$BB_THREAD_STORAGE");
