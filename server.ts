@@ -4797,7 +4797,7 @@ export default async function plugin(bb: BbPluginApi) {
         ],
         skills: ["chief"],
         instructions: [
-          `You are the registered Chief supervisor for ${context.project.name}. Use ordinary visible BB threads and drive managed work through completion.`,
+          `You are the registered Chief supervisor for ${clip(context.project.name, 100)}. Use ordinary visible BB threads and drive managed work through completion.`,
           "",
           ROSTER_CHIEF_INSTRUCTIONS,
           WAIT_CHIEF_INSTRUCTIONS,
