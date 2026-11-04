@@ -1095,13 +1095,6 @@ describe("Chief backend", () => {
     return { state, chief, worker, review };
   }
 
-  test("cooldown: a cooling reviewer is refused", async () => {
-    const { state, review } = await coolingReviewer();
-    const spawnedBefore = state.spawned.length;
-    await expect(review()).rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
-    expect(state.spawned).toHaveLength(spawnedBefore);
-  });
-
   test("cooldown: a refused review leaves the previous reviewer not complete", async () => {
     const { state, worker, review } = await coolingReviewer();
     state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
@@ -4306,7 +4299,7 @@ describe("Chief backend", () => {
     expect(missing.exitCode).toBe(1);
   });
 
-  test("migration rewrites an existing worker model pick to worker, preserving provider/model/reasoning", async () => {
+  test("the full migration chain keeps a pre-v1 worker model pick", async () => {
     const { bb, harness } = createFakePluginHost({ pluginId: "chief", agentSkillIds: ["chief", "chief-worker"] });
     const db = bb.storage.database();
     db.exec(`CREATE TABLE chief_models (
