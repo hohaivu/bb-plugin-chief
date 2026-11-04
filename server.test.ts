@@ -10057,6 +10057,9 @@ describe("tool-call stability", () => {
     expect(Object.keys(now.catalog)).toEqual(Object.keys(base.catalog));
 
     const titleTools = ["chief_delegate", "chief_plan", "chief_consult", "chief_spawn"];
+    // Allowed difference (a): the full new text, checked per tool before the description is dropped for the remainder comparison.
+    const MISSION_TITLE = "Exact concise title for the worker thread. Optional: defaults to the first line of mission, clipped to 160 characters.";
+    const SPAWN_TITLE = "A literal task label, used in the new Chief's thread title. Optional: defaults to the first line of request, clipped to 160 characters.";
     for (const [name, definition] of Object.entries(now.catalog)) {
       if (!titleTools.includes(name)) { expect(definition, name).toEqual(base.catalog[name]); continue; }
       const old = structuredClone(base.catalog[name]!);
@@ -10064,14 +10067,12 @@ describe("tool-call stability", () => {
       expect(old.inputSchema.required, name).toContain("title");
       expect(next.inputSchema.required, name).not.toContain("title");
       expect(next.inputSchema.required, name).toContain(name === "chief_spawn" ? "request" : "mission");
-      expect(next.inputSchema.properties.title!.description, name).toMatch(/ Optional: defaults to the first line of (mission|request), clipped to 160 characters\.$/);
+      expect(next.inputSchema.properties.title!.description, name).toBe(name === "chief_spawn" ? SPAWN_TITLE : MISSION_TITLE);
       old.inputSchema.required = old.inputSchema.required!.filter((field) => field !== "title");
       delete old.inputSchema.properties.title!.description;
       delete next.inputSchema.properties.title!.description;
       expect(next, name).toEqual(old);
     }
-    expect(now.catalog.chief_delegate!.inputSchema.properties.title!.description).toBe("Exact concise title for the worker thread. Optional: defaults to the first line of mission, clipped to 160 characters.");
-    expect(now.catalog.chief_spawn!.inputSchema.properties.title!.description).toBe("A literal task label, used in the new Chief's thread title. Optional: defaults to the first line of request, clipped to 160 characters.");
 
     let cut = 0;
     now.entries.forEach((entry, index) => {
@@ -10202,8 +10203,12 @@ describe("tool-call stability", () => {
     await state.harness.behavior.runCli(["plan", "--title", "Rework", "--mission", "Propose"], opts);
     await state.harness.behavior.runCli(["consult", "--title", "Rework", "--mission", "Explore"], opts);
     await state.harness.behavior.callAgentTool("chief_review", { branch: "feature/x" }, opts);
+    // Chief's chief_research spawns a real researcher row pinned to Chief's own provider and model.
+    state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, providerId: "codex" });
+    state.setThreadExecution({ model: "gpt-6-astra" });
+    await state.harness.behavior.callAgentTool("chief_research", { mode: "survey", question: "Who calls this?", items: ["a.ts"] }, opts);
     const managed = (await status(state)).threads.map((row) => row.threadId);
-    expect([...new Set((await status(state)).threads.map((row) => row.role))].sort()).toEqual(["advisor", "chief", "planner", "reviewer", "worker"]);
+    expect([...new Set((await status(state)).threads.map((row) => row.role))].sort()).toEqual(["advisor", "chief", "planner", "researcher", "reviewer", "worker"]);
     const env = (providerId: string, threadId: string) => state.harness.behavior.resolveProviderEnv(providerId, { threadId, projectId: "proj_1", hostId: "host_1" });
     for (const threadId of managed) {
       expect(await env("claude-code", threadId), threadId).toEqual([expect.objectContaining({ name: "ENABLE_TOOL_SEARCH", value: "false" })]);
@@ -10212,6 +10217,18 @@ describe("tool-call stability", () => {
     }
     expect(managed).toContain(worker.threadId);
     expect(await env("claude-code", "thr_other")).toEqual([]);
+  });
+
+  // Contract: README documents the env contribution as best-effort with both gaps (precedence and first session) and
+  // names the preload line as the fallback. Guards the documented trade-off, not the surrounding prose.
+  test("README documents the ENABLE_TOOL_SEARCH contribution as best-effort, with the precedence gap and the first-session gap", async () => {
+    const readme = await readFile(join(dirname(fileURLToPath(import.meta.url)), "README.md"), "utf8");
+    const paragraph = readme.split("\n").find((line) => line.includes("ENABLE_TOOL_SEARCH"))!;
+    expect(paragraph).toBeDefined();
+    expect(paragraph).toMatch(/best-effort/i);
+    expect(paragraph).toMatch(/another plugin's provider-env value[^.]*may win/);
+    expect(paragraph).toMatch(/first session can start before Chief records the thread/);
+    expect(paragraph).toMatch(/preload instruction line is the fallback/);
   });
 
   // Contract: title default on the tool path. Each tool names its thread differently; the default line is the same.
@@ -10263,6 +10280,8 @@ describe("tool-call stability", () => {
     const run = (title: string[], mission: string) => state.harness.behavior.runCli([command!, ...title, "--mission", mission, ...(extra as string[]), "--json"], opts);
     expect((await run([], "Fix totals\r\nSecond line")).exitCode).toBe(0);
     expect(state.spawned.at(-1).title).toBe(expected("Fix totals"));
+    expect((await run([], `${FIRST_160}\nmore`)).exitCode).toBe(0);
+    expect(state.spawned.at(-1).title).toBe(expected(FIRST_160));
     expect((await run([], `${FIRST_200}\nmore`)).exitCode).toBe(0);
     expect(state.spawned.at(-1).title).toBe(expected(`${FIRST_200.slice(0, 159)}…`));
     expect((await run(["--title", "Explicit title"], "Fix totals")).exitCode).toBe(0);
