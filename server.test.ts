@@ -9513,20 +9513,17 @@ describe("tester role", () => {
       expect(head).toBe(oracle);
     }, 300_000);
 
-    // Known limitation, pinned (not an oracle): the ancestry check's 20 s deadline covers the git call only. The host lookup
-    // that precedes it (system.config) has no deadline, so a lookup that never answers holds the real chief_review past 60 s.
-    // Regression: a deadline added around the lookup (or around the whole attempt: 20, 30 or 60 s) makes the call settle
-    // early, and this test names that change. Fake timers stand in for the wait: the fake clock is stepped 61 s while the
-    // lookup is held (no reviewer, no review-context.md, call unsettled), then the lookup answers and the review launches once.
-    test("review attempt: a pending ancestry host lookup holds chief_review past 60 s (known limitation)", async () => {
+    // A host lookup that never answers no longer holds chief_review (#177): the ancestry check's 20 s deadline covers the
+    // lookup, then the impact slice's 30 s deadline covers its own lookup, and the review launches on the whole pull request
+    // with both skip reasons. Regression: dropping either deadline holds the call past 50 s (no reviewer, call unsettled).
+    test("review attempt: a pending host lookup skips ancestry at 20 s and the slice at 50 s, and chief_review launches", async () => {
       const PR = "https://github.com/acme/shop/pull/8";
       let held = false;
-      let entered = false;
-      let release = () => {};
+      let lookups = 0;
       const answer = { primaryHostId: "host_1" };
       const state = await setup({
         projectPath: "/oracle/checkout",
-        system: { usageLimits: async () => ({}), config: () => held ? new Promise((resolve) => { entered = true; release = () => resolve(answer); }) : Promise.resolve(answer) },
+        system: { usageLimits: async () => ({}), config: () => held ? new Promise(() => { lookups += 1; }) : Promise.resolve(answer) },
       });
       let sha = HEAD_SHA;
       execFileMock.mockImplementation(async (file: string, args: string[]) => {
@@ -9541,29 +9538,35 @@ describe("tester role", () => {
       const reviewer = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='reviewer'`).get() as any).thread_id as string;
       await report(state, reviewer, { state: "ready", result: "Looks right", ...APPROVE });
 
-      // The second review reaches the ancestry check (the previous head differs from the new one) with the lookup held.
+      // The second review reaches the ancestry check (the previous head differs from the new one); every host lookup now hangs.
       sha = "b".repeat(40);
       held = true;
       vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
       try {
         let settled = false;
         const call = tool(state, "chief_review", { workerThreadId: w1 }, chief).finally(() => { settled = true; });
-        for (let step = 0; step < 61; step++) {
-          await vi.advanceTimersByTimeAsync(1_000);
-          await new Promise((resolve) => setImmediate(resolve));
-        }
+        const step = async (seconds: number) => {
+          for (let i = 0; i < seconds; i++) {
+            await vi.advanceTimersByTimeAsync(1_000);
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+        };
+        const reviewers = () => state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='reviewer'`).get();
         const nextReviewer = `thr_${state.spawned.length + 1}`;
-        expect(entered).toBe(true);
-        expect(settled).toBe(false);
-        expect(state.spawned).toHaveLength(3);
-        expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='reviewer'`).get()).toEqual({ n: 1 });
-        await expect(reviewContextOf(state, nextReviewer)).rejects.toThrow(/ENOENT/);
-        held = false;
-        release();
-        await expect(call).resolves.toContain("Review scope:");
-        expect(state.spawned).toHaveLength(4);
-        expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='reviewer'`).get()).toEqual({ n: 2 });
-        await expect(reviewContextOf(state, nextReviewer)).resolves.toContain("## The previous review (");
+        await step(19); // inside the ancestry deadline: only the ancestry lookup has started
+        expect({ lookups, settled, spawned: state.spawned.length, reviewers: reviewers() }).toEqual({ lookups: 1, settled: false, spawned: 3, reviewers: { n: 1 } });
+        await step(2); // the ancestry deadline passed at 20 s: the impact slice's own lookup has started
+        expect({ lookups, settled, spawned: state.spawned.length, reviewers: reviewers() }).toEqual({ lookups: 2, settled: false, spawned: 3, reviewers: { n: 1 } });
+        await step(28); // inside the slice's 30 s deadline (49 s in total): still no reviewer
+        expect({ lookups, settled, spawned: state.spawned.length, reviewers: reviewers() }).toEqual({ lookups: 2, settled: false, spawned: 3, reviewers: { n: 1 } });
+        await step(2); // the slice's deadline passed at 50 s: the review launches with no host answer
+        expect({ lookups, spawned: state.spawned.length, reviewers: reviewers() }).toEqual({ lookups: 2, spawned: 4, reviewers: { n: 2 } });
+        const reply = await call;
+        expect(reply).toContain(`Impact slice skipped: ${w1}: deadline (30 s) passed.`);
+        expect(reply).toContain(`Review scope: ${w1}: whole pull request (deadline (20 s) passed).`);
+        const context = await reviewContextOf(state, nextReviewer);
+        expect(context).toContain("## The previous review (");
+        expect(context).toContain("Skipped: deadline (30 s) passed.");
       } finally { vi.useRealTimers(); }
     }, 120_000);
 
