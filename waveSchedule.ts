@@ -133,8 +133,8 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
 
   /** The workers one review of this chain tip covers, in wave order: the latest worker of every wave,
    * minus design waves and workers already complete (the one passed in always stays). A replaces: chain's
-   * earlier waves are complete, so they drop out; a stacked chain whose waves each have their own PR is
-   * covered wave by wave. A worker with no plan link covers only itself. Assumes reviewRefusal passed. */
+   * earlier waves are complete, so they drop out; a chain has one branch and PR (only a legacy plan's stacked waves, each with
+   * its own PR, are covered wave by wave). A worker with no plan link covers only itself. Assumes reviewRefusal passed. */
   function reviewTargetsFor(worker: Row): Row[] {
     const waves = planWavesFor(worker.plan_thread_id);
     if (!waves.length || worker.plan_wave == null) return [worker];
