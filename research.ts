@@ -122,7 +122,7 @@ export function researchLine(role: string, settings: ResearchSettings | null) {
   if (!parsed.success || parsed.data === "researcher" || !settings?.enabled) return null;
   const modes = RESEARCH_MODES[parsed.data].join(", ");
   return parsed.data === "chief"
-    ? `Use chief_research (modes: ${modes}) for parallel read-only research; it runs in a child researcher thread and its report arrives as a lifecycle alert.`
+    ? `Use chief_research (modes: ${modes}) for parallel read-only research.`
     : `Use chief_research (modes: ${modes}) for parallel read-only research; it waits for the result.`;
 }
 
