@@ -7738,83 +7738,239 @@ describe("forge comments", () => {
   /** gh answers pull-request lookups as the other tests do; `forge` decides what the comment API does. */
   const route = (forge: (args: string[]) => unknown) => execFileMock.mockImplementation(async (file: string, args: string[]) =>
     file === "gh" && args[0] === "api" ? forge(args) : file === "gh" && args[0] === "pr" ? { stdout: ghHead("feature/x") } : { stdout: "" });
-  /** The reporter's Chief alert, delivered despite the stuck forge call. */
-  const reportAlertDelivered = (state: State, reporter: string) =>
-    (state.db.prepare(`SELECT delivered_at FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${reporter}:report:%`) as any)?.delivered_at;
+  const ISSUE = "https://github.com/acme/shop/issues/7";
+  type Op = "post" | "scan" | "login";
+  const opOf = (args: string[]): Op => args.includes("POST") ? "post" : args.includes("--paginate") ? "scan" : "login";
+  const callsOf = (op: Op) => forgeCalls().filter(([, args]) => opOf(args) === op);
+  const ANSWERS: Record<Op, unknown> = { post: { stdout: "" }, scan: { stdout: "" }, login: { stdout: "boss\n" } };
+  /** Every comment call answers normally, except the operations `override` takes over. */
+  const routeOps = (override: Partial<Record<Op, (args: string[]) => unknown>> = {}) =>
+    route((args) => (override[opOf(args)] ?? (() => ANSWERS[opOf(args)]))(args));
+  /** A comment call that stays unresolved until `release()`, then answers as a healthy forge would. */
+  const gate = (op: Op) => { let release!: () => void; const held = new Promise((resolve) => { release = () => resolve(ANSWERS[op]); }); return { held, release }; };
   const alerts = (state: State, text: string) => state.sent.filter((message) => String(message.input?.[0]?.text).includes(text));
+  const sentText = (state: State, from: number) => state.sent.slice(from).map((message) => ({ threadId: message.threadId, text: message.input[0].text }));
 
-  async function blockedWorker(state: State) {
+  async function blockedWorker(state: State, forge: { issueUrl?: string; prUrl?: string } = { prUrl: PR }) {
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix totals", { prUrl: PR });
+    const worker = await delegate(state, chief.threadId, "Fix totals", forge);
     return { chief, worker, act: () => call(state, "chief_report", { state: "blocked", result: "Tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" }, worker.threadId) };
   }
-  const readyWorker = async (state: State) => {
-    const { chief, worker } = await blockedWorker(state);
+  const readyWorker = async (state: State, forge?: { issueUrl?: string; prUrl?: string }) => {
+    const { chief, worker } = await blockedWorker(state, forge);
     await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker.threadId);
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
     return { chief, worker };
   };
 
-  // The three caller kinds that enqueue from a tool call: each must finish its own work while the forge call is stuck.
-  const CALLERS: [string, string, (state: State) => Promise<{ act: () => Promise<unknown>; finished: () => void | Promise<void> }>][] = [
-    ["blocked report", "blocked:", async (state) => {
-      const { worker, act } = await blockedWorker(state);
-      return { act, finished: async () => { expect(rowOf(state, worker.threadId).state).toBe("blocked"); await until(() => reportAlertDelivered(state, worker.threadId)); } };
+  /** What a caller owes its own user whatever the forge does: its returned text, its committed state and the full Report to its Chief. */
+  type Scenario = {
+    chief: string; prefix: string; act: () => Promise<unknown>; result: string;
+    /** The managed row the report or completion changes, and the fields it must hold afterwards. */
+    row: { id: string; fields: object };
+    /** The one Report alert Chief receives, in full; null when the caller sends none. */
+    report: { from: string; text: string } | null;
+  };
+  const CALLERS: [string, (state: State) => Promise<Scenario>][] = [
+    ["blocked report", async (state) => {
+      const { chief, worker, act } = await blockedWorker(state);
+      return {
+        chief: chief.threadId, prefix: "blocked:", act, result: "Report delivered to Chief.",
+        row: { id: worker.threadId, fields: { state: "blocked", last_report_state: "blocked", report_seq: 1, blocker: "Totals test fails", recommendation: "Fix the product code", result: "Tests fail" } },
+        report: { from: worker.threadId, text: `[Chief lifecycle alert]\nWorker report from Fix totals (${worker.threadId})\nState: blocked\nBlocked: Totals test fails — decide or escalate to the user.\nBlocker: Totals test fails\nRecommendation: Fix the product code\nResult: Tests fail` },
+      };
     }],
-    ["reviewer verdict", "verdict:", async (state) => {
+    ["reviewer verdict", async (state) => {
       const { chief, worker } = await readyWorker(state);
       const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
       return {
-        act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId),
-        finished: async () => { expect(rowOf(state, review.threadId)).toMatchObject({ state: "ready", verdict: "approve" }); await until(() => reportAlertDelivered(state, review.threadId)); },
+        chief: chief.threadId, prefix: "verdict:", act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId), result: "Report delivered to Chief.",
+        row: { id: review.threadId, fields: { state: "ready", verdict: "approve", last_report_state: "ready", report_seq: 1, result: "Reviewed" } },
+        report: { from: review.threadId, text: `[Chief lifecycle alert]\nReviewer report from Review · Fix totals (${review.threadId})\nState: ready\nVerdict: approve\nVerdict file: ${join(state.storageRoot, "chief", "proj_1", review.threadId, "verdict-1.md")}\nThe reviewer approves. chief_complete (threadId: ${worker.threadId}); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.\nFull report and last output: bb chief inspect ${review.threadId}\nResult: Reviewed` },
       };
     }],
-    ["completion", "complete:", async (state) => {
+    ["completion", async (state) => {
       const { chief, worker } = await readyWorker(state);
-      return { act: () => completeWorker(state, chief.threadId, worker.threadId), finished: () => expect(rowOf(state, worker.threadId).state).toBe("complete") };
+      return {
+        chief: chief.threadId, prefix: "complete:", act: () => completeWorker(state, chief.threadId, worker.threadId),
+        result: "Marked “Fix totals” complete without a review (reason recorded).\nIts pull request is marked ready for review.\nNo cleanup: no approving review.",
+        row: { id: worker.threadId, fields: { state: "complete", last_report_state: "ready", report_seq: 1, result: `Done${NO_DEVIATIONS}` } },
+        report: null,
+      };
     }],
   ];
+  const reporterOutbox = (state: State, reporter: string) =>
+    state.db.prepare(`SELECT dedupe_key, delivered_at FROM alert_outbox WHERE dedupe_key LIKE ?`).all(`${reporter}:report:%`) as { dedupe_key: string; delivered_at: number | null }[];
+  /** The caller's own work, as base produces it: asserted while a forge call is unresolved, and again after it settles. */
+  function expectRequiredWork(state: State, scenario: Scenario, sentBefore: number, outboxBefore: number) {
+    expect(rowOf(state, scenario.row.id)).toMatchObject(scenario.row.fields);
+    expect(sentText(state, sentBefore)).toEqual(scenario.report ? [{ threadId: scenario.chief, text: scenario.report.text }] : []);
+    if (!scenario.report) return;
+    // The full Report replaced its pending fallback in the outbox and was marked delivered.
+    const outbox = reporterOutbox(state, scenario.report.from);
+    expect(outbox).toHaveLength(outboxBefore + 1);
+    expect(outbox.filter((entry) => entry.dedupe_key.includes("pending-"))).toEqual([]);
+    expect(outbox.every((entry) => entry.delivered_at)).toBe(true);
+  }
+  const SEED_ROW = (state: State, chief: string, attempts: number, mention: number) => {
+    const key = `escalate:${chief}:seeded`;
+    state.db.prepare(`INSERT INTO forge_comments (dedupe_key, project_id, thread_id, target, body, mention, attempts, created_at) VALUES (?, 'proj_1', ?, ?, ?, ?, ?, ?)`)
+      .run(key, chief, PR, `seeded body\n\n${markerOf(key)}`, mention, attempts, Date.now() - 60_000);
+    return key;
+  };
+  // Which comment operation each case holds up: post is the caller's own new row; a leftover row with earlier attempts reaches
+  // the marker scan first; a leftover row that wants a mention reaches the login lookup first. Both leftovers sit ahead of the new row.
+  const OPS: { op: Op; seed: [attempts: number, mention: number] | null; held: { seeded: number; caller: number; calls: [post: number, scan: number, login: number] }; rejected: { seeded: number; calls: [number, number, number] } }[] = [
+    { op: "post", seed: null, held: { seeded: 0, caller: 1, calls: [1, 0, 0] }, rejected: { seeded: 0, calls: [1, 0, 0] } },
+    { op: "scan", seed: [1, 0], held: { seeded: 2, caller: 0, calls: [0, 1, 0] }, rejected: { seeded: 2, calls: [1, 1, 0] } },
+    { op: "login", seed: [0, 1], held: { seeded: 1, caller: 0, calls: [0, 0, 1] }, rejected: { seeded: 1, calls: [2, 0, 1] } },
+  ];
+  const SCAN_ARGS = ["api", "--hostname", "github.com", "--paginate", "repos/acme/shop/issues/8/comments", "--jq", ".[].body"];
+  const LOGIN_ARGS = ["api", "--hostname", "github.com", "user", "--jq", ".login"];
 
-  // Contract "Non-blocking callers (R3)": a forge call that never answers or fails never stalls the tool call, the state change
-  // or the Chief alert; the row records the attempt. Regression: a caller awaits the post, or the post runs inside the transaction.
-  test.each(CALLERS)("%s finishes its work while the forge call never answers", async (_name, prefix, scenario) => {
-    const state = await setup();
-    route(() => never());
-    const { act, finished } = await scenario(state);
-    await act();
-    await finished();
-    await until(() => rows(state).find((r) => r.dedupe_key.startsWith(prefix))?.attempts === 1);
-    expect(rows(state).find((r) => r.dedupe_key.startsWith(prefix))).toMatchObject({ posted_at: null, gave_up_at: null });
-    // The supervisor tick does not wait for the stuck drain, and the single-flight drain makes no second call.
-    await state.supervisorCycle();
-    expect(postCalls()).toHaveLength(1);
+  // Contract "Required result never waits on optional work (R3)": while a post, a marker scan or a login lookup is unresolved,
+  // each caller returns the text it returns on base, holds its committed state, and has delivered its full Report to its Chief.
+  // Releasing the call lets delivery resume. Regression: a caller awaits a comment call, the call runs inside the transaction,
+  // or the Report is left at its pending fallback.
+  describe.each(OPS)("while a comment $op call is unresolved", ({ op, seed, held }) => {
+    test.each(CALLERS)("%s returns, commits and reports in full, and delivery resumes on release", async (_name, build) => {
+      const state = await setup();
+      const hold = gate(op);
+      routeOps({ [op]: () => hold.held });
+      const scenario = await build(state);
+      const seeded = seed ? SEED_ROW(state, scenario.chief, ...seed) : null;
+      const sentBefore = state.sent.length;
+      const outboxBefore = scenario.report ? reporterOutbox(state, scenario.report.from).length : 0;
+      const rowOfKey = (key: string | undefined) => rows(state).find((row) => row.dedupe_key === key);
+      const callerKey = () => rows(state).find((row) => row.dedupe_key.startsWith(scenario.prefix))?.dedupe_key;
+      try {
+        expect(await scenario.act()).toBe(scenario.result);
+        expectRequiredWork(state, scenario, sentBefore, outboxBefore);
+        // The stuck call was really reached, and nothing past it ran.
+        await until(() => callsOf(op).length === 1);
+        await until(() => (rowOfKey(seeded ?? callerKey())?.attempts ?? 0) === (seeded ? held.seeded : held.caller));
+        expect([callsOf("post").length, callsOf("scan").length, callsOf("login").length]).toEqual(held.calls);
+        expect(rowOfKey(callerKey())).toMatchObject({ attempts: held.caller, posted_at: null, gave_up_at: null });
+        // A supervisor tick neither waits for the stuck pass nor starts a second call.
+        await state.supervisorCycle();
+        expect([callsOf("post").length, callsOf("scan").length, callsOf("login").length]).toEqual(held.calls);
+        expectRequiredWork(state, scenario, sentBefore, outboxBefore);
+      } finally {
+        hold.release();
+      }
+      await until(() => rows(state).length > 0 && rows(state).every((row) => row.posted_at));
+      expectRequiredWork(state, scenario, sentBefore, outboxBefore);
+      const callerBody = rowOfKey(callerKey())!.body;
+      const seededBody = seed ? `seeded body\n\n${seed[1] ? "@boss\n\n" : ""}${markerOf(seeded!)}` : null;
+      expect(postCalls().map(([, args]) => bodyOf(args))).toEqual(seededBody ? [seededBody, callerBody] : [callerBody]);
+      if (op === "scan") expect(callsOf("scan").map(([, args]) => args)).toEqual([SCAN_ARGS]);
+      if (op === "login") expect(callsOf("login").map(([, args]) => args)).toEqual([LOGIN_ARGS]);
+    });
   });
 
-  test.each(CALLERS)("%s finishes its work when the forge call fails", async (_name, prefix, scenario) => {
-    const state = await setup();
-    route(() => { throw bad(); });
-    const { act, finished } = await scenario(state);
-    await act();
-    await finished();
-    await until(() => rows(state).find((r) => r.dedupe_key.startsWith(prefix))?.last_error);
-    expect(rows(state).find((r) => r.dedupe_key.startsWith(prefix))).toMatchObject({ attempts: 1, posted_at: null, gave_up_at: null, last_error: expect.stringContaining("502") });
+  // Same contract, with every comment call failing: the callers are unchanged, and each row records the failed attempt.
+  describe.each(OPS)("while every comment call fails, with a $op operation reached", ({ seed, rejected }) => {
+    test.each(CALLERS)("%s returns, commits and reports in full", async (_name, build) => {
+      const state = await setup();
+      const fail = () => { throw bad(); };
+      routeOps({ post: fail, scan: fail, login: fail });
+      const scenario = await build(state);
+      const seeded = seed ? SEED_ROW(state, scenario.chief, ...seed) : null;
+      const sentBefore = state.sent.length;
+      const outboxBefore = scenario.report ? reporterOutbox(state, scenario.report.from).length : 0;
+      expect(await scenario.act()).toBe(scenario.result);
+      expectRequiredWork(state, scenario, sentBefore, outboxBefore);
+      await until(() => rows(state).length > (seed ? 1 : 0) && rows(state).every((row) => row.last_error));
+      const caller = rows(state).find((row) => row.dedupe_key.startsWith(scenario.prefix));
+      expect(caller).toMatchObject({ attempts: 1, posted_at: null, gave_up_at: null, last_error: expect.stringContaining("502") });
+      if (seeded) expect(rows(state).find((row) => row.dedupe_key === seeded)).toMatchObject({ attempts: rejected.seeded, posted_at: null, gave_up_at: null, last_error: expect.stringContaining("502") });
+      expect([callsOf("post").length, callsOf("scan").length, callsOf("login").length]).toEqual(rejected.calls);
+      expectRequiredWork(state, scenario, sentBefore, outboxBefore);
+    });
   });
 
-  // Contract "Equivalence of stored rows": a blocked report on a pull request posts one comment whose body ends with its marker.
-  test("a blocked report posts one comment through the gh adapter, and a repeated drain adds none", async () => {
+  // Contract "Equivalence of stored rows": for fixed inputs through the real callers, the stored row and the POSTed comment are
+  // these literals (written by hand from the base behaviour, never produced by the code under test): key form, project, thread,
+  // target choice, body, mention flag, mention placement and the marker as the last line. The same table runs on base c8a0d76.
+  // Regression: any changed title, round, line, detail text, key, target choice or mention position.
+  type Golden = { key: string; thread: string; target: string; body: string; mention: 0 | 1; post?: string; path?: string };
+  const GOLDENS: [string, (state: State) => Promise<{ act: () => Promise<unknown>; golden: Golden }>][] = [
+    ["blocked report (target: the pull request over the issue)", async (state) => {
+      const { worker, act } = await blockedWorker(state, { issueUrl: ISSUE, prUrl: PR });
+      const key = `blocked:${worker.threadId}:1`;
+      return { act, golden: { key, thread: worker.threadId, target: PR, mention: 0, body: `**Chief · Blocked** · round 1\n**Blocker:** Totals test fails\n**Recommendation:** Fix the product code\n\n${markerOf(key)}` } };
+    }],
+    ["reviewer verdict of a worker (request_changes with findings, round and reviewed head)", async (state) => {
+      const { chief, worker } = await readyWorker(state, { issueUrl: ISSUE, prUrl: PR });
+      const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
+      const key = `verdict:${review.threadId}:1:${worker.threadId}`;
+      return {
+        act: () => call(state, "chief_report", {
+          state: "ready", result: "Totals go negative when the discount exceeds the subtotal.", recommendation: "Clamp at zero.", verdict: "request_changes",
+          findings: [{ file: "totals.ts", line: 1, severity: "blocking", message: "Totals go negative." }, { file: "totals.ts", line: 9, severity: "nit", message: "Rename tmp." }],
+        }, review.threadId),
+        golden: {
+          key, thread: review.threadId, target: PR, mention: 0,
+          body: `**Chief · Review verdict** · round 1\n**Changes requested**\nReviewed head: \`aaaaaaaaaaaa\`\n1 blocking finding, 1 nit\n\n<details><summary>Findings and recommendation</summary>\n\n### Blocking findings\n\n- totals.ts:1 — Totals go negative.\n\n### Nits\n\n- totals.ts:9 — Rename tmp.\n\n### Findings\n\nTotals go negative when the discount exceeds the subtotal.\n\n### Recommendation\n\nClamp at zero.\n\n</details>\n\n${markerOf(key)}`,
+        },
+      };
+    }],
+    ["reviewer verdict of a pull request (approve, no worker in the key, no round)", async (state) => {
+      const { chief } = await blockedWorker(state);
+      const review = await chiefReview(state, chief.threadId, { pullRequest: PR });
+      const key = `verdict:${review.threadId}:1`;
+      return {
+        act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId),
+        golden: { key, thread: review.threadId, target: PR, mention: 0, body: `**Chief · Review verdict**\n**Approved**\n0 blocking findings, 0 nits\n\n<details><summary>Findings and recommendation</summary>\n\n### Findings\n\nReviewed\n\n</details>\n\n${markerOf(key)}` },
+      };
+    }],
+    ["completion (target: the issue over the pull request)", async (state) => {
+      const { chief, worker } = await readyWorker(state, { issueUrl: ISSUE, prUrl: PR });
+      const key = `complete:${worker.threadId}`;
+      return {
+        act: () => completeWorker(state, chief.threadId, worker.threadId),
+        golden: {
+          key, thread: worker.threadId, target: ISSUE, mention: 0, path: "repos/acme/shop/issues/7/comments",
+          body: `**Chief · Completed** · round 1\n**Fix totals**\nPull request: ${PR}\n**Planning skipped:** Bounded test fixture\n**Review skipped:** review is not under test here\n**Tests skipped:** tests are not under test here\n\n<details><summary>Result</summary>\n\nDone\n\n## Deviations from plan\nNone\n\n</details>\n\n${markerOf(key)}`,
+        },
+      };
+    }],
+    ["escalation (configured handle: the mention line sits before the marker, the stored body has none)", async (state) => {
+      await state.harness.behavior.setSettings({ forgeOwnerHandle: "@boss" });
+      const { chief, worker } = await blockedWorker(state);
+      const request = "Pick a currency rounding rule.";
+      const key = `escalate:${worker.threadId}:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;
+      return {
+        // The same request twice: one row, one post.
+        act: async () => {
+          const first = await call(state, "chief_escalate", { threadId: worker.threadId, request }, chief.threadId);
+          const second = await call(state, "chief_escalate", { threadId: worker.threadId, request }, chief.threadId);
+          expect([first, second]).toEqual(Array(2).fill(`Queued for ${PR}. Now write the same request in chat under **Need you**.`));
+        },
+        golden: { key, thread: worker.threadId, target: PR, mention: 1, body: `**Chief · Need you**\n${request}\n\n${markerOf(key)}`, post: `**Chief · Need you**\n${request}\n\n@boss\n\n${markerOf(key)}` },
+      };
+    }],
+    ["escalation (no configured handle: the forge login is the mention)", async (state) => {
+      const { chief, worker } = await blockedWorker(state);
+      const request = "Choose between the two migrations.";
+      const key = `escalate:${worker.threadId}:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;
+      return {
+        act: () => call(state, "chief_escalate", { threadId: worker.threadId, request }, chief.threadId),
+        golden: { key, thread: worker.threadId, target: PR, mention: 1, body: `**Chief · Need you**\n${request}\n\n${markerOf(key)}`, post: `**Chief · Need you**\n${request}\n\n@boss\n\n${markerOf(key)}` },
+      };
+    }],
+  ];
+  test.each(GOLDENS)("%s stores and posts the golden comment once", async (_name, build) => {
     const state = await setup();
-    route(() => ({ stdout: "" }));
-    const { act } = await blockedWorker(state);
+    routeOps();
+    const { act, golden } = await build(state);
     await act();
-    await until(() => rows(state)[0]?.posted_at);
-    const [row] = rows(state);
-    expect(row.dedupe_key).toMatch(/^blocked:thr_\d+:1$/);
-    expect(postCalls()).toHaveLength(1);
-    const [, args] = postCalls()[0]!;
-    expect(args).toEqual(expect.arrayContaining(["--hostname", "github.com", "--method", "POST"]));
-    expect(bodyOf(args)).toBe(row.body);
-    expect(row.body.endsWith(`\n\n${markerOf(row.dedupe_key)}`)).toBe(true);
-    expect(row.body).toContain("**Blocker:** Totals test fails");
+    await until(() => rows(state).length && rows(state).every((row) => row.posted_at));
+    expect(rows(state).map(({ dedupe_key, project_id, thread_id, target, body, mention }) => ({ dedupe_key, project_id, thread_id, target, body, mention })))
+      .toEqual([{ dedupe_key: golden.key, project_id: "proj_1", thread_id: golden.thread, target: golden.target, body: golden.body, mention: golden.mention }]);
+    expect(golden.body.endsWith(`\n\n${markerOf(golden.key)}`)).toBe(true);
+    expect(postCalls().map(([file, args]) => [file, args])).toEqual([["gh", ["api", "--hostname", "github.com", "--method", "POST", golden.path ?? "repos/acme/shop/issues/8/comments", "-f", `body=${golden.post ?? golden.body}`]]]);
+    // A later pass finds nothing pending.
     await state.supervisorCycle();
     await sleep(20);
     expect(postCalls()).toHaveLength(1);
@@ -7885,23 +8041,6 @@ describe("forge comments", () => {
     expect(alerts(state, "after 5 attempts")).toHaveLength(0);
   });
 
-  // Contract "chief_escalate": the same request twice posts once, with the owner mention, resolved at post time.
-  test("chief_escalate twice with one request queues and posts one comment that mentions the owner", async () => {
-    const state = await setup();
-    await state.harness.behavior.setSettings({ forgeOwnerHandle: "@boss" });
-    route(() => ({ stdout: "" }));
-    const { chief, worker } = await blockedWorker(state);
-    const first = await call(state, "chief_escalate", { threadId: worker.threadId, request: "Pick a currency rounding rule." }, chief.threadId);
-    const second = await call(state, "chief_escalate", { threadId: worker.threadId, request: "Pick a currency rounding rule." }, chief.threadId);
-    expect(first).toContain(`Queued for ${PR}`);
-    expect(second).toContain(`Queued for ${PR}`);
-    await until(() => rows(state)[0]?.posted_at);
-    expect(rows(state)).toHaveLength(1);
-    expect(postCalls()).toHaveLength(1);
-    expect(bodyOf(postCalls()[0]![1])).toContain("@boss");
-    expect(bodyOf(postCalls()[0]![1])).toContain("Pick a currency rounding rule.");
-  });
-
   // Contract "Table persistence and migration index": the host hashes each migration statement by index and refuses a mismatch,
   // so the statement list keeps its base prefix byte for byte and forge_comments stays at index 114.
   // The digests were computed on base c8a0d76. Regression: a statement before index 114 moves or changes, or the table text drifts.
@@ -7913,14 +8052,44 @@ describe("forge comments", () => {
     expect(sha256(MIGRATIONS[114]!)).toBe("a3417ec24942a9bbcebd37d78f81c24adfc436e63223e91291d30553a718982c");
   });
 
-  test("a database migrated before forge_comments upgrades, and the host refuses a changed forge_comments statement", async () => {
+  const upgradeHost = () => {
     const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade" });
     disposals.push(() => harness.lifecycle.dispose());
-    const db = bb.storage.database();
+    return { bb, db: bb.storage.database() };
+  };
+  // Contract "Persisted format unchanged": a database migrated before forge_comments upgrades without losing its rows, and the
+  // unchanged full statement list replays on the migrated database without error and without changing schema or data.
+  // Regression: the upgrade drops or rewrites an existing row, or replaying the same list re-runs or re-records a statement.
+  test("a database migrated before forge_comments upgrades with its rows intact, and replaying the full list changes nothing", () => {
+    const { bb, db } = upgradeHost();
     bb.storage.migrate(db, MIGRATIONS.slice(0, 114));
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE name='forge_comments'`).get()).toBeUndefined();
+    db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, title, state, created_at, updated_at) VALUES ('thr_keep', 'worker', 'proj_1', 'Keep me', 'ready', 1, 2)`).run();
+
     bb.storage.migrate(db, MIGRATIONS);
-    expect(db.prepare(`SELECT name FROM sqlite_master WHERE name='forge_comments'`).get()).toEqual({ name: "forge_comments" });
+    expect(db.prepare(`SELECT name FROM pragma_table_info('forge_comments') ORDER BY cid`).all().map((column: any) => column.name))
+      .toEqual(["dedupe_key", "project_id", "thread_id", "target", "body", "mention", "attempts", "last_error", "posted_at", "gave_up_at", "created_at"]);
+    // Statements after the table (ALTER managed_threads) ran over the existing row, which kept its values.
+    expect(db.prepare(`SELECT thread_id, role, project_id, title, state, created_at, updated_at, plan_issue_url, plan_review FROM managed_threads`).all())
+      .toEqual([{ thread_id: "thr_keep", role: "worker", project_id: "proj_1", title: "Keep me", state: "ready", created_at: 1, updated_at: 2, plan_issue_url: null, plan_review: null }]);
+
+    const snapshot = () => {
+      const tables = (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all() as { name: string }[]).map((table) => table.name);
+      return {
+        schema: db.prepare(`SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name`).all(),
+        data: Object.fromEntries(tables.map((table) => [table, db.prepare(`SELECT * FROM "${table}"`).all()])),
+      };
+    };
+    const migrated = snapshot();
+    expect(migrated.data._bb_migrations).toHaveLength(MIGRATIONS.length);
+    expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
+    expect(snapshot()).toEqual(migrated);
+  });
+
+  // The host refuses to start on a statement whose bytes changed at an applied index; that is a separate promise from the replay above.
+  test("the host refuses a changed forge_comments statement on a migrated database", () => {
+    const { bb, db } = upgradeHost();
+    bb.storage.migrate(db, MIGRATIONS);
     const changed = MIGRATIONS.map((statement, index) => index === 114 ? `${statement} ` : statement);
     expect(() => bb.storage.migrate(db, changed)).toThrow(/migration 114 does not match/);
   });
