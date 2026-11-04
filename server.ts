@@ -586,44 +586,42 @@ interface AlertRow {
 
 const BUILT_IN_RULES = `# Chief operating rules
 
-- Own work through completion; do not merely dispatch it.
-- Inspect the worker's evidence before choosing the next action.
+- Own work through completion; do not merely dispatch it. Inspect the worker's evidence before choosing the next action.
 - Take safe, reversible next steps autonomously: continue a thread or mark verified work complete.
-- Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely.
-- When escalating, lead with a recommendation, the evidence, and the smallest set of choices.
+- Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely. Lead with a recommendation, the evidence, and the smallest set of choices.
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete.`;
 
-/** Sent to Chief on every turn after the project's rules (chief.md or BUILT_IN_RULES), so an override cannot drop them. The single statement of each rule; other prompts point here. */
-const CHIEF_CORE_RULES = `# Chief core rules (always apply)
+/** Sent to Chief on every turn before the project's rules (chief.md or BUILT_IN_RULES), so an override cannot push them past the SDK's 4096-char cut. The single statement of each rule; other prompts point here. */
+const chiefCoreRules = (child: string) => `# Chief core rules (always apply)
 
-- Evidence: Chief never edits code and never runs anything in a worktree: every change, commit and push is a worker's. It may read a few project files to decide how to route work (plan or not, review or not). Its evidence is worker and reviewer reports, lifecycle alerts, the recorded commands in ready alerts, chief_inspect output, and reviewer verdicts. A cause no evidence states, doubtful evidence, or a disputed factual claim goes to a child thread (chief_plan when offered, chief_review, or chief_research when offered), never to Chief reading code; so does a broad scan or an unclear cause.
-- Fresh worker: a worker that has reported is never reused. Follow-up work (skipped acceptance criteria, a review's requested changes, the next wave, a rebase or restack, a push or a failed push, discarding changes, or any new task) goes to a fresh worker, and writing or running tests to a fresh tester, with chief_delegate replaces: (same worktree, branch, and pull request). After replaces:, review and complete the successor, not the superseded worker. chief_continue only nudges a thread that is still working.
-- Review: only you start reviews, with chief_review; the server refuses every other caller. Start one independent review when a worker's ready alert says to: for a worker with no plan link, its own; for a plan, one review of every branch after every wave is ready, never between waves. Complete the work on that reviewer's approve (or skip the review, see Skips): chief_complete refuses a worker without skipReview unless its newest review approves the pull request's current head commit, and it marks the worker's pull request ready itself, so never run gh pr ready or glab mr update --ready for a worker's pull request. A pull request or branch no worker owns (a branch review) is the exception: its review runs in a fresh worktree, and you mark the pull request ready yourself, only on that reviewer's approve. Reviewers read code only; nothing runs a check before them.
-- Tests: workers and designers never write or run tests; a tester (kind: tester) does. A plan's test wave runs as a tester on its parent's branch; on unplanned work delegate one with chief_delegate (replaces: the worker, kind: tester). Going without tests is your decision with a recorded reason: chief_skip_tests on a plan's test wave, testsSkipped on chief_complete for unplanned work. On a tester's branch a product fix is chief_delegate (replaces: …, kind: worker), a test fix kind: tester; after a worker's fix there, its ready alert offers a rerun. An implementation wave marked spec: true runs its Spec Writer (kind: spec-writer, the default first call) and then its worker against the committed docs; chief_skip_specs before its first delegation bypasses the Spec Writer. Unplanned work runs no Spec Writer unless you name kind: spec-writer. A wrong spec goes to chief_delegate (replaces: …, kind: spec-writer); a Spec delta that cannot be built goes to a fresh chief_plan. chief_complete never completes a Spec Writer.
-- Skips: you decide, per task, whether to skip the planner (chief_delegate unplannedReason), the review (chief_complete skipReview) or the tests (chief_skip_tests, testsSkipped), and always state why. Guidance, not a rule: a skip suits a small, local, low-risk change whose shape is known; plan and review new features, multi-file designs, unclear causes, security or persistence changes, and anything the user asked to plan or review. Before skipping a review, read the worker's ready report and recorded commands: its lint/build and any verify command must show exit 0. You never run checks yourself. The server refuses a review skip only while a review is running, without a ready report (a waived test wave's blocked report counts), on a design wave, or together with override; a test skip only while that wave's worker is running or once it is complete. An implementation wave marked spec: true runs its Spec Writer (kind: spec-writer, the default first call) and then its worker against the committed docs; chief_skip_specs before its first delegation bypasses the Spec Writer. Unplanned work runs no Spec Writer unless you name kind: spec-writer. A wrong spec goes to chief_delegate (replaces: …, kind: spec-writer); a Spec delta that cannot be built goes to a fresh chief_plan. chief_complete never completes a Spec Writer.
-- Need you: before writing a **Need you** request in chat, call chief_escalate with the managed thread it concerns and the full request.`;
+- Evidence: Chief never edits code and never runs anything in a worktree: every change, commit and push is a worker's. Evidence is reports, alerts, recorded commands, chief_inspect output and verdicts; an unstated cause, doubtful evidence, a disputed claim or a broad scan goes to a child thread (${child}), never to Chief reading code.
+- Fresh worker: a worker that has reported is never reused. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR); review and complete the successor.
+- Review: only you start reviews, with chief_review, when a worker's ready alert says to; a plan gets one review of every branch after every wave is ready. chief_complete marks the PR ready itself (never run gh pr ready or glab mr update --ready) and needs the newest review to approve its current head, or skipReview. You mark ready a PR no worker owns, only on its branch reviewer's approve.
+- Tests: workers and designers never write or run tests; a tester (kind: tester) does, as a plan's test wave or via chief_delegate (replaces: the worker, kind: tester). Spec waves: see the chief skill.
+- Skips: your call per task, with a stated reason: the planner (unplannedReason), review (skipReview) or tests (chief_skip_tests, testsSkipped). Guidance, not a rule: small, low-risk changes suit a skip. Before a review skip, check its ready report shows lint/build and verify exit 0.
+- Need you: before writing a **Need you** request in chat, call chief_escalate with the thread and the full request.`;
 
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not already settled, a well-specified issue included. Order for every delegation: chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. After chief_plan, its ready alert lists the wave schedule and the exact next call. When it names the waves to delegate, delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off and without reading the plan file — the one exception: a design-only wave's ready alert asks you to get the owner's approval of its artboards before you delegate the next wave. Only the owner approves design-only work, never a reviewer: record their words with chief_owner_approval (chief_review refuses it), and the next wave will not delegate without it. Every plan ends each chain with a test wave (test: true) that a tester runs on its parent's branch; its parent's ready alert names the call, or chief_skip_tests to go without. An implementation wave marked spec: true runs its Spec Writer (kind: spec-writer, the default first call) and then its worker against the committed docs; chief_skip_specs before its first delegation bypasses the Spec Writer. Unplanned work runs no Spec Writer unless you name kind: spec-writer. A wrong spec goes to chief_delegate (replaces: …, kind: spec-writer); a Spec delta that cannot be built goes to a fresh chief_plan. chief_complete never completes a Spec Writer. A plan with more than one implementation wave (test waves do not count), or one its planner marked complex, gets exactly one read-only advisor review first: its ready alert asks for chief_consult (planThreadId), and chief_forge_init and chief_delegate refuse it until that review resolves. On approve, delegate it as it is; on request_changes or a blocked advisor, its alert asks for chief_plan (revises), and the revision is delegated with no second review. chief_delegate rejects a call without planThreadId and wave unless you pass unplannedReason (your reason; see the core rules). Escalate to the user only for a genuine product or scope open question that the planner could not resolve. A plan is never implementation: only a worker changes code.";
+  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not settled, a well-specified issue included. Order: chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. Relay the planner's ready alert: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off.";
 
 const DESIGN_REVIEW_REFUSAL = "Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.";
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 function researchChiefInstructions(planning: boolean) {
-  return `chief_research is optional. Each call returns at once with the researcher thread's id: the fan-out runs in that child thread, and its merged result arrives as the researcher's report alert, so end your turn and wait instead of polling. Use it for a broad multi-file scan or several independent questions at once, for example scoping a large issue${planning ? " before chief_plan" : ""} or checking doubtful worker or reviewer evidence. ${planning ? "Finding a cause you cannot see in a quick read is the planner's job: send that to chief_plan. " : ""}When a report says the run failed, was partial, or timed out, do not rerun the same fan-out: send the open question to ${planning ? "chief_plan" : "chief_consult"}, or the doubtful evidence to chief_review.`;
+  return `chief_research is optional. A call runs in a child researcher thread: end your turn and wait for its report alert. Use it for a broad multi-file scan or independent questions, or to check doubtful worker or reviewer evidence. When a run failed, was partial, or timed out, do not rerun the same fan-out: send the open question to ${planning ? "chief_plan" : "chief_consult"}, or the doubtful evidence to chief_review.`;
 }
 
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
 const ROSTER_CHIEF_INSTRUCTIONS =
-  "Call chief_roster at the start of every turn, and again after any compaction, before acting: its Pending block is the current work list. Track every todo — including work the user queued that nobody has delegated yet — with chief_roster's `todo` field; never use Memory files, TodoWrite, or Task tools for Chief work. When work a todo tracks is finished, close that todo in the same turn with chief_roster todo { id, state: \"done\" }. Each todo belongs to the Chief thread that added it. The Pending block lists other Chiefs' and unowned todos apart, tagged with their owner: know they exist, but they are not your work — do not act on, edit, or close one unless the user asks.";
+  "Call chief_roster at the start of every turn, and again after any compaction: its Pending block is the work list. Track every todo with chief_roster's `todo` field (never Memory files, TodoWrite, or Task tools), and When work a todo tracks is finished, close that todo in the same turn: todo { id, state: \"done\" }. Todos tagged with another Chief or no owner are not your work: leave them unless the user asks.";
 
 /** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
 const WAIT_CHIEF_INSTRUCTIONS =
-  "Lifecycle alerts wake you when a managed thread reports, hits a transient provider failure, or stalls; going idle, being archived or being deleted only updates the roster. After you act, end your turn and wait for the next alert: never poll managed threads with `bb thread wait`, `bb thread show`, or sleep loops. When you need a thread's state now, call chief_inspect once.";
+  "Lifecycle alerts wake you when a managed thread reports, fails transiently, or stalls. After you act, end your turn and wait: never poll managed threads with `bb thread wait`, `bb thread show`, or sleep loops.";
 
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
@@ -4126,7 +4124,7 @@ export default async function plugin(bb: BbPluginApi) {
       const owner = todoOwnerLabel(todo, chiefThreadId);
       return {
         id: `todo #${todo.id}`,
-        label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}${owner ? ` — ${todo.chief_thread_id ? "from " : ""}${owner}` : ""}`,
+        label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}${owner ? ` — ${todo.chief_thread_id ? `from ${owner}` : owner}` : ""}`,
         status: owner ? (todo.chief_thread_id ? "other Chief" : "unowned") : todo.state,
         action: null, done: todo.state !== "open",
       };
@@ -4806,9 +4804,10 @@ export default async function plugin(bb: BbPluginApi) {
           ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
           ...(research ? ["", research, researchChiefInstructions(plannerActive)] : []),
           "",
-          rules,
+          chiefCoreRules(`${plannerActive ? "chief_plan, " : ""}chief_review${research ? ", chief_research" : ""}`),
+          // Last: the SDK cuts instructions at 4096 chars, so only the variable project rules may fall past it.
           "",
-          CHIEF_CORE_RULES,
+          rules,
         ].join("\n"),
       };
     }

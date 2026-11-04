@@ -161,7 +161,7 @@ test("button disabled when there are no projects to pick", async () => {
 });
 
 test("marks Chief conversations with a compact header badge", async () => {
-  expect(app.threadHeaderActions).toHaveLength(1);
+  expect(app.threadHeaderActions.map((action) => action.id)).toEqual(["chief-role", "new-chief"]);
   const chief = {
     threadId: "thr_chief",
     role: "chief" as const,
@@ -181,7 +181,7 @@ test("marks Chief conversations with a compact header badge", async () => {
     { threadId: string; projectId: string; isCompactViewport: boolean },
     typeof rpcContract
   >(
-    app.threadHeaderActions[0]!,
+    app.threadHeaderActions.find((action) => action.id === "chief-role")!,
     { threadId: chief.threadId, projectId: chief.projectId, isCompactViewport: false },
     {
       rpc: {
@@ -209,7 +209,7 @@ test("shows the role chip on managed threads and nothing on others", async () =>
       { threadId: string; projectId: string; isCompactViewport: boolean },
       typeof rpcContract
     >(
-      app.threadHeaderActions[0]!,
+      app.threadHeaderActions.find((action) => action.id === "chief-role")!,
       { threadId, projectId: "proj_1", isCompactViewport: false },
       { rpc: { role: ({ threadId }) => ({ role: threadId === worker.threadId ? worker.role : null }) } },
     );
@@ -430,8 +430,8 @@ test("registers the Chief researcher settings section after the models section",
 describe("Chief researcher settings", () => {
   const triple = { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const };
   const fake = () => {
-    const settings = { enabled: true, maxAgentCalls: 24, timeoutMinutes: { survey: 10, review: 10, investigate: 10 } };
-    const store = { selections: { survey: null, review: null, investigate: null } as Record<"survey" | "review" | "investigate", typeof triple | null> };
+    const settings = { enabled: true, maxAgentCalls: 24, timeoutMinutes: { survey: 10, investigate: 10 } };
+    const store = { selections: { survey: null, investigate: null } as Record<"survey" | "investigate", typeof triple | null> };
     const rpc = {
       researchConfiguration: () => ({
         settings: structuredClone(settings),
@@ -472,7 +472,7 @@ describe("Chief researcher settings", () => {
     await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
     await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
     expect(rendered.rpcCalls.filter((call) => call.method === "setResearchModel")).toHaveLength(0);
-    expect(store.selections).toEqual({ survey: null, review: null, investigate: null });
+    expect(store.selections).toEqual({ survey: null, investigate: null });
     expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(1);
   });
 
@@ -486,7 +486,7 @@ describe("Chief researcher settings", () => {
     const { rpc } = fake();
     const first = render(rpc);
     await vi.waitFor(() => expect(first.getAllByText("Local")[0]).toBeTruthy());
-    expect(first.getAllByText(inheriting)).toHaveLength(3);
+    expect(first.getAllByText(inheriting)).toHaveLength(2);
     const cell = picker(first);
     fireEvent.change(cell.getByLabelText("Provider ID"), { target: { value: triple.providerId } });
     fireEvent.change(cell.getByLabelText("Model"), { target: { value: triple.model } });
@@ -501,7 +501,7 @@ describe("Chief researcher settings", () => {
     await vi.waitFor(() => expect(second.getAllByText("Local")[0]).toBeTruthy());
     expect((picker(second).getByLabelText("Model") as HTMLInputElement).value).toBe(triple.model);
     expect(second.getAllByRole("button", { name: "Inherit caller" })).toHaveLength(1);
-    expect(second.getAllByText(inheriting)).toHaveLength(2);
+    expect(second.getAllByText(inheriting)).toHaveLength(1);
   });
 
   test("rejects a partial triple, stores nothing, and shows the error after reload", async () => {
@@ -516,7 +516,7 @@ describe("Chief researcher settings", () => {
     await vi.waitFor(() =>
       expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(2),
     );
-    expect(rendered.getAllByText(inheriting)).toHaveLength(3);
+    expect(rendered.getAllByText(inheriting)).toHaveLength(2);
   });
 
   test("the switch and the cap save valid values only", async () => {
@@ -546,7 +546,7 @@ describe("Chief researcher settings", () => {
     await vi.waitFor(() =>
       expect(rendered.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", mode: "survey", selection: null } }),
     );
-    expect(rendered.getAllByText(inheriting)).toHaveLength(3);
+    expect(rendered.getAllByText(inheriting)).toHaveLength(2);
     expect(store.selections.survey).toBeNull();
   });
 
@@ -554,14 +554,14 @@ describe("Chief researcher settings", () => {
     const rendered = render(fake().rpc);
     await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
     const sent = () => rendered.rpcCalls.filter((call) => call.method === "setResearchSettings").map((call) => call.input);
-    const timeout = rendered.getByLabelText("Review timeout (minutes)");
+    const timeout = rendered.getByLabelText("Investigate timeout (minutes)");
     for (const value of ["0", "61"]) {
       fireEvent.change(timeout, { target: { value } });
       expect(timeout.getAttribute("aria-invalid")).toBe("true");
     }
     expect(sent()).toHaveLength(0);
     fireEvent.change(timeout, { target: { value: "5" } });
-    await vi.waitFor(() => expect(sent()).toEqual([{ timeoutMinutes: { review: 5 } }]));
+    await vi.waitFor(() => expect(sent()).toEqual([{ timeoutMinutes: { investigate: 5 } }]));
     expect(timeout.getAttribute("aria-invalid")).toBe("false");
   });
 });
