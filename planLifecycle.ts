@@ -1,6 +1,6 @@
 import type { WorkerKind } from "./roles";
 import { clip, clipMiddle } from "./text";
-import { chainOf, parentOf, successorOf, type createWaveSchedule } from "./waveSchedule";
+import { chainOf, parentOf, successorOf, type createWaveSchedule, type PlanWave } from "./waveSchedule";
 
 /** What admission reads of a managed_threads row; the server's ManagedRow satisfies it. The first block is the wave schedule's own row. */
 interface PlanRow {
@@ -17,6 +17,7 @@ interface PlanRow {
   report_path: string | null;
   owner_approval: string | null;
   brief: string | null;
+  pr_url: string | null;
 }
 
 /** What one accepted chief_delegate hands the worker brief: the final kind and the plan facts it renders. */
@@ -47,10 +48,17 @@ export function createPlanLifecycle<Row extends PlanRow>(
 ) {
   const { planWavesFor, waveWorkers, specWave, specOwed, specReady, specChain } = schedule;
 
+  /** The newest worker row (any kind, Spec Writer included) over every wave of wave n's chain, a live row before a finished one:
+   * the worker the chain's next wave replaces. waves may be raw (absent cleared): an absent wave has no rows. */
+  function chainLatest(planThreadId: string, waves: PlanWave[], n: number): Row | undefined {
+    const rowsOfChain = chainOf(waves, n).flatMap((m) => waveWorkers(planThreadId, m)).sort((a, b) => a.created_at - b.created_at);
+    return rowsOfChain.filter((row) => !["complete", "archived", "deleted"].includes(row.state)).at(-1) ?? rowsOfChain.at(-1);
+  }
+
   /** Admits or refuses one chief_delegate. kind is the one the caller named (undefined: not named), resolvedKind the one
    * resolveDelegation gave; branch is the one the caller named. */
   function admitDelegation(request: {
-    chiefId: string; prior?: Row; kind?: WorkerKind; resolvedKind: WorkerKind; planThreadId?: string; wave?: number; branch?: string;
+    chiefId: string; prior?: Row; kind?: WorkerKind; resolvedKind: WorkerKind; planThreadId?: string; wave?: number; branch?: string; prUrl?: string;
   }): Admission {
     const { chiefId, prior, planThreadId, wave } = request;
     let kind = request.resolvedKind;
@@ -174,6 +182,25 @@ export function createPlanLifecycle<Row extends PlanRow>(
       } else if (kind === "tester" && !prior && !afterMerge) {
         throw new Error("kind: tester on a plan with no test wave needs replaces: of the worker whose branch it tests, or a new branch once that worker is complete.");
       }
+      // One plan chain, one branch, PR and worktree: a chain's waves share its latest worker's environment through replaces:.
+      const chain = chainOf(waves, wave);
+      const chainLead = chain[0]!;
+      const chainWorker = chainLatest(planThreadId, waves, wave);
+      const sameChain = `chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${chainWorker?.thread_id}${kind === "tester" ? ", kind: tester" : ""})`;
+      // (i) Another chain of this plan keeps its own branch: replaces: never crosses chains.
+      if (prior?.plan_thread_id === planThreadId && prior.plan_wave != null && !chain.includes(prior.plan_wave)) {
+        throw new Error(`Wave ${wave} belongs to the chain of waves ${chain.join(", ")}; ${prior.thread_id} works on wave ${prior.plan_wave}, another chain. An independent chain starts its own branch with chief_forge_init on its head wave ${chainLead}, or replaces that chain's latest worker${chainWorker ? ` — ${sameChain}` : ""}.`);
+      }
+      // (iv) A replacement keeps its prior's pull request; a prUrl only fills a prior that had none.
+      if (prior?.plan_thread_id === planThreadId && prior.pr_url && request.prUrl && request.prUrl !== prior.pr_url) {
+        throw new Error(`replaces: ${prior.thread_id} carries pull request ${prior.pr_url}; pass no prUrl or the same one. A plan chain has one pull request.`);
+      }
+      // (ii) A later wave continues its chain, and (iii) a started chain is never started twice: both go to the chain's latest worker.
+      if (!prior && !afterMerge && (parentOf(waves, wave) !== null || chainWorker)) {
+        throw new Error(chainWorker
+          ? `Wave ${wave}'s chain (waves ${chain.join(", ")}) already has worker ${chainWorker.thread_id} on wave ${chainWorker.plan_wave}; a chain has one branch, PR and worktree. Continue it with replaces: ${chainWorker.thread_id} — ${sameChain}.`
+          : `Wave ${wave} builds on wave ${parentOf(waves, wave)}: delegate its chain head, wave ${chainLead}, first (chief_forge_init, then chief_delegate), then continue with replaces: the chain's latest worker.`);
+      }
       if (kind === "spec-writer") baseline = !!scheduled.baseline && waveRows.every((row) => row.kind === "spec-writer");
       if (kind === "tester") {
         for (let n: number | null = wave; n !== null; n = parentOf(waves, n)) {
@@ -241,5 +268,5 @@ export function createPlanLifecycle<Row extends PlanRow>(
     return { outcome: "waive", parent };
   }
 
-  return { admitDelegation, waiveTests, waiveSpecs };
+  return { admitDelegation, chainLatest, waiveTests, waiveSpecs };
 }

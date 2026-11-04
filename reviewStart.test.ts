@@ -74,6 +74,7 @@ function world({ projectPath = null, heads = {} }: Options = {}) {
     projectPath: vi.fn(async (_projectId: string) => projectPath),
     projectHost: vi.fn(async (_projectId: string) => "host_proj"),
     environmentHost: vi.fn(async (_environmentId: string) => "host_env" as string | null),
+    reusableEnvironment: vi.fn(async (_threadId: string): Promise<{ environmentId: string; hostId: string } | null> => null),
     checkoutSkip: vi.fn(async (_projectId: string): Promise<string | null> => null),
     recordedCommands: vi.fn(async (_threadId: string) => []),
     writeFile: vi.fn(async (_threadId: string, _relPath: string, _content: string): Promise<unknown> => undefined),
@@ -130,7 +131,7 @@ describe("identity: every target's report and head come from one capture", () =>
     expect(out.reply).toContain("One review covers the whole plan: W1, W2, each pull request pinned to its own head commit where the forge answered.");
     expect(w.launches[0]!.args.environment).toEqual({ type: "host", hostId: "host_proj", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/one-head" } } });
     const prompt: string = w.launches[0]!.args.prompt;
-    expect(prompt).toContain(`- worker W1 “Task W1”: ${pr(1)} (branch feature/one-head, targeting main), pinned to ${SHA_B}: \`git fetch origin feature/one-head\`, then review \`git diff origin/main...${SHA_B}\``);
+    expect(prompt).toContain(`- worker W1 “Task W1”: ${pr(1)} (branch feature/one-head, targeting main), pinned to ${SHA_B}: \`git fetch origin feature/one-head && git checkout --detach ${SHA_B}\`, then review \`git diff origin/main...${SHA_B}\``);
     expect(prompt).toContain(`- worker W2 “Task W2”: branch feature/two (${pr(2)}), head not readable, not pinned: \`git fetch origin feature/two\`, then review \`git diff <the project's default branch>...origin/feature/two\`; the verdict binds to its report 5`);
     // The context names the pinned head's branch for W1 (not the row's) and the row's branch for the unpinned W2.
     const [context] = w.contexts();
@@ -435,5 +436,98 @@ describe("branch review: a branch or pull request no worker owns", () => {
     expect(w.forge.head).toHaveBeenCalledTimes(1);
     expect(w.managedSpawn.prepare).not.toHaveBeenCalled();
     expect(w.managedSpawn.launch).not.toHaveBeenCalled();
+  });
+});
+
+// Contract (docs/specs/plan-chains.md "Review Worktree"): a pinned review reuses the worktree of the newest earlier pinned reviewer of
+// the same task when the host says it is reusable, and in every other case launches a fresh managed worktree on the pull request branch.
+describe("review worktree: reuse of the newest earlier pinned reviewer", () => {
+  const fresh = (branch: string) => ({ type: "host", hostId: "host_proj", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: branch } } });
+  const shared = { environmentId: "env_rev", hostId: "host_rev" };
+  /** One pinned worker; each round is a new report and a finished previous reviewer, so the next chief_review starts a fresh reviewer. */
+  function pinnedWorld(branch = "feature/one") {
+    const w = world({ heads: { [pr(1)]: headOf(branch) } });
+    w.worker("W1", { prUrl: pr(1), branch });
+    const round = async () => {
+      const out = await w.review.startReview(w.chief, "W1");
+      w.nextReport(out.threadId); // the reviewer finishes: its report reserves, so the next review supersedes it
+      w.nextReport("W1");
+      return out;
+    };
+    return { w, round };
+  }
+
+  test("the first pinned review of a task launches a fresh managed worktree on the branch, and asks the host about no earlier reviewer", async () => {
+    const { w, round } = pinnedWorld();
+    await round();
+    expect(w.launches[0]!.args.environment).toEqual(fresh("feature/one"));
+    expect(w.host.reusableEnvironment).not.toHaveBeenCalled();
+  });
+
+  test("a later pinned review reuses the earlier reviewer's environment, on that host, and the brief tells the reviewer to check the commit out detached", async () => {
+    const { w, round } = pinnedWorld();
+    w.host.reusableEnvironment.mockResolvedValue(shared);
+    await round();
+    await round();
+    expect(w.host.reusableEnvironment).toHaveBeenCalledExactlyOnceWith("R1");
+    expect(w.managedSpawn.prepare).toHaveBeenLastCalledWith("proj", { role: "reviewer", hostId: "host_rev" });
+    expect(w.launches[1]!.args.environment).toEqual({ type: "reuse", environmentId: "env_rev" });
+    expect(w.launches[1]!.args.prompt).toContain(`\`git fetch origin feature/one && git checkout --detach ${SHA_B}\``);
+  });
+
+  test("repeated pinned rounds keep one worktree: only the first launch creates one, and each later round asks about the newest reviewer", async () => {
+    const { w, round } = pinnedWorld();
+    w.host.reusableEnvironment.mockResolvedValue(shared);
+    for (let n = 0; n < 4; n++) await round();
+    expect(w.launches.map((launch) => launch.args.environment.type)).toEqual(["host", "reuse", "reuse", "reuse"]);
+    expect(w.launches.slice(1).map((launch) => launch.args.environment.environmentId)).toEqual(["env_rev", "env_rev", "env_rev"]);
+    expect(w.host.reusableEnvironment.mock.calls.map(([id]) => id)).toEqual(["R1", "R2", "R3"]);
+  });
+
+  test.each([
+    ["answers null", (w: ReturnType<typeof world>) => w.host.reusableEnvironment.mockResolvedValue(null)],
+    ["rejects", (w: ReturnType<typeof world>) => w.host.reusableEnvironment.mockRejectedValue(new Error("host down"))],
+    ["throws synchronously", (w: ReturnType<typeof world>) => w.host.reusableEnvironment.mockImplementation(() => { throw new Error("sync"); })],
+  ])("when the host %s, the review still launches, on a fresh managed worktree", async (_name, arrange) => {
+    const { w, round } = pinnedWorld();
+    arrange(w);
+    await round();
+    const second = await round();
+    expect(second).toMatchObject({ created: true });
+    expect(w.host.reusableEnvironment).toHaveBeenCalledOnce();
+    expect(w.launches[1]!.args.environment).toEqual(fresh("feature/one"));
+    expect(w.managedSpawn.prepare).toHaveBeenLastCalledWith("proj", { role: "reviewer", hostId: "host_proj" });
+  });
+
+  test("an environment that is a target worker's own live environment is never reused", async () => {
+    const { w, round } = pinnedWorld();
+    w.host.reusableEnvironment.mockResolvedValue({ environmentId: "env_W1", hostId: "host_env" }); // settledLive gives W1 env_W1
+    await round();
+    await round();
+    expect(w.launches[1]!.args.environment).toEqual(fresh("feature/one"));
+  });
+
+  test("an earlier unpinned review is never a reuse candidate: the host is not asked, and a later pinned review starts fresh", async () => {
+    const w = world(); // the forge answers no head: the first review is unpinned and runs in the worker's own environment
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    const first = await w.review.startReview(w.chief, "W1");
+    expect(w.launches[0]!.args.environment).toEqual({ type: "reuse", environmentId: "env_W1" });
+    w.nextReport(first.threadId);
+    w.nextReport("W1");
+    w.forge.head.mockResolvedValue(headOf("feature/one"));
+    w.host.reusableEnvironment.mockResolvedValue(shared);
+    await w.review.startReview(w.chief, "W1");
+    expect(w.host.reusableEnvironment).not.toHaveBeenCalled();
+    expect(w.launches[1]!.args.environment).toEqual(fresh("feature/one"));
+  });
+
+  test("an unpinned later review keeps the worker's own environment even after a pinned reviewer exists", async () => {
+    const { w, round } = pinnedWorld();
+    w.host.reusableEnvironment.mockResolvedValue(shared);
+    await round();
+    w.forge.head.mockResolvedValue(null);
+    await w.review.startReview(w.chief, "W1");
+    expect(w.host.reusableEnvironment).not.toHaveBeenCalled();
+    expect(w.launches[1]!.args.environment).toEqual({ type: "reuse", environmentId: "env_W1" });
   });
 });

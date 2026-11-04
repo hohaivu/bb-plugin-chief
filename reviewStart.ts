@@ -121,7 +121,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
   const targetLine = (target: BriefTarget) => {
     const pinned = target.head;
     return pinned
-      ? `- worker ${target.threadId} “${target.title}”: ${target.prUrl} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch}\`, then review ${target.since
+      ? `- worker ${target.threadId} “${target.title}”: ${target.prUrl} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch} && git checkout --detach ${pinned.sha}\`, then review ${target.since
         ? `only the changes since the previous review: \`git diff ${target.since}..${pinned.sha}\` (the whole pull request, \`git diff origin/${pinned.base}...${pinned.sha}\`, is context only)`
         : `\`git diff origin/${pinned.base}...${pinned.sha}\``}`
       : `- worker ${target.threadId} “${target.title}”: branch ${target.branch}${target.prUrl ? ` (${target.prUrl})` : ""}, head not readable, not pinned: \`git fetch origin ${target.branch}\`, then review \`git diff <the project's default branch>...origin/${target.branch}\`; the verdict binds to its report ${target.reportSeq}`;
@@ -343,6 +343,9 @@ export interface ReviewHost<Row> {
   /** The machine the project's reviewer runs on. */
   projectHost: (projectId: string) => Promise<string>;
   environmentHost: (environmentId: string) => Promise<string | null>;
+  /** The worktree environment of an earlier reviewer thread when it can be reused: the thread exists, is not archived, deleted or active,
+   * and its environment is a worktree that is not destroyed or removed. Otherwise null. Never throws; bounded. */
+  reusableEnvironment: (threadId: string) => Promise<{ environmentId: string; hostId: string } | null>;
   /** Why the project's checkout cannot be read here, or null. Never throws. */
   checkoutSkip: (projectId: string) => Promise<string | null>;
   recordedCommands: (threadId: string) => Promise<RecordedCommand[] | null>;
@@ -563,7 +566,14 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         if ("skipped" in slice) sliceSkipped.push(`${target.row.thread_id}: ${slice.skipped}`);
         else sliceBudget -= slice.entries;
       }
-      const hostId = head ? await host.projectHost(worker.project_id) : await host.environmentHost(live.environmentId!);
+      // Only a pinned review may reuse the worktree of the newest earlier pinned reviewer of this task, and never a target worker's own environment.
+      let reuse: { environmentId: string; hostId: string } | null = null;
+      const earlierReviewer = head ? ledger.lastPinnedReviewer(targets.map((target) => target.thread_id)) : null;
+      if (earlierReviewer) {
+        try { reuse = await host.reusableEnvironment(earlierReviewer); } catch { reuse = null; }
+        if (reuse && [...lives.values()].some((targetLive) => targetLive.environmentId === reuse!.environmentId)) reuse = null;
+      }
+      const hostId = reuse ? reuse.hostId : head ? await host.projectHost(worker.project_id) : await host.environmentHost(live.environmentId!);
       const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
       const title = `Review · ${worker.title}`;
       const waves = plan.planWavesFor(worker.plan_thread_id);
@@ -625,7 +635,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       });
       const thread = await managedSpawn.launch(prepared, {
         projectId: worker.project_id,
-        environment: head
+        environment: reuse ? { type: "reuse", environmentId: reuse.environmentId } : head
           ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
           : { type: "reuse", environmentId: live.environmentId! },
         title, prompt,

@@ -584,7 +584,7 @@ const BUILT_IN_RULES = `# Chief operating rules
 const chiefCoreRules = (child: string) => `# Chief core rules (always apply)
 
 - Evidence: Chief never edits code and never runs anything in a worktree: every change, commit and push is a worker's. Evidence is reports, alerts, recorded commands, chief_inspect output and verdicts; an unstated cause, doubtful evidence, a disputed claim or a broad scan goes to a child thread (${child}), never to Chief reading code.
-- Fresh worker: a worker that has reported is never reused. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR); review and complete the successor.
+- Fresh worker: a worker that has reported is never reused. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR; a plan chain has exactly one of each, so its next wave is a replaces: too); review and complete the successor.
 - Review: only you start reviews, with chief_review, when a worker's ready alert says to; a plan gets one review of every branch after every wave is ready. chief_complete marks the PR ready itself (never run gh pr ready or glab mr update --ready) and needs the newest review to approve its current head, or skipReview. You mark ready a PR no worker owns, only on its branch reviewer's approve.
 - Tests: workers and designers never write or run tests; a tester (kind: tester) does, as a plan's test wave or via chief_delegate (replaces: the worker, kind: tester). Spec waves: see the chief skill.
 - Skips: your call per task, with a stated reason: the planner (unplannedReason), review (skipReview) or tests (chief_skip_tests, testsSkipped). Guidance, not a rule: small, low-risk changes suit a skip. Before a review skip, check its ready report shows lint/build and verify exit 0.
@@ -593,7 +593,7 @@ const chiefCoreRules = (child: string) => `# Chief core rules (always apply)
 /** Planning is on by default: the plugin persists the planner's wave schedule and
  * names the exact next call, so Chief relays it without reading the plan itself. */
 const PLANNER_CHIEF_INSTRUCTIONS =
-  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not settled, a well-specified issue included. Order: chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. Relay the planner's ready alert: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off.";
+  "Planning is on. Use chief_plan first for every new feature, multi-file change, or task whose design or cause is not settled, a well-specified issue included. Order: chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate. A plan chain (a head wave and every wave that builds on it) has one branch, one pull request and one worktree: chief_forge_init only on a chain head, and each later wave of the chain with chief_delegate replaces: the chain's latest worker. Relay the planner's ready alert: delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off.";
 
 const DESIGN_REVIEW_REFUSAL = "Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.";
 
@@ -1050,6 +1050,8 @@ export const MIGRATIONS = [
     `INSERT INTO chief_models_v8 SELECT * FROM chief_models`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_v8 RENAME TO chief_models`,
+    // One owner per shared worktree and cleanup action: the first cleanup job to reach the decisive teardown observation claims it; other jobs on that environment skip it.
+    `CREATE TABLE IF NOT EXISTS cleanup_environment_claims (environment_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('branch','trouble','stuck')), thread_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (environment_id, action))`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1581,7 +1583,7 @@ export default async function plugin(bb: BbPluginApi) {
     const prompt = [
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
-      "You own the forge for every delegation: run chief_forge_init (unplanned work: pass the mission, successCriteria and constraints you will give chief_delegate, since the pull request body is the reviewer's brief), and pass the branch, issueUrl and prUrl it returns to chief_delegate. If it returns a script instead, run it from the project checkout and use the CHIEF_FORGE line it prints. The chief skill's Git workflow section has the rest.",
+      "You own the forge for every delegation: run chief_forge_init (planned work only on a plan chain's head wave, since a chain has one branch and one pull request; unplanned work: pass the mission, successCriteria and constraints you will give chief_delegate, since the pull request body is the reviewer's brief), and pass the branch, issueUrl and prUrl it returns to chief_delegate. If it returns a script instead, run it from the project checkout and use the CHIEF_FORGE line it prints. The chief skill's Git workflow section has the rest.",
       "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
       "",
       "Call chief_roster for the current work list, then wait for work.",
@@ -1867,7 +1869,7 @@ export default async function plugin(bb: BbPluginApi) {
       throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. To skip the plan, pass unplannedReason (CLI: --unplanned-reason) with your reason.");
     }
     const { kind, planPath, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, specSources, specDocs, baseline } = plans.admitDelegation({
-      chiefId: chief.thread_id, prior, kind: params.kind, resolvedKind: resolved.kind, planThreadId, wave, branch: params.branch,
+      chiefId: chief.thread_id, prior, kind: params.kind, resolvedKind: resolved.kind, planThreadId, wave, branch: params.branch, prUrl: params.prUrl,
     });
     if (implementsDesign !== null) {
       // The design worker whose artboards this wave builds on: the one being replaced, else the wave's latest.
@@ -2206,7 +2208,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (heads.length === 1) {
         return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${row.thread_id}, wave: 1), then chief_delegate (planThreadId: ${row.thread_id}, wave: 1).${specFirstLine(row.thread_id, waves, 1)} The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`;
       }
-      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${row.thread_id}, wave: N), then chief_delegate (planThreadId: ${row.thread_id}, wave: N), all in this turn. Each independent wave gets its own task title and so its own branch and PR from the default base (chief_forge_init without base); do not stack them.${undelegated.map((n) => specFirstLine(row.thread_id, waves, n)).join("")} The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.`;
+      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${row.thread_id}, wave: N), then chief_delegate (planThreadId: ${row.thread_id}, wave: N), all in this turn. Each of these is an independent chain head and gets its own task title, branch, PR and worktree from the default base (chief_forge_init without base); its later waves continue that chain with replaces: the chain's latest worker, never a worker of another chain.${undelegated.map((n) => specFirstLine(row.thread_id, waves, n)).join("")} The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.`;
     }
     if (row.role === "worker") {
       // A reviewer that still covers this worker's latest report — either busy
@@ -2319,6 +2321,18 @@ export default async function plugin(bb: BbPluginApi) {
       projectPath,
       projectHost: async (projectId) => (await projectHostId(projectId)) ?? await defaultHostId(),
       environmentHost: environmentHostId,
+      reusableEnvironment: async (threadId) => {
+        try {
+          const thread = await bounded(() => bb.sdk.threads.get({ threadId }), CLEANUP_READ_MS);
+          if (thread.deletedAt !== null || thread.archivedAt !== null || BUSY_STATUSES.has(thread.status) || !thread.environmentId) return null;
+          const environment = await bounded(() => bb.sdk.environments.get({ environmentId: thread.environmentId! }), CLEANUP_READ_MS);
+          if (!environment.isWorktree || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return null;
+          return { environmentId: thread.environmentId, hostId: environment.hostId };
+        } catch (error) {
+          bb.log.warn(`Reviewer ${threadId} is not reusable, starting a fresh worktree: ${String(error)}`);
+          return null;
+        }
+      },
       checkoutSkip: checkoutHostSkip,
       recordedCommands,
       writeFile: writeStorageFile,
@@ -2516,14 +2530,25 @@ export default async function plugin(bb: BbPluginApi) {
       } catch (error) {
         if (!MISSING.test(String(error))) throw error; // a read error is never proof that the environment is gone
       }
-      if (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return cleanupMove(job, "branch");
+      // One job per shared worktree owns each action: the first to reach it claims it, the others end at storage with no alert. "In use" claims nothing.
+      const shared = (action: "branch" | "trouble" | "stuck") => {
+        const claim = db.transaction(() => {
+          db.prepare(`INSERT OR IGNORE INTO cleanup_environment_claims (environment_id, action, thread_id, at) VALUES (?, ?, ?, ?)`).run(job.environment_id, action, id, Date.now());
+          return db.prepare(`SELECT thread_id FROM cleanup_environment_claims WHERE environment_id=? AND action=?`).get(job.environment_id, action) as { thread_id: string };
+        })();
+        if (claim.thread_id === id) return false;
+        cleanupMove(job, "storage", { outcome: `worktree shared: ${action} handled by ${claim.thread_id}` });
+        return true;
+      };
+      if (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return shared("branch") ? undefined : cleanupMove(job, "branch");
       const teardown = environment.lifecycle.teardown;
       const trouble = teardown?.message?.startsWith("Needs recovery:") ? teardown.message
         : environment.hostLifecycle === "cleanup-failed" && teardown?.status !== "running" ? `bb reports cleanup-failed${teardown?.message ? `: ${teardown.message}` : ""}` : null;
       const left = `Left in place: the bb/ branch ${job.branch} and the worktree. Inspect: bb environment show ${job.environment_id}.`;
-      if (trouble) return cleanupMove(job, "storage", { outcome: "branch kept: teardown trouble" }, { key: "cleanup-teardown-trouble:alert", message: `Cleanup of ${label}: bb could not remove its worktree environment: ${clip(trouble, 300)}. ${left}` });
+      if (trouble) return shared("trouble") ? undefined : cleanupMove(job, "storage", { outcome: "branch kept: teardown trouble" }, { key: "cleanup-teardown-trouble:alert", message: `Cleanup of ${label}: bb could not remove its worktree environment: ${clip(trouble, 300)}. ${left}` });
       if (Date.now() - generation <= TEARDOWN_LIMIT_MS) return;
       if (environment.lifecycle.phase === "active") return cleanupMove(job, "storage", { outcome: "branch kept: environment in use" });
+      if (shared("stuck")) return;
       return cleanupMove(job, "storage", { outcome: "branch kept: teardown stuck" }, { key: "cleanup-teardown-stuck:alert", message: `Cleanup of ${label}: bb has not removed its worktree environment 60 minutes after the archive (${environment.lifecycle.phase}/${environment.hostLifecycle}). ${left}` });
     }
 
@@ -3957,7 +3982,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
-    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan until its required advisor review resolves. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
+    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan until its required advisor review resolves. For a plan, call it only on a chain head (a wave nothing precedes) that has no worker yet: a chain has one branch and one pull request, its later waves continue it with chief_delegate replaces:, and the pull request body lists every wave of the chain. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
     parameters: z.object({
       title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
       base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request. Stack only when this work builds on that pull request's changes; independent work gets its own PR on the default base."),
@@ -3998,13 +4023,28 @@ export default async function plugin(bb: BbPluginApi) {
         if (wave > waves.length) {
           throw new Error(`Wave ${wave} is out of range: planner ${planThreadId} scheduled ${waves.length} wave(s).`);
         }
+        // A chain has one branch and one pull request, opened here on its head and never again: raw waves, so a waived test wave stays on the chain.
+        const rawWaves = planner.plan_waves ? JSON.parse(planner.plan_waves) as PlanWave[] : [];
+        const chain = chainOf(rawWaves, wave);
+        if (chain[0] !== wave) {
+          throw new Error(`Wave ${wave} is not a chain head: it continues the chain of waves ${chain.join(", ")}, which has one branch and one pull request, opened by chief_forge_init on head wave ${chain[0]} only. Delegate wave ${wave} with chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: <the chain's latest worker>).`);
+        }
+        const started = plans.chainLatest(planThreadId, rawWaves, wave);
+        if (started) {
+          throw new Error(`Wave ${wave}'s chain already has worker ${started.thread_id}${started.branch ? ` on branch ${started.branch}` : ""}${started.pr_url ? ` with pull request ${started.pr_url}` : ""}: a chain has one branch and one pull request. Continue it with chief_delegate (planThreadId: ${planThreadId}, wave: ${started.plan_wave ?? wave}, replaces: ${started.thread_id}).`);
+        }
         body = [
           params.body ?? `Tracking work for ${params.title}.`,
           ...(briefSections.length ? ["", ...briefSections] : []),
-          "", `<details><summary>Plan — wave ${wave} of ${waves.length} (planner ${planThreadId})</summary>`,
+          "", `<details><summary>Plan — chain of waves ${chain.join(", ")} of ${waves.length} (planner ${planThreadId})</summary>`,
           "", clip(planner.result ?? "", 1_500),
-          "", "### Contracts to verify", clip(waves[wave - 1]!.contracts ?? "None listed.", 2_000),
           "</details>",
+          ...chain.flatMap((n) => [
+            "", `<details><summary>Wave ${n} of ${waves.length} — ${rawWaves[n - 1]!.title ?? "no description"}</summary>`,
+            ...(rawWaves[n - 1]!.testsSkipped ? ["", `Tests skipped: ${forgeText(rawWaves[n - 1]!.testsSkipped!, 500)}`] : []),
+            "", "### Contracts to verify", clip(rawWaves[n - 1]!.contracts ?? "None listed.", 2_000),
+            "</details>",
+          ]),
         ].join("\n");
       }
       // One tracking issue per plan: its title and body describe the plan, every wave's pull request tracks it.
@@ -4017,7 +4057,7 @@ export default async function plugin(bb: BbPluginApi) {
         return {
           issueTitle: planner.title.replace(/^Plan · /, ""),
           issueBody: sanitizeForge([
-            "Chief tracks this plan here: one comment per task outcome, one pull request per wave.", "",
+            "Chief tracks this plan here: one comment per task outcome, one pull request per chain.", "",
             clip(planner.result ?? "", 1_500), "", "### Waves",
             ...waves.map((entry, index) => `Wave ${index + 1}: ${entry.title ?? "no description"}${entry.dependsOn?.length ? ` · depends on ${entry.dependsOn.join(", ")}` : ""}${entry.design ? " · design" : ""}`),
           ].join("\n")),
@@ -4075,7 +4115,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
-    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work. verifyCommand goes into the worker's brief as its own check. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it. A plan with more than one wave or marked complex is refused until its one advisor review resolves (chief_consult planThreadId).`,
+    description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work. verifyCommand goes into the worker's brief as its own check. One plan chain has one branch, pull request and worktree: a later wave of a chain needs replaces: the chain's latest worker, replaces: never crosses to another chain, a started chain is not delegated fresh again, and a replacement keeps its prior's prUrl. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it. A plan with more than one wave or marked complex is refused until its one advisor review resolves (chief_consult planThreadId).`,
     parameters: delegateParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

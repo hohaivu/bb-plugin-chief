@@ -349,6 +349,20 @@ async function waiveTests(state: Awaited<ReturnType<typeof setup>>, chiefThreadI
   }
 }
 
+// A plan wave delegated the way the server stored one before a chain shared one branch: a worker row of its own, on its own branch.
+// chief_delegate now refuses to build one (a later wave of a chain replaces its chain's worker), so a test of the legacy stacked
+// graph seeds the row directly: an unplanned worker, stamped with its plan wave. The thread store reloads its row cache on its
+// next write (the next delegate or report), which every caller below makes before it reads the row back.
+async function legacyWave(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, planThreadId: string, n: number, branch: string, title = `Wave ${n} work`) {
+  const result = await state.harness.behavior.runCli([
+    "delegate", "--title", title, "--mission", "Do it", "--unplanned-reason", "Legacy stacked fixture", "--branch", branch, "--json",
+  ], { threadId: chiefThreadId, projectId: "proj_1" });
+  expect(result.exitCode).toBe(0);
+  const { threadId } = JSON.parse(result.stdout!) as { threadId: string };
+  state.db.prepare("UPDATE managed_threads SET plan_thread_id=?, plan_wave=?, unplanned_reason=NULL WHERE thread_id=?").run(planThreadId, n, threadId);
+  return { threadId };
+}
+
 // chief_review answers `Started|Using existing “<title>” in thread <id>.`: the retired `bb chief review` CLI answered JSON with these fields.
 async function chiefReview(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, params: { workerThreadId?: string; branch?: string; pullRequest?: string }) {
   const text = await state.harness.behavior.callAgentTool("chief_review", params, { threadId: chiefThreadId, projectId: "proj_1" }) as string;
@@ -4112,7 +4126,7 @@ describe("Chief backend", () => {
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain("waves: 2/4 done, wave 1 starting, wave 2 starting");
     expect(roster).toContain(`: ${path2} (independent)`);
-    expect(state.spawned.at(-1).prompt).toContain("This wave is independent");
+    expect(state.spawned.at(-1).prompt).toContain("This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch.");
 
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 1 done${NO_DEVIATIONS}` }, { threadId: w1.threadId, projectId: "proj_1" });
     let alert = state.sent.at(-1).input[0].text as string;
@@ -4181,12 +4195,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Two waves.", plan }, { threadId: planner.threadId, projectId: "proj_1" });
     await approvePlan(state, chief.threadId, planner.threadId);
     await waiveTests(state, chief.threadId, planner.threadId, [3]);
-    const delegate = async (n: number, branch: string) => JSON.parse((await state.harness.behavior.runCli([
-      "delegate", "--title", `Wave ${n} work`, "--mission", "Do it",
-      "--plan-thread", planner.threadId, "--wave", String(n), "--branch", branch, "--json",
-    ], opts)).stdout!) as { threadId: string };
-    await delegate(1, "feature/a");
-    const w2 = await delegate(2, "feature/b");
+    // Rows of a plan written before chains shared a branch: wave 2 is stacked on wave 1's own branch, wave 1 still active.
+    await legacyWave(state, chief.threadId, planner.threadId, 1, "feature/a");
+    const w2 = await legacyWave(state, chief.threadId, planner.threadId, 2, "feature/b");
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 2 done${NO_DEVIATIONS}` }, { threadId: w2.threadId, projectId: "proj_1" });
     const alert = state.sent.at(-1).input[0].text as string;
     expect(alert).toContain("the one review of the whole plan waits until wave(s) 1 are ready");
@@ -6080,7 +6091,8 @@ describe("tester role", () => {
     expect(next).toContain(`chief_delegate (planThreadId: ${planner.threadId}, wave: 2`);
     expect(next).not.toMatch(/tester|chief_skip_tests/);
 
-    await delegateWave(state, chief.threadId, planner.threadId, 2);
+    // The plan row is a pre-chain one: its wave 2 is a stacked worker of its own, which chief_delegate no longer builds.
+    await legacyWave(state, chief.threadId, planner.threadId, 2, "feature/two");
     const last = workerOn(state, planner.threadId, 2);
     expect(last.kind).toBeNull();
     await readyIdle(state, last.thread_id);
@@ -6402,6 +6414,341 @@ describe("tester role", () => {
       "    npm run lint → exit 1",
       "    npm run build → exit 0",
     ].join("\n"));
+  });
+
+  // Contracts (plan chains, wave 1): a plan chain has one branch, one pull request and one worker worktree, opened by
+  // chief_forge_init on its head only and continued with chief_delegate (replaces:). Independent heads get their own.
+  describe("plan chains", () => {
+    const PR_A = "https://github.com/o/r/pull/1";
+    const PR_B = "https://github.com/o/r/pull/2";
+    const withContracts = (n: number, contracts: string) => `# Wave ${n}\nDo the work.\n\n## Contracts to verify\n- ${contracts}\n\n## What we're NOT doing\n- x`;
+    /** An approved plan with the given waves; its ready result is `summary`. */
+    async function chainPlan(state: State, chiefThreadId: string, waves: object[], summary = "Plan summary.") {
+      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chiefThreadId));
+      const planner = (await status(state)).threads.filter((row) => row.role === "planner" && row.chiefThreadId === chiefThreadId).at(-1)!;
+      await report(state, planner.threadId, { state: "ready", result: summary, plan: waves });
+      await approvePlan(state, chiefThreadId, planner.threadId);
+      return planner;
+    }
+    const linear = (long = "Wave 1 keeps its invariant") => [{ body: withContracts(1, long) }, { body: wave(2) }, TEST_WAVE(3)];
+    const forge = (state: State, chiefThreadId: string, planThreadId: string, waveNo: number) =>
+      tool(state, "chief_forge_init", { title: `Wave ${waveNo} work`, planThreadId, wave: waveNo }, chiefThreadId) as Promise<string>;
+    const envOf = (state: State, threadId: string) => state.live.get(threadId)!.environmentId;
+    const freshSpawns = (state: State) => state.spawned.filter((args) => args.environment?.type === "host").length;
+
+    test("forge_init on a 3-wave chain head puts one section per chain wave in the pull request body, clipped, and says one pull request per chain in the issue", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await chainPlan(state, chief.threadId, linear("a".repeat(3_000)), "S".repeat(3_000));
+      await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 3, reason: "docs only" }, chief.threadId);
+      const script = await forge(state, chief.threadId, planner.threadId, 1);
+      expect(script).toContain("Plan — chain of waves 1, 2, 3 of 3");
+      expect(script.match(/<summary>Wave \d of 3/g)).toHaveLength(3);
+      expect(script.match(/Tests skipped: docs only/g)).toHaveLength(1);
+      // Each contract is clipped at 2,000 characters (the last is the ellipsis) and the plan summary at 1,500.
+      const contract = script.match(/### Contracts to verify\n(a[^\n]*|- a[^\n]*)\n/)![1]!;
+      expect(contract).toHaveLength(2_000);
+      expect(contract.endsWith("…")).toBe(true);
+      const summary = script.match(/\(planner [^)]*\)<\/summary>\n\n(S+…?)\n<\/details>/)![1]!;
+      expect(summary).toHaveLength(1_500);
+      expect(summary.endsWith("…")).toBe(true);
+      expect(script).toContain("ISSUE_BODY='Chief tracks this plan here: one comment per task outcome, one pull request per chain.");
+    });
+
+    test("an unplanned forge_init body is the title line plus the mission sections, as before chains", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const script = await tool(state, "chief_forge_init", { title: "Fix checkout totals", mission: "Correct and verify totals", successCriteria: "Regression passes", constraints: "No refactors" }, chief.threadId) as string;
+      const body = "Tracking work for Fix checkout totals.\n\n## Mission\nCorrect and verify totals\n## Success criteria\nRegression passes\n## Constraints\nNo refactors";
+      expect(script).toContain(`\nBODY='${body}'\n`);
+      expect(script).toContain(`\nISSUE_BODY='${body}'\n`);
+      expect(script).not.toContain("<details>");
+    });
+
+    test("forge_init is refused on a wave that continues a chain, naming the head, and on a head whose chain already has a worker, naming the latest", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await chainPlan(state, chief.threadId, linear());
+      for (const n of [2, 3]) {
+        await expect(forge(state, chief.threadId, planner.threadId, n)).rejects.toThrow(
+          new RegExp(`Wave ${n} is not a chain head: it continues the chain of waves 1, 2, 3.*head wave 1 only.*replaces: <the chain's latest worker>`));
+      }
+      await forge(state, chief.threadId, planner.threadId, 1);
+      await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: "feature/chain", prUrl: PR_A });
+      const w1 = workerOn(state, planner.threadId, 1).thread_id as string;
+      await expect(forge(state, chief.threadId, planner.threadId, 1)).rejects.toThrow(
+        `Wave 1's chain already has worker ${w1} on branch feature/chain with pull request ${PR_A}: a chain has one branch and one pull request. Continue it with chief_delegate (planThreadId: ${planner.threadId}, wave: 1, replaces: ${w1}).`);
+      // A fresh delegation on the started head is refused the same way, before a thread is spawned.
+      const spawned = state.spawned.length;
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 1, { branch: "feature/second" })).rejects.toThrow(`replaces: ${w1}`);
+      expect(state.spawned).toHaveLength(spawned);
+      // Once wave 2 continues the chain, the refusal names the newest worker, not wave 1's.
+      await readyIdle(state, w1);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: w1 });
+      const w2 = workerOn(state, planner.threadId, 2).thread_id as string;
+      await expect(forge(state, chief.threadId, planner.threadId, 1)).rejects.toThrow(`replaces: ${w2}).`);
+    });
+
+    test("a linear plan of N waves runs on one branch, one pull request and one worker worktree", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await chainPlan(state, chief.threadId, [{ body: withContracts(1, "ok") }, { body: wave(2) }, { body: wave(3) }, TEST_WAVE(4)]);
+      await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: "feature/chain", prUrl: PR_A, issueUrl: "https://github.com/o/r/issues/9" });
+      const workers = [workerOn(state, planner.threadId, 1).thread_id as string];
+      for (const n of [2, 3]) {
+        await readyIdle(state, workers.at(-1)!);
+        await delegateWave(state, chief.threadId, planner.threadId, n, { replaces: workers.at(-1) });
+        workers.push(workerOn(state, planner.threadId, n).thread_id);
+      }
+      const rows = workers.map((id) => rowOf(state, id));
+      expect(new Set(rows.map((row) => row.branch))).toEqual(new Set(["feature/chain"]));
+      expect(new Set(rows.map((row) => row.pr_url))).toEqual(new Set([PR_A]));
+      expect(new Set(rows.map((row) => row.issue_url))).toEqual(new Set(["https://github.com/o/r/issues/9"]));
+      expect(new Set(workers.map((id) => envOf(state, id))).size).toBe(1);
+      // Only the head asks for a fresh worktree; each later wave reuses the prior worker's environment.
+      expect(freshSpawns(state)).toBe(1);
+      expect(state.spawned.slice(-2).map((args) => args.environment)).toEqual(Array(2).fill({ type: "reuse", environmentId: envOf(state, workers[0]) }));
+    });
+
+    test("two independent heads each get their own branch, pull request and worktree; a replacement across chains is refused before any spawn", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await chainPlan(state, chief.threadId, [{ body: withContracts(1, "ok") }, TEST_WAVE(2), { body: wave(3), dependsOn: [] }, TEST_WAVE(4, [3])]);
+      await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: "feature/a", prUrl: PR_A });
+      const a = workerOn(state, planner.threadId, 1).thread_id as string;
+      await forge(state, chief.threadId, planner.threadId, 3);
+      const spawned = state.spawned.length;
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 3, { replaces: a })).rejects.toThrow(/another chain/);
+      expect(state.spawned).toHaveLength(spawned);
+      await delegateWave(state, chief.threadId, planner.threadId, 3, { branch: "feature/b", prUrl: PR_B });
+      const b = workerOn(state, planner.threadId, 3).thread_id as string;
+      expect(envOf(state, b)).not.toBe(envOf(state, a));
+      expect(rowOf(state, b)).toMatchObject({ branch: "feature/b", pr_url: PR_B });
+      expect(rowOf(state, a)).toMatchObject({ branch: "feature/a", pr_url: PR_A });
+      expect(freshSpawns(state)).toBe(2);
+    });
+
+    test("a replacement keeps its prior's branch and pull request: a different one is refused before any spawn, the same or none is accepted, and a null prior takes the given prUrl", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const planner = await chainPlan(state, chief.threadId, linear());
+      await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: "feature/chain", prUrl: PR_A });
+      const w1 = workerOn(state, planner.threadId, 1).thread_id as string;
+      await readyIdle(state, w1);
+      const spawned = state.spawned.length;
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: w1, prUrl: PR_B })).rejects.toThrow(
+        `replaces: ${w1} carries pull request ${PR_A}; pass no prUrl or the same one. A plan chain has one pull request.`);
+      await expect(delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: w1, branch: "feature/other" })).rejects.toThrow(
+        `replaces: ${w1} carries branch feature/chain; pass no --branch or the same one.`);
+      expect(state.spawned).toHaveLength(spawned);
+      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: w1, prUrl: PR_A, branch: "feature/chain" });
+      const w2 = workerOn(state, planner.threadId, 2).thread_id as string;
+      expect(rowOf(state, w2)).toMatchObject({ branch: "feature/chain", pr_url: PR_A });
+
+      // A chain whose head had no pull request yet: the replacement's prUrl fills it in.
+      const second = await chainPlan(state, chief.threadId, linear());
+      await delegateWave(state, chief.threadId, second.threadId, 1, { branch: "feature/second" });
+      const head = workerOn(state, second.threadId, 1).thread_id as string;
+      expect(rowOf(state, head).pr_url).toBeNull();
+      await readyIdle(state, head);
+      await delegateWave(state, chief.threadId, second.threadId, 2, { replaces: head, prUrl: PR_B });
+      expect(rowOf(state, workerOn(state, second.threadId, 2).thread_id).pr_url).toBe(PR_B);
+    });
+  });
+
+  // Contracts (plan chains, wave 2): chain tasks share one worktree, so of the cleanup jobs on one environment exactly one
+  // owns each action (branch deletion, teardown-trouble alert, teardown-stuck alert); the rest end at storage, silent.
+  describe("cleanup of jobs sharing one worktree", () => {
+    const HOUR = 60 * 60_000;
+    type Env = { phase: "destroyed" | "destroying" | "active"; trouble?: boolean };
+    const envOf = ({ phase, trouble }: Env, environmentId: string) => ({
+      id: environmentId, hostId: "host_1", workspaceProvisionType: "managed-worktree", isWorktree: true, branchName: "bb/shared",
+      status: phase === "destroyed" ? "destroyed" : "ready",
+      hostLifecycle: phase === "destroyed" ? "removed" : trouble ? "cleanup-failed" : "ready",
+      lifecycle: { phase, teardown: trouble ? { status: "failed", message: "Needs recovery: git worktree remove failed" } : { status: "running" } },
+    });
+    /** `count` archived workers whose cleanup jobs wait at the teardown step on the one environment `env_shared` (a chain's worktree). */
+    async function sharedJobs(state: State, count: number, reads: (call: number) => Env) {
+      let call = 0;
+      state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => envOf(reads(call++), environmentId));
+      await state.harness.behavior.setSettings({ cleanupApproved: true });
+      const chief = await start(state);
+      const archivedAt = Date.now() - 2 * HOUR;
+      const ids: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const id = (await delegate(state, chief.threadId, `Chain wave ${i + 1}`)).threadId;
+        ids.push(id);
+        state.live.set(id, { ...state.live.get(id)!, archivedAt } as any);
+        state.db.prepare(`INSERT INTO cleanup_jobs (thread_id, chief_thread_id, project_id, environment_id, branch, step, step_at, archived_at, created_at, updated_at)
+          VALUES (?, ?, 'proj_1', 'env_shared', ?, 'teardown', ?, ?, ?, ?)`).run(id, chief.threadId, `bb/${id}`, archivedAt, archivedAt, 1_000 + i, 1_000 + i);
+      }
+      return ids;
+    }
+    const job = (state: State, id: string) => state.db.prepare(`SELECT step, outcome FROM cleanup_jobs WHERE thread_id=?`).get(id) as { step: string; outcome: string | null };
+    const alerts = (state: State, kind: string) => state.db.prepare(`SELECT source_thread_id FROM alert_outbox WHERE dedupe_key LIKE ?`).all(`%:${kind}:alert`) as { source_thread_id: string }[];
+    const claims = (state: State) => state.db.prepare(`SELECT action, thread_id FROM cleanup_environment_claims WHERE environment_id='env_shared' ORDER BY action`).all();
+
+    test("three jobs on a destroyed environment: one owns the branch, the others end at storage with no alert", async () => {
+      execFileMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const state = await setup({ projectPath: "/repo/proj1" });
+      state.harness.sdk.stub("system.config", async () => ({ primaryHostId: "host_1" }));
+      const [first, second, third] = await sharedJobs(state, 3, () => ({ phase: "destroyed" }));
+      await state.supervisorCycle();
+      expect(job(state, first!)).toMatchObject({ step: "branch" });
+      for (const id of [second!, third!]) expect(job(state, id)).toEqual({ step: "storage", outcome: `worktree shared: branch handled by ${first}` });
+      expect(claims(state)).toEqual([{ action: "branch", thread_id: first }]);
+      expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE '%cleanup-%'`).get()).toEqual({ n: 0 });
+      // The next pass runs the owner's branch step: only its bb/ branch is looked up (and deleted), never the others'.
+      await state.supervisorCycle();
+      const branchCalls = execFileMock.mock.calls.map((call) => JSON.stringify(call[1])).filter((args) => args.includes("refs/heads/bb/"));
+      expect(branchCalls.length).toBeGreaterThan(0);
+      for (const args of branchCalls) expect(args).toContain(`refs/heads/bb/${first}`);
+      expect(job(state, first!).step).toBe("storage");
+    });
+
+    test.each([["trouble", true], ["stuck", false]])("three jobs on an environment with teardown %s raise exactly one alert", async (kind, trouble) => {
+      const state = await setup();
+      const [first, second, third] = await sharedJobs(state, 3, () => ({ phase: "destroying", trouble }));
+      await state.supervisorCycle();
+      expect(alerts(state, `cleanup-teardown-${kind}`)).toEqual([{ source_thread_id: first }]);
+      expect(job(state, first!)).toEqual({ step: "storage", outcome: trouble ? "branch kept: teardown trouble" : "branch kept: teardown stuck" });
+      for (const id of [second!, third!]) expect(job(state, id)).toEqual({ step: "storage", outcome: `worktree shared: ${kind} handled by ${first}` });
+      expect(claims(state)).toEqual([{ action: kind, thread_id: first }]);
+    });
+
+    test("a job that finds the environment in use claims nothing: a later job that finds it destroyed still owns the branch", async () => {
+      const state = await setup();
+      const [first, second] = await sharedJobs(state, 2, (call) => ({ phase: call === 0 ? "active" : "destroyed" }));
+      await state.supervisorCycle();
+      expect(job(state, first!)).toEqual({ step: "storage", outcome: "branch kept: environment in use" });
+      expect(job(state, second!)).toMatchObject({ step: "branch" });
+      expect(claims(state)).toEqual([{ action: "branch", thread_id: second }]);
+    });
+
+    test.each([
+      ["destroyed", { phase: "destroyed" as const }, "branch", null],
+      ["teardown trouble", { phase: "destroying" as const, trouble: true }, "storage", "cleanup-teardown-trouble"],
+      ["teardown stuck", { phase: "destroying" as const }, "storage", "cleanup-teardown-stuck"],
+    ])("a single job on its own worktree behaves as before shared claims: %s", async (_name, env, step, alert) => {
+      const state = await setup();
+      const [only] = await sharedJobs(state, 1, () => env);
+      await state.supervisorCycle();
+      expect(job(state, only!).step).toBe(step);
+      expect(job(state, only!).outcome ?? "").not.toContain("worktree shared");
+      expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE '%cleanup-teardown-%'`).get()).toEqual({ n: alert ? 1 : 0 });
+      if (alert) expect(alerts(state, alert)).toEqual([{ source_thread_id: only }]);
+    });
+  });
+
+  // Contracts (reviewer reuse, wave 2): repeated pinned review rounds of one task review in one worktree, checked out
+  // detached at each round's pinned commit; a reviewer whose worktree is gone, busy or not a worktree is never reused.
+  describe("reviewer worktree reuse across rounds", () => {
+    const PR = "https://github.com/acme/shop/pull/8";
+    const shaOf = (round: number) => String(round).repeat(40);
+    type Mode = { destroyed?: boolean; removed?: boolean; notWorktree?: boolean; unreadable?: boolean };
+    async function setupRounds(mode: Mode = {}) {
+      const state = await setup({ projectPath: "/oracle/checkout", system: { usageLimits: async () => ({}), config: async () => ({ primaryHostId: "host_1" }) } });
+      let sha = shaOf(1);
+      execFileMock.mockImplementation(async (file: string, args: string[]) => {
+        if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: sha, baseRefName: "main" }), stderr: "" };
+        throw new Error(`unexpected CLI ${file}`);
+      });
+      state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => {
+        if (mode.unreadable) throw new Error("host unreachable");
+        return {
+          id: environmentId, hostId: "host_1", workspaceProvisionType: "managed-worktree", isWorktree: !mode.notWorktree,
+          status: mode.destroyed ? "destroyed" : "ready", hostLifecycle: mode.removed ? "removed" : "ready", lifecycle: { phase: "idle" },
+        };
+      });
+      const chief = (await start(state)).threadId;
+      await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", prUrl: PR }, chief);
+      const worker = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker'`).get() as any).thread_id as string;
+      await readyIdle(state, worker);
+      /** One review round at `round`'s pinned commit, approved; returns its reviewer and how it was launched. */
+      const round = async (n: number) => {
+        sha = shaOf(n);
+        await tool(state, "chief_review", { workerThreadId: worker }, chief);
+        const reviewer = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='reviewer' ORDER BY rowid DESC`).get() as any).thread_id as string;
+        const { environment, prompt } = state.spawned.at(-1);
+        await report(state, reviewer, { state: "ready", result: "Looks right", ...APPROVE });
+        return { reviewer, environment, prompt: String(prompt) };
+      };
+      return { state, round, worker, chief };
+    }
+    const fresh = { type: "host", workspace: { type: "managed-worktree" } };
+
+    test("four pinned rounds review in one worktree, each checked out detached at its own pinned commit", async () => {
+      const { state, round } = await setupRounds();
+      const rounds = [await round(1), await round(2), await round(3), await round(4)];
+      expect(rounds[0]!.environment).toMatchObject(fresh);
+      const first = state.live.get(rounds[0]!.reviewer)!.environmentId;
+      for (const [index, entry] of rounds.slice(1).entries()) {
+        expect(entry.environment).toEqual({ type: "reuse", environmentId: first });
+        expect(entry.prompt).toContain(`git checkout --detach ${shaOf(index + 2)}`);
+      }
+      expect(new Set(rounds.map((entry) => state.live.get(entry.reviewer)!.environmentId))).toEqual(new Set([first]));
+      expect(state.spawned.filter((args) => args.environment?.type === "host" && args.title?.startsWith("Review"))).toHaveLength(1);
+    });
+
+    test.each<[string, Mode, (state: State, reviewer: string) => void]>([
+      ["its worktree is destroyed", { destroyed: true }, () => {}],
+      ["its worktree is removed from the host", { removed: true }, () => {}],
+      ["its environment is not a worktree", { notWorktree: true }, () => {}],
+      ["its environment cannot be read", { unreadable: true }, () => {}],
+      ["the reviewer thread is archived", {}, (state, id) => state.live.set(id, { ...state.live.get(id)!, archivedAt: Date.now() } as any)],
+      ["the reviewer thread is deleted", {}, (state, id) => state.live.set(id, { ...state.live.get(id)!, deletedAt: Date.now() } as any)],
+      ["the reviewer thread is still active", {}, (state, id) => setLive(state, id, "active")],
+    ])("round 2 starts a fresh worktree when the earlier reviewer's worktree cannot be reused: %s", async (_name, mode, arrange) => {
+      const { state, round } = await setupRounds(mode);
+      const first = await round(1);
+      arrange(state, first.reviewer);
+      const second = await round(2);
+      expect(second.environment).toMatchObject(fresh);
+    });
+
+    // Contract (wave 2.3): a reusableEnvironment lookup that never settles times out (CLEANUP_READ_MS = 15 s per bb read) and
+    // round 2 still launches a fresh worktree. Mutation caught: dropping bounded() from either read in the server adapter
+    // hangs chief_review forever on a host that never answers.
+    test.each([
+      ["the earlier reviewer's thread lookup", "threads.get"],
+      ["the earlier reviewer's environment lookup", "environments.get"],
+    ] as const)("round 2 completes on a fresh worktree after %s never settles", async (_name, hungRead) => {
+      const { state, round, worker, chief } = await setupRounds();
+      const first = await round(1);
+      let pendingCalls = 0;
+      const never = () => { pendingCalls += 1; return new Promise<never>(() => {}); };
+      if (hungRead === "threads.get") {
+        state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+          if (threadId === first.reviewer) return never();
+          const thread = state.live.get(threadId);
+          if (!thread) throw new Error("not found");
+          return thread;
+        });
+      } else {
+        state.harness.sdk.stub("environments.get", async () => never());
+      }
+      const spawnedBefore = state.spawned.length;
+      execFileMock.mockImplementation(async (file: string, args: string[]) => {
+        if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: shaOf(2), baseRefName: "main" }), stderr: "" };
+        throw new Error(`unexpected CLI ${file}`);
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+      try {
+        let settled = false;
+        const review = tool(state, "chief_review", { workerThreadId: worker }, chief).finally(() => { settled = true; });
+        await vi.advanceTimersByTimeAsync(14_000);
+        expect(pendingCalls).toBe(1);
+        expect(settled).toBe(false);
+        expect(state.spawned).toHaveLength(spawnedBefore);
+        await vi.advanceTimersByTimeAsync(1_500);
+        await review;
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(state.spawned).toHaveLength(spawnedBefore + 1);
+      expect(state.spawned.at(-1).environment).toMatchObject(fresh);
+      expect(String(state.spawned.at(-1).prompt)).toContain(`git checkout --detach ${shaOf(2)}`);
+    });
   });
 
   describe("Spec Writer role", () => {
@@ -6919,8 +7266,8 @@ describe("tester role", () => {
       await readyIdle(state, writer);
       const w1 = await swap(state, chief, planner.threadId, 1, writer, "worker");
       await readyIdle(state, w1);
-      await delegateWave(state, chief.threadId, planner.threadId, 2, { branch: "feature/b" });
-      const w2 = workerOn(state, planner.threadId, 2).thread_id as string;
+      // Wave 2 is a legacy stacked row on its own branch B: a chain's wave 2 now replaces wave 1's worker on branch A.
+      const { threadId: w2 } = await legacyWave(state, chief.threadId, planner.threadId, 2, "feature/b");
       await readyIdle(state, w2);
       const repair = await swap(state, chief, planner.threadId, 1, w1, "spec-writer");
       await putWriter(state, chief.threadId, repair, how);
@@ -7524,6 +7871,7 @@ describe("tester role", () => {
 
     // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief.
     // Regression: the baseline rule lands in the planner brief instead of the read-only skill.
+    // Plan chains changed one bullet of both prompts (the `dependsOn: []` sentence now says an independent wave runs as its own chain); the rest is base's bytes.
     test("the planner prompt equals base 6d288a2's for a plain and a revision brief", async () => {
       const state = await setup();
       expect(await plannerFixture(state)).toBe(await oracleFile("planner-6d288a2.txt"));
@@ -7724,6 +8072,10 @@ describe("tester role", () => {
     // received. The real handlers run; nothing is observed through a production seam; only the storage root is normalized.
     // Regression: a refactor of admission or the waiver predicates changes a refusal sentence or its order, a worker prompt
     // field, an idempotent repeat, or tightens a loose path (a terminal prior, a review after a worker fix on a test wave).
+    // Plan chains (this branch) changed exactly these outcomes of the base snapshot, nothing else: wave 2 of a legacy plan, a second
+    // worker on a started head, and a replaces: across chains now refuse with the chain sentences (a later wave continues its chain's
+    // worker; the design-owner-approval refusal of a wave with no replaces is pre-empted by the same rule and still holds on replaces:);
+    // the independent-wave brief line names the chain. Every other block is the base's bytes.
     // <plan-admission-oracle-begin>
     const admissionFixture = async () => {
       const blocks: string[] = [];
@@ -8334,6 +8686,14 @@ describe("tester role", () => {
           },
           /** Delegates a plan wave, reports ready, goes idle: its id. */
           wave: (c: any, wave: number, extra: object = {}) => k.worker(c.chief, { planThreadId: c.planner, wave, ...extra }),
+          /** A plan wave as the server stored one before chains shared a branch: a worker of its own on its own branch, which chief_delegate no longer builds (see legacyWave). */
+          legacyWave: async (c: any, wave: number, branch: string) => {
+            await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded oracle fixture", branch }, c.chief);
+            const id = newestWorker();
+            state.db.prepare("UPDATE managed_threads SET plan_thread_id=?, plan_wave=?, unplanned_reason=NULL WHERE thread_id=?").run(c.planner, wave, id);
+            await readyIdle(state, id);
+            return id;
+          },
           replace: (chief: string, id: string, extra: object = {}) => tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", replaces: id, ...extra }, chief),
           /** Runs a call: its reply or its refusal, and how many threads it launched. */
           attempt: async (label: string, call: () => Promise<unknown>) => {
@@ -8396,7 +8756,7 @@ describe("tester role", () => {
       const fixBranches = (k: any, c: any) => async ([a, b]: string[]) => [await k.wave(c, 1, { replaces: a }), await k.wave(c, 3, { replaces: b })];
       /** Two stacked waves (2 builds on 1), tests waived: one review covers both, reviewed from the tip. */
       const stack = (k: any) => k.mk([P(1), P(2), TEST_WAVE(3)], [3]);
-      const stacked = async (k: any, c: any) => { const base = await k.wave(c, 1, { branch: "feature/a" }); return [await k.wave(c, 2, { branch: "feature/b" }), base]; };
+      const stacked = async (k: any, c: any) => { const base = await k.wave(c, 1, { branch: "feature/a" }); return [await k.legacyWave(c, 2, "feature/b"), base]; };
       const fixStack = (k: any, c: any) => async ([tip, base]: string[]) => { const fresh = await k.wave(c, 1, { replaces: base }); return [await k.wave(c, 2, { replaces: tip }), fresh]; };
 
       // 1. Replacement: the ladder.
@@ -9146,6 +9506,7 @@ describe("tester role", () => {
     };
     // <review-attempt-oracle-end>
 
+    // Plan chains changed one thing of the base snapshot: a pinned reviewer's fetch line now also checks the pinned commit out detached (`git fetch origin <branch> && git checkout --detach <sha>`).
     test("review attempt oracle", async () => {
       const head = await reviewAttemptFixture();
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "review-attempt-cf92d9c.txt"), "utf8");

@@ -10,16 +10,16 @@ import { createWaveSchedule, type PlanWave } from "./waveSchedule";
 type Row = {
   thread_id: string; role: string; kind: string | null; state: string; last_report_state: string | null; created_at: number;
   plan_thread_id: string | null; plan_wave: number | null; plan_waves: string | null; chief_thread_id: string | null;
-  report_path: string | null; owner_approval: string | null; brief: string | null;
+  report_path: string | null; owner_approval: string | null; brief: string | null; pr_url: string | null;
 };
-type Worker = { id: string; plan?: string; wave?: number; kind?: string; state?: string; last?: string | null; report?: string; approval?: string; brief?: string };
+type Worker = { id: string; plan?: string; wave?: number; kind?: string; state?: string; last?: string | null; report?: string; approval?: string; brief?: string; pr?: string };
 type Request = Parameters<ReturnType<typeof createPlanLifecycle<Row>>["admitDelegation"]>[0];
 
 const CHIEF = "chief";
 let clock = 0;
 const base = (thread_id: string, over: Partial<Row>): Row => ({
   thread_id, role: "worker", kind: "worker", state: "ready", last_report_state: "ready", created_at: ++clock, plan_thread_id: null,
-  plan_wave: null, plan_waves: null, chief_thread_id: CHIEF, report_path: null, owner_approval: null, brief: null, ...over,
+  plan_wave: null, plan_waves: null, chief_thread_id: CHIEF, report_path: null, owner_approval: null, brief: null, pr_url: null, ...over,
 });
 
 /** plans: planner id -> its waves. workers are created in order (oldest first). taskChain: unplanned prior id -> chain ids, tip to head. */
@@ -29,7 +29,7 @@ function world(plans: Record<string, PlanWave[]>, workers: Worker[] = [], taskCh
   for (const w of workers) {
     rows.set(w.id, base(w.id, {
       kind: w.kind ?? "worker", state: w.state ?? "ready", last_report_state: w.last === undefined ? "ready" : w.last,
-      plan_thread_id: w.plan ?? null, plan_wave: w.wave ?? null, report_path: w.report ?? null, owner_approval: w.approval ?? null, brief: w.brief ?? null,
+      plan_thread_id: w.plan ?? null, plan_wave: w.wave ?? null, report_path: w.report ?? null, owner_approval: w.approval ?? null, brief: w.brief ?? null, pr_url: w.pr ?? null,
     }));
   }
   const review = vi.fn((_planner: Row) => reviewRefusal);
@@ -99,11 +99,12 @@ describe("admitDelegation: plan facts handed to the worker brief", () => {
     expect(admit({ ...planned, wave: 3, prior: "w1" }).waveNext).toBeNull();
   });
 
-  test("an independent head (dependsOn: []) is independent only without a prior", () => {
+  test("an independent head (dependsOn: []) is independent only when it starts fresh; replacing a worker of another chain is refused", () => {
     const { admit } = world({ [P]: [{ path: "w1" }, { path: "w2", dependsOn: [] }] }, [{ id: "w1", plan: P, wave: 1 }]);
     expect(admit({ ...planned, wave: 2 }).waveIndependent).toBe(true);
-    expect(admit({ ...planned, wave: 2, prior: "w1" }).waveIndependent).toBe(false);
-    expect(admit({ ...planned, wave: 1 }).waveIndependent).toBe(false);
+    expect(world({ [P]: [{ path: "w1" }, { path: "w2", dependsOn: [] }] }).admit({ ...planned, wave: 1 }).waveIndependent).toBe(false);
+    // Rule (i): the prior works on wave 1, another chain; the old "independent only without a prior" answer is now a refusal.
+    expect(() => admit({ ...planned, wave: 2, prior: "w1" })).toThrow(/^Wave 2 belongs to the chain of waves 2; w1 works on wave 1, another chain\./);
   });
 
   test("unplanned: only kind and the task-chain facts are set", () => {
@@ -444,5 +445,116 @@ describe("waiveSpecs", () => {
     const waived: PlanWave[] = [{ path: "w1" }, { path: "w2", spec: true, specsSkipped: "docs exist" }];
     expect(world({ [P]: waived }).lifecycle.waiveSpecs(P, 2)).toEqual({ outcome: "already-waived", parent: 1 });
     expect(world({ [P]: waived }, [{ id: "w", plan: P, wave: 2 }]).lifecycle.waiveSpecs(P, 2)).toEqual({ outcome: "already-waived-delegated", parent: 1 });
+  });
+});
+
+// Contract (docs/specs/plan-chains.md "Chain Admission and Delegation", "Pull Request Pinning"): a chain has one worker lineage;
+// every later wave continues it with replaces:, a started chain is never started twice, replaces: never crosses chains of one
+// plan, and a replacement keeps its prior's pull request. Plan: chain A = waves 1-2, chain B = waves 3-4 (4 is its test wave).
+describe("admitDelegation: plan chains", () => {
+  const chains: PlanWave[] = [{ path: "w1" }, { path: "w2", dependsOn: [1] }, { path: "w3", dependsOn: [] }, { path: "w4", dependsOn: [3], test: true }];
+  const tester = { kind: "tester" as const, resolvedKind: "tester" as const };
+
+  describe("(ii) a non-head wave needs replaces:", () => {
+    test("with no worker on its chain yet, the refusal names the chain head to delegate first", () => {
+      const { admit } = world({ [P]: chains });
+      expect(() => admit({ ...planned, wave: 2 })).toThrow("Wave 2 builds on wave 1: delegate its chain head, wave 1, first (chief_forge_init, then chief_delegate), then continue with replaces: the chain's latest worker.");
+    });
+
+    test.each([
+      ["the newest worker of the chain", [{ id: "a", plan: P, wave: 1 }, { id: "b", plan: P, wave: 2 }], "b"],
+      ["a live worker before a newer finished one", [{ id: "a", plan: P, wave: 1 }, { id: "b", plan: P, wave: 2, state: "complete" }], "a"],
+    ] as const)("with a worker on the chain, the refusal names %s", (_name, workers, latest) => {
+      const { admit } = world({ [P]: [...chains, { path: "w5", dependsOn: [2] }] }, [...workers]);
+      expect(() => admit({ ...planned, wave: 5 })).toThrow(`Wave 5's chain (waves 1, 2, 5) already has worker ${latest} on wave ${latest === "a" ? 1 : 2}; a chain has one branch, PR and worktree. Continue it with replaces: ${latest} — chief_delegate (planThreadId: ${P}, wave: 5, replaces: ${latest}).`);
+    });
+
+    test("a legacy plan (no dependsOn) is one chain: wave 2 without replaces: is refused, with it admitted", () => {
+      const { admit } = world({ [P]: [{ path: "w1" }, { path: "w2" }, { path: "w3" }] }, [{ id: "w1", plan: P, wave: 1 }]);
+      expect(() => admit({ ...planned, wave: 2 })).toThrow(/already has worker w1 on wave 1/);
+      expect(() => admit({ ...planned, wave: 3 })).toThrow(/Wave 3's chain \(waves 1, 2, 3\) already has worker w1/);
+      expect(admit({ ...planned, wave: 2, prior: "w1" }).planPath).toBe("w2");
+    });
+
+    test("the tester naming advice carries kind: tester", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "c", plan: P, wave: 3 }]);
+      expect(() => admit({ ...planned, wave: 4, ...tester })).toThrow(/is a test wave: it runs on wave 3's branch/);
+    });
+  });
+
+  describe("(iii) a started chain is never started twice", () => {
+    test("a head wave with a worker on its chain, delegated without replaces:, is refused and names that worker", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "a", plan: P, wave: 1 }]);
+      expect(() => admit({ ...planned, wave: 1 })).toThrow("Wave 1's chain (waves 1, 2) already has worker a on wave 1; a chain has one branch, PR and worktree. Continue it with replaces: a — chief_delegate (planThreadId: plan, wave: 1, replaces: a).");
+    });
+
+    test("a worker deeper in the chain also marks the head started", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "b", plan: P, wave: 2 }]);
+      expect(() => admit({ ...planned, wave: 1 })).toThrow(/already has worker b on wave 2/);
+    });
+
+    test("replaces: the chain's own worker is admitted, for any wave of the chain", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "a", plan: P, wave: 1 }]);
+      expect(admit({ ...planned, wave: 1, prior: "a" }).planPath).toBe("w1");
+      expect(admit({ ...planned, wave: 2, prior: "a" }).planPath).toBe("w2");
+    });
+
+    test("a head wave with no worker on its chain starts fresh, whatever other chains already run", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "a", plan: P, wave: 1 }]);
+      expect(admit({ ...planned, wave: 3 })).toMatchObject({ planPath: "w3", waveIndependent: true });
+    });
+
+    test("a tester may still start fresh on a new branch once the tested worker is complete (afterMerge)", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "c", plan: P, wave: 3, state: "complete" }]);
+      expect(admit({ ...planned, wave: 4, branch: "post-merge", ...tester }).kind).toBe("tester");
+      expect(() => admit({ ...planned, wave: 4, ...tester })).toThrow(/is a test wave/);
+    });
+  });
+
+  describe("(i) replaces: never crosses chains of one plan", () => {
+    test("a worker of chain A cannot be replaced into chain B's head; the refusal names chief_forge_init on the head", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "a", plan: P, wave: 1 }]);
+      expect(() => admit({ ...planned, wave: 3, prior: "a" })).toThrow("Wave 3 belongs to the chain of waves 3, 4; a works on wave 1, another chain. An independent chain starts its own branch with chief_forge_init on its head wave 3, or replaces that chain's latest worker.");
+    });
+
+    test("when chain B already runs, the refusal names its latest worker instead", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "a", plan: P, wave: 1 }, { id: "c", plan: P, wave: 3 }]);
+      expect(() => admit({ ...planned, wave: 3, prior: "a" })).toThrow("another chain. An independent chain starts its own branch with chief_forge_init on its head wave 3, or replaces that chain's latest worker — chief_delegate (planThreadId: plan, wave: 3, replaces: c).");
+    });
+
+    test("the refusal comes before the pull request check, whichever URL is passed", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "a", plan: P, wave: 1, pr: "https://h/pull/1" }]);
+      expect(() => admit({ ...planned, wave: 3, prior: "a", prUrl: "https://h/pull/2" })).toThrow(/another chain/);
+    });
+
+    test("a worker of another plan is not a cross-chain prior: the fresh-plan wave 1 escape stays open", () => {
+      const { admit, rows } = world({ [P]: chains }, [{ id: "old", plan: "other", wave: 1, state: "blocked", last: "blocked" }]);
+      rows.set("other", base("other", { role: "planner", kind: null, plan_waves: JSON.stringify([{ path: "o1" }, { path: "o2" }]) }));
+      expect(admit({ ...planned, wave: 1, prior: "old" }).planPath).toBe("w1");
+    });
+  });
+
+  describe("(iv) a replacement keeps its prior's pull request", () => {
+    const pr = "https://github.com/acme/shop/pull/7";
+    const pinned = () => world({ [P]: chains }, [{ id: "a", plan: P, wave: 1, pr }]);
+
+    test("a different prUrl on a replacement is refused, naming both the worker and the pull request", () => {
+      expect(() => pinned().admit({ ...planned, wave: 2, prior: "a", prUrl: "https://github.com/acme/shop/pull/8" })).toThrow(`replaces: a carries pull request ${pr}; pass no prUrl or the same one. A plan chain has one pull request.`);
+    });
+
+    test("the same prUrl, or none, is admitted", () => {
+      expect(pinned().admit({ ...planned, wave: 2, prior: "a", prUrl: pr }).planPath).toBe("w2");
+      expect(pinned().admit({ ...planned, wave: 2, prior: "a" }).planPath).toBe("w2");
+    });
+
+    test("a prior with no recorded pull request accepts a prUrl", () => {
+      const { admit } = world({ [P]: chains }, [{ id: "a", plan: P, wave: 1 }]);
+      expect(admit({ ...planned, wave: 2, prior: "a", prUrl: pr }).planPath).toBe("w2");
+    });
+
+    test("an unplanned delegation is not pinned: no planThreadId, no pull request check", () => {
+      const { admit } = world({}, [{ id: "w", pr }]);
+      expect(admit({ prior: "w", prUrl: "https://github.com/acme/shop/pull/9" }).kind).toBe("worker");
+    });
   });
 });

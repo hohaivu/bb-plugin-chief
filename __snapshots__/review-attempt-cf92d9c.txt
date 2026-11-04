@@ -639,8 +639,8 @@ Set chief_report `lesson` (at most 400 characters) only for a durable, project-l
 Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.
 ## This review
 Independently review the whole plan: 2 branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change.
-- worker <W1> “Fix totals”: https://github.com/acme/shop/pull/11 (branch feature/a, targeting main), pinned to <shaB>: `git fetch origin feature/a`, then review `git diff origin/main...<shaB>`
-- worker <W2> “Fix totals”: https://github.com/acme/shop/pull/12 (branch feature/b, targeting main), pinned to <shaC>: `git fetch origin feature/b`, then review `git diff origin/main...<shaC>`
+- worker <W1> “Fix totals”: https://github.com/acme/shop/pull/11 (branch feature/a, targeting main), pinned to <shaB>: `git fetch origin feature/a && git checkout --detach <shaB>`, then review `git diff origin/main...<shaB>`
+- worker <W2> “Fix totals”: https://github.com/acme/shop/pull/12 (branch feature/b, targeting main), pinned to <shaC>: `git fetch origin feature/b && git checkout --detach <shaC>`, then review `git diff origin/main...<shaC>`
 Report your findings to Chief thread <chief> with chief_report, state ready, and a verdict.
 Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When review-context.md lists plan files, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.
 
@@ -720,7 +720,7 @@ Set chief_report `lesson` (at most 400 characters) only for a durable, project-l
 Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.
 ## This review
 Independently review the whole plan: 2 branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change.
-- worker <W1> “Fix totals”: https://github.com/acme/shop/pull/11 (branch feature/a, targeting main), pinned to <shaB>: `git fetch origin feature/a`, then review `git diff origin/main...<shaB>`
+- worker <W1> “Fix totals”: https://github.com/acme/shop/pull/11 (branch feature/a, targeting main), pinned to <shaB>: `git fetch origin feature/a && git checkout --detach <shaB>`, then review `git diff origin/main...<shaB>`
 - worker <W2> “Fix totals”: branch feature/b (https://github.com/acme/shop/pull/12), head not readable, not pinned: `git fetch origin feature/b`, then review `git diff <the project's default branch>...origin/feature/b`; the verdict binds to its report 1
 Report your findings to Chief thread <chief> with chief_report, state ready, and a verdict.
 Inspect the actual worktree and evidence; do not rely only on the worker's claims. When review-context.md lists plan files, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.
@@ -933,8 +933,8 @@ Set chief_report `lesson` (at most 400 characters) only for a durable, project-l
 Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.
 ## This review
 Independently review the whole plan: 2 branches, each with its own pull request, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change.
-- worker <W1> “Fix totals”: https://github.com/acme/shop/pull/11 (branch feature/a, targeting main), pinned to <c1>: `git fetch origin feature/a`, then review `git diff origin/main...<c1>`
-- worker <W2> “Fix totals”: https://github.com/acme/shop/pull/12 (branch feature/b, targeting main), pinned to <c2>: `git fetch origin feature/b`, then review `git diff origin/main...<c2>`
+- worker <W1> “Fix totals”: https://github.com/acme/shop/pull/11 (branch feature/a, targeting main), pinned to <c1>: `git fetch origin feature/a && git checkout --detach <c1>`, then review `git diff origin/main...<c1>`
+- worker <W2> “Fix totals”: https://github.com/acme/shop/pull/12 (branch feature/b, targeting main), pinned to <c2>: `git fetch origin feature/b && git checkout --detach <c2>`, then review `git diff origin/main...<c2>`
 Report your findings to Chief thread <chief> with chief_report, state ready, and a verdict.
 Inspect the pinned pull request commit and the pull request description; do not rely only on the worker's claims. When review-context.md lists plan files, read each in full before judging the change against it, including the worker's stated deviations and any unstated scope drift.
 

@@ -399,3 +399,68 @@ describe("headApproval: is the newest verdict an approve for what the worker wou
     });
   });
 });
+
+// Contract (docs/specs/plan-chains.md "Review Worktree"): the reviewer a later pinned review may reuse is the newest reviewer of any
+// state that was pinned to a head and covers a worker of the task's chain; an unpinned reviewer ran in a worker's own environment.
+describe("lastPinnedReviewer: the earlier reviewer whose worktree a pinned review may reuse", () => {
+  const SHA = "a".repeat(40);
+
+  test("none when nothing reviewed the task", () => {
+    const { ledger, worker } = world();
+    worker("w1");
+    expect(ledger.lastPinnedReviewer(["w1"])).toBeNull();
+  });
+
+  test("the newest pinned reviewer wins over an older pinned one, whatever its state", () => {
+    const { ledger, worker, reviewer } = world();
+    worker("w1");
+    reviewer("r1", ["w1"], { reviewed_head_sha: SHA, state: "ready" });
+    reviewer("r2", ["w1"], { reviewed_head_sha: SHA, state: "complete" });
+    expect(ledger.lastPinnedReviewer(["w1"])).toBe("r2");
+  });
+
+  test("an unpinned reviewer is skipped even when newer: the answer is the newest pinned one", () => {
+    const { ledger, worker, reviewer } = world();
+    worker("w1");
+    reviewer("r1", ["w1"], { reviewed_head_sha: SHA });
+    reviewer("r2", ["w1"]);
+    expect(ledger.lastPinnedReviewer(["w1"])).toBe("r1");
+    const only = world();
+    only.worker("w1");
+    only.reviewer("r1", ["w1"]);
+    expect(only.ledger.lastPinnedReviewer(["w1"])).toBeNull();
+  });
+
+  test("a reviewer of an earlier worker in the replaces: chain counts: the task, not the row, is the unit", () => {
+    const { ledger, worker, reviewer } = world();
+    worker("w1");
+    worker("w2", { replaces: "w1" });
+    reviewer("r1", ["w1"], { reviewed_head_sha: SHA });
+    expect(ledger.lastPinnedReviewer(["w2"])).toBe("r1");
+  });
+
+  test("a reviewer of an unrelated task is never returned", () => {
+    const { ledger, worker, reviewer } = world();
+    worker("w1");
+    worker("other");
+    reviewer("r1", ["other"], { reviewed_head_sha: SHA });
+    expect(ledger.lastPinnedReviewer(["w1"])).toBeNull();
+  });
+
+  test("a plan review covering several workers is found from any of them, and the lists are merged", () => {
+    const { ledger, worker, reviewer } = world();
+    worker("w1");
+    worker("w2");
+    reviewer("r1", ["w1", "w2"], { reviewed_head_sha: SHA });
+    expect(ledger.lastPinnedReviewer(["w2"])).toBe("r1");
+    expect(ledger.lastPinnedReviewer(["w1", "w2"])).toBe("r1");
+  });
+
+  test("the same creation time is broken by insertion order: the later row wins", () => {
+    const { ledger, worker, reviewer } = world();
+    worker("w1");
+    reviewer("r1", ["w1"], { reviewed_head_sha: SHA, created_at: 500 });
+    reviewer("r2", ["w1"], { reviewed_head_sha: SHA, created_at: 500 });
+    expect(ledger.lastPinnedReviewer(["w1"])).toBe("r2");
+  });
+});
