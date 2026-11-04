@@ -2450,10 +2450,10 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_spawn_child", "chief_plan", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_research"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_research"]);
     expect(chief.skills).toEqual(["chief"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
-    expect(worker.skills).toEqual(["chief-worker"]);
+    expect(worker.skills).toEqual(["chief-worker", "chief-role-worker"]);
     for (const tool of [...chief.tools, ...worker.tools] as any[]) {
       expect(tool.presentation?.label, tool.name).toMatchObject({ pending: expect.any(String), completed: expect.any(String) });
     }
@@ -2489,7 +2489,7 @@ describe("Chief backend", () => {
       pluginMetadata: { role: "reviewer", chiefThreadId: chief.threadId },
     });
     expect(resolved.tools.map((tool: any) => tool.name)).toContain("chief_report");
-    expect(resolved.skills).toEqual(["chief-worker"]);
+    expect(resolved.skills).toEqual(["chief-worker", "chief-role-reviewer"]);
   });
 
   test("persists a reviewer's verdict even if chief_report races the row insert", async () => {
@@ -3096,7 +3096,7 @@ describe("Chief backend", () => {
     expect(text.startsWith("Name the test file")).toBe(true);
     expect(text.startsWith("Remain read-only")).toBe(false);
     // The read-only reminder still follows, unchanged in wording.
-    expect(text).toContain("Remain read-only in the repository: do not create, modify, or delete any file it tracks. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.");
+    expect(text).toContain("Remain read-only: do not create, modify, or delete any file the repository tracks, and do not commit or push. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.");
   });
 
   test.each([
@@ -3177,7 +3177,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, opts);
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed", ...CLOSE_OUT }, opts);
 
     await expect(state.harness.behavior.callAgentTool(
       "chief_continue", { threadId: worker.threadId, instruction: "Keep going" }, opts,
@@ -3194,7 +3194,7 @@ describe("Chief backend", () => {
 
     await expect(state.harness.behavior.callAgentTool(
       "chief_continue", { threadId: worker.threadId, instruction: "x".repeat(501) }, opts,
-    )).rejects.toThrow(`chief_delegate (replaces: ${worker.threadId})`);
+    )).rejects.toThrow("instruction: Too big: expected string to have <=500 characters");
     expect(state.sent.filter((entry: any) => entry.threadId === worker.threadId)).toHaveLength(sentBefore);
 
     await state.harness.behavior.callAgentTool(
@@ -3247,7 +3247,7 @@ describe("Chief backend", () => {
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(advisor.threadId));
     expect(configured.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
-    expect(configured.skills).toEqual(["chief-worker"]);
+    expect(configured.skills).toEqual(["chief-worker", "chief-role-read-only"]);
   });
 
   test("consults without a worker in the project checkout, and only from Chief", async () => {
@@ -3569,6 +3569,9 @@ describe("Chief backend", () => {
         worker: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
         reviewer: null,
         advisor: null,
+        designer: null,
+        "spec-writer": null,
+        tester: null,
       },
       unusable: [],
     }]);
@@ -3639,7 +3642,7 @@ describe("Chief backend", () => {
     expect(state.spawned).toHaveLength(2);
 
     // Once that worker is complete the branch is free again.
-    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, { threadId: chief.threadId, projectId: "proj_1" });
+    await completeWorker(state, chief.threadId, worker.threadId, { result: "Landed" });
     await delegate(state, chief.threadId, "Fix checkout totals follow-up", { branch: "feature/fix-checkout-totals" });
     expect(state.spawned).toHaveLength(3);
   });
