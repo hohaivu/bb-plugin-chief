@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The plan chains domain manages execution topology, branch allocation, pull requests, and worker environments across plan waves.
+The plan chains domain manages execution topology, branch allocation, pull requests, worker environments, reviewer worktrees, and cleanup claims.
 
 ## Domain Terms
 
@@ -13,15 +13,20 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Task branch**: the Git branch created for a plan chain.
 - **Worker environment**: the managed worktree environment assigned to a worker thread.
 - **Legacy plan**: an earlier plan where each wave received an independent branch.
+- **Pinned review**: a review round bound to a specific pull request commit SHA.
+- **Unpinned review**: a review round without a readable commit SHA.
+- **Cleanup claim**: a persistent record in `cleanup_environment_claims` that assigns an environment action to one thread.
 
 ## Ownership and Entry Points
 
-Four modules own the plan chains domain:
+Six modules own the plan chains domain:
 
 1. `waveSchedule.ts` owns graph traversal, wave relationships, and wave absence.
 2. `planLifecycle.ts` owns delegation admission, role progression, and waivers.
-3. `server.ts` owns worker execution, forge initialization, and delegation tools.
+3. `server.ts` owns worker execution, forge initialization, delegation tools, and cleanup steps.
 4. `planProgress.ts` owns progress checks, review readiness, and legacy restack rules.
+5. `reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
+6. `reviewLedger.ts` owns reviewer tracking, coverage checks, and historical task chain queries.
 
 Callers interact with these entry points:
 
@@ -34,6 +39,8 @@ Callers interact with these entry points:
 - `chief_forge_init(params)`: initializes the forge repository branch, pull request, and issue.
 - `startWorker(params)`: prepares and launches a worker thread in an environment.
 - `restackOf(worker, waves)`: determines whether a legacy wave requires a restack.
+- `reusableEnvironment(threadId)`: returns the environment of an earlier reviewer if it is available for reuse.
+- `cleanupStep(job, eligible)`: executes lifecycle cleanup transitions and records environment claims.
 
 ## Flows and States
 
@@ -55,6 +62,23 @@ Independent chains run in parallel:
 2. Chief calls `chief_forge_init` separately for each chain head.
 3. Each chain head receives an independent branch, pull request, and worker environment.
 4. Each chain proceeds through its waves independently.
+
+Reviewers reuse pinned worktrees across review rounds:
+
+1. Chief starts a pinned review for a completed task.
+2. The server searches for the newest earlier pinned reviewer across target task chains.
+3. The server reuses that reviewer worktree when the environment is reusable and distinct from any live target worker environment.
+4. The reviewer brief instructs the reviewer to checkout the pinned commit detached.
+5. The server creates a fresh managed worktree when no eligible earlier reviewer exists.
+
+Shared worktree cleanup coordinates action ownership:
+
+1. Multiple cleanup jobs start for threads that share one worktree environment.
+2. Each job proceeds through the archive step.
+3. The first job that observes the environment removed claims branch deletion and deletes the branch.
+4. Other jobs observe the existing claim, record outcome `worktree shared: branch handled by <owner>`, and advance to storage without an alert.
+5. The first job that observes teardown trouble or a stuck state records a claim and creates an alert.
+6. Other jobs observe that claim and advance to storage without creating an alert.
 
 ## Contracts
 
@@ -95,6 +119,28 @@ Independent chains run in parallel:
 - `chief_forge_init` formats the tracking issue body to state one pull request per chain. Reason: the tracking issue text must describe the chain pull request model.
 - `chief_forge_init` formats unplanned pull request bodies identically to base commit behavior. Reason: unplanned tasks follow single-task forge conventions without plan chains.
 
+### Review Worktree
+
+- `startReview` launches a fresh managed worktree on the pull request branch for the first pinned review of a task. Reason: a new review requires an isolated worktree checkout.
+- `startReview` reuses the newest earlier pinned reviewer worktree for a later pinned review of the same task when that reviewer is eligible. Reason: worktree reuse saves disk space and checkout time across review rounds.
+- `reusableEnvironment` returns an environment only when the earlier reviewer thread is live, not archived, not active, and has an existing worktree. Reason: reviews must not disrupt active threads or touch deleted environments.
+- `startReview` never reuses an environment that matches the live environment identifier of any review target worker. Reason: a reviewer must not mutate or lock the workspace of an active target worker.
+- The reviewer brief instructs the reviewer to checkout the pinned commit detached. Reason: detached checkouts avoid local branch divergence during review.
+- `startReview` launches a fresh managed worktree when `reusableEnvironment` returns null, rejects, or times out. Reason: review launches must continue without failure when reuse cannot complete safely.
+- `startReview` uses the live environment of the worker for an unpinned review. Reason: unpinned reviews run directly in the environment of the worker.
+- `startReview` never selects an unpinned review environment for later reviewer reuse. Reason: unpinned reviews record no pinned commit SHA and belong to workers.
+
+### Shared Worktree Cleanup
+
+- `cleanupStep` records an action claim in `cleanup_environment_claims` before deleting branches or issuing teardown alerts. Reason: atomic claims elect exactly one owner for each shared worktree action.
+- The first cleanup job that observes the worktree environment removed claims and executes branch deletion. Reason: one job must remove the shared branch safely.
+- The first cleanup job that observes environment teardown trouble claims and emits a `cleanup-teardown-trouble:alert` alert. Reason: shared teardown failures must produce exactly one alert for the environment.
+- The first cleanup job that observes stuck teardown claims and emits a `cleanup-teardown-stuck:alert` alert. Reason: timeout warnings on a shared environment must not trigger duplicate operator alerts.
+- A cleanup job transitions to `storage` with outcome `worktree shared: <action> handled by <owner>` when another job owns the claim. Reason: non-owning jobs must complete cleanup without repeating branch or alert actions.
+- `cleanupStep` records no claim when teardown discovers that the environment is in use. Reason: an environment in active use retains its branch without claiming permanent deletion rights.
+- A cleanup job that later observes the environment destroyed can claim branch deletion after a previous in-use observation. Reason: earlier in-use states do not lock future deletion ownership.
+- A single cleanup job on an unshared environment retains existing baseline step transitions, outcomes, and alerts. Reason: cleanup behavior for non-shared environments must not regress.
+
 ### Legacy Restack Handling
 
 - `planProgress.ts` evaluates restack requirements only for legacy plans where waves have distinct branches. Reason: new chains share a single branch and never require branch restacking.
@@ -114,6 +160,8 @@ Independent chains run in parallel:
 - A task branch hosts at most one active worker thread at any time. Reason: concurrent git operations on the same branch corrupt git reflogs.
 - Every worker in a plan chain shares the identical environment identifier, branch name, and pull request URL. Reason: chain identity must remain uniform across all wave transitions.
 - A replacement worker marks its superseded worker as complete. Reason: superseded workers must release active claims on resources.
+- Exactly one cleanup job owns each action for a shared environment in `cleanup_environment_claims`. Reason: primary key constraints prevent duplicate claim owners.
+- A reviewer worktree never hosts review execution on the live environment of an active target worker. Reason: concurrent reviewer execution inside a worker workspace causes file collisions.
 - `legacyWaveGraph.oracle.json` decisions remain identical to base commit results. Reason: legacy plan verification contracts require strict regression avoidance.
 
 ## Related Decisions
