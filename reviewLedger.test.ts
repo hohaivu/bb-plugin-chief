@@ -262,6 +262,44 @@ describe("openReviews: the open reviews of workers' task chains", () => {
   });
 });
 
+describe("busyReview: the busy open review chief_complete names when it refuses skipReview", () => {
+  const chain = (busy?: (status: string) => boolean) => {
+    const w = world(busy);
+    w.worker("w1");
+    w.worker("w2", { replaces: "w1" });
+    return w;
+  };
+
+  test("the worker's own review comes first even when a review of an older chain member is newer", () => {
+    const { ledger, reviewer } = chain();
+    reviewer("r2", ["w2"], { created_at: 100, state: "working" });
+    reviewer("r1", ["w1"], { created_at: 200, state: "working" });
+    expect(ledger.busyReview("w2")?.thread_id).toBe("r2");
+    // openReviews orders by age (reviewStart's rule): the same data gives the other answer there.
+    expect(ledger.openReviews(["w2"]).inFlight?.thread_id).toBe("r1");
+  });
+
+  test("an idle own review is skipped: the next busy review down the chain is named", () => {
+    const { ledger, reviewer } = chain();
+    reviewer("r2", ["w2"], { created_at: 100, state: "ready" });
+    reviewer("r1", ["w1"], { created_at: 200, state: "working" });
+    expect(ledger.busyReview("w2")?.thread_id).toBe("r1");
+  });
+
+  test("a review of a worker later in the chain is not in this worker's chain", () => {
+    const { ledger, reviewer } = chain();
+    reviewer("r2", ["w2"], { state: "working" });
+    expect(ledger.busyReview("w1")).toBeUndefined();
+  });
+
+  test("busy is decided by the injected predicate, and completed reviews are ignored", () => {
+    const { ledger, reviewer } = chain((status) => status === "working");
+    reviewer("r2", ["w2"], { state: "complete" });
+    reviewer("r1", ["w1"], { state: "active" });
+    expect(ledger.busyReview("w2")).toBeUndefined();
+  });
+});
+
 describe("headApproval: is the newest verdict an approve for what the worker would ship", () => {
   const HEAD = "a".repeat(40);
   const OTHER = "b".repeat(40);

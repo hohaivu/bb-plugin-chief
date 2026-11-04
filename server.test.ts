@@ -8669,5 +8669,30 @@ describe("tester role", () => {
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "review-decisions-4b5ad00.txt"), "utf8");
       expect(head).toBe(oracle);
     }, 120_000);
+
+    // Contract: chief_complete's skipReview refusal names the first busy review down the worker's own task chain, own
+    // review first, as on base 4b5ad00; chief_review still picks newest first. Regression: sorting the chain's open reviews
+    // by age names the newer review of the replaced worker. Unplanned W1 is replaced by W2, then R2 starts on W2 and a
+    // newer R1 on W1 (an unplanned review of a replaced worker is allowed), so only a real chain scan names R2.
+    test("skipReview on a replacement names its own busy review, not a newer one on the replaced worker", async () => {
+      const state = await setup();
+      execFileMock.mockReset();
+      const chief = (await start(state)).threadId;
+      const worker = async (extra: object = {}) => {
+        await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", ...("replaces" in extra ? {} : { unplannedReason: "Bounded chain fixture" }), ...extra }, chief);
+        const id = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker' ORDER BY rowid DESC`).get() as any).thread_id as string;
+        await readyIdle(state, id);
+        return id;
+      };
+      const w1 = await worker();
+      const w2 = await worker({ replaces: w1 });
+      const r2 = (await chiefReview(state, chief, { workerThreadId: w2 })).threadId;
+      const r1 = (await chiefReview(state, chief, { workerThreadId: w1 })).threadId;
+      expect(r1).not.toBe(r2);
+      // Pin R1 as the newer review in SQL, so the order never depends on the clock.
+      state.db.prepare(`UPDATE managed_threads SET created_at=(SELECT created_at FROM managed_threads WHERE thread_id=?)+1000 WHERE thread_id=?`).run(r2, r1);
+      const refusal = await tool(state, "chief_complete", { threadId: w2, skipReview: "chain order", testsSkipped: "chain order" }, chief).then(() => "completed", (error: Error) => error.message);
+      expect(refusal).toBe(`Refusing to skip the review of ${w2}: review ${r2} is still running; wait for its verdict.`);
+    }, 120_000);
   });
 });
