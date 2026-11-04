@@ -46,10 +46,10 @@ const NO_DEVIATIONS = "\n\n## Deviations from plan\nNone";
 const planFile = (state: { storageRoot: string }, plannerThreadId: string, n: number) => join(state.storageRoot, "chief", "proj_1", plannerThreadId, `plan-${n}.md`);
 const TEST_WAVE = (n: number, dependsOn?: number[]) => ({ body: wave(n, "Write the tests."), test: true, ...(dependsOn ? { dependsOn } : {}) });
 
-function configurationContext(threadId: string, projectId = "proj_1"): PluginAgentConfigurationContext {
+function configurationContext(threadId: string, projectId = "proj_1", name = projectId === "proj_1" ? "Asha" : "Second"): PluginAgentConfigurationContext {
   return {
     thread: { id: threadId, title: null, parentThreadId: null, sourceThreadId: null },
-    project: { id: projectId, kind: "standard", name: projectId === "proj_1" ? "Asha" : "Second", gitRemoteUrl: null },
+    project: { id: projectId, kind: "standard", name, gitRemoteUrl: null },
     environment: { id: "env_1", name: "worktree", path: "/tmp/worktree", workspaceProvisionType: "managed-worktree", branchName: "chief/test" },
     host: { id: "host_1", name: "Local" },
     provider: { id: "codex", model: "model", capabilities: { supportsNativeUserQuestion: false } },
@@ -5391,13 +5391,13 @@ describe("chief_research", () => {
     expect(off).not.toContain("do not rerun the same fan-out");
   });
 
-  // The SDK cuts configure() instructions at 4096 chars (the testing host slices the same way), and chief.md may be up to 32,000.
-  test.each([5_000, 32_000])("a %i-char chief.md only trims project rules: Chief's own instructions stay inside the 4096-char cut", async (size) => {
+  // The SDK cuts configure() instructions at 4096 chars (the testing host slices the same way), and chief.md may be up to 32,000; the project name is also unbounded input.
+  test.each([[5_000, 4], [32_000, 4], [5_000, 5_000]])("a %i-char chief.md and a %i-char project name only trim project rules: Chief's own instructions stay inside the 4096-char cut", async (size, nameLength) => {
     const marker = "# Project rules marker";
     const state = await setup({ rules: `${marker}\n${"- Project rule text.\n".repeat(Math.ceil(size / 21))}`.slice(0, size) });
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const threadId = await roleThread(state, "chief");
-    const { instructions } = await state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
+    const { instructions } = await state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId, "proj_1", "N".repeat(nameLength)));
     expect(instructions!.length).toBe(4096);
     const coreEnd = instructions!.indexOf("chief_escalate with the thread and the full request");
     expect(coreEnd).toBeGreaterThan(-1);
