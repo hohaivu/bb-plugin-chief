@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7715,5 +7716,212 @@ describe("tester role", () => {
       expect(plainItems).toHaveLength(6);
       expect(plainItems.join("\n")).not.toContain("(6)");
     });
+  });
+});
+
+// Forge comments (wave 2): the callers in server.ts reach the outbox through the real gh adapter, so every test routes the
+// forge CLI at the execFile boundary. The same assertions hold on the pre-move base (c8a0d76) and on the module.
+describe("forge comments", () => {
+  type State = Awaited<ReturnType<typeof setup>>;
+  const PR = "https://github.com/acme/shop/pull/8";
+  const markerOf = (key: string) => `<!-- chief:${createHash("sha1").update(key).digest("hex").slice(0, 16)} -->`;
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const until = async (done: () => unknown) => { for (let i = 0; i < 300 && !done(); i += 1) await sleep(5); expect(done()).toBeTruthy(); };
+  const call = (state: State, tool: string, params: object, threadId: string) => state.harness.behavior.callAgentTool(tool, params, { threadId, projectId: "proj_1" }) as Promise<any>;
+  const rows = (state: State) => state.db.prepare(`SELECT * FROM forge_comments ORDER BY created_at, dedupe_key`).all() as any[];
+  const rowOf = (state: State, id: string) => state.db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(id) as any;
+  const forgeCalls = () => execFileMock.mock.calls.filter(([file, args]) => file === "gh" && args[0] === "api");
+  const postCalls = () => forgeCalls().filter(([, args]) => args.includes("POST"));
+  const bodyOf = (args: string[]) => args.find((arg) => arg.startsWith("body="))!.slice(5);
+  const never = () => new Promise<never>(() => {});
+  const bad = () => Object.assign(new Error("gh failed"), { stderr: "HTTP 502 bad gateway" });
+  /** gh answers pull-request lookups as the other tests do; `forge` decides what the comment API does. */
+  const route = (forge: (args: string[]) => unknown) => execFileMock.mockImplementation(async (file: string, args: string[]) =>
+    file === "gh" && args[0] === "api" ? forge(args) : file === "gh" && args[0] === "pr" ? { stdout: ghHead("feature/x") } : { stdout: "" });
+  /** The reporter's Chief alert, delivered despite the stuck forge call. */
+  const reportAlertDelivered = (state: State, reporter: string) =>
+    (state.db.prepare(`SELECT delivered_at FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${reporter}:report:%`) as any)?.delivered_at;
+  const alerts = (state: State, text: string) => state.sent.filter((message) => String(message.input?.[0]?.text).includes(text));
+
+  async function blockedWorker(state: State) {
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix totals", { prUrl: PR });
+    return { chief, worker, act: () => call(state, "chief_report", { state: "blocked", result: "Tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" }, worker.threadId) };
+  }
+  const readyWorker = async (state: State) => {
+    const { chief, worker } = await blockedWorker(state);
+    await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker.threadId);
+    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
+    return { chief, worker };
+  };
+
+  // The three caller kinds that enqueue from a tool call: each must finish its own work while the forge call is stuck.
+  const CALLERS: [string, string, (state: State) => Promise<{ act: () => Promise<unknown>; finished: () => void | Promise<void> }>][] = [
+    ["blocked report", "blocked:", async (state) => {
+      const { worker, act } = await blockedWorker(state);
+      return { act, finished: async () => { expect(rowOf(state, worker.threadId).state).toBe("blocked"); await until(() => reportAlertDelivered(state, worker.threadId)); } };
+    }],
+    ["reviewer verdict", "verdict:", async (state) => {
+      const { chief, worker } = await readyWorker(state);
+      const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
+      return {
+        act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId),
+        finished: async () => { expect(rowOf(state, review.threadId)).toMatchObject({ state: "ready", verdict: "approve" }); await until(() => reportAlertDelivered(state, review.threadId)); },
+      };
+    }],
+    ["completion", "complete:", async (state) => {
+      const { chief, worker } = await readyWorker(state);
+      return { act: () => completeWorker(state, chief.threadId, worker.threadId), finished: () => expect(rowOf(state, worker.threadId).state).toBe("complete") };
+    }],
+  ];
+
+  // Contract "Non-blocking callers (R3)": a forge call that never answers or fails never stalls the tool call, the state change
+  // or the Chief alert; the row records the attempt. Regression: a caller awaits the post, or the post runs inside the transaction.
+  test.each(CALLERS)("%s finishes its work while the forge call never answers", async (_name, prefix, scenario) => {
+    const state = await setup();
+    route(() => never());
+    const { act, finished } = await scenario(state);
+    await act();
+    await finished();
+    await until(() => rows(state).find((r) => r.dedupe_key.startsWith(prefix))?.attempts === 1);
+    expect(rows(state).find((r) => r.dedupe_key.startsWith(prefix))).toMatchObject({ posted_at: null, gave_up_at: null });
+    // The supervisor tick does not wait for the stuck drain, and the single-flight drain makes no second call.
+    await state.supervisorCycle();
+    expect(postCalls()).toHaveLength(1);
+  });
+
+  test.each(CALLERS)("%s finishes its work when the forge call fails", async (_name, prefix, scenario) => {
+    const state = await setup();
+    route(() => { throw bad(); });
+    const { act, finished } = await scenario(state);
+    await act();
+    await finished();
+    await until(() => rows(state).find((r) => r.dedupe_key.startsWith(prefix))?.last_error);
+    expect(rows(state).find((r) => r.dedupe_key.startsWith(prefix))).toMatchObject({ attempts: 1, posted_at: null, gave_up_at: null, last_error: expect.stringContaining("502") });
+  });
+
+  // Contract "Equivalence of stored rows": a blocked report on a pull request posts one comment whose body ends with its marker.
+  test("a blocked report posts one comment through the gh adapter, and a repeated drain adds none", async () => {
+    const state = await setup();
+    route(() => ({ stdout: "" }));
+    const { act } = await blockedWorker(state);
+    await act();
+    await until(() => rows(state)[0]?.posted_at);
+    const [row] = rows(state);
+    expect(row.dedupe_key).toMatch(/^blocked:thr_\d+:1$/);
+    expect(postCalls()).toHaveLength(1);
+    const [, args] = postCalls()[0]!;
+    expect(args).toEqual(expect.arrayContaining(["--hostname", "github.com", "--method", "POST"]));
+    expect(bodyOf(args)).toBe(row.body);
+    expect(row.body.endsWith(`\n\n${markerOf(row.dedupe_key)}`)).toBe(true);
+    expect(row.body).toContain("**Blocker:** Totals test fails");
+    await state.supervisorCycle();
+    await sleep(20);
+    expect(postCalls()).toHaveLength(1);
+  });
+
+  // Contract "Rolled-back transaction writes nothing": the verdict/blocked row is enqueued inside report()'s transaction.
+  // Regression: the post is started before the commit, or the row survives the rollback.
+  test("a report whose transaction rolls back queues no row and posts nothing", async () => {
+    const state = await setup();
+    route(() => ({ stdout: "" }));
+    const { worker, act } = await blockedWorker(state);
+    state.db.exec(`DROP TABLE alert_outbox`);
+    await expect(act()).rejects.toThrow();
+    await sleep(30);
+    expect(rows(state)).toEqual([]);
+    expect(forgeCalls()).toHaveLength(0);
+    expect(rowOf(state, worker.threadId).state).not.toBe("blocked");
+  });
+
+  // Contract "enqueue defers the alert": a queue-write failure never fails the report; Chief hears of it after the commit.
+  test("a failed queue write leaves the report intact and alerts Chief", async () => {
+    const state = await setup();
+    route(() => ({ stdout: "" }));
+    const { worker, act } = await blockedWorker(state);
+    state.db.exec(`DROP TABLE forge_comments`);
+    await act();
+    expect(rowOf(state, worker.threadId).state).toBe("blocked");
+    await until(() => alerts(state, "Could not queue the forge comment blocked").length);
+    expect(alerts(state, "The local record is intact.")).not.toHaveLength(0);
+    expect(forgeCalls()).toHaveLength(0);
+  });
+
+  // Contract "Exactly one escalation" + inherited limits: a row left at attempts=5 by an earlier process runs again at once
+  // as attempt 6 on a fresh instance, scans first, and escalates once with the "after 5 attempts" text. These are limits kept, not fixed.
+  test("a row left at 5 attempts retries at once after a restart, escalates once, and is then terminal", async () => {
+    const state = await setup();
+    const { worker } = await blockedWorker(state);
+    const key = `blocked:${worker.threadId}:9`;
+    state.db.prepare(`INSERT INTO forge_comments (dedupe_key, project_id, thread_id, target, body, mention, attempts, created_at) VALUES (?, 'proj_1', ?, ?, ?, 0, 5, ?)`)
+      .run(key, worker.threadId, PR, `body\n\n${markerOf(key)}`, Date.now());
+    const order: string[] = [];
+    route((args) => {
+      if (args.includes("POST")) { order.push("post"); throw bad(); }
+      order.push("scan");
+      return { stdout: "" };
+    });
+    await state.supervisorCycle();
+    await until(() => rows(state)[0]?.gave_up_at);
+    expect(order).toEqual(["scan", "post"]);
+    expect(rows(state)[0]).toMatchObject({ attempts: 6, posted_at: null });
+    await until(() => alerts(state, "after 5 attempts").length === 1);
+    await state.supervisorCycle();
+    await sleep(30);
+    expect(forgeCalls()).toHaveLength(2);
+    expect(alerts(state, "after 5 attempts")).toHaveLength(1);
+  });
+
+  test("a row that exhausts its attempts for a thread with no Chief is logged as an error, not alerted", async () => {
+    const state = await setup();
+    const { worker } = await blockedWorker(state);
+    state.db.prepare(`UPDATE managed_threads SET chief_thread_id=NULL WHERE thread_id=?`).run(worker.threadId);
+    const key = `blocked:${worker.threadId}:9`;
+    state.db.prepare(`INSERT INTO forge_comments (dedupe_key, project_id, thread_id, target, body, mention, attempts, created_at) VALUES (?, 'proj_1', ?, ?, ?, 0, 4, ?)`)
+      .run(key, worker.threadId, PR, `body\n\n${markerOf(key)}`, Date.now());
+    route((args) => { if (args.includes("POST")) throw bad(); return { stdout: "" }; });
+    await state.supervisorCycle();
+    await until(() => state.harness.logEntries.some((entry) => entry.level === "error" && entry.message.includes("after 5 attempts")));
+    expect(alerts(state, "after 5 attempts")).toHaveLength(0);
+  });
+
+  // Contract "chief_escalate": the same request twice posts once, with the owner mention, resolved at post time.
+  test("chief_escalate twice with one request queues and posts one comment that mentions the owner", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ forgeOwnerHandle: "@boss" });
+    route(() => ({ stdout: "" }));
+    const { chief, worker } = await blockedWorker(state);
+    const first = await call(state, "chief_escalate", { threadId: worker.threadId, request: "Pick a currency rounding rule." }, chief.threadId);
+    const second = await call(state, "chief_escalate", { threadId: worker.threadId, request: "Pick a currency rounding rule." }, chief.threadId);
+    expect(first).toContain(`Queued for ${PR}`);
+    expect(second).toContain(`Queued for ${PR}`);
+    await until(() => rows(state)[0]?.posted_at);
+    expect(rows(state)).toHaveLength(1);
+    expect(postCalls()).toHaveLength(1);
+    expect(bodyOf(postCalls()[0]![1])).toContain("@boss");
+    expect(bodyOf(postCalls()[0]![1])).toContain("Pick a currency rounding rule.");
+  });
+
+  // Contract "Table persistence and migration index": the host hashes each migration statement by index and refuses a mismatch,
+  // so the statement list keeps its base prefix byte for byte and forge_comments stays at index 114.
+  // The digests were computed on base c8a0d76. Regression: a statement before index 114 moves or changes, or the table text drifts.
+  test("the migration prefix and the forge_comments statement match the base bytes", () => {
+    const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(131);
+    expect(sha256(JSON.stringify(MIGRATIONS.slice(0, 131)))).toBe("06d2542eb36bce964295e9664ed9ce6670c59f03bf1bd605a5bae6092acfa6ba");
+    expect(MIGRATIONS[114]).toMatch(/^CREATE TABLE forge_comments/);
+    expect(sha256(MIGRATIONS[114]!)).toBe("a3417ec24942a9bbcebd37d78f81c24adfc436e63223e91291d30553a718982c");
+  });
+
+  test("a database migrated before forge_comments upgrades, and the host refuses a changed forge_comments statement", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    bb.storage.migrate(db, MIGRATIONS.slice(0, 114));
+    expect(db.prepare(`SELECT name FROM sqlite_master WHERE name='forge_comments'`).get()).toBeUndefined();
+    bb.storage.migrate(db, MIGRATIONS);
+    expect(db.prepare(`SELECT name FROM sqlite_master WHERE name='forge_comments'`).get()).toEqual({ name: "forge_comments" });
+    const changed = MIGRATIONS.map((statement, index) => index === 114 ? `${statement} ` : statement);
+    expect(() => bb.storage.migrate(db, changed)).toThrow(/migration 114 does not match/);
   });
 });
