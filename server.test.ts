@@ -355,6 +355,10 @@ async function chiefReview(state: Awaited<ReturnType<typeof setup>>, chiefThread
 }
 
 // A reviewer's ready report must carry findings: [] for an approve and a blocking entry for request_changes.
+/** The review-context.md a reviewer reads: the brief, the worker's report and any earlier review travel there, not in the prompt. */
+const reviewContextOf = (state: { storageRoot: string }, reviewerThreadId: string) => readFile(join(state.storageRoot, reviewerThreadId, "review-context.md"), "utf8");
+const latestReviewContext = async (state: Awaited<ReturnType<typeof setup>>) =>
+  reviewContextOf(state, (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId);
 const APPROVE = { verdict: "approve", findings: [] } as const;
 const REQUEST_CHANGES = { verdict: "request_changes", findings: [{ file: "totals.ts", line: 1, severity: "blocking", message: "Totals go negative." }] } as const;
 
@@ -1630,9 +1634,12 @@ describe("Chief backend", () => {
       expect(entry.environment).toEqual({ type: "reuse", environmentId: "env_worker" });
     }
     expect((await status(state)).threads.find((row) => row.threadId === firstReviewer.threadId)?.state).toBe("complete");
-    expect(reviewSpawns[1].prompt).toContain("Totals are off by the discount");
-    expect(reviewSpawns[1].prompt).toContain("Verdict: request_changes");
-    expect(reviewSpawns[1].prompt).toContain("The previous review");
+    const secondReviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
+    const context = await reviewContextOf(state, secondReviewer.threadId);
+    expect(context).toContain(`## The previous review (${firstReviewer.threadId})`);
+    expect(context).toContain("Totals are off by the discount");
+    expect(context).toContain("Verdict: request_changes");
+    expect(reviewSpawns[1].prompt).toContain("Check each finding of the previous review");
     expect(state.sent.filter((entry) => entry.threadId === firstReviewer.threadId)
       .some((entry) => entry.input[0].text.includes("Re-check"))).toBe(false);
     // The worker's own ready report names the exact next call; chief_review itself sends no alert.
@@ -1738,7 +1745,7 @@ describe("Chief backend", () => {
     await reject(reviewer.threadId);
     expect(state.sent.at(-1).input[0].text).toContain("Verdict: request_changes");
     expect(state.sent.at(-1).input[0].text).toContain(`chief_delegate (replaces: ${worker.threadId})`);
-    expect(state.sent.at(-1).input[0].text).not.toContain("not converging");
+    expect(state.sent.at(-1).input[0].text).not.toContain("consecutive rounds");
     expect(state.sent.at(-1).input[0].text).not.toContain("chief_consult");
     expect(JSON.stringify(await state.harness.behavior.callAgentTool(
       "chief_inspect", { threadId: reviewer.threadId }, { threadId: chief.threadId },
@@ -1752,10 +1759,10 @@ describe("Chief backend", () => {
     const secondReviewer = (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
     expect(secondReviewer.threadId).not.toBe(reviewer.threadId);
     await reject(secondReviewer.threadId);
-    expect(state.sent.at(-1).input[0].text).toContain("not converging");
-    expect(state.sent.at(-1).input[0].text).toContain("escalate to the user");
-    expect(state.sent.at(-1).input[0].text).toContain(`Call chief_consult (workerThreadId: ${worker.threadId}) only when a finding is disputed`);
-    expect(state.sent.at(-1).input[0].text).toContain(`hand it straight to a fresh worker with chief_delegate (replaces: ${worker.threadId})`);
+    expect(state.sent.at(-1).input[0].text).toContain("still requires changes after 2 consecutive rounds");
+    expect(state.sent.at(-1).input[0].text).toContain(`Call chief_consult (workerThreadId: ${worker.threadId}) now, before any further delegation`);
+    expect(state.sent.at(-1).input[0].text).toContain(`hand its advice to one fresh worker with chief_delegate (replaces: ${worker.threadId})`);
+    expect(state.sent.at(-1).input[0].text).toContain("If that review still requires changes, stop and escalate to the user.");
     expect(state.sent.at(-1).input[0].text).not.toContain("Before starting another worker round");
   });
 
@@ -1840,15 +1847,18 @@ describe("Chief backend", () => {
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready for review" }, { threadId: worker.threadId, projectId: "proj_1" });
       await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" });
       const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-      return { state, chief, worker, reviewer, path: join(state.storageRoot, reviewer.threadId, "verdict.md") };
+      const pathOf = () => (state.db.prepare("SELECT verdict_path FROM managed_threads WHERE thread_id=?").get(reviewer.threadId) as { verdict_path: string }).verdict_path;
+      return { state, chief, worker, reviewer, pathOf };
     };
     const findings = `${"The discount is applied twice. ".repeat(80)}END-OF-FINDINGS`;
 
     test("persists a reviewer's full verdict to a file and names it in the alert and inspect", async () => {
-      const { state, chief, worker, reviewer, path } = await reviewed();
+      const { state, chief, worker, reviewer, pathOf } = await reviewed();
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: findings, ...REQUEST_CHANGES, regression: true, recommendation: "Apply it once",
       }, { threadId: reviewer.threadId, projectId: "proj_1" });
+      const path = pathOf();
+      expect(path).toMatch(/verdict-1\.md$/);
       const file = await readFile(path, "utf8");
       expect(file).toContain(findings);
       expect(file).toContain("Verdict: request_changes\nRegression: yes");
@@ -1863,20 +1873,22 @@ describe("Chief backend", () => {
     });
 
     test("hands a replacement worker the reviewer's verdict file", async () => {
-      const { state, chief, worker, reviewer, path } = await reviewed();
+      const { state, chief, worker, reviewer, pathOf } = await reviewed();
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: findings, ...REQUEST_CHANGES,
       }, { threadId: reviewer.threadId, projectId: "proj_1" });
       await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
       const prompt: string = state.spawned.at(-1).prompt;
-      expect(prompt).toContain(`Verdict file (read it in full): ${path}`);
+      expect(prompt).toContain(`Verdict file: ${pathOf()}`);
+      expect(prompt).toContain("Totals go negative.");
       expect(prompt).toContain("names a plan file or verdict file, read that file in full");
     });
 
     test("a failed verdict-file write does not fail the report", async () => {
       const { state, chief, reviewer } = await reviewed();
-      // A plain file where the reviewer's storage directory should be makes the write fail.
-      await writeFile(join(state.storageRoot, reviewer.threadId), "not a directory");
+      // A plain file where the reviewer's artifact directory should be makes the write fail.
+      await mkdir(join(state.storageRoot, "chief", "proj_1"), { recursive: true });
+      await writeFile(join(state.storageRoot, "chief", "proj_1", reviewer.threadId), "not a directory");
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: findings, ...APPROVE,
       }, { threadId: reviewer.threadId, projectId: "proj_1" });
@@ -1921,7 +1933,7 @@ describe("Chief backend", () => {
     // Phase 3's very first rejection must not read as two rounds of disagreement.
     await verdict((await latestReviewer()).threadId, "request_changes");
     expect(state.sent.at(-1).input[0].text).toContain("Verdict: request_changes");
-    expect(state.sent.at(-1).input[0].text).not.toContain("not converging");
+    expect(state.sent.at(-1).input[0].text).not.toContain("consecutive rounds");
     expect(state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals")).toHaveLength(3);
   });
 
@@ -1944,7 +1956,7 @@ describe("Chief backend", () => {
     expect(text).toContain("introduced a new problem");
     expect(text).toContain(`chief_delegate (replaces: ${worker.threadId})`);
     expect(text).not.toContain("chief_consult (workerThreadId");
-    expect(text).not.toContain("not converging");
+    expect(text).not.toContain("consecutive rounds");
     const consultAction = `The reviewer requires changes. The reviewer reports this change introduced a new problem; make the fix's brief name it. Hand the fix to a fresh worker with chief_delegate (replaces: ${worker.threadId}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`;
     expect(text).toContain(consultAction);
 
@@ -1973,7 +1985,7 @@ describe("Chief backend", () => {
 
     const text = state.sent.at(-1).input[0].text as string;
     expect(text).toContain("Verdict: approve");
-    expect(text).toContain("The reviewer approves. Complete this work, then mark the pull request ready.");
+    expect(text).toContain(`The reviewer approves. chief_complete (threadId: ${worker.threadId}); it marks the pull request ready.`);
     expect(text).not.toContain("chief_consult");
   });
 
@@ -1987,12 +1999,12 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool(
       "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
     );
-    const review = state.spawned.find((entry: any) => entry.title === "Review · Fix checkout totals");
     // Without the brief the reviewer scores the change against a standard nobody set.
-    expect(review.prompt).toContain("Correct and verify totals");
-    expect(review.prompt).toContain("Regression passes");
-    expect(review.prompt).toContain("Totals fixed and covered by a test");
-    expect(review.prompt).toContain(`bb chief inspect ${worker.threadId}`);
+    const context = await latestReviewContext(state);
+    expect(context).toContain("Correct and verify totals");
+    expect(context).toContain("Regression passes");
+    expect(context).toContain("Totals fixed and covered by a test");
+    expect(context).toContain(`bb chief inspect ${worker.threadId}`);
   });
 
   test("keeps a plan file path in the reviewer's brief excerpt behind a long-but-valid mission", async () => {
@@ -2017,10 +2029,10 @@ describe("Chief backend", () => {
       "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
     );
 
-    const review = state.spawned.find((entry: any) => entry.title === "Review · Fix checkout totals");
-    expect(review.prompt).toContain(planPath);
+    const context = await latestReviewContext(state);
+    expect(context).toContain(planPath);
     // The head of the mission survives the same clip, alongside the tail.
-    expect(review.prompt).toContain("Correct and verify totals.");
+    expect(context).toContain("Correct and verify totals.");
   });
 
   test("clips the worker's result in first and fresh reviewer prompts", async () => {
@@ -2035,10 +2047,10 @@ describe("Chief backend", () => {
       "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
     );
 
-    const review = state.spawned.find((entry: any) => entry.title === "Review · Fix checkout totals");
-    const resultLine = review.prompt.split("## What the worker reported")[1].split("\n")[1];
+    const context = await latestReviewContext(state);
+    const resultLine = context.split("## What the worker reported")[1]!.split("\n")[1]!;
     expect(resultLine.length).toBeLessThanOrEqual(300);
-    expect(review.prompt).toContain(`bb chief inspect ${worker.threadId}`);
+    expect(context).toContain(`bb chief inspect ${worker.threadId}`);
 
     // The fresh reviewer spawned after a fix clips the worker's new result the same way.
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
@@ -2052,10 +2064,10 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool(
       "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
     );
-    const freshReviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!;
-    const freshResultLine = freshReviewSpawn.prompt.split("## What the worker reported")[1].split("\n")[1];
+    const freshContext = await latestReviewContext(state);
+    const freshResultLine = freshContext.split("## What the worker reported")[1]!.split("\n")[1]!;
     expect(freshResultLine.length).toBeLessThanOrEqual(300);
-    expect(freshReviewSpawn.prompt).toContain(`bb chief inspect ${worker.threadId}`);
+    expect(freshContext).toContain(`bb chief inspect ${worker.threadId}`);
   });
 
   test("keeps reviewers read-only however the continuation is phrased", async () => {
@@ -3657,7 +3669,7 @@ describe("Chief backend", () => {
     const freshWorkerSpawn = state.spawned.at(-1);
     expect(freshWorkerSpawn.environment).toEqual({ type: "reuse", environmentId: "env_worker" });
     expect(freshWorkerSpawn.prompt).toContain("Review findings to fix");
-    expect(freshWorkerSpawn.prompt).toContain("Totals are off by the discount");
+    expect(freshWorkerSpawn.prompt).toContain("- totals.ts:1 — Totals go negative.");
     expect(freshWorkerSpawn.prompt).toContain("Your worktree is based on feature/fix-checkout-totals");
 
     const rows = (await status(state)).threads;
