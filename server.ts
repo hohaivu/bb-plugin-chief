@@ -1050,6 +1050,8 @@ export const MIGRATIONS = [
     `INSERT INTO chief_models_v8 SELECT * FROM chief_models`,
     `DROP TABLE chief_models`,
     `ALTER TABLE chief_models_v8 RENAME TO chief_models`,
+    // One owner per shared worktree and cleanup action: the first cleanup job to reach the decisive teardown observation claims it; other jobs on that environment skip it.
+    `CREATE TABLE IF NOT EXISTS cleanup_environment_claims (environment_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('branch','trouble','stuck')), thread_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (environment_id, action))`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -2319,6 +2321,18 @@ export default async function plugin(bb: BbPluginApi) {
       projectPath,
       projectHost: async (projectId) => (await projectHostId(projectId)) ?? await defaultHostId(),
       environmentHost: environmentHostId,
+      reusableEnvironment: async (threadId) => {
+        try {
+          const thread = await bounded(() => bb.sdk.threads.get({ threadId }), CLEANUP_READ_MS);
+          if (thread.deletedAt !== null || thread.archivedAt !== null || BUSY_STATUSES.has(thread.status) || !thread.environmentId) return null;
+          const environment = await bounded(() => bb.sdk.environments.get({ environmentId: thread.environmentId! }), CLEANUP_READ_MS);
+          if (!environment.isWorktree || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return null;
+          return { environmentId: thread.environmentId, hostId: environment.hostId };
+        } catch (error) {
+          bb.log.warn(`Reviewer ${threadId} is not reusable, starting a fresh worktree: ${String(error)}`);
+          return null;
+        }
+      },
       checkoutSkip: checkoutHostSkip,
       recordedCommands,
       writeFile: writeStorageFile,
@@ -2516,14 +2530,25 @@ export default async function plugin(bb: BbPluginApi) {
       } catch (error) {
         if (!MISSING.test(String(error))) throw error; // a read error is never proof that the environment is gone
       }
-      if (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return cleanupMove(job, "branch");
+      // One job per shared worktree owns each action: the first to reach it claims it, the others end at storage with no alert. "In use" claims nothing.
+      const shared = (action: "branch" | "trouble" | "stuck") => {
+        const claim = db.transaction(() => {
+          db.prepare(`INSERT OR IGNORE INTO cleanup_environment_claims (environment_id, action, thread_id, at) VALUES (?, ?, ?, ?)`).run(job.environment_id, action, id, Date.now());
+          return db.prepare(`SELECT thread_id FROM cleanup_environment_claims WHERE environment_id=? AND action=?`).get(job.environment_id, action) as { thread_id: string };
+        })();
+        if (claim.thread_id === id) return false;
+        cleanupMove(job, "storage", { outcome: `worktree shared: ${action} handled by ${claim.thread_id}` });
+        return true;
+      };
+      if (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return shared("branch") ? undefined : cleanupMove(job, "branch");
       const teardown = environment.lifecycle.teardown;
       const trouble = teardown?.message?.startsWith("Needs recovery:") ? teardown.message
         : environment.hostLifecycle === "cleanup-failed" && teardown?.status !== "running" ? `bb reports cleanup-failed${teardown?.message ? `: ${teardown.message}` : ""}` : null;
       const left = `Left in place: the bb/ branch ${job.branch} and the worktree. Inspect: bb environment show ${job.environment_id}.`;
-      if (trouble) return cleanupMove(job, "storage", { outcome: "branch kept: teardown trouble" }, { key: "cleanup-teardown-trouble:alert", message: `Cleanup of ${label}: bb could not remove its worktree environment: ${clip(trouble, 300)}. ${left}` });
+      if (trouble) return shared("trouble") ? undefined : cleanupMove(job, "storage", { outcome: "branch kept: teardown trouble" }, { key: "cleanup-teardown-trouble:alert", message: `Cleanup of ${label}: bb could not remove its worktree environment: ${clip(trouble, 300)}. ${left}` });
       if (Date.now() - generation <= TEARDOWN_LIMIT_MS) return;
       if (environment.lifecycle.phase === "active") return cleanupMove(job, "storage", { outcome: "branch kept: environment in use" });
+      if (shared("stuck")) return;
       return cleanupMove(job, "storage", { outcome: "branch kept: teardown stuck" }, { key: "cleanup-teardown-stuck:alert", message: `Cleanup of ${label}: bb has not removed its worktree environment 60 minutes after the archive (${environment.lifecycle.phase}/${environment.hostLifecycle}). ${left}` });
     }
 

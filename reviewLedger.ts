@@ -121,6 +121,14 @@ export function createReviewLedger<Row extends LedgerRow>(
     return null;
   }
 
+  /** The newest reviewer of any state that was pinned to a head (reviewed_head_sha set) and covers any worker in these workers' task chains; null when none.
+   * An unpinned review ran in a worker's own environment and is never returned. */
+  function lastPinnedReviewer(workerThreadIds: string[]): string | null {
+    const chain = [...new Set(workerThreadIds.flatMap(taskChain))];
+    const row = db.prepare(`SELECT r.thread_id FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND r.reviewed_head_sha IS NOT NULL AND t.worker_thread_id IN (${chain.map(() => "?").join(",")}) ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`).get(...chain) as { thread_id: string } | undefined;
+    return row?.thread_id ?? null;
+  }
+
   /** Every open review of these workers' task chains, newest first; inFlight is the first one still busy. */
   function openReviews(workerThreadIds: string[]) {
     const open = [...new Set(workerThreadIds.flatMap(taskChain))]
@@ -198,5 +206,5 @@ export function createReviewLedger<Row extends LedgerRow>(
     return { approved: true } as const;
   }
 
-  return { targets, openReview, openReviews, busyReview, covering, isCurrent, taskChain, ladder, rung, replacement, headApproval, repoint, addTargets, carriedStreak, seedStreak, recordVerdict, newestVerdict };
+  return { targets, openReview, openReviews, lastPinnedReviewer, busyReview, covering, isCurrent, taskChain, ladder, rung, replacement, headApproval, repoint, addTargets, carriedStreak, seedStreak, recordVerdict, newestVerdict };
 }
