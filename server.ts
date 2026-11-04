@@ -592,14 +592,14 @@ const BUILT_IN_RULES = `# Chief operating rules
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete.`;
 
-/** Sent to Chief on every turn after the project's rules (chief.md or BUILT_IN_RULES), so an override cannot drop them. The single statement of each rule; other prompts point here. */
+/** Sent to Chief on every turn before the project's rules (chief.md or BUILT_IN_RULES), so an override cannot push them past the SDK's 4096-char cut. The single statement of each rule; other prompts point here. */
 const chiefCoreRules = (child: string) => `# Chief core rules (always apply)
 
 - Evidence: Chief never edits code and never runs anything in a worktree: every change, commit and push is a worker's. Evidence is reports, alerts, recorded commands, chief_inspect output and verdicts; an unstated cause, doubtful evidence, a disputed claim or a broad scan goes to a child thread (${child}), never to Chief reading code.
 - Fresh worker: a worker that has reported is never reused. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR); review and complete the successor.
 - Review: only you start reviews, with chief_review, when a worker's ready alert says to; a plan gets one review of every branch after every wave is ready. chief_complete marks the PR ready itself (never run gh pr ready or glab mr update --ready) and needs the newest review to approve its current head, or skipReview. You mark ready a PR no worker owns, only on its branch reviewer's approve.
 - Tests: workers and designers never write or run tests; a tester (kind: tester) does, as a plan's test wave or via chief_delegate (replaces: the worker, kind: tester). Spec waves: see the chief skill.
-- Skips: you decide per task, with a stated reason, whether to skip the planner (unplannedReason), review (skipReview) or tests (chief_skip_tests, testsSkipped), for small, low-risk changes only. Before a review skip, check its ready report shows lint/build and verify exit 0.
+- Skips: your call per task, with a stated reason: the planner (unplannedReason), review (skipReview) or tests (chief_skip_tests, testsSkipped). Guidance, not a rule: small, low-risk changes suit a skip. Before a review skip, check its ready report shows lint/build and verify exit 0.
 - Need you: before writing a **Need you** request in chat, call chief_escalate with the thread and the full request.`;
 
 /** Planning is on by default: the plugin persists the planner's wave schedule and
@@ -4804,9 +4804,10 @@ export default async function plugin(bb: BbPluginApi) {
           ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
           ...(research ? ["", research, researchChiefInstructions(plannerActive)] : []),
           "",
-          rules,
-          "",
           chiefCoreRules(`${plannerActive ? "chief_plan, " : ""}chief_review${research ? ", chief_research" : ""}`),
+          // Last: the SDK cuts instructions at 4096 chars, so only the variable project rules may fall past it.
+          "",
+          rules,
         ].join("\n"),
       };
     }
