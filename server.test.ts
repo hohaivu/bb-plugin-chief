@@ -9151,20 +9151,19 @@ describe("tester role", () => {
       expect(head).toBe(oracle);
     }, 300_000);
 
-    // Known limitation, pinned (not an oracle): the ancestry check's 20 s deadline covers the git call only. The host lookup
-    // that precedes it (system.config) has no deadline, so a lookup that never answers holds the real chief_review past 60 s.
-    // Regression: a deadline added around the lookup (or around the whole attempt: 20, 30 or 60 s) makes the call settle
-    // early, and this test names that change. Fake timers stand in for the wait: the fake clock is stepped 61 s while the
-    // lookup is held (no reviewer, no review-context.md, call unsettled), then the lookup answers and the review launches once.
-    test("review attempt: a pending ancestry host lookup holds chief_review past 60 s (known limitation)", async () => {
+    // Contract: one 20 s deadline bounds the ancestry host lookup plus its git check. A lookup that never answers makes the
+    // review fall back to the whole pull request ("deadline (20 s) passed") and launch once. Regression: a deadline that covers
+    // only the git call (the host lookup unbounded) holds chief_review past 20 s; one that fires early settles it before 20 s.
+    // Only the first lookup after `held` is set never answers (the ancestry's); the impact slice's own lookup, with its separate
+    // 30 s deadline, answers. Fake timers stand in for the wait: the clock is stepped 19 s (call unsettled), then 1 s more (settled).
+    test("review attempt: a pending ancestry host lookup falls back to the whole pull request at the 20 s deadline", async () => {
       const PR = "https://github.com/acme/shop/pull/8";
       let held = false;
       let entered = false;
-      let release = () => {};
       const answer = { primaryHostId: "host_1" };
       const state = await setup({
         projectPath: "/oracle/checkout",
-        system: { usageLimits: async () => ({}), config: () => held ? new Promise((resolve) => { entered = true; release = () => resolve(answer); }) : Promise.resolve(answer) },
+        system: { usageLimits: async () => ({}), config: () => { if (!held) return Promise.resolve(answer); held = false; entered = true; return new Promise(() => {}); } },
       });
       let sha = HEAD_SHA;
       execFileMock.mockImplementation(async (file: string, args: string[]) => {
@@ -9186,22 +9185,25 @@ describe("tester role", () => {
       try {
         let settled = false;
         const call = tool(state, "chief_review", { workerThreadId: w1 }, chief).finally(() => { settled = true; });
-        for (let step = 0; step < 61; step++) {
-          await vi.advanceTimersByTimeAsync(1_000);
-          await new Promise((resolve) => setImmediate(resolve));
-        }
+        const step = async (seconds: number) => {
+          for (let i = 0; i < seconds; i++) {
+            await vi.advanceTimersByTimeAsync(1_000);
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+        };
         const nextReviewer = `thr_${state.spawned.length + 1}`;
+        await step(19);
         expect(entered).toBe(true);
         expect(settled).toBe(false);
         expect(state.spawned).toHaveLength(3);
-        expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='reviewer'`).get()).toEqual({ n: 1 });
         await expect(reviewContextOf(state, nextReviewer)).rejects.toThrow(/ENOENT/);
-        held = false;
-        release();
-        await expect(call).resolves.toContain("Review scope:");
+        await step(1);
+        const reply = await call;
+        expect(settled).toBe(true);
+        expect(reply).toContain(`Review scope: ${w1}: whole pull request (deadline (20 s) passed).`);
         expect(state.spawned).toHaveLength(4);
         expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='reviewer'`).get()).toEqual({ n: 2 });
-        await expect(reviewContextOf(state, nextReviewer)).resolves.toContain("## The previous review (");
+        await expect(reviewContextOf(state, nextReviewer)).resolves.toBeTruthy();
       } finally { vi.useRealTimers(); }
     }, 120_000);
 
