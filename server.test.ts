@@ -6589,13 +6589,21 @@ describe("tester role", () => {
     const claims = (state: State) => state.db.prepare(`SELECT action, thread_id FROM cleanup_environment_claims WHERE environment_id='env_shared' ORDER BY action`).all();
 
     test("three jobs on a destroyed environment: one owns the branch, the others end at storage with no alert", async () => {
-      const state = await setup();
+      execFileMock.mockResolvedValue({ stdout: "", stderr: "" });
+      const state = await setup({ projectPath: "/repo/proj1" });
+      state.harness.sdk.stub("system.config", async () => ({ primaryHostId: "host_1" }));
       const [first, second, third] = await sharedJobs(state, 3, () => ({ phase: "destroyed" }));
       await state.supervisorCycle();
       expect(job(state, first!)).toMatchObject({ step: "branch" });
       for (const id of [second!, third!]) expect(job(state, id)).toEqual({ step: "storage", outcome: `worktree shared: branch handled by ${first}` });
       expect(claims(state)).toEqual([{ action: "branch", thread_id: first }]);
       expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE '%cleanup-%'`).get()).toEqual({ n: 0 });
+      // The next pass runs the owner's branch step: only its bb/ branch is looked up (and deleted), never the others'.
+      await state.supervisorCycle();
+      const branchCalls = execFileMock.mock.calls.map((call) => JSON.stringify(call[1])).filter((args) => args.includes("refs/heads/bb/"));
+      expect(branchCalls.length).toBeGreaterThan(0);
+      for (const args of branchCalls) expect(args).toContain(`refs/heads/bb/${first}`);
+      expect(job(state, first!).step).toBe("storage");
     });
 
     test.each([["trouble", true], ["stuck", false]])("three jobs on an environment with teardown %s raise exactly one alert", async (kind, trouble) => {
