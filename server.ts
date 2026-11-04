@@ -13,16 +13,15 @@ import { forgeInitScript } from "./forge";
 import { classify, composeComment, errorText, hasMarker, ownerHandle, parseForgeTarget, postComment, sanitizeForge, withMention } from "./forgeComments";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
-import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
 import { cleanupEligible, deleteSafeBranch, ownedBranch } from "./cleanup";
-import { createReviewStart, type PinnedHead } from "./reviewStart";
+import { createReviewStart } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import {
   LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX,
   checkReport, contractsOf, findingLines, hasSpecBaseline, reportAlert, reportFileBody, verdictFileBody, type Pointer,
 } from "./reportIntake";
-import { advisorBrief, plannerBrief, resolveDelegation, verdictPreview, workerBrief } from "./delegationBrief";
-import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
+import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "./delegationBrief";
+import { clip, type RecordedCommand } from "./text";
 import { createPlanProgress, type SegmentState } from "./planProgress";
 import { chainOf, createWaveSchedule, waveTitle, type PlanWave } from "./waveSchedule";
 import { createPlanLifecycle } from "./planLifecycle";
@@ -97,18 +96,6 @@ function parsePullRequestRef(input: string): { target: string; repo: string | nu
   const shortRef = input.match(/^([\w.-]+\/[\w.-]+)#(\d+)$/);
   if (shortRef) return { target: shortRef[2], repo: shortRef[1], forge: null };
   return { target: input.replace(/^#/, ""), repo: null, forge: null };
-}
-
-/** Best-effort: resolves a pull request reference to its head branch with
- * whichever forge CLI the repo uses, mirroring the detection in forgeInitScript.
- * An explicit URL's own forge wins; a bare number or owner/repo#123 reference
- * falls back to `git remote get-url origin` in the target project's own
- * checkout (cwd), never this process's own. Every subprocess is time-bounded,
- * and any failure — no remote, no CLI, no auth, an unrecognised reference, a
- * hung subprocess — returns null so the caller falls back to treating the
- * input as a plain branch name. */
-async function resolvePullRequestBranch(pullRequest: string, cwd: string | null): Promise<string | null> {
-  return (await prHead(pullRequest, cwd))?.branch ?? null;
 }
 
 /** The forge targets a pull request reference could live on, with its number and repo. */
@@ -1193,7 +1180,6 @@ export default async function plugin(bb: BbPluginApi) {
   let researchActive: ResearchSettings | null = null;
   const rulesCache = new Map<string, string>();
   const alertDeliveries = new Map<string, Promise<boolean>>();
-  const reviewStarts = new Map<string, Promise<{ threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[] }>>();
 
   let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
   const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
@@ -2322,10 +2308,25 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
-    db, store, ledger, managedSpawn, requireChiefCaller, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
-    busyStatuses: BUSY_STATUSES, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
-    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle, writeReviewContext, impactSlice,
-    reviewedAncestry: reviewedAncestryOf,
+    db, store, ledger, managedSpawn, controlsThread,
+    plan: { reviewRefusal, reviewTargetsFor, planWavesFor },
+    host: {
+      settledLive: async (worker) => {
+        const live = await waitIdleAfterReport(worker);
+        if (BUSY_STATUSES.has(live.status)) busyRejection(worker, live.status, "starting a review");
+        return live;
+      },
+      projectPath,
+      projectHost: async (projectId) => (await projectHostId(projectId)) ?? await defaultHostId(),
+      environmentHost: environmentHostId,
+      checkoutSkip: checkoutHostSkip,
+      recordedCommands,
+      writeFile: writeStorageFile,
+      alertChief,
+      logError: (message) => bb.log.error(message),
+    },
+    forge: { head: prHead },
+    git: { env: forgeEnv },
   });
 
   /** Why the project's checkout path cannot be used here, or null when it is on the server's primary host.
@@ -2557,62 +2558,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
     await bounded(() => bb.sdk.plugins.callRpc({ pluginId: "bb--storage-retention", method: "clearThread", input: { threadId: id }, outputSchema: z.object({ ok: z.literal(true) }) }), CLEANUP_CALL_MS);
     return finish("cleaned");
-  }
-
-  /** Whether the previous reviewed head is an ancestor of the pinned head, from the project checkout; never throws. */
-  async function reviewedAncestryOf(row: ManagedRow, previousSha: string, head: PinnedHead, projectDir: string | null): Promise<{ ancestor: true } | { skipped: string }> {
-    try {
-      if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
-      const hostSkip = await checkoutHostSkip(row.project_id);
-      if (hostSkip) return { skipped: hostSkip };
-      return await reviewedAncestry({ cwd: projectDir, env: forgeEnv(), previousSha, head, deadlineMs: 20_000 });
-    } catch (error) {
-      return { skipped: clip(String(error), 200) };
-    }
-  }
-
-  /** The impact slice of the commit under review, read from the project checkout with git only (no worktree is created). */
-  async function impactSlice(row: ManagedRow, head: PinnedHead | null, projectDir: string | null, maxEntries: number): Promise<ImpactSlice> {
-    // One 30 s deadline covers the host lookup, the branch resolution and the slice itself.
-    const deadline = Date.now() + 30_000;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    // A finished slice is final: neither the deadline nor a later failure may replace it with a skip.
-    let completed: ImpactSlice | undefined;
-    let publish: (slice: ImpactSlice) => void = () => undefined;
-    const ready = new Promise<ImpactSlice>((resolve) => { publish = (slice) => { completed = slice; resolve(slice); }; });
-    const expired = new Promise<ImpactSlice>((resolve) => { timer = setTimeout(() => resolve(completed ?? { skipped: "deadline (30 s) passed" }), 30_000); });
-    const work = async (): Promise<ImpactSlice> => {
-      if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
-      const hostSkip = await checkoutHostSkip(row.project_id);
-      if (hostSkip) return { skipped: hostSkip };
-      const options = () => ({ cwd: projectDir, env: forgeEnv(), maxEntries, deadlineMs: deadline - Date.now(), onReady: publish });
-      if (head) return await computeImpactSlice({ ...options(), sha: head.sha, baseRef: `origin/${head.base}`, fetchRef: head.branch });
-      if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
-      const run = gitWithin(projectDir, forgeEnv(), deadline);
-      const git = (args: string[]) => run(args).then((out) => out.trim() || null, (error: Error) => { if (error.message === "deadline") throw error; return null; });
-      const sha = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${row.branch}^{commit}`])
-        ?? await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${row.branch}^{commit}`]);
-      if (!sha) return { skipped: `branch ${row.branch} not found locally` };
-      const baseRef = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
-      if (!baseRef) return { skipped: "origin/HEAD not set" };
-      return await computeImpactSlice({ ...options(), sha, baseRef, fetchRef: row.branch });
-    };
-    try {
-      return await Promise.race([work(), ready, expired]);
-    } catch (error) {
-      return completed ?? { skipped: clip(String(error), 200) };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  /** Which path a worker review took, for chief_review's reply. */
-  function reviewPathNote(workerThreadId: string, pinnedSha?: string | null, covers?: string[]) {
-    if (covers && covers.length > 1) return `One review covers the whole plan: ${covers.join(", ")}, each pull request pinned to its own head commit where the forge answered. Complete each worker only on its approve.`;
-    if (pinnedSha) return `It reviews the pull request pinned to head commit ${pinnedSha} in its own worktree.`;
-    return store.get(workerThreadId)?.pr_url
-      ? "The pull request head could not be read, so it reviews the worker's own environment and its verdict is not bound to a commit: chief_complete will need a fresh review once the forge answers, or an override."
-      : "It reviews the worker's own environment (no pull request).";
   }
 
   /** Why a worker may not complete yet, or null when its newest review covers what it would ship.
@@ -3085,26 +3030,6 @@ export default async function plugin(bb: BbPluginApi) {
   async function persistBrief(threadId: string, prompt: string) {
     await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
   }
-
-  /** Writes a reviewer's review-context.md: 3 attempts (1s, 2s backoff), then alerts Chief so it stops or nudges the reviewer. Never throws. */
-  async function writeReviewContext(threadId: string, content: string, workerThreadId: string) {
-    let error: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
-      try {
-        await writeStorageFile(threadId, "review-context.md", `${content}\n`);
-        return;
-      } catch (caught) { error = caught; }
-    }
-    // The worker's row names the same Chief, for when the reviewer's own row cannot be read.
-    const row = [store.get(threadId), store.get(workerThreadId)].find((candidate) => candidate?.chief_thread_id);
-    const message = `Could not write review-context.md for reviewer ${threadId} after 3 attempts: ${String(error)}. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.`;
-    // The alert is the last resort; its own failure is logged rather than thrown after the reviewer has launched.
-    if (row) await Promise.resolve().then(() => alertChief(row, `review-context:${threadId}`, message)).catch((alertError) => bb.log.error(`${message} The Chief alert also failed: ${String(alertError)}`));
-    else bb.log.error(message);
-  }
-
-
 
   type ThreadInput = ThreadInsert<ManagedRow["role"], ManagedRow["state"]>;
   /** The caller's managed row. While insertThread has not run yet, `pending` holds the row recovered from spawn-seeded
@@ -4428,17 +4353,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (params.workerThreadId) {
         await controlledTarget(params.workerThreadId, caller);
         touchCallerChief(caller);
-        const review = await startReview(caller, params.workerThreadId, params.focus);
-        const sliceNote = review.sliceSkipped?.length ? ` Impact slice skipped: ${review.sliceSkipped.join("; ")}.` : "";
-        const scopeNote = review.scope?.length ? ` Review scope: ${review.scope.join("; ")}.` : "";
-        return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}. ${reviewPathNote(params.workerThreadId, review.pinnedSha, review.covers)}${sliceNote}${scopeNote}`;
+        return (await startReview(caller, params.workerThreadId, params.focus)).reply;
       }
       touchCallerChief(caller);
-      const branch = params.branch
-        ?? (await resolvePullRequestBranch(params.pullRequest!, await projectPath(caller.project_id)))
-        ?? params.pullRequest!;
-      const review = await startBranchReview(caller, branch, params.pullRequest ?? null, params.focus);
-      return `${review.created ? "Started" : "Using existing"} “${review.title}” in thread ${review.threadId}.`;
+      return (await startBranchReview(caller, { branch: params.branch, pullRequest: params.pullRequest }, params.focus)).reply;
     },
   });
   bb.agents.registerTool({

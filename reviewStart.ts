@@ -1,8 +1,10 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { verdictPreview } from "./delegationBrief";
+import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
 import type { ManagedSpawn } from "./managedSpawn";
-import type { ImpactSlice } from "./impactSlice";
 import type { createReviewLedger } from "./reviewLedger";
 import { REVIEW_ONLY } from "./roles";
+import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
 import type { ThreadStore } from "./threadStore";
 import { chainOf, type PlanWave } from "./waveSchedule";
 
@@ -310,6 +312,8 @@ interface ReviewRow {
   summary: string | null;
   report_path: string | null;
   recommendation: string | null;
+  verdict: string | null;
+  verdict_path: string | null;
   branch: string | null;
   pr_url: string | null;
   plan_thread_id: string | null;
@@ -321,7 +325,8 @@ interface ReviewRow {
   created_at: number;
 }
 
-export type ReviewStarted = { threadId: string; title: string; workerThreadId: string | null; created: boolean; pinnedSha?: string | null; covers?: string[]; sliceSkipped?: string[]; scope?: string[] };
+/** What a chief_review call answers: the reviewer thread and the reply text the handler forwards. */
+export type ReviewStarted = { threadId: string; title: string; created: boolean; reply: string };
 
 /** The row fields launch writes for a reviewer. */
 interface ReviewInsert {
@@ -330,55 +335,66 @@ interface ReviewInsert {
   branch?: string | null; prUrl?: string | null; reviewedReportSeq?: number | null; reviewedHeadSha?: string | null;
 }
 
+/** What a review attempt asks of the BB host and the plugin server. */
+export interface ReviewHost<Row> {
+  /** Waits for the worker's turn to end after its report, then refuses (with the shared busy wording) while it is still busy. */
+  settledLive: (worker: Row) => Promise<LiveThread>;
+  projectPath: (projectId: string) => Promise<string | null>;
+  /** The machine the project's reviewer runs on. */
+  projectHost: (projectId: string) => Promise<string>;
+  environmentHost: (environmentId: string) => Promise<string | null>;
+  /** Why the project's checkout cannot be read here, or null. Never throws. */
+  checkoutSkip: (projectId: string) => Promise<string | null>;
+  recordedCommands: (threadId: string) => Promise<RecordedCommand[] | null>;
+  writeFile: (threadId: string, relPath: string, content: string) => Promise<unknown>;
+  alertChief: (row: Row, key: string, message: string) => Promise<unknown>;
+  logError: (message: string) => void;
+}
+
 export interface ReviewStartDeps<Row extends ReviewRow> {
   db: Database;
   store: ThreadStore<Row>;
   ledger: ReturnType<typeof createReviewLedger<Row>>;
   managedSpawn: ManagedSpawn<ReviewInsert>;
-  requireChiefCaller: (caller: Row | undefined, what: string) => asserts caller is Row;
-  reviewRefusal: (worker: Row) => string | null;
-  reviewTargetsFor: (worker: Row) => Row[];
-  planWavesFor: (planThreadId: string | null) => PlanWave[];
+  plan: {
+    reviewRefusal: (worker: Row) => string | null;
+    reviewTargetsFor: (worker: Row) => Row[];
+    planWavesFor: (planThreadId: string | null) => PlanWave[];
+  };
   controlsThread: (row: Row, callerChiefId: string) => boolean;
-  terminal: (state: string) => boolean;
-  busyStatuses: ReadonlySet<string>;
-  waitIdleAfterReport: (worker: Row) => Promise<LiveThread>;
-  busyRejection: (worker: Row, status: string, before: string) => never;
-  prHead: (pullRequest: string, cwd: string | null) => Promise<PinnedHead | null>;
-  projectPath: (projectId: string) => Promise<string | null>;
-  projectHostId: (projectId: string) => Promise<string | null>;
-  defaultHostId: () => Promise<string>;
-  environmentHostId: (environmentId: string) => Promise<string | null>;
-  recordedCommands: (threadId: string) => Promise<{ command: string; exitCode: number | null; status: string }[] | null>;
-  recordedLines: (recorded: { command: string; exitCode: number | null; status: string }[] | null) => string[];
-  verdictPreview: (review: Row) => string[];
-  clip: (value: string, limit?: number) => string;
-  clipMiddle: (value: string, limit: number) => string;
-  /** Writes the reviewer's review-context.md; owns its retries and alerting Chief on final failure. */
-  writeReviewContext: (threadId: string, content: string, workerThreadId: string) => Promise<void>;
-  /** Git-only file:line pointers outside the commit's diff; never blocks a review, a failure is `{ skipped }`. */
-  impactSlice: (row: Row, head: PinnedHead | null, projectDir: string | null, maxEntries: number) => Promise<ImpactSlice>;
-  /** Whether the previous reviewed head is an ancestor of the pinned head; never blocks a review, a failure is `{ skipped }`. */
-  reviewedAncestry: (row: Row, previousSha: string, head: PinnedHead, projectDir: string | null) => Promise<{ ancestor: true } | { skipped: string }>;
+  host: ReviewHost<Row>;
+  /** Read-only; the production adapter never rejects (it returns null on every CLI failure). */
+  forge: { head: (pullRequest: string, cwd: string | null) => Promise<PinnedHead | null> };
+  /** The environment git and the forge CLIs run with; not a git transport. */
+  git: { env: () => NodeJS.ProcessEnv };
 }
 
-/** One module owns starting a reviewer: the owner and duplicate checks, the in-flight dedupe, the pinned heads,
- * the brief, the launch, and retiring the reviews it supersedes. It returns data; alerts and tool-result wording stay in the server. */
+/** One target a review covers, frozen for the attempt: its row as captured before any await and the forge head read for it. */
+interface CoveredTarget<Row> { row: Row; head: PinnedHead | null; since?: string }
+
+const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
+
+/** The Review attempt module: one reviewer launch over frozen Reports and heads, with its scope, context, brief and ledger identity.
+ * It owns the owner and duplicate checks, the in-flight dedupe, the pinned heads, the re-review scope, the impact slices
+ * (one 30-entry budget across the targets), the brief, the launch with its ledger identity, the review-context.md write
+ * (retries, then a Chief alert) and retiring the reviews it supersedes, and it answers with the reply text.
+ *
+ * Impact slices and ancestry are optional enrichment: they never throw and never refuse a review, but the launch waits for them
+ * (sequential, at most 30 s per slice; ancestry's git step at most 20 s, its host lookup unbounded). Required local results
+ * (the Report, the Chief alert) never pass through this module.
+ *
+ * `caller` is the active Chief's row; the handler has already checked it. */
 export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<Row>) {
-  const {
-    db, store, ledger, managedSpawn, reviewRefusal, reviewTargetsFor, planWavesFor, controlsThread, terminal,
-    busyStatuses, waitIdleAfterReport, busyRejection, prHead, projectPath, projectHostId, defaultHostId, environmentHostId,
-    recordedCommands, recordedLines, verdictPreview, clip, clipMiddle,
-  } = deps;
+  const { db, store, ledger, managedSpawn, plan, controlsThread, host, forge } = deps;
   const existingBranchReview = db.prepare<[string, string, string]>(
     `SELECT * FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NULL AND chief_thread_id=? AND project_id=? AND branch=? AND state NOT IN ('complete','archived','deleted') ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   );
   const reviewStarts = new Map<string, Promise<ReviewStarted>>();
 
   /** Runs one start under its key: a second call with the same key joins the first, and the entry goes once it settles. */
-  async function dedupe<T extends ReviewStarted>(key: string, run: () => Promise<T>): Promise<T> {
+  async function dedupe(key: string, run: () => Promise<ReviewStarted>): Promise<ReviewStarted> {
     const inFlight = reviewStarts.get(key);
-    if (inFlight) return inFlight as Promise<T>;
+    if (inFlight) return inFlight;
     const start = run();
     reviewStarts.set(key, start);
     try {
@@ -388,88 +404,167 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     }
   }
 
+  /** Whether the previous reviewed head is an ancestor of the pinned head, from the project checkout; never throws. */
+  async function reviewedAncestryOf(row: Row, previousSha: string, head: PinnedHead, projectDir: string | null): Promise<{ ancestor: true } | { skipped: string }> {
+    try {
+      if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
+      // shortcut: the host lookup has no overall deadline (pending host = pending review); bound it if chief_review hangs in practice.
+      const hostSkip = await host.checkoutSkip(row.project_id);
+      if (hostSkip) return { skipped: hostSkip };
+      return await reviewedAncestry({ cwd: projectDir, env: deps.git.env(), previousSha, head, deadlineMs: 20_000 });
+    } catch (error) {
+      return { skipped: clip(String(error), 200) };
+    }
+  }
+
+  /** The impact slice of the commit under review, read from the project checkout with git only (no worktree is created). */
+  async function impactSlice(row: Row, head: PinnedHead | null, projectDir: string | null, maxEntries: number): Promise<ImpactSlice> {
+    // One 30 s deadline covers the host lookup, the branch resolution and the slice itself.
+    const deadline = Date.now() + 30_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // A finished slice is final: neither the deadline nor a later failure may replace it with a skip.
+    let completed: ImpactSlice | undefined;
+    let publish: (slice: ImpactSlice) => void = () => undefined;
+    const ready = new Promise<ImpactSlice>((resolve) => { publish = (slice) => { completed = slice; resolve(slice); }; });
+    const expired = new Promise<ImpactSlice>((resolve) => { timer = setTimeout(() => resolve(completed ?? { skipped: "deadline (30 s) passed" }), 30_000); });
+    const work = async (): Promise<ImpactSlice> => {
+      if (!projectDir) return { skipped: "no local checkout of the project on the plugin server" };
+      const hostSkip = await host.checkoutSkip(row.project_id);
+      if (hostSkip) return { skipped: hostSkip };
+      const options = () => ({ cwd: projectDir, env: deps.git.env(), maxEntries, deadlineMs: deadline - Date.now(), onReady: publish });
+      if (head) return await computeImpactSlice({ ...options(), sha: head.sha, baseRef: `origin/${head.base}`, fetchRef: head.branch });
+      if (!row.branch) return { skipped: "the worker has no branch and no pinned head" };
+      const run = gitWithin(projectDir, deps.git.env(), deadline);
+      const git = (args: string[]) => run(args).then((out) => out.trim() || null, (error: Error) => { if (error.message === "deadline") throw error; return null; });
+      const sha = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${row.branch}^{commit}`])
+        ?? await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${row.branch}^{commit}`]);
+      if (!sha) return { skipped: `branch ${row.branch} not found locally` };
+      const baseRef = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+      if (!baseRef) return { skipped: "origin/HEAD not set" };
+      return await computeImpactSlice({ ...options(), sha, baseRef, fetchRef: row.branch });
+    };
+    try {
+      return await Promise.race([work(), ready, expired]);
+    } catch (error) {
+      return completed ?? { skipped: clip(String(error), 200) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Writes a reviewer's review-context.md: 3 attempts (1s, 2s backoff), then alerts Chief so it stops or nudges the reviewer. Never throws. */
+  async function writeReviewContext(threadId: string, content: string, workerThreadId: string) {
+    let error: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+      try {
+        await host.writeFile(threadId, "review-context.md", `${content}\n`);
+        return;
+      } catch (caught) { error = caught; }
+    }
+    // The worker's row names the same Chief, for when the reviewer's own row cannot be read.
+    const row = [store.get(threadId), store.get(workerThreadId)].find((candidate) => candidate?.chief_thread_id);
+    const message = `Could not write review-context.md for reviewer ${threadId} after 3 attempts: ${String(error)}. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.`;
+    // The alert is the last resort; its own failure is logged rather than thrown after the reviewer has launched.
+    if (row) await Promise.resolve().then(() => host.alertChief(row, `review-context:${threadId}`, message)).catch((alertError) => host.logError(`${message} The Chief alert also failed: ${String(alertError)}`));
+    else host.logError(message);
+  }
+
+  const startedReply = (created: boolean, title: string, threadId: string) => `${created ? "Started" : "Using existing"} “${title}” in thread ${threadId}.`;
+
+  /** Which path a worker review took, for chief_review's reply. */
+  function reviewPathNote(workerThreadId: string, pinnedSha: string | null | undefined, covers: string[]) {
+    if (covers.length > 1) return `One review covers the whole plan: ${covers.join(", ")}, each pull request pinned to its own head commit where the forge answered. Complete each worker only on its approve.`;
+    if (pinnedSha) return `It reviews the pull request pinned to head commit ${pinnedSha} in its own worktree.`;
+    // Kept as a fresh read (Chief's decision): the reply text re-reads the worker's pull request; no other identity does.
+    return store.get(workerThreadId)?.pr_url
+      ? "The pull request head could not be read, so it reviews the worker's own environment and its verdict is not bound to a commit: chief_complete will need a fresh review once the forge answers, or an override."
+      : "It reviews the worker's own environment (no pull request).";
+  }
+
   /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
    * by a fresh one rather than resumed; its reject_streak carries over onto the new
    * row, so deadlock detection still sees consecutive rejections across the fresh
    * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
-  async function startReview(caller: Row | undefined, workerThreadId: string, focus?: string) {
-    deps.requireChiefCaller(caller, "Starting a review");
+  async function startReview(caller: Row, workerThreadId: string, focus?: string): Promise<ReviewStarted> {
     const worker = store.get(workerThreadId);
     if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
-    const refusal = reviewRefusal(worker);
+    const refusal = plan.reviewRefusal(worker);
     if (refusal) throw new Error(refusal);
     // One review of a plan covers the latest worker of every branch; any other worker covers itself.
-    const targets = reviewTargetsFor(worker);
+    const targets = plan.reviewTargetsFor(worker);
     for (const target of targets) {
       if (!controlsThread(target, caller.thread_id) || target.project_id !== caller.project_id) throw new Error(`No managed worker ${target.thread_id} for this Chief.`);
     }
-    const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && planWavesFor(worker.plan_thread_id).length > 0);
+    const planReview = targets.length > 1 || (!!worker.plan_thread_id && worker.plan_wave != null && plan.planWavesFor(worker.plan_thread_id).length > 0);
     const reviewKey = planReview ? `plan:${worker.plan_thread_id}` : workerThreadId;
-    return dedupe<ReviewStarted>(reviewKey, async () => {
+    return dedupe(reviewKey, async () => {
       const { open: openReviews, previous, inFlight: busy } = ledger.openReviews(targets.map((target) => target.thread_id));
       if (busy) {
-        return { threadId: busy.thread_id, title: busy.title, workerThreadId, created: false, pinnedSha: busy.reviewed_head_sha, covers: targets.map((target) => target.thread_id) };
+        return {
+          threadId: busy.thread_id, title: busy.title, created: false,
+          reply: `${startedReply(false, busy.title, busy.thread_id)} ${reviewPathNote(workerThreadId, busy.reviewed_head_sha, targets.map((target) => target.thread_id))}`,
+        };
       }
       const lives = new Map<string, LiveThread>();
       for (const target of targets) {
-        const live = await waitIdleAfterReport(target);
-        if (busyStatuses.has(live.status)) busyRejection(target, live.status, "starting a review");
+        const live = await host.settledLive(target);
         if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`Worker ${target.thread_id} is not reviewable.`);
         lives.set(target.thread_id, live);
       }
       const live = lives.get(workerThreadId)!;
       // The forge's head, read now, is the commit each verdict will cover. No PR, or a head the forge will not
       // tell us, keeps a single-worker review on the worker's own environment exactly as before (reviewed_head_sha stays NULL).
-      const projectDir = await projectPath(worker.project_id);
-      const heads = new Map<string, PinnedHead | null>();
-      for (const target of targets) heads.set(target.thread_id, target.pr_url ? await prHead(target.pr_url, projectDir) : null);
-      const head = heads.get(workerThreadId) ?? null;
+      const projectDir = await host.projectPath(worker.project_id);
+      const covered: CoveredTarget<Row>[] = [];
+      for (const target of targets) covered.push({ row: target, head: target.pr_url ? await forge.head(target.pr_url, projectDir) : null });
+      const mine = covered.find((target) => target.row.thread_id === workerThreadId)!;
+      const head = mine.head;
       if (!head && !live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
-      for (const target of targets) {
-        if (target !== worker && !heads.get(target.thread_id) && !target.branch) {
-          throw new Error(`Worker ${target.thread_id} has no readable pull request head and no branch, so the plan's one review cannot reach it. Retry once the forge answers.`);
+      for (const target of covered) {
+        if (target.row !== worker && !target.head && !target.row.branch) {
+          throw new Error(`Worker ${target.row.thread_id} has no readable pull request head and no branch, so the plan's one review cannot reach it. Retry once the forge answers.`);
         }
       }
       // Re-review scope: each target ranges from its own chain's newest verdict head; any doubt reviews the whole change.
-      const since = new Map<string, string>();
       const scope: string[] = [];
-      for (const target of targets) {
-        const verdict = ledger.newestVerdict(target);
+      for (const target of covered) {
+        const verdict = ledger.newestVerdict(target.row);
         if (!verdict) continue; // round 1: the whole change, no note
-        const pinned = heads.get(target.thread_id);
+        const pinned = target.head;
         const previousSha = verdict.head_sha?.toLowerCase();
         if (!pinned || !previousSha) {
-          scope.push(`${target.thread_id}: whole ${pinned ? "pull request" : "change"} (${pinned ? "the previous review recorded no head commit" : "no pinned pull request head"})`);
+          scope.push(`${target.row.thread_id}: whole ${pinned ? "pull request" : "change"} (${pinned ? "the previous review recorded no head commit" : "no pinned pull request head"})`);
           continue;
         }
         // Equal heads: nothing new was pushed, an empty range; the reviewer still checks the previous findings.
         const ancestry = previousSha === pinned.sha ? { ancestor: true as const }
-          : await deps.reviewedAncestry(target, previousSha, pinned, projectDir).catch((error): { skipped: string } => ({ skipped: clip(String(error), 200) }));
-        if ("skipped" in ancestry) { scope.push(`${target.thread_id}: whole pull request (${ancestry.skipped})`); continue; }
-        since.set(target.thread_id, previousSha);
-        scope.push(`${target.thread_id}: changes since ${previousSha.slice(0, 12)}`);
+          : await reviewedAncestryOf(target.row, previousSha, pinned, projectDir).catch((error): { skipped: string } => ({ skipped: clip(String(error), 200) }));
+        if ("skipped" in ancestry) { scope.push(`${target.row.thread_id}: whole pull request (${ancestry.skipped})`); continue; }
+        target.since = previousSha;
+        scope.push(`${target.row.thread_id}: changes since ${previousSha.slice(0, 12)}`);
       }
       // Sequential, each bounded by its own deadline.
       const impactSlices: NonNullable<ReviewBriefInput["impactSlices"]> = [];
       const sliceSkipped: string[] = [];
       let sliceBudget = 30; // total across targets; a target past it gets 0 entries and states them as omitted
-      for (const target of targets) {
-        const slice = await deps.impactSlice(target, heads.get(target.thread_id) ?? null, projectDir, Math.min(sliceBudget, Math.max(5, Math.floor(30 / targets.length))))
+      for (const target of covered) {
+        const slice = await impactSlice(target.row, target.head, projectDir, Math.min(sliceBudget, Math.max(5, Math.floor(30 / targets.length))))
           .catch((error): { skipped: string } => ({ skipped: clip(String(error), 200) }));
-        impactSlices.push({ threadId: target.thread_id, branch: heads.get(target.thread_id)?.branch ?? target.branch, ...slice });
-        if ("skipped" in slice) sliceSkipped.push(`${target.thread_id}: ${slice.skipped}`);
+        impactSlices.push({ threadId: target.row.thread_id, branch: target.head?.branch ?? target.row.branch, ...slice });
+        if ("skipped" in slice) sliceSkipped.push(`${target.row.thread_id}: ${slice.skipped}`);
         else sliceBudget -= slice.entries;
       }
-      const hostId = head ? (await projectHostId(worker.project_id)) ?? await defaultHostId() : await environmentHostId(live.environmentId!);
+      const hostId = head ? await host.projectHost(worker.project_id) : await host.environmentHost(live.environmentId!);
       const prepared = await managedSpawn.prepare(worker.project_id, { role: "reviewer", hostId });
       const title = `Review · ${worker.title}`;
-      const waves = planWavesFor(worker.plan_thread_id);
+      const waves = plan.planWavesFor(worker.plan_thread_id);
       // A plan review sees every wave; a single worker's reviewer sees only its chain's waves.
       const chain = worker.plan_wave != null && waves.length && !planReview ? chainOf(waves, worker.plan_wave) : waves.map((_, index) => index + 1);
       const contractLines = waves.length === 1
         ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
         : chain.filter((n) => !waves[n - 1]!.testsSkipped).flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
-      const recorded = targets.length > 1 ? null : await recordedCommands(workerThreadId);
+      const recorded = targets.length > 1 ? null : await host.recordedCommands(workerThreadId);
       const specWaves = chain.filter((n) => !!waves[n - 1]!.spec && !waves[n - 1]!.test && !waves[n - 1]!.design && !waves[n - 1]!.specsSkipped);
       const specBaseline = specWaves.some((n) => !!waves[n - 1]!.baseline);
       const specUnplanned = !waves.length && ledger.taskChain(worker.thread_id).some((id) => store.get(id)?.kind === "spec-writer");
@@ -484,22 +579,22 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         const rows = reported.filter((row) => keep(row) || others.has(row));
         earlier.set(target.thread_id, await Promise.all(rows.map(async (row) => ({
           threadId: row.thread_id, kind: row.kind, reportPath: row.report_path,
-          ...(targets.length > 1 ? {} : { recorded: recordedLines(await recordedCommands(row.thread_id)) }),
+          ...(targets.length > 1 ? {} : { recorded: recordedLines(await host.recordedCommands(row.thread_id)) }),
         }))));
       }
-      const briefTarget = (row: Row): BriefTarget => ({
+      const briefTarget = ({ row, head: pinned, since }: CoveredTarget<Row>): BriefTarget => ({
         threadId: row.thread_id, title: row.title, prUrl: row.pr_url, branch: row.branch, reportSeq: row.report_seq,
-        hasResult: !!row.result, reportPath: row.report_path, head: heads.get(row.thread_id) ?? null,
-        ...(since.has(row.thread_id) ? { since: since.get(row.thread_id) } : {}),
+        hasResult: !!row.result, reportPath: row.report_path, head: pinned,
+        ...(since ? { since } : {}),
         kind: row.kind, earlier: earlier.get(row.thread_id) ?? [],
       });
       const { prompt, context } = reviewBrief({
         worker: {
-          ...briefTarget(worker), kind: worker.kind,
+          ...briefTarget(mine), kind: worker.kind,
           brief: worker.brief ? clipMiddle(worker.brief, 4_000) : null,
           reported: worker.summary ?? clip(worker.result ?? "", 300),
         },
-        targets: targets.map(briefTarget),
+        targets: covered.map(briefTarget),
         wavePaths: waves.map((wave) => wave.path),
         chain,
         contractLines,
@@ -526,11 +621,11 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
           : { type: "reuse", environmentId: live.environmentId! },
         title, prompt,
-      }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: worker.report_seq, reviewedHeadSha: head?.sha },
-      (threadId) => ledger.addTargets(threadId, targets.map((target) => ({
-        threadId: target.thread_id, reportSeq: target.report_seq, headSha: heads.get(target.thread_id)?.sha ?? null, prUrl: target.pr_url, branch: target.branch,
+      }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: mine.row.report_seq, reviewedHeadSha: head?.sha },
+      (threadId) => ledger.addTargets(threadId, covered.map((target) => ({
+        threadId: target.row.thread_id, reportSeq: target.row.report_seq, headSha: target.head?.sha ?? null, prUrl: target.row.pr_url, branch: target.row.branch,
       }))));
-      if (context) await deps.writeReviewContext(thread.id, context, workerThreadId);
+      if (context) await writeReviewContext(thread.id, context, workerThreadId);
       // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
       const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
       if (openReviews.length || streak) {
@@ -540,24 +635,33 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           for (const old of openReviews) store.completeSuperseded(old.thread_id, now);
         });
       }
-      return { threadId: thread.id, title, workerThreadId, created: true, pinnedSha: head?.sha ?? null, covers: targets.map((target) => target.thread_id), sliceSkipped, scope };
+      const sliceNote = sliceSkipped.length ? ` Impact slice skipped: ${sliceSkipped.join("; ")}.` : "";
+      const scopeNote = scope.length ? ` Review scope: ${scope.join("; ")}.` : "";
+      return {
+        threadId: thread.id, title, created: true,
+        reply: `${startedReply(true, title, thread.id)} ${reviewPathNote(workerThreadId, head?.sha ?? null, targets.map((target) => target.thread_id))}${sliceNote}${scopeNote}`,
+      };
     });
   }
 
   /** The chief_review counterpart to startReview for a pull request or branch no
    * managed worker owns: same reviewer contract, but spawned on a fresh managed
-   * worktree (delegate()'s exact shape) instead of the worker's reused environment. */
-  async function startBranchReview(caller: Row | undefined, branch: string, pullRequestRef: string | null, focus?: string) {
-    deps.requireChiefCaller(caller, "Starting a review");
+   * worktree (delegate()'s exact shape) instead of the worker's reused environment.
+   * A pull request resolves to its head branch through forge.head; any failure treats the raw reference as the branch. */
+  async function startBranchReview(caller: Row, target: { branch?: string; pullRequest?: string }, focus?: string): Promise<ReviewStarted> {
     const { thread_id: chiefThreadId, project_id: projectId } = caller;
+    const pullRequestRef = target.pullRequest ?? null;
+    const branch = target.branch
+      ?? (await forge.head(target.pullRequest!, await host.projectPath(projectId)))?.branch
+      ?? target.pullRequest!;
     // A branch a managed worker still carries is reviewed through that worker, so the review follows its plan and head.
     const owner = store.all().find((row) => row.role === "worker" && !terminal(row.state)
       && row.chief_thread_id === chiefThreadId && row.project_id === projectId && row.branch === branch);
     if (owner) throw new Error(`Branch ${branch} is owned by worker ${owner.thread_id}: use chief_review (workerThreadId: ${owner.thread_id}).`);
     return dedupe(JSON.stringify(["branch", chiefThreadId, projectId, branch]), async () => {
       const duplicate = existingBranchReview.get(chiefThreadId, projectId, branch) as Row | undefined;
-      if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, workerThreadId: null, created: false };
-      const hostId = (await projectHostId(projectId)) ?? await defaultHostId();
+      if (duplicate) return { threadId: duplicate.thread_id, title: duplicate.title, created: false, reply: startedReply(false, duplicate.title, duplicate.thread_id) };
+      const hostId = await host.projectHost(projectId);
       const prepared = await managedSpawn.prepare(projectId, { role: "reviewer", hostId });
       const title = `Review · ${branch}`;
       const prompt = branchReviewBrief({ branch, pullRequestRef, focus, chiefThreadId });
@@ -570,7 +674,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         },
         title, prompt,
       }, { role: "reviewer", chiefThreadId, branch, prUrl: pullRequestRef });
-      return { threadId: thread.id, title, workerThreadId: null, created: true };
+      return { threadId: thread.id, title, created: true, reply: startedReply(true, title, thread.id) };
     });
   }
 
