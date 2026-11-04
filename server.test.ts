@@ -69,7 +69,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object } = {}) {
+async function setup(options: { rules?: string; hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -118,7 +118,7 @@ async function setup(options: { hostStatus?: string; providerAvailable?: boolean
           kind: "standard",
           ...(options.projectPath ? { sources: [{ path: options.projectPath, hostId: "host_1", isDefault: true }] } : {}),
         }),
-        fileContent: async () => { throw new Error("missing"); },
+        fileContent: async () => { if (options.rules === undefined) throw new Error("missing"); return { content: options.rules, contentEncoding: "utf8" }; },
         defaultExecutionOptions: async () => { projectDefaultsReads += 1; return projectDefaults; },
       },
       hosts: { get: async () => ({ id: "host_storage", threadStorageRootPath: join(storageRoot, "thread-storage") }), list: async () => [{ id: "host_1", name: "Local", status: options.hostStatus ?? "connected" }] },
@@ -5389,6 +5389,25 @@ describe("chief_research", () => {
     const off = (await configured()).instructions;
     expect(off).not.toContain("chief_research is optional.");
     expect(off).not.toContain("do not rerun the same fan-out");
+  });
+
+  // The SDK cuts configure() instructions at 4096 chars (the testing host slices the same way), and chief.md may be up to 32,000.
+  test.each([5_000, 32_000])("a %i-char chief.md only trims project rules: Chief's own instructions stay inside the 4096-char cut", async (size) => {
+    const marker = "# Project rules marker";
+    const state = await setup({ rules: `${marker}\n${"- Project rule text.\n".repeat(Math.ceil(size / 21))}`.slice(0, size) });
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const threadId = await roleThread(state, "chief");
+    const { instructions } = await state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
+    expect(instructions!.length).toBe(4096);
+    const coreEnd = instructions!.indexOf("chief_escalate with the thread and the full request");
+    expect(coreEnd).toBeGreaterThan(-1);
+    for (const part of [
+      "# Chief core rules (always apply)", "Call chief_roster at the start of every turn", "never poll managed threads",
+      "chief_plan first", "delegate every wave it lists right away",
+      "chief_research is optional.", "or the doubtful evidence to chief_review.",
+      "Guidance, not a rule", "Chief never edits code",
+    ]) expect(instructions).toContain(part);
+    expect(instructions!.indexOf(marker)).toBeGreaterThan(coreEnd);
   });
 });
 
