@@ -7739,6 +7739,11 @@ describe("forge comments", () => {
   const route = (forge: (args: string[]) => unknown) => execFileMock.mockImplementation(async (file: string, args: string[]) =>
     file === "gh" && args[0] === "api" ? forge(args) : file === "gh" && args[0] === "pr" ? { stdout: ghHead("feature/x") } : { stdout: "" });
   const ISSUE = "https://github.com/acme/shop/issues/7";
+  // The pre-move code caches a forge login per host for the whole process, so any case that reaches a login lookup runs on a host
+  // of its own: the same assertions then hold on base and on the module, whatever ran before.
+  let hostCount = 0;
+  const freshHost = () => `forge${hostCount += 1}.example.com`;
+  const prOn = (host: string) => `https://${host}/acme/shop/pull/8`;
   type Op = "post" | "scan" | "login";
   const opOf = (args: string[]): Op => args.includes("POST") ? "post" : args.includes("--paginate") ? "scan" : "login";
   const callsOf = (op: Op) => forgeCalls().filter(([, args]) => opOf(args) === op);
@@ -7771,17 +7776,17 @@ describe("forge comments", () => {
     /** The one Report alert Chief receives, in full; null when the caller sends none. */
     report: { from: string; text: string } | null;
   };
-  const CALLERS: [string, (state: State) => Promise<Scenario>][] = [
-    ["blocked report", async (state) => {
-      const { chief, worker, act } = await blockedWorker(state);
+  const CALLERS: [string, (state: State, pr: string) => Promise<Scenario>][] = [
+    ["blocked report", async (state, pr) => {
+      const { chief, worker, act } = await blockedWorker(state, { prUrl: pr });
       return {
         chief: chief.threadId, prefix: "blocked:", act, result: "Report delivered to Chief.",
         row: { id: worker.threadId, fields: { state: "blocked", last_report_state: "blocked", report_seq: 1, blocker: "Totals test fails", recommendation: "Fix the product code", result: "Tests fail" } },
         report: { from: worker.threadId, text: `[Chief lifecycle alert]\nWorker report from Fix totals (${worker.threadId})\nState: blocked\nBlocked: Totals test fails — decide or escalate to the user.\nBlocker: Totals test fails\nRecommendation: Fix the product code\nResult: Tests fail` },
       };
     }],
-    ["reviewer verdict", async (state) => {
-      const { chief, worker } = await readyWorker(state);
+    ["reviewer verdict", async (state, pr) => {
+      const { chief, worker } = await readyWorker(state, { prUrl: pr });
       const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
       return {
         chief: chief.threadId, prefix: "verdict:", act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId), result: "Report delivered to Chief.",
@@ -7789,8 +7794,8 @@ describe("forge comments", () => {
         report: { from: review.threadId, text: `[Chief lifecycle alert]\nReviewer report from Review · Fix totals (${review.threadId})\nState: ready\nVerdict: approve\nVerdict file: ${join(state.storageRoot, "chief", "proj_1", review.threadId, "verdict-1.md")}\nThe reviewer approves. chief_complete (threadId: ${worker.threadId}); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.\nFull report and last output: bb chief inspect ${review.threadId}\nResult: Reviewed` },
       };
     }],
-    ["completion", async (state) => {
-      const { chief, worker } = await readyWorker(state);
+    ["completion", async (state, pr) => {
+      const { chief, worker } = await readyWorker(state, { prUrl: pr });
       return {
         chief: chief.threadId, prefix: "complete:", act: () => completeWorker(state, chief.threadId, worker.threadId),
         result: "Marked “Fix totals” complete without a review (reason recorded).\nIts pull request is marked ready for review.\nNo cleanup: no approving review.",
@@ -7812,10 +7817,10 @@ describe("forge comments", () => {
     expect(outbox.filter((entry) => entry.dedupe_key.includes("pending-"))).toEqual([]);
     expect(outbox.every((entry) => entry.delivered_at)).toBe(true);
   }
-  const SEED_ROW = (state: State, chief: string, attempts: number, mention: number) => {
+  const SEED_ROW = (state: State, chief: string, target: string, attempts: number, mention: number) => {
     const key = `escalate:${chief}:seeded`;
     state.db.prepare(`INSERT INTO forge_comments (dedupe_key, project_id, thread_id, target, body, mention, attempts, created_at) VALUES (?, 'proj_1', ?, ?, ?, ?, ?, ?)`)
-      .run(key, chief, PR, `seeded body\n\n${markerOf(key)}`, mention, attempts, Date.now() - 60_000);
+      .run(key, chief, target, `seeded body\n\n${markerOf(key)}`, mention, attempts, Date.now() - 60_000);
     return key;
   };
   // Which comment operation each case holds up: post is the caller's own new row; a leftover row with earlier attempts reaches
@@ -7825,8 +7830,8 @@ describe("forge comments", () => {
     { op: "scan", seed: [1, 0], held: { seeded: 2, caller: 0, calls: [0, 1, 0] }, rejected: { seeded: 2, calls: [1, 1, 0] } },
     { op: "login", seed: [0, 1], held: { seeded: 1, caller: 0, calls: [0, 0, 1] }, rejected: { seeded: 1, calls: [2, 0, 1] } },
   ];
-  const SCAN_ARGS = ["api", "--hostname", "github.com", "--paginate", "repos/acme/shop/issues/8/comments", "--jq", ".[].body"];
-  const LOGIN_ARGS = ["api", "--hostname", "github.com", "user", "--jq", ".login"];
+  const SCAN_ARGS = (host: string) => ["api", "--hostname", host, "--paginate", "repos/acme/shop/issues/8/comments", "--jq", ".[].body"];
+  const LOGIN_ARGS = (host: string) => ["api", "--hostname", host, "user", "--jq", ".login"];
 
   // Contract "Required result never waits on optional work (R3)": while a post, a marker scan or a login lookup is unresolved,
   // each caller returns the text it returns on base, holds its committed state, and has delivered its full Report to its Chief.
@@ -7837,8 +7842,9 @@ describe("forge comments", () => {
       const state = await setup();
       const hold = gate(op);
       routeOps({ [op]: () => hold.held });
-      const scenario = await build(state);
-      const seeded = seed ? SEED_ROW(state, scenario.chief, ...seed) : null;
+      const host = freshHost();
+      const scenario = await build(state, prOn(host));
+      const seeded = seed ? SEED_ROW(state, scenario.chief, prOn(host), ...seed) : null;
       const sentBefore = state.sent.length;
       const outboxBefore = scenario.report ? reporterOutbox(state, scenario.report.from).length : 0;
       const rowOfKey = (key: string | undefined) => rows(state).find((row) => row.dedupe_key === key);
@@ -7863,8 +7869,8 @@ describe("forge comments", () => {
       const callerBody = rowOfKey(callerKey())!.body;
       const seededBody = seed ? `seeded body\n\n${seed[1] ? "@boss\n\n" : ""}${markerOf(seeded!)}` : null;
       expect(postCalls().map(([, args]) => bodyOf(args))).toEqual(seededBody ? [seededBody, callerBody] : [callerBody]);
-      if (op === "scan") expect(callsOf("scan").map(([, args]) => args)).toEqual([SCAN_ARGS]);
-      if (op === "login") expect(callsOf("login").map(([, args]) => args)).toEqual([LOGIN_ARGS]);
+      if (op === "scan") expect(callsOf("scan").map(([, args]) => args)).toEqual([SCAN_ARGS(host)]);
+      if (op === "login") expect(callsOf("login").map(([, args]) => args)).toEqual([LOGIN_ARGS(host)]);
     });
   });
 
@@ -7874,8 +7880,9 @@ describe("forge comments", () => {
       const state = await setup();
       const fail = () => { throw bad(); };
       routeOps({ post: fail, scan: fail, login: fail });
-      const scenario = await build(state);
-      const seeded = seed ? SEED_ROW(state, scenario.chief, ...seed) : null;
+      const host = freshHost();
+      const scenario = await build(state, prOn(host));
+      const seeded = seed ? SEED_ROW(state, scenario.chief, prOn(host), ...seed) : null;
       const sentBefore = state.sent.length;
       const outboxBefore = scenario.report ? reporterOutbox(state, scenario.report.from).length : 0;
       expect(await scenario.act()).toBe(scenario.result);
@@ -7893,7 +7900,7 @@ describe("forge comments", () => {
   // these literals (written by hand from the base behaviour, never produced by the code under test): key form, project, thread,
   // target choice, body, mention flag, mention placement and the marker as the last line. The same table runs on base c8a0d76.
   // Regression: any changed title, round, line, detail text, key, target choice or mention position.
-  type Golden = { key: string; thread: string; target: string; body: string; mention: 0 | 1; post?: string; path?: string };
+  type Golden = { key: string; thread: string; target: string; body: string; mention: 0 | 1; post?: string; path?: string; host?: string };
   const GOLDENS: [string, (state: State) => Promise<{ act: () => Promise<unknown>; golden: Golden }>][] = [
     ["blocked report (target: the pull request over the issue)", async (state) => {
       const { worker, act } = await blockedWorker(state, { issueUrl: ISSUE, prUrl: PR });
@@ -7951,12 +7958,13 @@ describe("forge comments", () => {
       };
     }],
     ["escalation (no configured handle: the forge login is the mention)", async (state) => {
-      const { chief, worker } = await blockedWorker(state);
+      const host = freshHost();
+      const { chief, worker } = await blockedWorker(state, { prUrl: prOn(host) });
       const request = "Choose between the two migrations.";
       const key = `escalate:${worker.threadId}:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;
       return {
         act: () => call(state, "chief_escalate", { threadId: worker.threadId, request }, chief.threadId),
-        golden: { key, thread: worker.threadId, target: PR, mention: 1, body: `**Chief · Need you**\n${request}\n\n${markerOf(key)}`, post: `**Chief · Need you**\n${request}\n\n@boss\n\n${markerOf(key)}` },
+        golden: { key, thread: worker.threadId, target: prOn(host), host, mention: 1, body: `**Chief · Need you**\n${request}\n\n${markerOf(key)}`, post: `**Chief · Need you**\n${request}\n\n@boss\n\n${markerOf(key)}` },
       };
     }],
   ];
@@ -7969,7 +7977,7 @@ describe("forge comments", () => {
     expect(rows(state).map(({ dedupe_key, project_id, thread_id, target, body, mention }) => ({ dedupe_key, project_id, thread_id, target, body, mention })))
       .toEqual([{ dedupe_key: golden.key, project_id: "proj_1", thread_id: golden.thread, target: golden.target, body: golden.body, mention: golden.mention }]);
     expect(golden.body.endsWith(`\n\n${markerOf(golden.key)}`)).toBe(true);
-    expect(postCalls().map(([file, args]) => [file, args])).toEqual([["gh", ["api", "--hostname", "github.com", "--method", "POST", golden.path ?? "repos/acme/shop/issues/8/comments", "-f", `body=${golden.post ?? golden.body}`]]]);
+    expect(postCalls().map(([file, args]) => [file, args])).toEqual([["gh", ["api", "--hostname", golden.host ?? "github.com", "--method", "POST", golden.path ?? "repos/acme/shop/issues/8/comments", "-f", `body=${golden.post ?? golden.body}`]]]);
     // A later pass finds nothing pending.
     await state.supervisorCycle();
     await sleep(20);
