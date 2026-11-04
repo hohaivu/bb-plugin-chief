@@ -9151,18 +9151,20 @@ describe("tester role", () => {
       expect(head).toBe(oracle);
     }, 300_000);
 
-    // Known limitation, pinned (not an oracle): reviewedAncestryOf's 20 s deadline covers the git call only. The host lookup
-    // that precedes it (system.config) has no deadline, so a lookup that never answers holds the real chief_review past 20 s.
-    // Regression: a deadline added around the lookup (or around the whole attempt) makes the call settle at 20 s, and this
-    // test names that change. Fake timers stand in for the wait; the fake clock is stepped past 21 s, then the lookup answers.
-    test("review attempt: a pending ancestry host lookup holds chief_review past 20 s (known limitation)", async () => {
+    // Known limitation, pinned (not an oracle): the ancestry check's 20 s deadline covers the git call only. The host lookup
+    // that precedes it (system.config) has no deadline, so a lookup that never answers holds the real chief_review past 60 s.
+    // Regression: a deadline added around the lookup (or around the whole attempt: 20, 30 or 60 s) makes the call settle
+    // early, and this test names that change. Fake timers stand in for the wait: the fake clock is stepped 61 s while the
+    // lookup is held (no reviewer, no review-context.md, call unsettled), then the lookup answers and the review launches once.
+    test("review attempt: a pending ancestry host lookup holds chief_review past 60 s (known limitation)", async () => {
       const PR = "https://github.com/acme/shop/pull/8";
       let held = false;
+      let entered = false;
       let release = () => {};
       const answer = { primaryHostId: "host_1" };
       const state = await setup({
         projectPath: "/oracle/checkout",
-        system: { usageLimits: async () => ({}), config: () => held ? new Promise((resolve) => { release = () => resolve(answer); }) : Promise.resolve(answer) },
+        system: { usageLimits: async () => ({}), config: () => held ? new Promise((resolve) => { entered = true; release = () => resolve(answer); }) : Promise.resolve(answer) },
       });
       let sha = HEAD_SHA;
       execFileMock.mockImplementation(async (file: string, args: string[]) => {
@@ -9184,17 +9186,40 @@ describe("tester role", () => {
       try {
         let settled = false;
         const call = tool(state, "chief_review", { workerThreadId: w1 }, chief).finally(() => { settled = true; });
-        for (let step = 0; step < 21; step++) {
+        for (let step = 0; step < 61; step++) {
           await vi.advanceTimersByTimeAsync(1_000);
           await new Promise((resolve) => setImmediate(resolve));
         }
+        const nextReviewer = `thr_${state.spawned.length + 1}`;
+        expect(entered).toBe(true);
         expect(settled).toBe(false);
         expect(state.spawned).toHaveLength(3);
+        expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='reviewer'`).get()).toEqual({ n: 1 });
+        await expect(reviewContextOf(state, nextReviewer)).rejects.toThrow(/ENOENT/);
         held = false;
         release();
         await expect(call).resolves.toContain("Review scope:");
         expect(state.spawned).toHaveLength(4);
+        expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='reviewer'`).get()).toEqual({ n: 2 });
+        await expect(reviewContextOf(state, nextReviewer)).resolves.toContain("## The previous review (");
       } finally { vi.useRealTimers(); }
-    }, 60_000);
+    }, 120_000);
+
+    // Handler contract: chief_review is Chief-only. The review attempt module no longer guards its caller, so the real
+    // handler's requireChiefCaller is the only refusal. Regression: dropping or moving that guard lets a worker (or an
+    // unregistered thread) start a reviewer.
+    test("review attempt: chief_review is refused for a managed worker and an unregistered caller, with no reviewer started", async () => {
+      const state = await setup();
+      const chief = (await start(state)).threadId;
+      await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture" }, chief);
+      const w1 = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker'`).get() as any).thread_id as string;
+      await readyIdle(state, w1);
+      const spawnedBefore = state.spawned.length;
+      const asCaller = (threadId: string) => state.harness.behavior.callAgentTool("chief_review", { workerThreadId: w1 }, { threadId, projectId: "proj_1" });
+      await expect(asCaller(w1)).rejects.toThrow("chief_review is for the active Chief only: a managed worker reports ready with chief_report, and Chief starts the review.");
+      await expect(asCaller("thr_unregistered")).rejects.toThrow("chief_review is for the active Chief only: ask the active Chief to start it.");
+      expect(state.spawned).toHaveLength(spawnedBefore);
+      expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE role='reviewer'`).get()).toEqual({ n: 0 });
+    });
   });
 });
