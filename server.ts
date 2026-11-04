@@ -4126,7 +4126,7 @@ export default async function plugin(bb: BbPluginApi) {
       const owner = todoOwnerLabel(todo, chiefThreadId);
       return {
         id: `todo #${todo.id}`,
-        label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}${owner ? ` — ${todo.chief_thread_id ? "from " : ""}${owner}` : ""}`,
+        label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}${owner ? ` — ${todo.chief_thread_id ? `from ${owner}` : owner}` : ""}`,
         status: owner ? (todo.chief_thread_id ? "other Chief" : "unowned") : todo.state,
         action: null, done: todo.state !== "open",
       };
