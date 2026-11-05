@@ -387,13 +387,14 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
     return { models, notes, hostId, caller, pick, own, environmentId: live?.environmentId ?? null, permissionMode: callerMode };
   }
 
-  /** Why the run cannot start (a provider signed out or at 100% of a usage window), or null. */
+  /** Why the run cannot start (a provider not installed or at 100% of a usage window), or null. A signed-out status only warns: account-pool proxied hosts report it while pooled threads work. */
   async function researchPreflight(hostId: string, providerIds: string[]) {
     // ponytail: fails open (missing key, error, throw, timeout) because not every provider reports usage.
     for (const providerId of new Set(providerIds)) {
       const res = await discover(async (signal) => bb.sdk.system.usageLimits({ hostId, providerId, signal }), "Usage check").catch(() => null);
       const usage = (res as Record<string, any> | null)?.[providerId];
-      if (usage?.status === "not_installed" || usage?.status === "unauthenticated" || usage?.status === "expired") return `${providerId} is ${usage.status}`;
+      if (usage?.status === "not_installed") return `${providerId} is ${usage.status}`;
+      if (usage?.status === "unauthenticated" || usage?.status === "expired") bb.log.warn(`Researcher provider ${providerId} reports ${usage.status}; starting anyway (a pooled or proxied host can still serve it).`);
       const full = usage?.status === "ok" ? usage.windows?.find((w: { usedPercent: number }) => w.usedPercent >= 100) : null;
       if (full) return `${providerId} is out of quota (${full.label} window at ${full.usedPercent}%${full.resetsAt ? `, resets ${full.resetsAt}` : ""})`;
     }
