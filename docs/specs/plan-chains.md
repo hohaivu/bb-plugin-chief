@@ -16,6 +16,10 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Pinned review**: a review round bound to a specific pull request commit SHA.
 - **Unpinned review**: a review round without a readable commit SHA.
 - **Cleanup claim**: a persistent record in `cleanup_environment_claims` that assigns an environment action to one thread.
+- **Repair target**: a worker thread that a reviewer covers. An open target is a repair target with work still open.
+- **Loose target**: an open target that is not in a legacy stack.
+- **Reject streak**: the rejection count that a reviewer row carries as `reject_streak`.
+- **Rung**: the advice level (fix, consult, or stop) that `ledger.rung` returns for a reject streak.
 
 ## Ownership and Entry Points
 
@@ -24,7 +28,7 @@ Six modules own the plan chains domain:
 1. `waveSchedule.ts` owns graph traversal, wave relationships, and wave absence.
 2. `planLifecycle.ts` owns delegation admission, role progression, and waivers.
 3. `server.ts` owns worker execution, forge initialization, delegation tools, and cleanup steps.
-4. `planProgress.ts` owns progress checks, review readiness, and legacy restack rules.
+4. `planProgress.ts` owns progress checks, review readiness, legacy restack rules, and the repair decision after a reviewer verdict.
 5. `reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
 6. `reviewLedger.ts` owns reviewer tracking, coverage checks, and historical task chain queries.
 
@@ -39,6 +43,12 @@ Callers interact with these entry points:
 - `chief_forge_init(params)`: initializes the forge repository branch, pull request, and issue.
 - `startWorker(params)`: prepares and launches a worker thread in an environment.
 - `restackOf(worker, waves)`: determines whether a legacy wave requires a restack.
+- `reviewAdvice(reviewer)`: returns null, or one advice of kind approve, fix, consult, or stop.
+  - The advice names the layout: whole plan, single managed worker, or unowned branch.
+  - The advice lists the open targets, the legacy stack groups in wave order, and the loose targets.
+  - For each target, the advice states whether it is a tester branch and whether it sits on a spec-bearing chain.
+  - A tester branch is a tester row or a worker on a test wave.
+- `onSpecChain(row)`: returns true for a plan chain with a Spec Writer on an unbypassed spec wave. It also returns true for an unplanned task chain that holds a Spec Writer.
 - `reusableEnvironment(threadId)`: returns the environment of an earlier reviewer if it is available for reuse.
 - `cleanupStep(job, eligible)`: executes lifecycle cleanup transitions and records environment claims.
 
@@ -144,7 +154,7 @@ Shared worktree cleanup coordinates action ownership:
 ### Legacy Restack Handling
 
 - `planProgress.ts` evaluates restack requirements only for legacy plans where waves have distinct branches. Reason: new chains share a single branch and never require branch restacking.
-- `server.ts` provides restack instructions only for legacy stacked plans. Reason: historical plan graphs in SQLite require backward compatibility.
+- `server.ts` words restack instructions only for the legacy stacks that `reviewAdvice` returns. It never groups targets itself. Reason: historical plan graphs in SQLite require backward compatibility.
 - The server never instructs new chain workers to restack branches. Reason: all waves in a new chain commit directly to the shared branch.
 
 ### Baseline Graph and Schedule Operations
@@ -163,6 +173,12 @@ Shared worktree cleanup coordinates action ownership:
 - Exactly one cleanup job owns each action for a shared environment in `cleanup_environment_claims`. Reason: primary key constraints prevent duplicate claim owners.
 - A reviewer worktree never hosts review execution on the live environment of an active target worker. Reason: concurrent reviewer execution inside a worker workspace causes file collisions.
 - `legacyWaveGraph.oracle.json` decisions remain identical to base commit results. Reason: legacy plan verification contracts require strict regression avoidance.
+- Reviewer advice is not permission. Reason: advice is plan-wide wording, and permission is per task.
+- `reviewAdvice` takes its rung from the `reject_streak` that the reviewer carries, through `ledger.rung`. Reason: one carried streak gives one answer for the alert, Pending, and the action panel.
+- `ledger.replacement` keeps permission for a `replaces:`. It decides from task history, consult timing, and user approval. Reason: permission depends on the task, not on the plan.
+- A satisfied consult still shows consult advice. `chief_delegate` decides whether the `replaces:` proceeds. Reason: advice stays plan-wide wording.
+- `server.ts` `nextAction` formats the result of `reviewAdvice` and makes no repair decision of its own. Reason: one module reads plan state and reviewer state together, and the server only writes sentences.
+- The report alert, `chief_roster` Pending, and the action panel read the same `reviewAdvice` answer. Reason: the three surfaces must never give different advice.
 
 ## Related Decisions
 
