@@ -6,7 +6,7 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 
 ## Domain Terms
 
-- **Report**: one `chief_report` call. It has a state (`ready`, `blocked`, `active`, or `idle`) and optional fields such as `result`, `verdict`, `findings`, `fails`, `lesson`, and `plan`.
+- **Report**: one `chief_report` call. It has a state (`ready`, `blocked`, `active`, `idle`, or `failed`) and optional fields such as `result`, `verdict`, `findings`, `fails`, `lesson`, and `plan`.
 - **Row**: the `managed_threads` record of the reporting thread.
 - **Pending row**: a row built from spawn metadata when the thread has no stored row yet. It is a candidate until the report validates.
 - **Seq and rev**: `report_seq` counts reports of a row. `result_rev` counts replacements of the stored result.
@@ -173,7 +173,7 @@ Each contract carries its reason.
 - A missing verdict file never erases the stored verdict. Reason: the verdict rows commit first.
 - Review ledger writes run only inside the `store.batch` of the intake. Reason: the ledger refuses a write outside a batch.
 - The intake is the only writer of `chief_lessons` in a report. Reason: the thread store keeps only `managed_threads`.
-- A failed optional step changes only the alert text and the attached paths. It never removes a committed row.
+- A failed optional step changes only the alert text and the attached paths. It never removes a committed row. Reason: the required rows are already committed before optional work begins, so an optional failure cannot roll them back.
 
 ### Trade-offs
 
