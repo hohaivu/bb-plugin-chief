@@ -11,7 +11,7 @@ import {
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { cliAdapters, createForgeComments, FORGE_COMMENTS_TABLE, sanitizeForge } from "./forgeComments";
-import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
+import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
 import { cleanupEligible, deleteSafeBranch, ownedBranch } from "./cleanup";
 import { commitStamp, fastForward, stampLine } from "./checkoutSync";
@@ -23,7 +23,7 @@ import {
 } from "./reportIntake";
 import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "./delegationBrief";
 import { clip, type RecordedCommand } from "./text";
-import { createPlanProgress, type SegmentState } from "./planProgress";
+import { createPlanProgress, type RepairTarget, type SegmentState } from "./planProgress";
 import { chainOf, createWaveSchedule, type PlanWave } from "./waveSchedule";
 import { createPlanLifecycle } from "./planLifecycle";
 import {
@@ -1184,7 +1184,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const ledger = createReviewLedger<ManagedRow>(db, store.get, store, { busy: (status) => BUSY_STATUSES.has(status) });
   const schedule = createWaveSchedule<ManagedRow>(store.rows);
-  const { planWavesFor, isDesignWave, isTestWave, waveWorkers, specWave, specChain, reviewTargetsFor } = schedule;
+  const { planWavesFor, isDesignWave, isTestWave, waveWorkers, specWave, reviewTargetsFor } = schedule;
   let plannerActive = false;
   // The cleanupApproved setting, cached so chief_complete never reads settings: false until the first read, which fails closed.
   let cleanupActive = false;
@@ -1196,6 +1196,7 @@ export default async function plugin(bb: BbPluginApi) {
   let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
   const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
   const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
+  const { onSpecChain } = progress;
   const plans = createPlanLifecycle<ManagedRow>(store, schedule, ledger, planReviewRefusal);
   /** A supporting row whose work was absorbed: a reviewer or advisor of a complete worker,
    * a researcher that reported ready (its report alert carries the result), or a planner once
@@ -2040,12 +2041,6 @@ export default async function plugin(bb: BbPluginApi) {
       : "";
   }
 
-  /** The row sits on a spec-bearing chain: a plan chain with a Spec Writer on an unbypassed spec wave, or an unplanned task chain holding a Spec Writer. */
-  function onSpecChain(row: ManagedRow): boolean {
-    if (row.plan_thread_id && row.plan_wave != null) return specChain(row.plan_thread_id, planWavesFor(row.plan_thread_id), row.plan_wave);
-    return ledger.taskChain(row.thread_id).some((id) => store.get(id)?.kind === "spec-writer");
-  }
-
   /** The Spec Writer's hand-off to its wave's worker. */
   function implementLine(row: ManagedRow): string {
     return row.plan_thread_id && row.plan_wave != null
@@ -2240,56 +2235,51 @@ export default async function plugin(bb: BbPluginApi) {
       const advised = row.worker_thread_id ? store.get(row.worker_thread_id) : undefined;
       return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with ${advised ? replacesCall(advised) : row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : "chief_delegate (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
     }
-    if (row.role !== "reviewer" || !row.verdict) return null;
-    // Null: replaces: re-pointed a covered worker to a fresh one (that branch's findings were handed off), or every covered worker is complete.
-    const round = progress.fixRound(row);
-    if (!round) return null;
-    const { open, plan, stacks, loose } = round;
-    // A stacked chain's waves each build on the one before, so they are fixed one at a time, never in parallel.
-    const wave = (target: ReviewTarget) => store.get(target.worker_thread_id)?.plan_wave;
-    const workers = open.map((target) => target.worker_thread_id).join(", ");
-    if (row.verdict === "approve") {
-      if (plan) {
-        return `The reviewer approves the whole plan. ${open.map((target) => `chief_complete (threadId: ${target.worker_thread_id})`).join("; ")}; each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.`;
+    const advice = progress.reviewAdvice(row);
+    if (!advice) return null;
+    const flagged = advice.kind !== "approve" && advice.regression ? " The reviewer reports this change introduced a new problem; make the fix's brief name it." : "";
+    if (advice.kind === "stop") {
+      return `The reviewer still requires changes after ${advice.streak} consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.${flagged}`;
+    }
+    const { work } = advice;
+    if (advice.kind === "approve") {
+      if (work.layout === "plan") {
+        return `The reviewer approves the whole plan. ${work.open.map((target) => `chief_complete (threadId: ${target.threadId})`).join("; ")}; each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.`;
       }
-      const complete = row.worker_thread_id
-        ? `chief_complete (threadId: ${row.worker_thread_id}); it marks the pull request ready`
+      const complete = work.layout === "single"
+        ? `chief_complete (threadId: ${work.target.threadId}); it marks the pull request ready`
         : `chief_complete (threadId: ${row.thread_id}), then mark the pull request ready yourself (no worker owns it)`;
       return `The reviewer approves. ${complete}. Nits listed with an approve are optional: start no worker round for them alone.`;
     }
-    const flagged = row.regression ? " The reviewer reports this change introduced a new problem; make the fix's brief name it." : "";
     // A tester's branch: a product fix goes to a worker, a test fix to a tester; replacing it needs the kind.
-    const tested = (id: string) => { const target = store.get(id); return !!target && (target.kind === "tester" || isTestWave(target)); };
-    const specOn = (id: string) => { const target = store.get(id); return !!target && onSpecChain(target); };
-    const handoff = (id: string) => specOn(id)
-      ? `chief_delegate (replaces: ${id}, kind: worker) for product-code findings${tested(id) ? `, chief_delegate (replaces: ${id}, kind: tester) for test-only findings` : ""} or chief_delegate (replaces: ${id}, kind: spec-writer) for docs findings`
-      : tested(id)
-      ? `chief_delegate (replaces: ${id}, kind: worker) for product-code findings or chief_delegate (replaces: ${id}, kind: tester) for test-only findings`
-      : `chief_delegate (replaces: ${id})`;
-    const testerIds = open.map((target) => target.worker_thread_id).filter(tested);
-    const mixed = testerIds.length
-      ? ` On ${testerIds.join(", ")} name the kind: kind: worker for product-code findings, kind: tester for test-only findings. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests.`
-      : "";
-    const rung = ledger.rung(row.reject_streak);
-    if (rung === "stop") {
-      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.${flagged}`;
-    }
-    if (rung === "consult") {
-      if (plan) {
-        return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult (workerThreadId: ${open[0]!.worker_thread_id}) now, before any further delegation, with every branch of the review (${workers}) in its context — one consult unlocks the fix for each. Then hand its advice to ${stacks.length
-          ? `fresh workers with chief_delegate (replaces: …): on the stacked waves ${stacks.map((stack) => stack.map(wave).join(" → ")).join("; ")} one at a time in wave order, the earliest wave the findings name first, then each later wave restacked on it as its ready report directs; any other branch the findings name in this turn. Run exactly one more review once every wave is ready.`
+    const handoff = (target: RepairTarget) => target.spec
+      ? `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings${target.tested ? `, chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings` : ""} or chief_delegate (replaces: ${target.threadId}, kind: spec-writer) for docs findings`
+      : target.tested
+      ? `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings or chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings`
+      : `chief_delegate (replaces: ${target.threadId})`;
+    // A stacked chain's waves each build on the one before, so they are fixed one at a time, never in parallel.
+    if (work.layout === "plan") {
+      const { open, stacks, loose } = work;
+      const workers = open.map((target) => target.threadId).join(", ");
+      const testerIds = open.filter((target) => target.tested).map((target) => target.threadId);
+      const mixed = testerIds.length
+        ? ` On ${testerIds.join(", ")} name the kind: kind: worker for product-code findings, kind: tester for test-only findings. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests.`
+        : "";
+      if (advice.kind === "consult") {
+        return `The reviewer still requires changes after ${advice.streak} consecutive rounds. Call chief_consult (workerThreadId: ${open[0]!.threadId}) now, before any further delegation, with every branch of the review (${workers}) in its context — one consult unlocks the fix for each. Then hand its advice to ${stacks.length
+          ? `fresh workers with chief_delegate (replaces: …): on the stacked waves ${stacks.map((stack) => stack.map((target) => target.wave).join(" → ")).join("; ")} one at a time in wave order, the earliest wave the findings name first, then each later wave restacked on it as its ready report directs; any other branch the findings name in this turn. Run exactly one more review once every wave is ready.`
           : "one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review."}${mixed} If that review still requires changes, stop and escalate to the user.${flagged}`;
       }
-      return `The reviewer still requires changes after ${row.reject_streak} consecutive rounds. Call chief_consult${row.worker_thread_id ? ` (workerThreadId: ${row.worker_thread_id})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with ${row.worker_thread_id ? handoff(row.worker_thread_id) : `chief_delegate (branch: ${row.branch})`} and run exactly one more review.${row.worker_thread_id && tested(row.worker_thread_id) ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} If that review still requires changes, stop and escalate to the user.${flagged}`;
+      if (stacks.length) {
+        return `The reviewer requires changes.${flagged} ${stacks.map((stack) => `Waves ${stack.map((target) => target.wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${target.wave}: ${target.threadId}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${loose.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${loose.map(handoff).join(" / ")}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`;
+      }
+      return `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map(handoff).join(" / ")}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`;
     }
-    if (plan && stacks.length) {
-      return `The reviewer requires changes.${flagged} ${stacks.map((stack) => `Waves ${stack.map(wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${wave(target)}: ${target.worker_thread_id}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${loose.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${loose.map((target) => handoff(target.worker_thread_id)).join(" / ")}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`;
+    if (advice.kind === "consult") {
+      return `The reviewer still requires changes after ${advice.streak} consecutive rounds. Call chief_consult${work.layout === "single" ? ` (workerThreadId: ${work.target.threadId})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with ${work.layout === "single" ? handoff(work.target) : `chief_delegate (branch: ${row.branch})`} and run exactly one more review.${work.layout === "single" && work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} If that review still requires changes, stop and escalate to the user.${flagged}`;
     }
-    if (plan) {
-      return `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map((target) => handoff(target.worker_thread_id)).join(" / ")}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`;
-    }
-    return row.worker_thread_id
-      ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with ${handoff(row.worker_thread_id)}; its findings are attached automatically.${tested(row.worker_thread_id) ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} Escalate if the disagreement is a genuine decision.`
+    return work.layout === "single"
+      ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with ${handoff(work.target)}; its findings are attached automatically.${work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} Escalate if the disagreement is a genuine decision.`
       : `The reviewer requires changes, and no managed worker owns branch ${row.branch}.${flagged} Hand the fix to a fresh worker with chief_delegate (branch: ${row.branch}${row.pr_url ? `, prUrl: ${row.pr_url}` : ""}; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.`;
   }
 
