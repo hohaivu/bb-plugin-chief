@@ -44,10 +44,10 @@ function world(busy: (status: string) => boolean = (status) => status === "worki
   };
   const advisor = (id: string, forWorker: string, over: { created_at: number; advised_at: number | null }) => insert(id, "advisor", { worker_thread_id: forWorker, ...over });
   /** A verdict for each covered worker, in insertion order (the newest has the highest id). */
-  const verdict = (reviewerId: string, workers: string[], verdictName: string, at: number, over: { head_sha?: string; worker_report_seq?: number } = {}) => {
+  const verdict = (reviewerId: string, workers: string[], verdictName: string, at: number, over: { head_sha?: string; worker_report_seq?: number; report_seq?: number } = {}) => {
     for (const w of workers) {
-      db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES (?, ?, ?, 1, ?, ?, ?)`)
-        .run(reviewerId, w, verdictName, at, over.head_sha ?? null, over.worker_report_seq ?? null);
+      db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(reviewerId, w, verdictName, over.report_seq ?? 1, at, over.head_sha ?? null, over.worker_report_seq ?? null);
     }
   };
   const rejections = (reviewerId: string, workerId: string, count: number) => {
@@ -462,5 +462,95 @@ describe("lastPinnedReviewer: the earlier reviewer whose worktree a pinned revie
     reviewer("r1", ["w1"], { reviewed_head_sha: SHA, created_at: 500 });
     reviewer("r2", ["w1"], { reviewed_head_sha: SHA, created_at: 500 });
     expect(ledger.lastPinnedReviewer(["w1"])).toBe("r2");
+  });
+});
+
+// Contract (PR #187): eventCounts is the one owner of "how many approve / request_changes events did each reviewer give".
+// One event is one report (reviewer_thread_id, report_seq), however many target rows the report wrote; history wins over the
+// current verdict; the carried reject_streak is never an event count. chiefStats' caller test lives in server.test.ts.
+describe("eventCounts: review events per reviewer", () => {
+  const noCounts = { approve: 0, request_changes: 0 };
+
+  test("one report with several target rows is one event", () => {
+    const { ledger, worker, reviewer, verdict } = world();
+    for (const id of ["w1", "w2", "w3"]) worker(id);
+    reviewer("r1", ["w1", "w2", "w3"]);
+    verdict("r1", ["w1", "w2", "w3"], "request_changes", 1);
+    expect(ledger.eventCounts([{ thread_id: "r1", verdict: "request_changes" }]).get("r1")).toEqual({ approve: 0, request_changes: 1 });
+  });
+
+  test("two reports of one reviewer are two events; the same report_seq of another reviewer is its own event", () => {
+    const { ledger, worker, reviewer, verdict } = world();
+    worker("w1");
+    reviewer("r1", ["w1"]);
+    reviewer("r2", ["w1"]);
+    verdict("r1", ["w1"], "request_changes", 1, { report_seq: 1 });
+    verdict("r1", ["w1"], "request_changes", 2, { report_seq: 2 });
+    verdict("r2", ["w1"], "request_changes", 3, { report_seq: 1 });
+    const counts = ledger.eventCounts([{ thread_id: "r1", verdict: "request_changes" }, { thread_id: "r2", verdict: "request_changes" }]);
+    expect(counts.get("r1")).toEqual({ approve: 0, request_changes: 2 });
+    expect(counts.get("r2")).toEqual({ approve: 0, request_changes: 1 });
+  });
+
+  test("reject, approve, reject is two request_changes events, while the consecutive streak is one", () => {
+    const { ledger, worker, reviewer, verdict } = world();
+    worker("w1");
+    reviewer("r1", ["w1"]);
+    verdict("r1", ["w1"], "request_changes", 1, { report_seq: 1 });
+    verdict("r1", ["w1"], "approve", 2, { report_seq: 2 });
+    verdict("r1", ["w1"], "request_changes", 3, { report_seq: 3 });
+    expect(ledger.eventCounts([{ thread_id: "r1", verdict: "request_changes" }]).get("r1")).toEqual({ approve: 1, request_changes: 2 });
+    expect(ledger.ladder("w1").streak).toBe(1);
+  });
+
+  test("history survives a cleared current verdict and a completed reviewer", () => {
+    const { ledger, worker, reviewer, verdict } = world();
+    worker("w1");
+    reviewer("r1", ["w1"], { state: "complete" });
+    verdict("r1", ["w1"], "request_changes", 1);
+    expect(ledger.eventCounts([{ thread_id: "r1", verdict: null }]).get("r1")).toEqual({ approve: 0, request_changes: 1 });
+  });
+
+  test("a reviewer with history does not count its current verdict again", () => {
+    const { ledger, worker, reviewer, verdict } = world();
+    worker("w1");
+    reviewer("r1", ["w1"]);
+    reviewer("r2", ["w1"]);
+    verdict("r1", ["w1"], "request_changes", 1);
+    verdict("r2", ["w1"], "approve", 2);
+    const counts = ledger.eventCounts([{ thread_id: "r1", verdict: "request_changes" }, { thread_id: "r2", verdict: "request_changes" }]);
+    // r1: the current verdict is the same event as its history row. r2: a current verdict that differs from its history is still ignored.
+    expect(counts.get("r1")).toEqual({ approve: 0, request_changes: 1 });
+    expect(counts.get("r2")).toEqual({ approve: 1, request_changes: 0 });
+  });
+
+  test("a legacy reviewer with no history and a carried reject_streak of 3 is exactly one event, from its current verdict", () => {
+    const { ledger, worker, reviewer } = world();
+    worker("w1");
+    reviewer("r1", ["w1"], { verdict: "request_changes", reject_streak: 3 });
+    expect(ledger.eventCounts([{ thread_id: "r1", verdict: "request_changes" }]).get("r1")).toEqual({ approve: 0, request_changes: 1 });
+    expect(ledger.ladder("w1").streak).toBe(3);
+  });
+
+  test("no history and a null current verdict count nothing", () => {
+    const { ledger, worker, reviewer } = world();
+    worker("w1");
+    reviewer("r1", ["w1"]);
+    expect(ledger.eventCounts([{ thread_id: "r1", verdict: null }]).get("r1")).toEqual(noCounts);
+  });
+
+  test("an empty input gives nothing; only the reviewers passed in get an entry, zero counts included", () => {
+    const { ledger, worker, reviewer, verdict } = world();
+    worker("w1");
+    reviewer("r1", ["w1"]);
+    reviewer("r2", ["w1"]);
+    reviewer("r3", ["w1"]);
+    verdict("r1", ["w1"], "approve", 1);
+    verdict("r2", ["w1"], "request_changes", 2);
+    expect(ledger.eventCounts([]).size).toBe(0);
+    const counts = ledger.eventCounts([{ thread_id: "r1", verdict: "approve" }, { thread_id: "r3", verdict: null }]);
+    expect([...counts.keys()].sort()).toEqual(["r1", "r3"]);
+    expect(counts.get("r1")).toEqual({ approve: 1, request_changes: 0 });
+    expect(counts.get("r3")).toEqual(noCounts);
   });
 });

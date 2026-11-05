@@ -3561,14 +3561,12 @@ export default async function plugin(bb: BbPluginApi) {
         hardStalls: sum(counts.map((c) => c?.hardStalls ?? 0)),
       };
     };
-    // Verdict history is the source for approve/request_changes counts; a reviewer from before reviewer_verdicts
-    // existed has no rows, so its row's current verdict stands in for the one it gave.
-    const verdictsBy = new Map<string, string[]>();
-    for (const entry of db.prepare(`SELECT reviewer_thread_id, verdict FROM reviewer_verdicts GROUP BY reviewer_thread_id, report_seq ORDER BY MIN(id)`).all() as { reviewer_thread_id: string; verdict: string }[]) {
-      if (ids.has(entry.reviewer_thread_id)) verdictsBy.set(entry.reviewer_thread_id, [...(verdictsBy.get(entry.reviewer_thread_id) ?? []), entry.verdict]);
-    }
-    const verdictsOf = (list: ManagedRow[]) => list.filter((row) => row.role === "reviewer")
-      .flatMap((row) => verdictsBy.get(row.thread_id) ?? (row.verdict ? [row.verdict] : []));
+    const reviewers = rows.filter((row) => row.role === "reviewer");
+    const eventCounts = ledger.eventCounts(reviewers);
+    const verdictsOf = (list: ManagedRow[]) => {
+      const counts = list.flatMap((row) => eventCounts.get(row.thread_id) ?? []);
+      return { approve: sum(counts.map((c) => c.approve)), request_changes: sum(counts.map((c) => c.request_changes)) };
+    };
     const terminal = ["complete", "archived", "deleted"];
     const perTask = [...groups].filter(([, list]) => list.some((row) => row.role === "planner" || row.role === "worker")).map(([key, list]) => {
       const planner = list.find((row) => row.role === "planner");
@@ -3586,8 +3584,8 @@ export default async function plugin(bb: BbPluginApi) {
       return {
         key, title: planner?.title ?? workers[0]?.title ?? key, status, workers: workers.length, waves,
         replacements: Math.max(0, workers.length - waves),
-        approvals: verdicts.filter((verdict) => verdict === "approve").length,
-        requestChanges: verdicts.filter((verdict) => verdict === "request_changes").length,
+        approvals: verdicts.approve,
+        requestChanges: verdicts.request_changes,
         category: (key.startsWith("plan:") || workers.some((row) => row.plan_thread_id) ? "planned"
           : workers[0]?.simple === 1 ? "simple"
           : workers[0]?.planner_on == null ? "unknown"
@@ -3605,9 +3603,7 @@ export default async function plugin(bb: BbPluginApi) {
     const exactSince = eventsSince === undefined ? null : Number(eventsSince);
     const count = (status: string) => perTask.filter((task) => task.status === status).length;
     const todoCount = (state: TodoRow["state"]) => todos.filter((todo) => todo.state === state).length;
-    const reviewers = rows.filter((row) => row.role === "reviewer");
-    const verdicts = verdictsOf(rows);
-    const requestChanges = verdicts.filter((verdict) => verdict === "request_changes").length;
+    const { approve, request_changes: requestChanges } = verdictsOf(rows);
     const categoryCount = (category: string) => perTask.filter((task) => task.category === category).length;
     const researchBy = new Map<string, { role: string; mode: string | null; calls: number; succeeded: number }>();
     for (const call of db.prepare(`SELECT caller_thread_id, role, mode, outcome FROM chief_research_calls ORDER BY id`).all() as { caller_thread_id: string; role: string; mode: string | null; outcome: string }[]) {
@@ -3625,7 +3621,7 @@ export default async function plugin(bb: BbPluginApi) {
         planned: categoryCount("planned"), unplanned_planner_on: categoryCount("unplanned_planner_on"),
         unplanned_planner_off: categoryCount("unplanned_planner_off"), simple: categoryCount("simple"), unknown: categoryCount("unknown"),
       },
-      verdicts: { approve: verdicts.length - requestChanges, request_changes: requestChanges },
+      verdicts: { approve, request_changes: requestChanges },
       research: [...researchBy.values()].sort((a, b) => a.role.localeCompare(b.role) || String(a.mode).localeCompare(String(b.mode))),
       todos: { open: todoCount("open"), done: todoCount("done"), dropped: todoCount("dropped") },
       repairs: {
