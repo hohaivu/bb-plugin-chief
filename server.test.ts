@@ -10546,4 +10546,182 @@ describe("checkout freshness", () => {
       expect(await w.r.head()).toBe(w.r.c0);
     });
   });
+
+  describe("busy rule", () => {
+    const NOT_BUSY = ["idle", "ready", "blocked"];
+    test.each(["active", "starting", "stopping", "pending"])("a researcher of this Chief whose live status is %s makes chief_research skip, and the next researcher still starts", async (status) => {
+      const w = await world();
+      noWarning(await w.research(), RESEARCH_BASE);
+      const [first] = w.rows("researcher");
+      w.setLive(first!, status);
+      await w.r.push();
+      const before = w.calls.length;
+      expectWarned(await w.research(), RESEARCH_BASE, new RegExp(`researcher ${first} is still running in it`));
+      expect(w.spawnedRole("researcher")).toHaveLength(2);
+      expect(w.calls).toHaveLength(before);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test.each(NOT_BUSY)("a researcher whose live status is %s does not block the fast-forward", async (status) => {
+      const w = await world();
+      await w.research();
+      w.setLive(w.rows("researcher")[0]!, status);
+      const tip = await w.r.push();
+      noWarning(await w.research(), RESEARCH_BASE);
+      expect(await w.r.head()).toBe(tip);
+    });
+
+    test("a researcher whose live read throws counts as running", async () => {
+      const w = await world();
+      await w.research();
+      const [first] = w.rows("researcher");
+      await w.r.push();
+      w.state.failNextGet(first!);
+      expectWarned(await w.research(), RESEARCH_BASE, new RegExp(`researcher ${first} is still running in it`));
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a researcher whose live read times out counts as running; releasing the read later starts no git", async () => {
+      const w = await world();
+      await w.research();
+      const [first] = w.rows("researcher");
+      await w.r.push();
+      const before = w.calls.length;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let hits = 0;
+      w.state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+        if (threadId === first) { hits += 1; await held; }
+        const thread = w.state.live.get(threadId);
+        if (!thread) throw new Error("not found");
+        return thread;
+      });
+      await withFakeTimers(async () => {
+        const call = track(w.research());
+        await flush(4_900);
+        expect(call.done).toBe(false);
+        await flush(200);
+        await call.settled;
+        expect(hits).toBe(1);
+        expectWarned(call.value!, RESEARCH_BASE, new RegExp(`researcher ${first} is still running in it`));
+        release();
+        await flush(0);
+      });
+      expect(w.calls).toHaveLength(before);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a researcher of another Chief never counts", async () => {
+      const w = await world();
+      const other = (await start(w.state, "proj_2")).threadId;
+      w.state.live.set(other, { ...w.state.live.get(other)!, providerId: "codex" });
+      await w.state.harness.behavior.callAgentTool("chief_research", SURVEY("Other chief question"), { threadId: other, projectId: "proj_2" });
+      const foreign = w.state.db.prepare("SELECT thread_id FROM managed_threads WHERE role='researcher' AND chief_thread_id=?").get(other) as { thread_id: string };
+      w.setLive(foreign.thread_id, "active");
+      const tip = await w.r.push();
+      noWarning(await w.research(), RESEARCH_BASE);
+      expect(await w.r.head()).toBe(tip);
+    });
+
+    test("in a researcher call, a running planner whose sharing is unknown blocks", async () => {
+      const w = await world();
+      expectWarned(await w.plan(), PLAN_BASE, /could not tell whether the planner shares it/);
+      const [planner] = w.rows("planner");
+      w.setLive(planner!, "active");
+      await w.r.push();
+      expectWarned(await w.research(), RESEARCH_BASE, new RegExp(`planner ${planner} is still running in it`));
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("in a researcher call, a running planner on a confirmed separate checkout does not block", async () => {
+      const w = await world({ projectPath: "/elsewhere/worktree-default" });
+      noWarning(await w.plan(), PLAN_BASE);
+      w.setLive(w.rows("planner")[0]!, "active");
+      const tip = await w.r.push();
+      noWarning(await w.research(), RESEARCH_BASE);
+      expect(await w.r.head()).toBe(tip);
+    });
+
+    test("a running planner that shares Chief's checkout blocks the next chief_plan", async () => {
+      const w = await world({ projectPath: "clone" });
+      noWarning(await w.plan(), PLAN_BASE);
+      w.setLive(w.rows("planner")[0]!, "active");
+      await w.r.push();
+      const before = w.calls.length;
+      expectWarned(await w.plan(), PLAN_BASE, /planner thr_\d+ is still running in it/);
+      expect(w.calls).toHaveLength(before);
+      expect(w.spawnedRole("planner")).toHaveLength(2);
+    });
+  });
+
+  describe("ordering: a refused call leaves Chief's checkout and git alone", () => {
+    const ctxOf = (w: World) => w.ctx;
+    test.each<[string, (w: World) => Promise<unknown>, RegExp]>([
+      ["research on a cooling model", async (w) => {
+        w.state.db.prepare("INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES ('codex', 'gpt-6-astra', ?, 'x', 0)").run(Date.now() + 600_000);
+        return w.research();
+      }, /cooling down/],
+      ["research switched off", async (w) => {
+        await w.state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
+        return w.research();
+      }, /chief_research is off/],
+      ["planning switched off", async (w) => {
+        await w.state.harness.behavior.setSettings({ plannerEnabled: false });
+        return w.plan();
+      }, /./],
+      ["a revision of a plan that does not exist", async (w) => w.state.harness.behavior.callAgentTool("chief_plan", { title: "Revise", mission: "Propose again", revises: "thr_missing" }, ctxOf(w)), /./],
+    ])("%s", async (_name, act, message) => {
+      const w = await world({ projectPath: "clone" });
+      await w.r.push();
+      await expect(act(w)).rejects.toThrow(message);
+      expect(w.calls).toEqual([]);
+      expect(await w.r.head()).toBe(w.r.c0);
+      expect(w.spawnedRole("researcher")).toHaveLength(0);
+      expect(w.spawnedRole("planner")).toHaveLength(0);
+    });
+  });
+
+  describe("planner sharing is three-valued, through the chief_plan tool and CLI plan", () => {
+    const UNKNOWN = /could not tell whether the planner shares it/;
+    const causes: [string, (w: World) => void][] = [
+      ["projects.get throws", (w) => { w.state.harness.sdk.stub("projects.get", async () => { throw new Error("project lookup failed"); }); }],
+      ["environments.get throws", (w) => { w.state.harness.sdk.stub("environments.get", async () => { throw new Error("env lookup failed"); }); }],
+      ["environments.get has no path", (w) => { delete w.cfg.env.path; }],
+    ];
+    describe.each(causes)("%s", (_name, arrange) => {
+      test("chief_plan warns once, spawns the planner and runs no git", async () => {
+        const w = await world({ projectPath: "clone" });
+        await w.r.push();
+        arrange(w);
+        expectWarned(await w.plan(), PLAN_BASE, UNKNOWN);
+        expect(w.spawnedRole("planner")).toHaveLength(1);
+        expect(w.calls).toEqual([]);
+        expect(await w.r.head()).toBe(w.r.c0);
+      });
+
+      test("CLI plan warns once, spawns the planner and runs no git", async () => {
+        const w = await world({ projectPath: "clone" });
+        await w.r.push();
+        arrange(w);
+        const result = await w.cliPlan();
+        expect(result.exitCode).toBe(0);
+        expectWarned(result.stdout!.trim(), CLI_PLAN_BASE, UNKNOWN);
+        expect(w.spawnedRole("planner")).toHaveLength(1);
+        expect(w.calls).toEqual([]);
+        expect(await w.r.head()).toBe(w.r.c0);
+      });
+    });
+
+    test("CLI plan on a shared checkout fast-forwards it with no warning, and a remote host there is a remote-host warning", async () => {
+      const w = await world({ projectPath: "clone" });
+      const tip = await w.r.push();
+      const ok = await w.cliPlan();
+      expect(ok.stdout!.trim()).toMatch(CLI_PLAN_BASE);
+      expect(await w.r.head()).toBe(tip);
+      w.cfg.hostId = "host_2";
+      const before = w.calls.length;
+      expectWarned((await w.cliPlan()).stdout!.trim(), CLI_PLAN_BASE, /remote host/);
+      expect(w.calls).toHaveLength(before);
+    });
+  });
 });
