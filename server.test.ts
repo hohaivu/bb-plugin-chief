@@ -10382,12 +10382,12 @@ describe("checkout freshness", () => {
    * `projectPath` is the project source path the server compares with Chief's path to decide whether a planner shares it.
    * `hold` may return a promise that delays a git call, or rejects like execFile's killed child; it sees the call's options.
    */
-  async function world(opts: { projectPath?: "clone" | string; env?: Record<string, unknown> | "all"; r?: Awaited<ReturnType<typeof repos>>; behind?: boolean } = {}) {
+  async function world(opts: { projectPath?: "clone" | string; env?: "all"; r?: Awaited<ReturnType<typeof repos>> } = {}) {
     const r = opts.r ?? await repos();
     const projectPath = opts.projectPath === "clone" ? r.chief : opts.projectPath;
     const state = await setup({ projectPath, system: PRIMARY });
     await state.harness.behavior.setSettings({ plannerEnabled: true });
-    const cfg = { env: { path: r.chief, defaultBranch: "main" } as Record<string, unknown>, hostId: "host_1", everyEnvironment: false };
+    const cfg = { env: { path: r.chief, defaultBranch: "main" } as Record<string, unknown>, hostId: "host_1", everyEnvironment: opts.env === "all" };
     state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
       id: environmentId, hostId: cfg.hostId, workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
       ...(cfg.everyEnvironment || environmentId.startsWith("env_default") ? cfg.env : {}),
@@ -10842,6 +10842,137 @@ describe("checkout freshness", () => {
       });
       expect(w.spawnedRole("planner")).toHaveLength(1);
       expect(w.calls).toEqual([]);
+    });
+  });
+
+  describe("report stamp, through chief_report", () => {
+    const alertText = (w: World) => w.state.sent.at(-1).input[0].text as string;
+    const report = (w: World, threadId: string, extra: object = { state: "blocked", blocker: "stuck", recommendation: "retry" }) =>
+      w.state.harness.behavior.callAgentTool("chief_report", extra, { threadId, projectId: "proj_1" });
+    const until = async (cond: () => boolean) => {
+      for (let i = 0; i < 5_000 && !cond(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+      expect(cond()).toBe(true);
+    };
+    const stateOf = (w: World, threadId: string) => (w.state.db.prepare("SELECT last_report_state AS s FROM managed_threads WHERE thread_id=?").get(threadId) as { s: string }).s;
+    /** The line after `State:` in an alert or report file. */
+    const afterState = (text: string) => { const lines = text.split("\n"); return lines[lines.findIndex((line) => line.startsWith("State:")) + 1]; };
+
+    describe.each([["researcher", async (w: World) => { await w.research(); return w.rows("researcher")[0]!; }],
+      ["planner", async (w: World) => { await w.plan(); return w.rows("planner")[0]!; }]] as const)("%s", (role, spawn) => {
+      test("the alert carries Read at <12 hex> right after State, with no stale clause when origin has not moved", async () => {
+        const w = await world({ projectPath: "clone" });
+        const id = await spawn(w);
+        await report(w, id);
+        expect(alertText(w)).toContain(`State: blocked\nRead at ${w.r.c0.slice(0, 12)}\n`);
+        expect(alertText(w)).not.toContain("may be stale");
+      });
+
+      test("adds the stale clause exactly when ls-remote returns a different SHA", async () => {
+        const w = await world({ projectPath: "clone" });
+        const id = await spawn(w);
+        const tip = await w.r.push();
+        const spawnCalls = w.calls.length;
+        await report(w, id);
+        expect(afterState(alertText(w))).toBe(`Read at ${w.r.c0.slice(0, 12)}; main is now ${tip.slice(0, 12)}, so this answer may be stale`);
+        expect(await w.r.head()).toBe(w.r.c0);
+        expect(w.calls.slice(spawnCalls).map((call) => call.args)).toEqual([["rev-parse", "HEAD"], ["ls-remote", "origin", "refs/heads/main"]]);
+      });
+
+      test("keeps the local SHA when ls-remote fails, and the state and alert are still delivered", async () => {
+        const w = await world({ projectPath: "clone" });
+        const id = await spawn(w);
+        await git(w.r.chief, "remote", "set-url", "origin", join(w.r.root, "gone.git"));
+        await report(w, id);
+        expect(afterState(alertText(w))).toBe(`Read at ${w.r.c0.slice(0, 12)}`);
+        expect(stateOf(w, id)).toBe("blocked");
+      });
+
+      test("a long result puts the same stamp after State in the report file", async () => {
+        const w = await world({ projectPath: "clone" });
+        const id = await spawn(w);
+        const tip = await w.r.push();
+        await report(w, id, { state: "blocked", blocker: "stuck", recommendation: "retry", result: "word ".repeat(4_000) });
+        const path = /Full report: (\S+)/.exec(alertText(w))![1]!;
+        const expected = `Read at ${w.r.c0.slice(0, 12)}; main is now ${tip.slice(0, 12)}, so this answer may be stale`;
+        expect(afterState(await readFile(path, "utf8"))).toBe(expected);
+        expect(afterState(alertText(w))).toBe(expected);
+      });
+
+      test.each([
+        ["an environment lookup that throws", (w: World) => { w.state.harness.sdk.stub("environments.get", async () => { throw new Error("env lookup failed"); }); }],
+        ["an unreadable checkout path", (w: World) => { w.cfg.env.path = join(w.r.root, "missing"); }],
+        ["a remote host", (w: World) => { w.cfg.hostId = "host_2"; }],
+        ["no default branch", (w: World) => { delete w.cfg.env.defaultBranch; }],
+      ])(`%s drops only the stamp from the ${role} report: it is still delivered`, async (_name, arrange) => {
+        const w = await world({ projectPath: "clone", env: "all" });
+        const id = await spawn(w);
+        arrange(w);
+        await report(w, id);
+        expect(alertText(w)).toMatch(/^\[Chief lifecycle alert\]\n.* report from .*\nState: blocked\n/);
+        expect(alertText(w)).not.toContain("Read at");
+        expect(stateOf(w, id)).toBe("blocked");
+      });
+    });
+
+    test("a held ls-remote: the report state and pending alert are committed first, the stamp keeps the local SHA after 12 s, and the call returns", async () => {
+      const w = await world();
+      await w.research();
+      const id = w.rows("researcher")[0]!;
+      w.hold.git = (args, options) => (args[0] === "ls-remote" ? killedAfterTimeout(options) : undefined);
+      await withFakeTimers(async () => {
+        const call = track(report(w, id));
+        await until(() => w.calls.some((c) => c.args[0] === "ls-remote"));
+        // Required result first: committed while the optional comparison is still running.
+        expect(stateOf(w, id)).toBe("blocked");
+        expect(w.state.db.prepare("SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?").all(`${id}:report:%:pending-%`)).toHaveLength(1);
+        await flush(10_000);
+        expect(call.done).toBe(false);
+        await until(() => w.calls.filter((c) => c.args[0] === "ls-remote").length === 2);
+        await flush(2_000);
+        await call.settled;
+        expect(call.error).toBeUndefined();
+        expect(w.inflight()).toBe(0);
+      });
+      expect(afterState(alertText(w))).toBe(`Read at ${w.r.c0.slice(0, 12)}`);
+    });
+
+    test("a held system.config read is bounded to 5 s: no stamp, no git, the report is delivered", async () => {
+      const w = await world();
+      await w.research();
+      const id = w.rows("researcher")[0]!;
+      const spawnCalls = w.calls.length;
+      let hits = 0;
+      w.state.harness.sdk.stub("system.config", async () => { hits += 1; await new Promise(() => undefined); return { primaryHostId: "host_1" }; });
+      await withFakeTimers(async () => {
+        const call = track(report(w, id));
+        await until(() => hits === 1);
+        await flush(4_900);
+        expect(call.done).toBe(false);
+        await flush(200);
+        await call.settled;
+        expect(call.error).toBeUndefined();
+      });
+      expect(alertText(w)).not.toContain("Read at");
+      expect(w.calls).toHaveLength(spawnCalls);
+      expect(stateOf(w, id)).toBe("blocked");
+    });
+
+    test("worker, reviewer and advisor alerts are unchanged: no stamp and no git", async () => {
+      const w = await world({ projectPath: "clone", env: "all" });
+      const delegated = await w.state.harness.behavior.runCli(["delegate", "--title", "Fix totals", "--mission", "Do it", "--unplanned-reason", "stamp test", "--json"], w.ctx);
+      const worker = (JSON.parse(delegated.stdout!) as { threadId: string }).threadId;
+      await report(w, worker);
+      expect(alertText(w)).toContain("State: blocked");
+      expect(alertText(w)).not.toContain("Read at");
+      await report(w, worker, { state: "ready", result: "Done\n\n## Deviations from plan\nNone" });
+      await w.state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker }, w.ctx);
+      const reviewer = w.rows("reviewer")[0]!;
+      await report(w, reviewer, { state: "ready", result: "Reviewed", verdict: "approve", findings: [] });
+      expect(alertText(w)).not.toContain("Read at");
+      await w.state.harness.behavior.runCli(["consult", "--title", "Rework", "--mission", "Explore"], w.ctx);
+      await report(w, w.rows("advisor")[0]!, { state: "ready", result: "Sound", verdict: "approve" });
+      expect(alertText(w)).not.toContain("Read at");
+      expect(w.calls.filter((call) => ["ls-remote", "rev-parse"].includes(call.args[0]!))).toEqual([]);
     });
   });
 });
