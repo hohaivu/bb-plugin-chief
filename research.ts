@@ -378,7 +378,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
     for (const note of notes) bb.log.warn(note);
     // A researcher child runs on `pick` (the mode's own pick, never a per-call override), else on Chief's own model.
     const own = live?.providerId && callerOptions?.model
-      ? { providerId: live.providerId, model: callerOptions.model, reasoningLevel: callerOptions.reasoningLevel }
+      ? { providerId: live.providerId, model: callerOptions.model, reasoningLevel: callerOptions.reasoningLevel as ModelSelection["reasoningLevel"] }
       : null;
     return { models, notes, hostId, caller, pick, own, environmentId: live?.environmentId ?? null, permissionMode: callerMode };
   }
