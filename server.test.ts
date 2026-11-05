@@ -2466,7 +2466,7 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_research"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
     expect(chief.skills).toEqual(["chief"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker", "chief-role-worker"]);
@@ -10052,7 +10052,14 @@ describe("tool-call stability", () => {
   // Regression: any stray change to tool selection or order, to a tool schema, to codex instructions or to claude instructions.
   test("tool-config oracle: head equals base 7178582 apart from the title schema and the claude-code preload line", async () => {
     const base = JSON.parse(await readFile(snapshotPath, "utf8")) as Fixture;
-    const now = await head();
+    const full = await head();
+    // Allowed difference (d): Chief alone gets chief_sync (PR 183). Checked here, then dropped so the rest still compares against base.
+    expect(Object.keys(full.catalog)).toContain("chief_sync");
+    for (const entry of full.entries) expect(entry.tools.includes("chief_sync"), entry.key).toBe(entry.key.includes("| chief |"));
+    const now: Fixture = {
+      catalog: Object.fromEntries(Object.entries(full.catalog).filter(([name]) => name !== "chief_sync")),
+      entries: full.entries.map((entry) => ({ ...entry, tools: entry.tools.filter((name) => name !== "chief_sync") })),
+    };
     expect(now.entries.map((entry) => entry.key)).toEqual(base.entries.map((entry) => entry.key));
     expect(Object.keys(now.catalog)).toEqual(Object.keys(base.catalog));
 
@@ -10556,6 +10563,90 @@ describe("checkout freshness", () => {
       expectWarned(await w.plan(), PLAN_BASE, /uncommitted changes/);
       expect(w.spawnedRole("planner")).toHaveLength(1);
       expect(await w.r.head()).toBe(w.r.c0);
+    });
+  });
+
+  // chief_sync (PR 183): the Chief-only tool that runs the same fast-forward on Chief's own checkout, through the real tool handler.
+  describe("chief_sync", () => {
+    const sync = (w: World) => w.state.harness.behavior.callAgentTool("chief_sync", {}, w.ctx) as Promise<string>;
+    const SKIPPED = /^Did not fast-forward your checkout to origin\/main: /;
+
+    test("a checkout one commit behind is fast-forwarded and the reply names the old and the new commit", async () => {
+      const w = await world();
+      const tip = await w.r.push();
+      const reply = await sync(w);
+      expect(reply).toContain(w.r.c0.slice(0, 12));
+      expect(reply).toContain(tip.slice(0, 12));
+      expect(reply).not.toContain("Did not fast-forward");
+      expect(await w.r.head()).toBe(tip);
+      expect(w.calls.some((call) => call.args[0] === "merge" && call.args.includes("--ff-only"))).toBe(true);
+    });
+
+    test("an already current checkout names its commit, is no skip and never merges", async () => {
+      const w = await world();
+      const reply = await sync(w);
+      expect(reply).toContain(w.r.c0.slice(0, 12));
+      expect(reply).not.toContain("Did not fast-forward");
+      expect(w.calls.some((call) => call.args[0] === "merge")).toBe(false);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test.each([
+      ["a dirty checkout", async (w: World) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); }, /uncommitted changes/],
+      ["a branch with a commit of its own", async (w: World) => {
+        await writeFile(join(w.r.chief, "mine.txt"), "mine\n");
+        await git(w.r.chief, "add", "-A");
+        await git(w.r.chief, "commit", "-q", "-m", "mine");
+      }, /1 commit\(s\) not on origin\/main/],
+      ["a failing fetch", async (w: World) => { await git(w.r.chief, "remote", "set-url", "origin", join(w.r.root, "gone.git")); }, /git fetch failed/],
+    ])("%s is a warning reply, not an error, and HEAD stays", async (_name, arrange, reason) => {
+      const w = await world();
+      await w.r.push();
+      await arrange(w);
+      const head = await w.r.head();
+      const reply = await sync(w);
+      expect(reply).toMatch(SKIPPED);
+      expect(reply).toMatch(reason);
+      expect(await w.r.head()).toBe(head);
+    });
+
+    test("a running researcher of this Chief is a warning naming it, runs no git and leaves HEAD", async () => {
+      const w = await world();
+      await w.research();
+      const [researcher] = w.rows("researcher");
+      w.setLive(researcher!, "active");
+      await w.r.push();
+      const before = w.calls.length;
+      const reply = await sync(w);
+      expect(reply).toMatch(SKIPPED);
+      expect(reply).toContain(`researcher ${researcher} is still running in it`);
+      expect(w.calls).toHaveLength(before);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a running planner that shares Chief's checkout is a warning naming it and leaves HEAD", async () => {
+      const w = await world({ projectPath: "clone" });
+      await w.plan();
+      const [planner] = w.rows("planner");
+      w.setLive(planner!, "active");
+      await w.r.push();
+      const reply = await sync(w);
+      expect(reply).toMatch(SKIPPED);
+      expect(reply).toContain(`planner ${planner} is still running in it`);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a caller that is not Chief is refused and nothing is fetched or moved", async () => {
+      const w = await world();
+      const { threadId: worker } = await delegate(w.state, w.chief);
+      const tip = await w.r.push();
+      const before = w.calls.length;
+      const call = (ctx: object) => w.state.harness.behavior.callAgentTool("chief_sync", {}, ctx);
+      await expect(call({ threadId: worker, projectId: "proj_1" })).rejects.toThrow(/Chief/);
+      await expect(call({ threadId: "thr_unknown", projectId: "proj_1" })).rejects.toThrow(/Chief/);
+      await expect(call({ projectId: "proj_1" })).rejects.toThrow(/Chief/);
+      expect(w.calls).toHaveLength(before);
+      expect(await w.r.head()).not.toBe(tip);
     });
   });
 
