@@ -1382,6 +1382,109 @@ describe("Chief backend", () => {
         title: "Repair", mission: "Fix the findings", replaces: worker.threadId,
       }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(`The reviewer has requested changes 3 times in a row on ${worker.threadId}. Do not delegate another round`);
     });
+
+    // Contract (PR #187, preservation): the whole `bb chief stats` text and JSON, project-wide and per Chief, equal what pre-refactor
+    // 512cfeb855abda0ae90df972121b977318e959d7 printed on this same fixture under a fixed clock. The oracle file was captured by running
+    // this marked block against 512cfeb's server.ts, with the one marked comparison line swapped for a write. It also pins the fixture's
+    // database hash, so a drifting fixture fails here instead of passing against a stale oracle.
+    // Regression: stats counting a review event per target row, per carried streak or per replacement chain; a legacy reviewer counted
+    // twice or dropped; or any other stats byte changing with the refactor.
+    // <stats-oracle-fixture>
+    const statsOracleRun = async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        let clock = Date.UTC(2026, 0, 1);
+        const tick = (minutes: number) => vi.setSystemTime((clock += minutes * 60_000));
+        tick(0);
+        const state = await setup();
+        const chief = await start(state);
+        const other = JSON.parse((await state.harness.behavior.runCli(["create", "--project", "proj_1", "--json"])).stdout!);
+        const asWorker = (id: string) => ({ threadId: id, projectId: "proj_1" });
+        const ready = (id: string) => state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Ready${NO_DEVIATIONS}` }, asWorker(id));
+        tick(5);
+        const taskA = await delegate(state, chief.threadId, "Task A", { branch: "feature/a" });
+        tick(5);
+        await ready(taskA.threadId);
+        tick(5);
+        const taskB = await delegate(state, chief.threadId, "Task B", { branch: "feature/b" });
+        const taskA2 = await delegate(state, chief.threadId, "Task A", { replaces: taskA.threadId });
+        const taskO = await delegate(state, other.threadId, "Other task", { branch: "feature/other" });
+        // Reviewer rows: report_seq 1 targets for the ones that report; legacy rows carry a verdict and no history.
+        const seed = (id: string, owner: string, extra: Record<string, unknown>, covers: string[]) => {
+          const row = { thread_id: id, role: "reviewer", project_id: "proj_1", chief_thread_id: owner, title: id, state: "ready", created_at: clock, updated_at: clock, ...extra };
+          state.db.prepare(`INSERT INTO managed_threads (${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`).run(...Object.values(row));
+          for (const covered of covers) state.db.prepare(`INSERT INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq) VALUES (?, ?, 1)`).run(id, covered);
+          state.addLive(id, "proj_1");
+        };
+        // Multi-target plan review: three reports, each covering Task A's worker and Task B's worker (two target rows per report).
+        seed("review_plan", chief.threadId, { worker_thread_id: taskA.threadId }, [taskA.threadId, taskB.threadId]);
+        // Legacy reviewers from before reviewer_verdicts: no history, a carried streak of 3, an approve, and a null verdict.
+        seed("legacy_rc", chief.threadId, { worker_thread_id: taskB.threadId, verdict: "request_changes", reject_streak: 3 }, [taskB.threadId]);
+        seed("legacy_approve", chief.threadId, { worker_thread_id: taskA2.threadId, verdict: "approve" }, [taskA2.threadId]);
+        seed("legacy_null", chief.threadId, { worker_thread_id: taskA2.threadId, verdict: null }, [taskA2.threadId]);
+        // Branch-only reviewers: no worker and no targets. One names Task A's branch (joins its task), one names no task's branch.
+        seed("branch_task", chief.threadId, { branch: "feature/a" }, []);
+        seed("branch_orphan", chief.threadId, { branch: "feature/orphan" }, []);
+        // A reviewer of another Chief: counts project-wide, not in this Chief's scope.
+        seed("other_review", other.threadId, { worker_thread_id: taskO.threadId }, [taskO.threadId]);
+        tick(5);
+        // The thread store reloads its row cache on its next write; the seeded rows are read after this report.
+        await ready(taskB.threadId);
+        const verdict = async (id: string, params: Record<string, unknown>) => {
+          tick(10);
+          await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Reviewed", ...params }, asWorker(id));
+        };
+        await verdict("review_plan", REQUEST_CHANGES);
+        await verdict("review_plan", APPROVE);
+        await verdict("review_plan", APPROVE);
+        await verdict("branch_task", APPROVE);
+        // The regression flag lives on a reviewer's last request_changes: this reviewer's final report.
+        await verdict("branch_task", { ...REQUEST_CHANGES, regression: true });
+        await verdict("branch_orphan", APPROVE);
+        await verdict("other_review", REQUEST_CHANGES);
+        tick(10);
+        await completeWorker(state, chief.threadId, taskA2.threadId);
+        tick(1);
+        // The fixture's own failure and stats cutoffs are stamped by SQLite's real clock at setup: pin them.
+        state.db.prepare("UPDATE plugin_meta SET value=? WHERE key IN ('stats_since','failure_events_since')").run(String(Date.UTC(2026, 0, 1)));
+
+        const table = (name: string) => state.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all();
+        // Only the random temp storage root (in report_path and verdict_path) is normalized.
+        const fixtureHash = createHash("sha256").update(JSON.stringify(["managed_threads", "review_targets", "reviewer_verdicts", "plugin_meta"].map(table)).replaceAll(state.storageRoot, "<storage>")).digest("hex");
+        const runs = [];
+        for (const scope of [["--project", "proj_1"], ["--chief", chief.threadId], ["--chief", other.threadId]]) {
+          for (const mode of [[], ["--json"]]) {
+            const args = ["stats", ...scope, ...mode];
+            const result = await state.harness.behavior.runCli(args);
+            runs.push({ args, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr ?? null });
+          }
+        }
+        return { state, fixtureHash, runs };
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+    // </stats-oracle-fixture>
+
+    test("chief stats: text and JSON equal pre-refactor 512cfeb on a multi-target, multi-report, legacy, scoped and branch-only fixture", async () => {
+      const { state, fixtureHash, runs } = await statsOracleRun();
+      // The fixture really holds the cases: 3 plan reports x 2 targets, 2 branch_task reports, then 1 + 1 single reports, legacy rows with no history.
+      const historyOf = (id: string) => state.db.prepare("SELECT COUNT(*) AS rows, COUNT(DISTINCT report_seq) AS events FROM reviewer_verdicts WHERE reviewer_thread_id=?").get(id);
+      expect(historyOf("review_plan")).toEqual({ rows: 6, events: 3 });
+      expect(historyOf("branch_task")).toEqual({ rows: 2, events: 2 });
+      for (const legacy of ["legacy_rc", "legacy_approve", "legacy_null"]) expect(historyOf(legacy)).toEqual({ rows: 0, events: 0 });
+      // Counts worked out from the contract, not from the code: plan 2+1, legacy 1 approve + 1 rc, branch_task 1+1, orphan 1, other chief 1 rc.
+      const json = (index: number) => JSON.parse(runs[index]!.stdout!);
+      expect(json(1).verdicts).toEqual({ approve: 5, request_changes: 4 });
+      expect(json(3).verdicts).toEqual({ approve: 5, request_changes: 3 });
+      expect(json(3).repairs).toMatchObject({ requestChanges: 3, regressions: 1 });
+      expect(json(5).verdicts).toEqual({ approve: 0, request_changes: 1 });
+      expect(runs.map((run) => run.exitCode)).toEqual([0, 0, 0, 0, 0, 0]);
+
+      const actual = JSON.stringify({ fixtureHash, runs }, null, 2) + "\n";
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "chief-stats-512cfeb.json"), "utf8");
+      expect(actual).toBe(oracle); // oracle-compare
+    });
   });
 
   test("supersedes an undelivered alert instead of re-delivering it after a newer report", async () => {
