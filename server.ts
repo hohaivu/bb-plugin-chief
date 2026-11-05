@@ -14,6 +14,7 @@ import { cliAdapters, createForgeComments, FORGE_COMMENTS_TABLE, sanitizeForge }
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger, type ReviewTarget } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
 import { cleanupEligible, deleteSafeBranch, ownedBranch } from "./cleanup";
+import { commitStamp, fastForward, stampLine } from "./checkoutSync";
 import { createReviewStart } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import {
@@ -1714,6 +1715,7 @@ export default async function plugin(bb: BbPluginApi) {
       title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context,
       research: researchLine("planner", await researchSettings()) !== null, revision,
     });
+    const warning = await freshenChiefCheckout(chief, "planner");
     const thread = await managedSpawn.launch(prepared, { projectId, environment: { type: "project-default" }, title, prompt },
       { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null },
       // Earlier revision attempts that failed or stopped are superseded atomically with the new one.
@@ -1723,7 +1725,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (earlier.thread_id !== newId && !BUSY_STATUSES.has(earlier.state) && !terminal(earlier.state)) store.completeSuperseded(earlier.thread_id, now);
         }
       } : undefined);
-    return { threadId: thread.id, title, projectId };
+    return { threadId: thread.id, title, projectId, ...(warning ? { warning } : {}) };
   }
 
   /** chief_plan revises: P is allowed only once P's one review asked for changes and no revision is in or working; returns the revision brief input. */
@@ -2366,6 +2368,84 @@ export default async function plugin(bb: BbPluginApi) {
       } catch (error) { lookupError = error; }
     }
     return `could not confirm which host holds the project checkout (${clip(String(lookupError), 200)})`;
+  }
+
+  const FRESHEN_MS = 30_000;
+  const STAGE_READ_MS = 5_000;
+  const STAMP_MS = 12_000;
+
+  /** A read-only SDK lookup bounded by min(5 s, time left before `deadline`); with no time left it never starts.
+   * An abandoned lookup has no continuation into this code: the caller has already moved on through the rejection. */
+  function stageRead(deadline: number) {
+    return <T>(call: () => Promise<T>): Promise<T> => {
+      const left = deadline - Date.now();
+      return left <= 0 ? Promise.reject(new Error("timed out")) : bounded(call, Math.min(STAGE_READ_MS, left));
+    };
+  }
+
+  type ServerCheckout = { path: string; branch: string } | { path: string | null; skipped: string };
+
+  /** The checkout of `threadId`'s environment, when it is on the plugin server's primary host and has a default branch. Never throws. */
+  async function serverCheckout(threadId: string, read: ReturnType<typeof stageRead>): Promise<ServerCheckout> {
+    let path: string | null = null;
+    try {
+      const { environmentId } = await read(() => bb.sdk.threads.get({ threadId }));
+      if (!environmentId) return { path, skipped: "no environment" };
+      const environment = await read(() => bb.sdk.environments.get({ environmentId }));
+      if (!environment.path) return { path, skipped: "no checkout path" };
+      path = environment.path;
+      if (!environment.defaultBranch) return { path, skipped: "default branch unknown" };
+      if (environment.hostId !== (await read(() => bb.sdk.system.config())).primaryHostId) return { path, skipped: "the checkout is on a remote host, not the plugin server" };
+      return { path, branch: environment.defaultBranch };
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      return { path, skipped: message === "timed out" || message === "deadline passed" ? "timed out" : clip(message, 200) };
+    }
+  }
+
+  /** Fast-forwards Chief's checkout before a researcher, or a planner that shares it, starts. Returns one warning line when it did not, else null. Never throws.
+   * Nothing that reaches git is raced: every git call is awaited to exit, so when this returns no git it started is running or can start. */
+  async function freshenChiefCheckout(chief: ManagedRow, reader: "researcher" | "planner"): Promise<string | null> {
+    const warn = (reason: string, branch?: string) => `Did not fast-forward your checkout to origin/${branch ?? "the default branch"}: ${reason}. The ${reader} reads it as it is.`;
+    try {
+      const deadline = Date.now() + FRESHEN_MS;
+      const read = stageRead(deadline);
+      const co = await serverCheckout(chief.thread_id, read);
+      const source = co.path ? await read(() => projectPath(chief.project_id)).catch(() => null) : null;
+      // A failed lookup is "unknown", never "no": only two known, different paths prove a separate checkout.
+      const sharing = co.path && source ? (co.path === source ? "yes" : "no") : "unknown";
+      if (reader === "planner" && sharing === "no") return null;
+      if (reader === "planner" && sharing === "unknown") {
+        return warn(`could not tell whether the planner shares it (${co.path ? "project checkout path unknown" : (co as { skipped: string }).skipped})`);
+      }
+      if ("skipped" in co) return warn(co.skipped);
+      const candidates = store.all().filter((row) => row.chief_thread_id === chief.thread_id && !terminal(row.state)
+        && (row.role === "researcher" || (row.role === "planner" && sharing !== "no")));
+      // A live read that fails or times out counts as running.
+      const running = (await Promise.all(candidates.map(async (row) => {
+        const live = await read(() => bb.sdk.threads.get({ threadId: row.thread_id })).catch(() => null);
+        return !live || BUSY_STATUSES.has(live.status) ? row : null;
+      }))).find((row) => row);
+      if (running) return warn(`${running.role} ${running.thread_id} is still running in it`, co.branch);
+      const result = await fastForward({ cwd: co.path, env: forgeEnv(), branch: co.branch, deadline });
+      return "skipped" in result ? warn(result.skipped, co.branch) : null;
+    } catch (error) {
+      return warn(clip(String((error as Error)?.message ?? error), 200));
+    }
+  }
+
+  /** `Read at <sha>[; <branch> is now <sha>, so this answer may be stale]` for the checkout `threadId` runs in, or null. Never throws, no outer deadline:
+   * the local SHA is kept once read, and a slow `ls-remote` only drops the comparison. */
+  async function reportStamp(threadId: string): Promise<string | null> {
+    try {
+      const deadline = Date.now() + STAMP_MS;
+      const co = await serverCheckout(threadId, stageRead(deadline));
+      if ("skipped" in co) return null;
+      const stamp = await commitStamp({ cwd: co.path, env: forgeEnv(), branch: co.branch, deadline });
+      return stamp ? stampLine(stamp, co.branch) : null;
+    } catch {
+      return null;
+    }
   }
 
   /** bb waits 5 min, then retries a failed teardown after 1, 2, 4 and 8 min with hooks of up to 15 min each. */
@@ -3175,7 +3255,9 @@ export default async function plugin(bb: BbPluginApi) {
     // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
     const preview = reviewerVerdict && !!verdictPath && !!params.result;
     const waveLines = plannerReady && planWaves ? planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`) : [];
-    const layout = reportAlert({ role: row.role, title: row.title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview });
+    // Optional enrichment: the state, seq and pending alert are already committed above.
+    const stamp = row.role === "researcher" || row.role === "planner" ? await reportStamp(threadId) : null;
+    const layout = reportAlert({ role: row.role, title: row.title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp });
     // Long-or-clipped is decided from this first pass; the pass that follows only adds the pointer.
     const first = layout(null);
     let alert = first.text;
@@ -3188,7 +3270,7 @@ export default async function plugin(bb: BbPluginApi) {
       let pointer: Pointer;
       try {
         reportPath = await writeArtifact(threadId, row.project_id, reportName, reportFileBody({
-          role: row.role, title: row.title, threadId, params, verdict, action, waveLines, inlinePlans, recorded,
+          role: row.role, title: row.title, threadId, params, verdict, action, waveLines, inlinePlans, recorded, stamp,
         }));
         pointer = { line: `Full report: ${reportPath}`, name: reportName };
       } catch (error) {
@@ -3984,7 +4066,7 @@ export default async function plugin(bb: BbPluginApi) {
   const { research, researchSleep, checkUnreported } = createResearch({
     db, bb, managedRow, roleRow: store.get, terminal, isActiveChief, researchSettings, readResearchModel,
     environmentHostId, discover, catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError,
-    lastOutput, managedSpawn, alertChief, writeArtifact, serverPath, clip, execFileAsync,
+    lastOutput, managedSpawn, alertChief, freshenCheckout: (chief) => freshenChiefCheckout(chief, "researcher"), writeArtifact, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   });
 
@@ -4147,7 +4229,7 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error("chief_plan requires an active registered Chief thread.");
       }
       const result = await startPlan(params, context.threadId);
-      return `Started planner “${result.title}” in thread ${result.threadId}. Its ready alert lists the wave schedule and the exact next call.`;
+      return `Started planner “${result.title}” in thread ${result.threadId}. Its ready alert lists the wave schedule and the exact next call.${result.warning ? `\n${result.warning}` : ""}`;
     },
   });
   bb.agents.registerTool({
@@ -4770,7 +4852,7 @@ export default async function plugin(bb: BbPluginApi) {
           });
           if (!parsed.success) return fail(`Invalid plan brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await startPlan(parsed.data, context.threadId);
-          return ok(result, `Started planner “${result.title}” in ${result.threadId}.`);
+          return ok(result, `Started planner “${result.title}” in ${result.threadId}.${result.warning ? `\n${result.warning}` : ""}`);
         }
         if (command === "consult") {
           const parsed = consultParams.safeParse({

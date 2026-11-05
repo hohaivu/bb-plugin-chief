@@ -262,6 +262,8 @@ export type ReportAlertInput = {
   waveLines: string[];
   inlinePlans: string[];
   preview: boolean;
+  /** `Read at <sha>…` for a researcher or planner report, else null. */
+  stamp: string | null;
 };
 
   // The alert is built in two tiers. The required lines come first, each with its own hard budget (header,
@@ -271,7 +273,7 @@ export type ReportAlertInput = {
   // report-<seq>.md, or for a reviewer's verdict its verdict-<seq>.md. Both names carry the report number,
   // so no file an earlier alert pointed at is ever overwritten.
 export function reportAlert(input: ReportAlertInput) {
-  const { role, title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview } = input;
+  const { role, title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp } = input;
   const FIELD_ROOM = 600;
   const ACTION_ROOM = 400;
   const MIN_RESULT_ROOM = 200;
@@ -293,6 +295,7 @@ export function reportAlert(input: ReportAlertInput) {
     const top = [
       clip(`${role[0]!.toUpperCase()}${role.slice(1)} report from ${title} (${threadId})`, 200),
       `State: ${params.state}`,
+      ...(stamp ? [clip(stamp, 160)] : []),
       ...(pointer ? [pointer.line] : []),
       ...(failList?.length ? [`Fails: ${failList.length} ruled out (carried to any replaces: successor)`] : []),
     ];
@@ -376,11 +379,12 @@ export function reportFileBody(input: {
   waveLines: string[];
   inlinePlans: string[];
   recorded: RecordedCommand[] | null | undefined;
+  stamp?: string | null;
 }) {
-  const { role, title, threadId, params, verdict, action, waveLines, inlinePlans, recorded } = input;
+  const { role, title, threadId, params, verdict, action, waveLines, inlinePlans, recorded, stamp } = input;
   return [
     `# ${role[0]!.toUpperCase()}${role.slice(1)} report from ${title} (${threadId})`, "",
-    `State: ${params.state}`, ...(verdict ? [`Verdict: ${verdict}`] : []), `Next: ${action}`,
+    `State: ${params.state}`, ...(stamp ? [clip(stamp, 160)] : []), ...(verdict ? [`Verdict: ${verdict}`] : []), `Next: ${action}`,
     ...(waveLines.length ? ["", "## Plan files", "", ...waveLines, ...inlinePlans] : []),
     ...(params.state === "blocked" ? ["", "## Blocker", "", params.blocker!] : []),
     ...(params.recommendation ? ["", "## Recommendation", "", params.recommendation] : []),
