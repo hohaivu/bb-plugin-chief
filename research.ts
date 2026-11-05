@@ -284,6 +284,8 @@ export interface ResearchDeps<Row extends ResearchRow, Catalog> {
     title: string; brief: string; state: "starting"; status: string;
   }>;
   alertChief: (row: Row, key: string, message: string) => Promise<unknown>;
+  /** Fast-forwards Chief's checkout before a researcher reads it; the warning line when it did not. Never throws. */
+  freshenCheckout: (chief: Row) => Promise<string | null>;
   /** Writes one of Chief's artifacts and returns its absolute path. */
   writeArtifact: (threadId: string, projectId: string, name: string, content: string) => Promise<string>;
   serverPath: () => string;
@@ -298,7 +300,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
   const {
     db, bb, managedRow, roleRow, terminal, isActiveChief, researchSettings, readResearchModel, environmentHostId, discover,
     catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError, lastOutput, managedSpawn,
-    alertChief, writeArtifact, serverPath, clip, execFileAsync,
+    alertChief, freshenCheckout, writeArtifact, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   } = deps;
 
@@ -730,6 +732,8 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
       `- Report with chief_report state ready (blocked only when the run could not start or the stop failed): \`result\` is the full report within ${MAX_RESULT_LENGTH} characters, with the runId on its first line, and \`summary\` at most 800 characters. When nothing usable came back, report blocked with the cause as blocker and your recommended next step as recommendation.`,
       "- Do not ask the user directly from this thread.",
     ].join("\n");
+    // After every refusal above: a refused call leaves Chief's checkout as it was.
+    const warning = await freshenCheckout(chief);
     const thread = await managedSpawn.launch(managed, {
       projectId: chief.project_id,
       environment: { type: "reuse", environmentId: prepared.environmentId },
@@ -737,7 +741,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
       extra: prepared.permissionMode ? { permissionMode: prepared.permissionMode } : {},
       onSpawnError: (error) => new Error(`chief_research did not start: BB could not run a researcher thread in Chief's checkout (${clip(error instanceof Error ? error.message : String(error), 200)}). Nothing was started in a fresh worktree.`),
     }, { role: "researcher", chiefThreadId: chief.thread_id, brief: prompt });
-    return { threadId: thread.id, title, prefix: prepared.prefix };
+    return { threadId: thread.id, title, prefix: prepared.prefix, warning };
   }
 
   async function researchRun(
@@ -759,7 +763,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
     if (role === "chief") {
       const started = await startResearcher(params, row, cap);
       call.outcome = "spawned";
-      return `${started.prefix}Started researcher thread ${started.threadId} (${started.title}). It runs the ${params.mode} in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.`;
+      return `${started.prefix}Started researcher thread ${started.threadId} (${started.title}). It runs the ${params.mode} in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.${started.warning ? `\n${started.warning}` : ""}`;
     }
     const prepared = await researchPrepare(params, context.threadId, cap, role !== "researcher");
     const { script, args, prefix } = prepared;

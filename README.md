@@ -95,6 +95,8 @@ the schedule. Chief never opens or reads a plan file, and delegates wave 1 right
 for user sign-off. It escalates to you only for a genuine product or scope open question the planner
 named. Nothing is implemented until it delegates.
 
+A planner shares Chief's checkout only when the project default is the project checkout (Chief's environment path equals the project source path). Then Chief fast-forwards it first, like a researcher's. A planner in its own worktree is left alone, and when that cannot be told (a lookup failed) Chief starts it with a `could not tell whether the planner shares it` warning. Every planner report alert carries the `Read at <sha>` line.
+
 **Plan review.** A plan with more than one implementation wave (test waves do not count), or one the planner marked `complex` on its ready
 report, gets exactly one read-only advisor review before delegation. Its ready alert asks for
 `chief_consult (planThreadId: …)`, and `chief_forge_init` and `chief_delegate` refuse the plan until
@@ -167,6 +169,8 @@ to a fresh worktree. The thread runs on the mode's per-machine pick, or on Chief
 pick is set or the machine can no longer serve it. A researcher that reports ready is absorbed (its
 alert carries the result); one whose run failed, was partial, or timed out says so in its report. The
 mode's timeout bounds the whole run from the thread's start, after which the run is stopped.
+
+Before the researcher starts, Chief fast-forwards its checkout to `origin/<default branch>` (`git fetch` + `git merge --ff-only`). It skips this, appending one `Did not fast-forward…` line to the tool result and still starting the researcher, when a researcher or planner of this Chief is running, tracked files have uncommitted changes, the branch has local commits, git or a lookup fails or times out, or the checkout is on another host. Every researcher report alert says `Read at <sha>` (the commit it read) and, when the default branch has moved since, that the answer may be stale.
 
 The agents share the caller's checkout and permissions. They are read-only only because the prompt
 tells them to be. A planner's call, and each call a researcher thread makes while resuming, waits up to its mode's timeout (10 minutes by default), and never more than 2.5 minutes, because some providers end tool calls at

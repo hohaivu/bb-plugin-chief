@@ -1,0 +1,41 @@
+{
+  "meta": {
+    "cwd": "/Volumes/VuHo_T5/Develop/personal/research/bb-plugin-chief.oracle-base-948c49c",
+    "runnerRoot": "/Volumes/VuHo_T5/Develop/personal/research/bb-plugin-chief.oracle-base-948c49c",
+    "head": "948c49cb6cac6f2e3066fe0e2164e22c809c8a4f",
+    "fixtureHash": "f9fb2d8ca0b0fd1d50688a1998dd3cd70724ab80150f9ce37529107c1db462f4",
+    "scenarios": 10
+  },
+  "outputs": {
+    "research, behind clone (fast-forward succeeds)": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+    "research, current clone": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+    "chief_plan, shared checkout, behind": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
+    "chief_plan, shared checkout, current": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
+    "chief_plan, confirmed separate checkout": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
+    "CLI plan text, shared checkout, behind": {
+      "exitCode": 0,
+      "stdout": "Started planner “Plan · Plan 1” in thr_2.\n",
+      "stderr": ""
+    },
+    "CLI plan text, confirmed separate checkout": {
+      "exitCode": 0,
+      "stdout": "Started planner “Plan · Plan 1” in thr_2.\n",
+      "stderr": ""
+    },
+    "CLI plan --json, shared checkout, behind": {
+      "exitCode": 0,
+      "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\"\n}\n",
+      "stderr": ""
+    },
+    "CLI plan --json, shared checkout, current": {
+      "exitCode": 0,
+      "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\"\n}\n",
+      "stderr": ""
+    },
+    "CLI plan --json, confirmed separate checkout": {
+      "exitCode": 0,
+      "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\"\n}\n",
+      "stderr": ""
+    }
+  }
+}
