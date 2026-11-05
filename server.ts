@@ -328,7 +328,7 @@ const failEntry = z.object({
   scope: z.string().trim().min(1).max(120),
   basis: z.string().trim().min(1).max(200).describe("the command, test or input that reproduces it"),
 });
-type FailEntry = z.infer<typeof failEntry>;
+export type FailEntry = z.infer<typeof failEntry>;
 const MAX_CARRIED_FAILS = 12;
 /** chief_report's fails entry. Published without length limits: checkReport enforces them in one pass, with a fix per field. */
 const reportFailEntry = z.object({

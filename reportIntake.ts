@@ -1,7 +1,36 @@
-import type { ReviewTarget } from "./reviewLedger";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { ReviewTarget, createReviewLedger } from "./reviewLedger";
 import type { Role } from "./roles";
-import type { ManagedRow, ReportFinding, ReportParams } from "./server";
+import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "./server";
+import type { ThreadInsert, ThreadStore } from "./threadStore";
 import { COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, fitLines, recordedLines, type RecordedCommand } from "./text";
+
+type Database = ReturnType<BbPluginApi["storage"]["database"]>;
+
+/** What the report intake needs from the server; the server owns each adapter's implementation. */
+export interface ReportIntakeAdapters {
+  /** chief_lessons is written only by the intake; the thread store keeps only managed_threads (threadStore.ts:66-67). */
+  db: Database;
+  store: ThreadStore<ManagedRow>;
+  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets">;
+  lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInsert<ManagedRow["role"], ManagedRow["state"]> }>;
+  writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string): Promise<{ path: string }[]>;
+  writeArtifact(threadId: string, projectId: string, name: string, content: string): Promise<string>;
+  /** In-batch outbox write (server.ts writeAlert). */
+  writeAlert(row: ManagedRow, key: string, message: string): void;
+  /** Enqueue and deliver (server.ts alertChief). */
+  alertChief(row: ManagedRow, key: string, message: string): Promise<boolean>;
+  /** In-batch forge comment content builders; they stay in server.ts (docs/specs/forge-comments.md names server.ts as their owner). */
+  enqueueVerdictComments(row: ManagedRow, seq: number, verdict: string, findings: ReportFinding[] | undefined, result: string | undefined, recommendation: string | undefined): void;
+  enqueueBlockedComment(row: ManagedRow, seq: number, blocker: string | undefined, recommendation: string | undefined): void;
+  /** In-batch plan log append (server.ts appendPlanLog). */
+  appendPlanLog(row: ManagedRow, entries: (FailEntry & { kind: "FAIL" })[]): void;
+  /** The alert's Next line for the row as committed: nextAction(row, true) ?? waveWaitLine(row) ?? the researcher line ?? the inspect line, word for word as today. */
+  actionLine(row: ManagedRow): string;
+  recordedCommands(threadId: string): Promise<RecordedCommand[] | null>;
+  reportStamp(threadId: string): Promise<string | null>;
+  warn(message: string): void;
+}
 
 /** A report whose result fits is short: no file, and no summary needed. */
 export const SUMMARY_MAX = 800;
