@@ -2466,7 +2466,7 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_research"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
     expect(chief.skills).toEqual(["chief"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker", "chief-role-worker"]);
@@ -10052,7 +10052,14 @@ describe("tool-call stability", () => {
   // Regression: any stray change to tool selection or order, to a tool schema, to codex instructions or to claude instructions.
   test("tool-config oracle: head equals base 7178582 apart from the title schema and the claude-code preload line", async () => {
     const base = JSON.parse(await readFile(snapshotPath, "utf8")) as Fixture;
-    const now = await head();
+    const full = await head();
+    // Allowed difference (d): Chief alone gets chief_sync (PR 183). Checked here, then dropped so the rest still compares against base.
+    expect(Object.keys(full.catalog)).toContain("chief_sync");
+    for (const entry of full.entries) expect(entry.tools.includes("chief_sync"), entry.key).toBe(entry.key.includes("| chief |"));
+    const now: Fixture = {
+      catalog: Object.fromEntries(Object.entries(full.catalog).filter(([name]) => name !== "chief_sync")),
+      entries: full.entries.map((entry) => ({ ...entry, tools: entry.tools.filter((name) => name !== "chief_sync") })),
+    };
     expect(now.entries.map((entry) => entry.key)).toEqual(base.entries.map((entry) => entry.key));
     expect(Object.keys(now.catalog)).toEqual(Object.keys(base.catalog));
 
@@ -10556,6 +10563,90 @@ describe("checkout freshness", () => {
       expectWarned(await w.plan(), PLAN_BASE, /uncommitted changes/);
       expect(w.spawnedRole("planner")).toHaveLength(1);
       expect(await w.r.head()).toBe(w.r.c0);
+    });
+  });
+
+  // chief_sync (PR 183): the Chief-only tool that runs the same fast-forward on Chief's own checkout, through the real tool handler.
+  describe("chief_sync", () => {
+    const sync = (w: World) => w.state.harness.behavior.callAgentTool("chief_sync", {}, w.ctx) as Promise<string>;
+    const SKIPPED = /^Did not fast-forward your checkout to origin\/main: /;
+
+    test("a checkout one commit behind is fast-forwarded and the reply names the old and the new commit", async () => {
+      const w = await world();
+      const tip = await w.r.push();
+      const reply = await sync(w);
+      expect(reply).toContain(w.r.c0.slice(0, 12));
+      expect(reply).toContain(tip.slice(0, 12));
+      expect(reply).not.toContain("Did not fast-forward");
+      expect(await w.r.head()).toBe(tip);
+      expect(w.calls.some((call) => call.args[0] === "merge" && call.args.includes("--ff-only"))).toBe(true);
+    });
+
+    test("an already current checkout names its commit, is no skip and never merges", async () => {
+      const w = await world();
+      const reply = await sync(w);
+      expect(reply).toContain(w.r.c0.slice(0, 12));
+      expect(reply).not.toContain("Did not fast-forward");
+      expect(w.calls.some((call) => call.args[0] === "merge")).toBe(false);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test.each([
+      ["a dirty checkout", async (w: World) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); }, /uncommitted changes/],
+      ["a branch with a commit of its own", async (w: World) => {
+        await writeFile(join(w.r.chief, "mine.txt"), "mine\n");
+        await git(w.r.chief, "add", "-A");
+        await git(w.r.chief, "commit", "-q", "-m", "mine");
+      }, /1 commit\(s\) not on origin\/main/],
+      ["a failing fetch", async (w: World) => { await git(w.r.chief, "remote", "set-url", "origin", join(w.r.root, "gone.git")); }, /git fetch failed/],
+    ])("%s is a warning reply, not an error, and HEAD stays", async (_name, arrange, reason) => {
+      const w = await world();
+      await w.r.push();
+      await arrange(w);
+      const head = await w.r.head();
+      const reply = await sync(w);
+      expect(reply).toMatch(SKIPPED);
+      expect(reply).toMatch(reason);
+      expect(await w.r.head()).toBe(head);
+    });
+
+    test("a running researcher of this Chief is a warning naming it, runs no git and leaves HEAD", async () => {
+      const w = await world();
+      await w.research();
+      const [researcher] = w.rows("researcher");
+      w.setLive(researcher!, "active");
+      await w.r.push();
+      const before = w.calls.length;
+      const reply = await sync(w);
+      expect(reply).toMatch(SKIPPED);
+      expect(reply).toContain(`researcher ${researcher} is still running in it`);
+      expect(w.calls).toHaveLength(before);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a running planner that shares Chief's checkout is a warning naming it and leaves HEAD", async () => {
+      const w = await world({ projectPath: "clone" });
+      await w.plan();
+      const [planner] = w.rows("planner");
+      w.setLive(planner!, "active");
+      await w.r.push();
+      const reply = await sync(w);
+      expect(reply).toMatch(SKIPPED);
+      expect(reply).toContain(`planner ${planner} is still running in it`);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a caller that is not Chief is refused and nothing is fetched or moved", async () => {
+      const w = await world();
+      const { threadId: worker } = await delegate(w.state, w.chief);
+      const tip = await w.r.push();
+      const before = w.calls.length;
+      const call = (ctx: object) => w.state.harness.behavior.callAgentTool("chief_sync", {}, ctx);
+      await expect(call({ threadId: worker, projectId: "proj_1" })).rejects.toThrow(/Chief/);
+      await expect(call({ threadId: "thr_unknown", projectId: "proj_1" })).rejects.toThrow(/Chief/);
+      await expect(call({ projectId: "proj_1" })).rejects.toThrow(/Chief/);
+      expect(w.calls).toHaveLength(before);
+      expect(await w.r.head()).not.toBe(tip);
     });
   });
 
@@ -11081,5 +11172,117 @@ describe("checkout freshness", () => {
       expect(golden.meta.fixtureHash).toBe(fixtureHash);
       expect(actual).toEqual(golden.outputs);
     });
+  });
+
+  // Preservation of #181's callers (chief_research, chief_plan, CLI plan) across the chief_sync refactor. The golden file was
+  // recorded on base 0e3ab0c by running this same describe there with ORACLE_OUT_FRESH set; here the head output of the same
+  // fixture must equal it. Covers success and every skip path, recording reply, HEAD outcome, spawns and the git calls made.
+  describe("checkout equivalence with base 0e3ab0c", () => {
+    type Run = (w: World) => Promise<unknown>;
+    type Scenario = { name: string; projectPath?: "clone" | string; run: Run };
+    const ownCommit = async (w: World) => {
+      await writeFile(join(w.r.chief, "mine.txt"), "mine\n");
+      await git(w.r.chief, "add", "-A");
+      await git(w.r.chief, "commit", "-q", "-m", "mine");
+    };
+    const badOrigin = (w: World) => git(w.r.chief, "remote", "set-url", "origin", join(w.r.root, "gone.git"));
+    const cli = async (w: World, ...extra: string[]) => {
+      const result = await w.cliPlan(...extra);
+      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+    };
+    const FIXTURE: Scenario[] = [
+      { name: "research, behind (fast-forward)", run: (w) => w.research() },
+      { name: "research, current", run: async (w) => { await git(w.r.chief, "pull", "-q", "--ff-only"); return w.research(); } },
+      { name: "research, dirty", run: async (w) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); return w.research(); } },
+      { name: "research, own commit", run: async (w) => { await ownCommit(w); return w.research(); } },
+      { name: "research, fetch fails", run: async (w) => { await badOrigin(w); return w.research(); } },
+      { name: "research, remote host", run: async (w) => { w.cfg.hostId = "host_2"; return w.research(); } },
+      { name: "research, no default branch", run: async (w) => { delete w.cfg.env.defaultBranch; return w.research(); } },
+      { name: "research, environment lookup throws", run: async (w) => { w.state.harness.sdk.stub("environments.get", async () => { throw new Error("env lookup failed"); }); return w.research(); } },
+      { name: "research, running researcher", run: async (w) => {
+        const first = await w.research();
+        w.setLive(w.rows("researcher")[0]!, "active");
+        await w.r.push();
+        return [first, await w.research()];
+      } },
+      { name: "research, running planner of unknown sharing", run: async (w) => {
+        const first = await w.plan();
+        w.setLive(w.rows("planner")[0]!, "active");
+        await w.r.push();
+        return [first, await w.research()];
+      } },
+      { name: "chief_plan, shared, behind (fast-forward)", projectPath: "clone", run: (w) => w.plan() },
+      { name: "chief_plan, shared, current", projectPath: "clone", run: async (w) => { await git(w.r.chief, "pull", "-q", "--ff-only"); return w.plan(); } },
+      { name: "chief_plan, shared, dirty", projectPath: "clone", run: async (w) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); return w.plan(); } },
+      { name: "chief_plan, shared, own commit", projectPath: "clone", run: async (w) => { await ownCommit(w); return w.plan(); } },
+      { name: "chief_plan, shared, fetch fails", projectPath: "clone", run: async (w) => { await badOrigin(w); return w.plan(); } },
+      { name: "chief_plan, shared, remote host", projectPath: "clone", run: async (w) => { w.cfg.hostId = "host_2"; return w.plan(); } },
+      { name: "chief_plan, shared, running planner", projectPath: "clone", run: async (w) => {
+        const first = await w.plan();
+        w.setLive(w.rows("planner")[0]!, "active");
+        await w.r.push();
+        return [first, await w.plan()];
+      } },
+      { name: "chief_plan, shared, running researcher", projectPath: "clone", run: async (w) => {
+        const first = await w.research();
+        w.setLive(w.rows("researcher")[0]!, "active");
+        await w.r.push();
+        return [first, await w.plan()];
+      } },
+      { name: "chief_plan, sharing unknown (projects.get throws)", projectPath: "clone", run: async (w) => {
+        w.state.harness.sdk.stub("projects.get", async () => { throw new Error("project lookup failed"); });
+        return w.plan();
+      } },
+      { name: "chief_plan, sharing unknown (environment has no path)", projectPath: "clone", run: async (w) => { delete w.cfg.env.path; return w.plan(); } },
+      { name: "chief_plan, confirmed separate checkout", projectPath: "/elsewhere/worktree-default", run: (w) => w.plan() },
+      { name: "CLI plan text, shared, behind (fast-forward)", projectPath: "clone", run: (w) => cli(w) },
+      { name: "CLI plan text, shared, current", projectPath: "clone", run: async (w) => { await git(w.r.chief, "pull", "-q", "--ff-only"); return cli(w); } },
+      { name: "CLI plan text, shared, dirty", projectPath: "clone", run: async (w) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); return cli(w); } },
+      { name: "CLI plan text, shared, own commit", projectPath: "clone", run: async (w) => { await ownCommit(w); return cli(w); } },
+      { name: "CLI plan text, shared, fetch fails", projectPath: "clone", run: async (w) => { await badOrigin(w); return cli(w); } },
+      { name: "CLI plan text, shared, remote host", projectPath: "clone", run: async (w) => { w.cfg.hostId = "host_2"; return cli(w); } },
+      { name: "CLI plan text, sharing unknown", projectPath: "clone", run: async (w) => { delete w.cfg.env.path; return cli(w); } },
+      { name: "CLI plan text, confirmed separate checkout", projectPath: "/elsewhere/worktree-default", run: (w) => cli(w) },
+      { name: "CLI plan --json, shared, behind (fast-forward)", projectPath: "clone", run: (w) => cli(w, "--json") },
+      { name: "CLI plan --json, shared, dirty", projectPath: "clone", run: async (w) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); return cli(w, "--json"); } },
+      { name: "CLI plan --json, sharing unknown", projectPath: "clone", run: async (w) => { delete w.cfg.env.path; return cli(w, "--json"); } },
+    ];
+    const fixtureHash = createHash("sha256").update(FIXTURE.map((s) => `${s.name}|${s.projectPath}`).join("\n")).digest("hex");
+    const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "checkoutFreshness.base0e3ab0c.oracle.json");
+
+    async function outputs() {
+      const out: Record<string, unknown> = {};
+      for (const scenario of FIXTURE) {
+        const w = await world({ projectPath: scenario.projectPath });
+        await w.r.push();
+        const replies = await scenario.run(w);
+        const head = await w.r.head();
+        const originMain = await git(w.r.chief, "rev-parse", "origin/main");
+        const normalize = (value: unknown) => JSON.parse(JSON.stringify(value).split(w.r.root).join("<root>").replace(/\b[0-9a-f]{40}\b/g, "<sha>"));
+        out[scenario.name] = normalize({
+          replies,
+          head: head === w.r.c0 ? "c0" : head === originMain ? "origin tip" : "local commit",
+          threads: { researcher: w.spawnedRole("researcher").length, planner: w.spawnedRole("planner").length },
+          gitCalls: w.calls.map((call) => ({ args: call.args, cwd: call.cwd, spawned: call.spawned })),
+        });
+      }
+      return out;
+    }
+
+    test("research, chief_plan and CLI plan replies, HEAD, spawns and git calls are identical to base 0e3ab0c for every skip case and the fast-forward", async () => {
+      const actual = await outputs();
+      if (process.env.ORACLE_OUT_FRESH) {
+        const meta = {
+          cwd: process.cwd(), runnerRoot: dirname(fileURLToPath(import.meta.url)),
+          head: await git(process.cwd(), "rev-parse", "HEAD"), fixtureHash, scenarios: FIXTURE.length,
+        };
+        await writeFile(process.env.ORACLE_OUT_FRESH, `${JSON.stringify({ meta, outputs: actual }, null, 2)}\n`);
+        return;
+      }
+      const golden = JSON.parse(await readFile(GOLDEN, "utf8")) as { meta: { head: string; fixtureHash: string }; outputs: Record<string, unknown> };
+      expect(golden.meta.head).toBe("0e3ab0c4b7f6aa27cd2bba93ef757e19b3a57610");
+      expect(golden.meta.fixtureHash).toBe(fixtureHash);
+      expect(actual).toEqual(golden.outputs);
+    }, 120_000);
   });
 });
