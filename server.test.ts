@@ -1329,6 +1329,58 @@ describe("Chief backend", () => {
       const text = (await state.harness.behavior.runCli(["stats", "--project", "proj_1"])).stdout!;
       expect(text).toContain("Tasks:");
       expect(text).toContain("Not measured:");
+
+      // Review counts: one plan review covers two workers (two target rows per report) and counts as one event per report.
+      // A branch-only reviewer covers no worker and has no task; it counts in the global totals only.
+      const second = await delegate(state, chief.threadId, "Second task");
+      const seedReviewer = (id: string, extra: Record<string, unknown>, covers: string[]) => {
+        const row = { thread_id: id, role: "reviewer", project_id: "proj_1", chief_thread_id: chief.threadId, title: id, state: "ready", created_at: 1, updated_at: 1, ...extra };
+        state.db.prepare(`INSERT INTO managed_threads (${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`).run(...Object.values(row));
+        for (const covered of covers) state.db.prepare(`INSERT INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq) VALUES (?, ?, 1)`).run(id, covered);
+        state.addLive(id, "proj_1");
+      };
+      seedReviewer("review_plan", { worker_thread_id: worker.threadId }, [worker.threadId, second.threadId]);
+      seedReviewer("review_branch", { branch: "feature/orphan" }, []);
+      // The thread store reloads its row cache on its next write; seeded rows are read after this report.
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: second.threadId, projectId: "proj_1" });
+      const reviewer = (id: string) => ({ threadId: id, projectId: "proj_1" });
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Fix it.", ...REQUEST_CHANGES }, reviewer("review_plan"));
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Fixed.", ...APPROVE }, reviewer("review_plan"));
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Fine.", ...APPROVE }, reviewer("review_branch"));
+      expect(state.db.prepare("SELECT COUNT(*) AS n FROM reviewer_verdicts WHERE reviewer_thread_id='review_plan'").get()).toEqual({ n: 4 });
+
+      const reviewed = await stats(state, { threadId: chief.threadId, projectId: "proj_1" });
+      // 2 events of the plan review + 1 of the branch-only reviewer, not 5 rows.
+      expect(reviewed.verdicts).toEqual({ approve: 2, request_changes: 1 });
+      expect(reviewed.repairs.requestChanges).toBe(1);
+      // The plan review belongs to its first worker's task; the second task and the orphan reviewer add nothing per task.
+      const perTask = (title: string) => reviewed.perTask.find((task: any) => task.title === title);
+      expect(perTask("Fix checkout totals")).toMatchObject({ approvals: 1, requestChanges: 1 });
+      expect(perTask("Second task")).toMatchObject({ approvals: 0, requestChanges: 0 });
+      expect(reviewed.perTask.reduce((n: number, task: any) => n + task.approvals, 0)).toBe(1);
+      expect(byChief.perTask.every((task: any) => task.approvals === 0 && task.requestChanges === 0)).toBe(true);
+    });
+
+    // Contract (PR #187): stats counts a legacy reviewer (no reviewer_verdicts rows, current verdict request_changes) as one event,
+    // while the replacement gate still reads its carried reject_streak of 3. The two numbers answer different questions.
+    test("chief stats: a legacy reviewer with a carried streak of 3 is one request_changes event, and still stops a replacement", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const worker = await delegate(state, chief.threadId, "Legacy task", { branch: "feature/legacy-streak" });
+      state.db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, title, state, created_at, updated_at, worker_thread_id, verdict, reject_streak)
+        VALUES ('legacy_review', 'reviewer', 'proj_1', ?, 'legacy_review', 'ready', 1, 1, ?, 'request_changes', 3)`).run(chief.threadId, worker.threadId);
+      state.db.prepare(`INSERT INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq) VALUES ('legacy_review', ?, 1)`).run(worker.threadId);
+      state.addLive("legacy_review", "proj_1");
+      // The thread store reloads its row cache on its next write.
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: worker.threadId, projectId: "proj_1" });
+
+      expect(state.db.prepare("SELECT COUNT(*) AS n FROM reviewer_verdicts").get()).toEqual({ n: 0 });
+      const result = await stats(state);
+      expect(result.verdicts).toEqual({ approve: 0, request_changes: 1 });
+      expect(result.perTask[0]).toMatchObject({ approvals: 0, requestChanges: 1 });
+      await expect(state.harness.behavior.callAgentTool("chief_delegate", {
+        title: "Repair", mission: "Fix the findings", replaces: worker.threadId,
+      }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(`The reviewer has requested changes 3 times in a row on ${worker.threadId}. Do not delegate another round`);
     });
   });
 
