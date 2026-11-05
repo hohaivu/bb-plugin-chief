@@ -17,7 +17,24 @@ export interface ProgressRow {
   report_seq: number;
   branch: string | null;
   verdict: string | null;
+  worker_thread_id: string | null;
+  reject_streak: number;
+  regression: number | null;
 }
+
+/** One worker a reviewer covers: its wave, whether it is a tester branch (a tester row or a worker on a test wave),
+ * and whether it sits on a spec-bearing chain. */
+export interface RepairTarget { threadId: string; wave: number | null; tested: boolean; spec: boolean }
+/** What a reviewer verdict covers: a whole plan (stacks are legacy chains fixed in wave order; loose is every other
+ * open target), one managed worker, or a branch no worker owns. */
+export type RepairWork =
+  | { layout: "plan"; open: RepairTarget[]; stacks: RepairTarget[][]; loose: RepairTarget[] }
+  | { layout: "single"; target: RepairTarget }
+  | { layout: "branch" };
+export type ReviewAdvice =
+  | { kind: "approve"; work: RepairWork }
+  | { kind: "fix" | "consult"; work: RepairWork; streak: number; regression: boolean }
+  | { kind: "stop"; streak: number; regression: boolean };
 
 /** The two row-state tests the server owns: a terminal row, and a live thread status that is busy. */
 export interface ProgressStates {
@@ -38,7 +55,7 @@ export function createPlanProgress<Row extends ProgressRow>(
   ledger: ReturnType<typeof createReviewLedger<Row>>,
   states: ProgressStates,
 ) {
-  const { planWavesFor, isDesignWave, waveWorkers, specOwed, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
+  const { planWavesFor, isDesignWave, isTestWave, specChain, waveWorkers, specOwed, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
 
   /** A same-wave fix worker's later wave to restack, or null. Set only when the worker replaces a worker of its own
    * wave (a fix round, not a first-time hand-off between waves) and the wave that builds on it has a live worker.
@@ -152,6 +169,32 @@ export function createPlanProgress<Row extends ProgressRow>(
     return { covered, open, plan: covered.length > 1, stacks, loose: open.filter((target) => !stacked.has(target)) };
   }
 
+  /** The row sits on a spec-bearing chain: a plan chain with a Spec Writer on an unbypassed spec wave, or an unplanned task chain holding a Spec Writer. */
+  function onSpecChain(row: Row): boolean {
+    if (row.plan_thread_id && row.plan_wave != null) return specChain(row.plan_thread_id, planWavesFor(row.plan_thread_id), row.plan_wave);
+    return ledger.taskChain(row.thread_id).some((id) => rows().get(id)?.kind === "spec-writer");
+  }
+
+  /** The repair decision after a reviewer verdict, or null (no verdict, or nothing left to repair). Advice, not permission:
+   * the rung comes from the reviewer's carried streak, and chief_delegate's ledger.replacement still decides each replaces:. */
+  function reviewAdvice(reviewer: Row): ReviewAdvice | null {
+    if (reviewer.role !== "reviewer" || !reviewer.verdict) return null;
+    const round = fixRound(reviewer);
+    if (!round) return null;
+    const target = (threadId: string): RepairTarget => {
+      const row = rows().get(threadId);
+      return { threadId, wave: row?.plan_wave ?? null, tested: !!row && (row.kind === "tester" || isTestWave(row)), spec: !!row && onSpecChain(row) };
+    };
+    const ofTarget = (entry: ReviewTarget) => target(entry.worker_thread_id);
+    const work: RepairWork = round.plan
+      ? { layout: "plan", open: round.open.map(ofTarget), stacks: round.stacks.map((stack) => stack.map(ofTarget)), loose: round.loose.map(ofTarget) }
+      : reviewer.worker_thread_id ? { layout: "single", target: target(reviewer.worker_thread_id) } : { layout: "branch" };
+    if (reviewer.verdict === "approve") return { kind: "approve", work };
+    const rung = ledger.rung(reviewer.reject_streak);
+    const regression = !!reviewer.regression;
+    return rung === "stop" ? { kind: "stop", streak: reviewer.reject_streak, regression } : { kind: rung, work, streak: reviewer.reject_streak, regression };
+  }
+
   /** A planner's progress: one segment per chain, and how many of all its waves are done. A test wave Chief waived
    * (chief_skip_tests) counts as done, delegated or not, and stays in the total. */
   function waveProgress(planner: Row): { done: number; total: number; segments: { wave: number; state: SegmentState }[] } {
@@ -207,5 +250,5 @@ export function createPlanProgress<Row extends ProgressRow>(
     return { waves, next: successorOf(waves, row.plan_wave!) };
   }
 
-  return { reviewBlock, waitingOn, readyStep, fixRound, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
+  return { reviewBlock, waitingOn, readyStep, reviewAdvice, onSpecChain, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
 }
