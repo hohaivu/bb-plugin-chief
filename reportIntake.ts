@@ -1,7 +1,39 @@
-import type { ReviewTarget } from "./reviewLedger";
+import { createHash } from "node:crypto";
+import { basename } from "node:path";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { ReviewTarget, createReviewLedger } from "./reviewLedger";
 import type { Role } from "./roles";
-import type { ManagedRow, ReportFinding, ReportParams } from "./server";
+import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "./server";
+import type { ThreadInsert, ThreadStore } from "./threadStore";
 import { COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, fitLines, recordedLines, type RecordedCommand } from "./text";
+import { waveTitle } from "./waveSchedule";
+
+type Database = ReturnType<BbPluginApi["storage"]["database"]>;
+
+/** What the report intake needs from the server; the server owns each adapter's implementation. */
+export interface ReportIntakeAdapters {
+  /** chief_lessons is written only by the intake; the thread store keeps only managed_threads (threadStore.ts:66-67). */
+  db: Database;
+  store: ThreadStore<ManagedRow>;
+  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets">;
+  lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInsert<ManagedRow["role"], ManagedRow["state"]> }>;
+  writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string): Promise<{ path: string }[]>;
+  writeArtifact(threadId: string, projectId: string, name: string, content: string): Promise<string>;
+  /** In-batch outbox write (server.ts writeAlert). */
+  writeAlert(row: ManagedRow, key: string, message: string): void;
+  /** Enqueue and deliver (server.ts alertChief). */
+  alertChief(row: ManagedRow, key: string, message: string): Promise<boolean>;
+  /** In-batch forge comment content builders; they stay in server.ts (docs/specs/forge-comments.md names server.ts as their owner). */
+  enqueueVerdictComments(row: ManagedRow, seq: number, verdict: string, findings: ReportFinding[] | undefined, result: string | undefined, recommendation: string | undefined): void;
+  enqueueBlockedComment(row: ManagedRow, seq: number, blocker: string | undefined, recommendation: string | undefined): void;
+  /** In-batch plan log append (server.ts appendPlanLog). */
+  appendPlanLog(row: ManagedRow, entries: (FailEntry & { kind: "FAIL" })[]): void;
+  /** The alert's Next line for the row as committed: nextAction(row, true) ?? waveWaitLine(row) ?? the researcher line ?? the inspect line, word for word as today. */
+  actionLine(row: ManagedRow): string;
+  recordedCommands(threadId: string): Promise<RecordedCommand[] | null>;
+  reportStamp(threadId: string): Promise<string | null>;
+  warn(message: string): void;
+}
 
 /** A report whose result fits is short: no file, and no summary needed. */
 export const SUMMARY_MAX = 800;
@@ -12,6 +44,9 @@ export const MAX_REPORT_FAILS = 5;
 export const MAX_FINDINGS = 40;
 export const REPORT_TEXT_MAX = 4_000;
 export const LESSON_MAX = 400;
+export const MAX_CARRIED_FAILS = 12;
+
+type WaveInput = { body: string; dependsOn?: number[]; design?: boolean; test?: boolean; spec?: boolean };
 
 /** One Markdown bullet per finding of the given severity, never clipped. */
 export function findingLines(list: ReportFinding[], severity: ReportFinding["severity"]) {
@@ -85,7 +120,7 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, pa
     errors.push('result lacks a "## Deviations from plan" Markdown heading; a plan worker\'s ready report must list each departure from the plan and why, or "None".');
   }
 
-  // report() decodes a JSON string first, so a string left here is not an array.
+  // The report intake decodes a JSON string first, so a string left here is not an array.
   if (params.fails !== undefined && !Array.isArray(params.fails)) {
     errors.push("fails: send an array of {text, scope, basis}.");
   } else if (params.fails?.length) {
@@ -100,7 +135,7 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, pa
     });
   }
 
-  // report() decodes a JSON string first, so a string left here is not an array.
+  // The report intake decodes a JSON string first, so a string left here is not an array.
   if (params.findings !== undefined) {
     if (row.role !== "reviewer") errors.push(`findings is only for a reviewer's ready report (role is ${row.role}); remove it.`);
     if (!Array.isArray(params.findings)) errors.push("findings: send an array of {file, line?, severity, message, fix?}.");
@@ -392,4 +427,180 @@ export function reportFileBody(input: {
     ...(params.summary ? ["", "## Summary", "", params.summary] : []),
     ...(params.result ? ["", "## Result", "", params.result] : []),
   ].join("\n") + "\n";
+}
+
+/** The one owner of chief_report acceptance and publication: required state commits first, then the optional files and the alert. */
+export function createReportIntake(adapters: ReportIntakeAdapters): { report(threadId: string, params: ReportParams, callerProjectId: string): Promise<boolean> } {
+  const { db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, warn } = adapters;
+  async function report(threadId: string, params: ReportParams, callerProjectId: string) {
+    const found = await lookupRow(threadId, callerProjectId);
+    // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
+    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null });
+    if (!candidate || candidate.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
+    if (found.row && ["complete", "archived", "deleted"].includes(found.row.state)) {
+      throw new Error(`Managed thread ${threadId} is ${found.row.state} and can no longer report.`);
+    }
+    // Some planners send the wave array JSON-encoded; the string branch would take it as one flat wave.
+    let plan: string | unknown[] | undefined = params.plan;
+    if (typeof plan === "string" && plan.startsWith("[")) {
+      let decoded: unknown;
+      try { decoded = JSON.parse(plan); } catch { decoded = undefined; }
+      if (Array.isArray(decoded)) plan = decoded;
+    }
+    let reportFails = params.fails;
+    if (typeof reportFails === "string") {
+      try { reportFails = JSON.parse(reportFails); } catch { /* checkReport refuses the string */ }
+    }
+    let reportFindings = params.findings;
+    if (typeof reportFindings === "string") {
+      try { reportFindings = JSON.parse(reportFindings); } catch { /* checkReport refuses the string */ }
+    }
+    const errors = checkReport(candidate, { ...params, fails: reportFails, findings: reportFindings }, plan);
+    if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
+    if (found.pending) store.insert(found.pending);
+    const row = store.get(threadId)!;
+    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, test?, spec?}[], with bodies not yet trimmed if JSON-decoded.
+    const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;
+    const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
+    const verdict = params.state === "ready" ? params.verdict ?? null : null;
+    const plannerReady = row.role === "planner" && params.state === "ready";
+    const planWaves = plannerReady && planInput ? await writePlan(threadId, row.project_id, planInput) : null;
+    const scheduledWaves = planWaves && planInput
+      ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof planInput === "string" ? planInput : planInput[index]!.body)!,
+        title: waveTitle(typeof planInput === "string" ? planInput : planInput[index]!.body),
+        ...(typeof planInput !== "string" && planInput[index]!.dependsOn ? { dependsOn: planInput[index]!.dependsOn } : {}),
+        ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}),
+        ...(typeof planInput !== "string" && planInput[index]!.test ? { test: true } : {}),
+        ...(typeof planInput !== "string" && planInput[index]!.spec ? { spec: true } : {}),
+        ...(typeof planInput !== "string" && planInput[index]!.spec && hasSpecBaseline(planInput[index]!.body) ? { baseline: true } : {}) }))
+      : null;
+    // Best-effort mirror into Chief's storage: inline-vis resolves paths against the rendering thread.
+    let inlinePlans: string[] = [];
+    if (planWaves && planInput && row.chief_thread_id) {
+      try {
+        await writePlan(threadId, row.project_id, planInput, row.chief_thread_id);
+        inlinePlans = planWaves.map((wave) => `::inline-vis{source="thread-storage" file="plans/${threadId}/${basename(wave.path)}"}`);
+      } catch (error) {
+        warn(`Could not mirror ${threadId}'s plan into Chief's storage: ${String(error)}`);
+      }
+    }
+    // checkReport proved the shape: reportFails is an array of {text, scope, basis} or unset.
+    const failList = reportFails as FailEntry[] | undefined;
+    let fails: string | null = null;
+    if (failList?.length) {
+      const key = (entry: FailEntry) => `${entry.scope}\u0000${entry.text}`;
+      const fresh = new Set(failList.map(key));
+      const kept = (row.fails ? JSON.parse(row.fails) as FailEntry[] : []).filter((entry) => !fresh.has(key(entry)));
+      const at = Date.now();
+      const incoming = failList.filter((entry, index) => failList.findIndex((other) => key(other) === key(entry)) === index)
+        .map((entry) => ({ ...entry, at }));
+      fails = JSON.stringify([...kept, ...incoming].slice(-MAX_CARRIED_FAILS));
+    }
+    // checkReport proved the shape; only a reviewer's ready report carries findings.
+    const findingList = (reportFindings as ReportFinding[] | undefined)?.map((entry) => ({ ...entry, file: entry.file.trim(), message: entry.message.trim(), ...(entry.fix !== undefined ? { fix: entry.fix.trim() } : {}) }));
+    const regressionFlag = params.state === "ready" && params.regression === true && verdict === "request_changes";
+    const now = Date.now();
+    // A reviewer's active_cycle counts every resume, not rejection rounds — a
+    // reviewer resumed for an unrelated reason must not read as a deadlock.
+    // reject_streak counts only consecutive request_changes verdicts, and
+    // resets the moment either side breaks the streak with an approve.
+    // report_seq is reserved here, so the per-report file names below never collide.
+    const { report_seq: seq, result_rev: resultRev } = store.batch(() => {
+      const reserved = store.reserveReport({
+        threadId, state: params.state, result: params.result ?? null, summary: params.summary ?? null,
+        blocker: params.state === "blocked" ? params.blocker ?? null : null,
+        recommendation: params.recommendation ?? null, verdict,
+        planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails,
+        findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null, now,
+      });
+      if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
+        store.markAdvised(threadId, now);
+        // The plan's one review: the first advice from any of its advisors decides it.
+        if (row.plan_thread_id) store.resolvePlanReview(row.plan_thread_id, params.state === "ready" && verdict === "approve" ? "approved" : "changes");
+      }
+      if (plannerReady && scheduledWaves) {
+        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.test).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
+        const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
+        if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
+      }
+      if ((row.role === "advisor" || row.role === "reviewer") && params.state === "ready" && params.lesson) {
+        db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role) VALUES (?, ?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role);
+      }
+      ledger.recordVerdict(row, verdict, reserved.report_seq, now);
+      if (row.role === "reviewer" && params.state === "ready" && verdict) {
+        enqueueVerdictComments(row, reserved.report_seq, verdict, findingList, params.result, params.recommendation);
+      } else if (row.role === "worker" && params.state === "blocked") {
+        enqueueBlockedComment(row, reserved.report_seq, params.blocker, params.recommendation);
+      }
+      // Same transaction as the state commit: a crash before the full alert below still leaves Chief a pointer.
+      // The final alert's key shares the report: kind, so it evicts this row while undelivered.
+      if (row.chief_thread_id) {
+        const body = clip(params.summary ?? params.result ?? "", 300);
+        writeAlert(row, `report:${row.active_cycle}:pending-${reserved.report_seq}`, [
+          `${row.title} (${threadId}) reported ${params.state} (report ${reserved.report_seq}).`,
+          ...(body ? [body] : []),
+          `The full alert could not be built; run chief_inspect ${threadId}.`,
+        ].join("\n"));
+      }
+      // A plan worker's fails also reach its peer waves through chief_log, so it need not post them twice.
+      if (row.role === "worker" && row.plan_thread_id && failList?.length) {
+        appendPlanLog(row, failList.map((entry) => ({ ...entry, kind: "FAIL" as const })));
+      }
+      return reserved;
+    });
+    const current = store.get(threadId)!;
+    const action = actionLine(current);
+    const recorded = row.role === "worker" && params.state === "ready" ? await recordedCommands(threadId) : undefined;
+    const verdictName = `verdict-${seq}.md`;
+    const reportName = `report-${seq}.md`;
+    const reviewerVerdict = row.role === "reviewer" && !!verdict;
+    // Best-effort: the verdict is in the DB either way, so a failed write only loses the file.
+    let verdictPath: string | null = null;
+    const reviewedTargets = reviewerVerdict ? ledger.targets(threadId) : [];
+    if (reviewerVerdict) {
+      try {
+        verdictPath = await writeArtifact(threadId, row.project_id, verdictName, verdictFileBody({
+          threadId, verdict, regressionFlag, reviewedTargets, workerThreadId: row.worker_thread_id, reviewedHeadSha: row.reviewed_head_sha,
+          findingList, result: params.result, recommendation: params.recommendation,
+        }));
+      } catch (error) {
+        warn(`Could not write ${threadId}'s verdict file: ${String(error)}`);
+      }
+    }
+    const longResult = (params.result?.length ?? 0) > SUMMARY_MAX;
+    // A reviewer's full findings live in the verdict file: the alert carries a preview and where to read the rest.
+    const preview = reviewerVerdict && !!verdictPath && !!params.result;
+    const waveLines = plannerReady && planWaves ? planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`) : [];
+    // Optional enrichment: the state, seq and pending alert are already committed above.
+    const stamp = row.role === "researcher" || row.role === "planner" ? await reportStamp(threadId) : null;
+    const layout = reportAlert({ role: row.role, title: row.title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp });
+    // Long-or-clipped is decided from this first pass; the pass that follows only adds the pointer.
+    const first = layout(null);
+    let alert = first.text;
+    let reportPath: string | null = null;
+    if (reviewerVerdict) {
+      // A reviewer with a verdict never gets a report file: its verdict file is the full report.
+      if (!verdictPath) alert = layout({ line: `Full report: could not write ${verdictName} (see the plugin log)`, name: null }).text;
+      else if (longResult || first.clipped) alert = layout({ line: `Full report: ${verdictPath}`, name: verdictName }).text;
+    } else if (longResult || first.clipped) {
+      let pointer: Pointer;
+      try {
+        reportPath = await writeArtifact(threadId, row.project_id, reportName, reportFileBody({
+          role: row.role, title: row.title, threadId, params, verdict, action, waveLines, inlinePlans, recorded, stamp,
+        }));
+        pointer = { line: `Full report: ${reportPath}`, name: reportName };
+      } catch (error) {
+        warn(`Could not write ${threadId}'s report file: ${String(error)}`);
+        pointer = { line: `Full report: could not write ${reportName} (see the plugin log)`, name: null };
+      }
+      alert = layout(pointer).text;
+    }
+    // Guarded by report_seq, and report_path also by result_rev: a slow write never attaches its path to a
+    // newer report, nor to a result chief_complete replaced meanwhile (even with identical text). Always runs, so a
+    // report without a verdict still clears the previous verdict_path as the main UPDATE used to.
+    store.attachReportFiles(threadId, seq, resultRev, verdictPath, reportPath);
+    const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
+    return alertChief(store.get(threadId) ?? current, `report:${current.active_cycle}:${contentKey}`, alert);
+  }
+  return { report };
 }

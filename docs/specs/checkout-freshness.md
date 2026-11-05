@@ -21,10 +21,10 @@ The checkout freshness domain keeps Chief's checkout current before a researcher
 | Entry point | File | Role |
 | --- | --- | --- |
 | `fastForward`, `commitStamp`, `stampLine` | `checkoutSync.ts` | Run git and build the stamp text. |
-| `freshenChiefCheckout`, `reportStamp`, `serverCheckout`, `stageRead` | `server.ts` | Decide whether to fast-forward and read the stamp. |
+| `freshenChiefCheckout`, `reportStamp`, `serverCheckout`, `stageRead` | `server.ts` | Decide whether to fast-forward and read the stamp. `reportStamp` is an adapter of the report intake. |
 | `startResearcher`, `researchRun` | `research.ts` | Start a researcher and build the tool reply. |
 | `startPlan`, `chief_plan`, CLI `plan` | `server.ts` | Start a planner and build the tool and CLI replies. |
-| `report` | `server.ts` | Save a report and deliver the alert. |
+| `report` (`createReportIntake`) | `reportIntake.ts` | Save a report and deliver the alert. `report-intake.md` describes it. |
 | `reportAlert`, `reportFileBody` | `reportIntake.ts` | Lay out the alert and the report file. |
 
 ## Baseline: Behaviour Before the Fast-Forward
@@ -55,7 +55,7 @@ This section describes the code before this change. The next sections describe t
 
 ### Report delivery
 
-1. `report` validates the report and loads the thread row.
+1. The report intake (`report`) validates the report and loads the thread row.
 2. `store.batch` reserves the report sequence number, saves the report state, and writes a pending alert in one transaction. The pending alert key is `report:<cycle>:pending-<seq>`.
 3. `reportAlert` lays out the full alert. A report file is written when the result is long or the alert is clipped.
 4. `store.attachReportFiles` attaches the files. `alertChief` delivers the alert.
@@ -137,7 +137,7 @@ The warning has this form: `Did not fast-forward your checkout to origin/<branch
 
 ### Report stamp
 
-`report` calls `reportStamp` for a researcher or planner report. Worker, reviewer, and advisor alerts do not change.
+The report intake (`report`) calls `reportStamp` for a researcher or planner report. Worker, reviewer, and advisor alerts do not change.
 
 1. `store.batch` commits the report state, the sequence number, and the pending alert.
 2. `reportStamp` reads the reporter's own checkout. For a researcher, this is Chief's checkout.
@@ -177,7 +177,7 @@ Each contract carries its reason.
 
 - `reportStamp` never throws and has no outer deadline wrapper. Reason: a slow `ls-remote` must not remove the local SHA.
 - Once `rev-parse HEAD` succeeds, the alert and the report file carry `Read at <sha>`. This holds when `ls-remote` fails or passes the shared 12 s deadline.
-- The server commits the report state, the sequence number, and the pending alert before the stamp starts. Reason: the required result must not depend on optional enrichment.
+- The report intake commits the report state, the sequence number, and the pending alert before the stamp starts. Reason: the required result must not depend on optional enrichment.
 - The stamp never changes the report state, the sequence number, or the saved files.
 - The stamp line is a required line in `fixedCost` of `reportAlert`. Reason: a long result must not push it out of the alert.
 - The stamp adds no database column. Reason: the stamp lives in the alert text and the report file.
