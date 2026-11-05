@@ -30,10 +30,11 @@ const reasoningSchema = z.enum([
   "ultra",
   "ultracode",
 ]);
+/** reasoningLevel is a plain string like the SDK's own: providers may define levels beyond `reasoningSchema`, which only guards tool input. */
 export const modelSelectionSchema = z.object({
   providerId: z.string().trim().min(1),
   model: z.string().trim().min(1),
-  reasoningLevel: reasoningSchema,
+  reasoningLevel: z.string().trim().min(1),
 });
 export type ModelSelection = z.infer<typeof modelSelectionSchema>;
 
@@ -89,7 +90,8 @@ const workflowSelectionSchema = z.object({
   model: z.string().trim().min(1),
   reasoningLevel: reasoningSchema,
 }).strict();
-type WorkflowSelection = z.infer<typeof workflowSelectionSchema>;
+/** The enum guards tool input only; a stored pick carries whatever level the SDK reported. */
+type WorkflowSelection = Omit<z.infer<typeof workflowSelectionSchema>, "reasoningLevel"> & { reasoningLevel: string };
 const textList = (what: string) => z.array(z.string().trim().min(1).max(1_000)).min(1).max(20).optional().describe(what);
 /** One flat object with a per-mode check, not a union: tool parameters must publish as a JSON Schema of type object. */
 export const researchParams = z.object({
@@ -378,7 +380,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
     for (const note of notes) bb.log.warn(note);
     // A researcher child runs on `pick` (the mode's own pick, never a per-call override), else on Chief's own model.
     const own = live?.providerId && callerOptions?.model
-      ? { providerId: live.providerId, model: callerOptions.model, reasoningLevel: callerOptions.reasoningLevel as ModelSelection["reasoningLevel"] }
+      ? { providerId: live.providerId, model: callerOptions.model, reasoningLevel: callerOptions.reasoningLevel }
       : null;
     return { models, notes, hostId, caller, pick, own, environmentId: live?.environmentId ?? null, permissionMode: callerMode };
   }

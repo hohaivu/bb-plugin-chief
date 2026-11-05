@@ -268,7 +268,7 @@ function HostModelPicker({ hostId, value, disabled, onPick }: {
       routing={{ kind: "host", hostId }}
       disabled={disabled}
       onChange={(next) => {
-        const selection = { providerId: next.providerId, model: next.model, reasoningLevel: next.reasoningLevel as ModelSelection["reasoningLevel"] };
+        const selection = { providerId: next.providerId, model: next.model, reasoningLevel: next.reasoningLevel };
         if (selection.providerId !== value.providerId || selection.model !== value.model
           || selection.reasoningLevel !== value.reasoningLevel) onPick(selection);
       }}

@@ -1418,7 +1418,7 @@ export default async function plugin(bb: BbPluginApi) {
       const model = catalog.models.find((candidate) => candidate.isDefault) ?? catalog.models[0];
       if (!model) return { fallback: null, error: "This machine reported no models." };
       return {
-        fallback: { providerId: provider.id, model: model.model, reasoningLevel: model.defaultReasoningEffort as ModelSelection["reasoningLevel"] },
+        fallback: { providerId: provider.id, model: model.model, reasoningLevel: model.defaultReasoningEffort },
         error: null,
       };
     } catch (error) {
@@ -1444,7 +1444,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (!model) throw new Error("the machine no longer offers that model");
       const reasoningLevel = model.supportedReasoningEfforts.some(
         (effort) => effort.reasoningEffort === selection.reasoningLevel,
-      ) ? selection.reasoningLevel : model.defaultReasoningEffort as ModelSelection["reasoningLevel"];
+      ) ? selection.reasoningLevel : model.defaultReasoningEffort;
       return { ...selection, reasoningLevel };
     } catch (error) {
       bb.log.warn(
