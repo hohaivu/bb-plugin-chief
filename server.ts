@@ -2403,10 +2403,10 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** Fast-forwards Chief's checkout before a researcher, or a planner that shares it, starts. Returns one warning line when it did not, else null. Never throws.
+  /** Fast-forwards Chief's checkout before a researcher, or a planner that shares it, starts, or when Chief asks (chief_sync). Returns the old and new commit, a warning line when it did not, or null when a planner has a separate checkout. Never throws.
    * Nothing that reaches git is raced: every git call is awaited to exit, so when this returns no git it started is running or can start. */
-  async function freshenChiefCheckout(chief: ManagedRow, reader: "researcher" | "planner"): Promise<string | null> {
-    const warn = (reason: string, branch?: string) => `Did not fast-forward your checkout to origin/${branch ?? "the default branch"}: ${reason}. The ${reader} reads it as it is.`;
+  async function syncChiefCheckout(chief: ManagedRow, reader: "researcher" | "planner" | "chief"): Promise<{ from: string; to: string } | { warning: string } | null> {
+    const warn = (reason: string, branch?: string) => ({ warning: `Did not fast-forward your checkout to origin/${branch ?? "the default branch"}: ${reason}. ${reader === "chief" ? "You read" : `The ${reader} reads`} it as it is.` });
     try {
       const deadline = Date.now() + FRESHEN_MS;
       const read = stageRead(deadline);
@@ -2428,10 +2428,16 @@ export default async function plugin(bb: BbPluginApi) {
       }))).find((row) => row);
       if (running) return warn(`${running.role} ${running.thread_id} is still running in it`, co.branch);
       const result = await fastForward({ cwd: co.path, env: forgeEnv(), branch: co.branch, deadline });
-      return "skipped" in result ? warn(result.skipped, co.branch) : null;
+      return "skipped" in result ? warn(result.skipped, co.branch) : result;
     } catch (error) {
       return warn(clip(String((error as Error)?.message ?? error), 200));
     }
+  }
+
+  /** The researcher and planner callers want only the warning line. */
+  async function freshenChiefCheckout(chief: ManagedRow, reader: "researcher" | "planner"): Promise<string | null> {
+    const result = await syncChiefCheckout(chief, reader);
+    return result && "warning" in result ? result.warning : null;
   }
 
   /** `Read at <sha>[; <branch> is now <sha>, so this answer may be stale]` for the checkout `threadId` runs in, or null. Never throws, no outer deadline:
@@ -4526,6 +4532,21 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   bb.agents.registerTool({
+    name: "chief_sync",
+    presentation: { label: { pending: "Syncing checkout…", completed: "Synced checkout" } },
+    description: "Fast-forward your own checkout to origin's default branch before you read code yourself. It never overwrites uncommitted or ignored files and never errors on a skip: it returns the old and new commit, or why it left the checkout as it is (a researcher or sharing planner is running, uncommitted changes, commits of its own, a failed fetch).",
+    parameters: z.object({}),
+    async execute(_params, context) {
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
+      if (!isActiveChief(caller)) throw new Error("chief_sync is for the Chief thread.");
+      touchCallerChief(caller);
+      const result = await syncChiefCheckout(caller, "chief");
+      if (!result) return "Nothing to sync.";
+      if ("warning" in result) return result.warning;
+      return result.from === result.to ? `Your checkout is already at ${result.to.slice(0, 12)}.` : `Fast-forwarded your checkout from ${result.from.slice(0, 12)} to ${result.to.slice(0, 12)}.`;
+    },
+  });
+  bb.agents.registerTool({
     name: "chief_report",
     presentation: { label: { pending: "Reporting to Chief…", completed: "Reported to Chief" } },
     description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict and findings; a planner's ready report requires plan (the full plan body), which Chief receives as a file, and may set complex; a plan review's ready report requires a verdict. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
@@ -4593,7 +4614,7 @@ export default async function plugin(bb: BbPluginApi) {
       const tools = [
         ...(plannerActive ? ["chief_plan"] : []),
         "chief_consult", "chief_spawn",
-        "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate",
+        "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync",
         ...(researchTool ? ["chief_research"] : []),
       ];
       return {
