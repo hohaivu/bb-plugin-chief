@@ -313,6 +313,8 @@ describe("a refusal writes nothing", () => {
     { name: "findings on a worker", role: "worker", params: { state: "ready", result: "ok", findings: [] }, message: "findings is only for a reviewer's ready report (role is worker); remove it." },
     { name: "a lesson on a worker", role: "worker", params: { state: "ready", result: "ok", lesson: "rule" }, message: "lesson is only for an advisor or reviewer's ready report (role is worker); remove it." },
     { name: "a lesson on a non-ready reviewer report", role: "reviewer", params: { state: "active", lesson: "rule" }, message: 'lesson is only allowed when state is ready (state is "active"); remove it.' },
+    { name: "approve with a blocking finding and a lesson", role: "reviewer", params: { ...APPROVE, findings: [finding], lesson: "Never recorded." }, message: 'verdict is approve but findings has 1 "blocking" entry' },
+    { name: "a lesson on a blocked reviewer report", role: "reviewer", params: { state: "blocked", result: "Stuck", blocker: "No access", recommendation: "Grant it", lesson: "Never recorded." }, message: 'lesson is only allowed when state is ready (state is "blocked"); remove it.' },
   ] as const)("validation: $name", async ({ role, params, message }) => {
     const w = world();
     w.seedReviewer();
@@ -358,7 +360,10 @@ describe("a refusal writes nothing", () => {
     const w = world();
     w.pendingRows.set("w9", { threadId: "w9", role: "worker", projectId: "proj", chiefThreadId: "chief1", title: "w9", state: "active" });
 
+    const before = w.stores();
+
     await expect(w.intake.report("w9", { state: "ready" }, "proj")).rejects.toThrow("result is empty; a ready report needs a non-empty result.");
+    expect(w.stores()).toEqual(before);
     expect(w.rowOf("w9")).toBeUndefined();
     expect(w.log).toEqual(["lookupRow"]);
 
