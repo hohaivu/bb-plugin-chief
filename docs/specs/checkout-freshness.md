@@ -34,7 +34,9 @@ This section describes the code before this change. The next sections describe t
 ### Researcher start
 
 - `chief_research` from Chief calls `startResearcher` in `research.ts`.
-- `researchPrepare` makes every refusal: cap, cooldown, quota, and no reusable environment. A refusal happens before any thread exists.
+- `researchPrepare` refuses on the call cap, the researcher model, the cooldown, and the quota. It returns `environmentId`, which can be null.
+- `startResearcher` then refuses when `environmentId` is null, because the thread has no reusable environment.
+- Every refusal happens before any thread exists.
 - The researcher reuses Chief's own environment (`{ type: "reuse" }`). The code has no fallback to a fresh worktree.
   Reason: the researcher reads Chief's working tree.
 - The code runs no git command and no freshness step before the spawn.
@@ -81,7 +83,7 @@ The alert has no commit stamp. `reportAlert` puts the title line, then `State: <
 3. HEAD has commits that `origin/<default branch>` does not have.
 4. HEAD already equals `origin/<default branch>`. The result is `{ from, to }` with equal values.
 5. Fewer than 10 s remain before the merge.
-6. `git merge --ff-only` fails.
+6. `git merge --ff-only --no-overwrite-ignore` fails.
 
 ### Planner sharing
 
@@ -159,6 +161,8 @@ Each contract carries its reason.
 - The server runs git only in a checkout on the primary host. Reason: the plugin server cannot run git on a remote host.
 - A planner call runs no git unless both paths are known and equal. Reason: a failed lookup is not proof of a separate worktree.
 - The merge starts only when at least 10 s remain. Reason: a deadline must not kill a merge halfway through a working tree update.
+- A merge retry starts only when at least 10 s remain. Each merge attempt needs the full reserve, not only the first. Reason: an under-budget retry can meet the deadline halfway through a working tree update.
+- The merge uses `--no-overwrite-ignore`. An ignored untracked file that `origin/<default branch>` adds stays unchanged, and the merge fails as a skip. Reason: git replaces such a file by default, and the user's file is lost.
 
 ### Deadlines
 
