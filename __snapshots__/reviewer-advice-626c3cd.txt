@@ -25,6 +25,17 @@ Result: The discount is applied twice
 - reviewer “Review · Fix totals” (thr_6): The reviewer approves the whole plan. chief_complete (threadId: thr_4); chief_complete (threadId: thr_5); each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
 --- after completing the first branch: Pending
 - reviewer “Review · Fix totals” (thr_6): The reviewer approves the whole plan. chief_complete (threadId: thr_5); each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+--- approved again after completing the first branch: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Verdict: approve
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-2.md
+The reviewer approves the whole plan. chief_complete (threadId: thr_5); each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- approved again after completing the first branch: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer approves the whole plan. chief_complete (threadId: thr_5); each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
 
 === approve: unowned branch ===
 --- approve: alert
@@ -503,6 +514,17 @@ Result: The discount is applied twice
 - reviewer “Review · Fix totals” (thr_3): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
 --- after the replacement: Pending
 (no Pending line)
+--- reported again after the replacement: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-2.md
+Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- reported again after the replacement: Pending
+(no Pending line)
 
 === null: a plan target was re-pointed by replaces ===
 --- reported: alert
@@ -519,6 +541,17 @@ Result: The discount is applied twice
 --- after replacing branch 1: Pending
 (no Pending line)
 --- after replacing branch 3: Pending
+(no Pending line)
+--- reported again after replacing branch 3: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-2.md
+Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- reported again after replacing branch 3: Pending
 (no Pending line)
 
 === null: every covered worker is complete ===

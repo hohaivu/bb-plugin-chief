@@ -9229,7 +9229,12 @@ describe("tester role", () => {
     // Regression: moving the repair decision changes a sentence, the layout it picks (plan, single, branch), the stack grouping, the
     // tester or spec routes, the rung, or that an approve wins over a streak.
     // Base capture (the same fixture, byte for byte, produced the snapshot on base and is compared on head):
-    //   base: 626c3cdf5af8fcbf2e02b0e4e83b537b1813d811 (a Worktrunk checkout of 626c3cd with this fixture and the unchanged server.test.ts; its writer variant wrote the snapshot)
+    //   base: 626c3cdf5af8fcbf2e02b0e4e83b537b1813d811, a Worktrunk checkout (since removed) at /Volumes/VuHo_T5/Develop/personal/research/bb-plugin-chief.tester-base2-626c3cd;
+    //     runner root = that directory; this server.test.ts with its oracle assertion swapped to write the output; `npx vitest run server.test.ts -t "reviewer advice oracle"` exit 0 (1 passed); `npx tsc --noEmit` exit 0 (0 errors).
+    //   head: 6807ccc3e1c5b6601b2def281d4abdc73eed9a07 + this commit's test changes (production tree = e031902), cwd and runner root /Volumes/VuHo_T5/.bb/plugins/environment-worktrunk/host-data/worktrees/thr_qd8mstf97i-1/bb-plugin-chief;
+    //     `npx vitest run server.test.ts -t "reviewer advice"` exit 0 (2 passed) against the snapshot copied unchanged from the base run.
+    //   fixture block sha256 (between the markers), base and head: cddcc6046b3d7a41fb03cedebb6b2c66e16dd79885e02fa26b4fb23e292f6bd4; snapshot sha256: 49769900d73f6615d01a81303bf0368bd83ff07f3f95ec7e5a3fee9a72895069.
+    //   Pending only, not alert: "no verdict" (no accepted report reaches a ready reviewer without a verdict) and "approve carrying streak 3" (an approve report resets the streak before its alert).
     // <reviewer-advice-oracle-begin>
     const reviewerAdviceFixture = async () => {
       const blocks: string[] = [];
@@ -9293,6 +9298,12 @@ describe("tester role", () => {
             await k.pending(`${label}: Pending`, chief, reviewer);
             return reviewer;
           },
+          /** The reviewer reports again (a later report re-reads the persisted state): emits the alert it sent, then the Pending line. */
+          again: async (label: string, chief: string, reviewer: string, params: object) => {
+            await report(state, reviewer, params);
+            emit(`${label}: alert`, state.sent.at(-1).input[0].text);
+            await k.pending(`${label}: Pending`, chief, reviewer);
+          },
           /** Any later write reloads the row cache, so a SQL edit made after a report is read. */
           reload: (chief: string) => k.worker(chief),
           replace: (chief: string, id: string, extra: object = {}) => tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", replaces: id, ...extra }, chief),
@@ -9341,6 +9352,7 @@ describe("tester role", () => {
         await tool(k.state, "chief_complete", { threadId: a }, c.chief);
         await k.reload(c.chief);
         await k.pending("after completing the first branch: Pending", c.chief, reviewer);
+        await k.again("approved again after completing the first branch", c.chief, reviewer, { state: "ready", result: "The discount is applied twice", verdict: "approve", findings: [] });
       });
       await run("approve: unowned branch", async (k) => {
         const chief = await k.chief();
@@ -9352,6 +9364,7 @@ describe("tester role", () => {
         k.state.db.prepare(`UPDATE managed_threads SET reject_streak=3 WHERE thread_id=?`).run(reviewer);
         await k.reload(chief);
         await k.pending("approve carrying streak 3: Pending", chief, reviewer);
+        // Pending only: an approve report resets reject_streak to 0 before its alert is built, so no accepted report alerts an approve that carries a streak.
       });
 
       // 2. request_changes at the fix rung.
@@ -9499,6 +9512,7 @@ describe("tester role", () => {
         k.state.db.prepare(`UPDATE managed_threads SET verdict=NULL WHERE thread_id=?`).run(reviewer);
         await k.reload(chief);
         await k.pending("verdict cleared: Pending", chief, reviewer);
+        // Pending only: no accepted report reaches a ready reviewer with no verdict (checkReport refuses a ready reviewer report without one; a blocked report is routed before the reviewer branch), so its alert is not observable.
       });
       await run("null: the covered worker was re-pointed by replaces", async (k) => {
         const chief = await k.chief();
@@ -9506,6 +9520,7 @@ describe("tester role", () => {
         const reviewer = await k.judge("reported", chief, { workerThreadId: worker }, FIX);
         await k.replace(chief, worker);
         await k.pending("after the replacement: Pending", chief, reviewer);
+        await k.again("reported again after the replacement", chief, reviewer, { state: "ready", result: "The discount is applied twice", ...REQUEST_CHANGES });
       });
       await run("null: a plan target was re-pointed by replaces", async (k) => {
         const c = await branches(k);
@@ -9515,6 +9530,7 @@ describe("tester role", () => {
         await k.pending("after replacing branch 1: Pending", c.chief, reviewer);
         await k.wave(c, 3, { replaces: b });
         await k.pending("after replacing branch 3: Pending", c.chief, reviewer);
+        await k.again("reported again after replacing branch 3", c.chief, reviewer, { state: "ready", result: "The discount is applied twice", ...REQUEST_CHANGES });
       });
       await run("null: every covered worker is complete", async (k) => {
         const chief = await k.chief();
