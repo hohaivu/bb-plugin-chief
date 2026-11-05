@@ -10328,3 +10328,222 @@ describe("tool-call stability", () => {
     expect((await head()).catalog.chief_forge_init!.inputSchema.required).toContain("title");
   });
 });
+
+// Chief's checkout is fast-forwarded before a researcher or planner reads it, and their reports say which commit they read.
+// Real git runs against local bare remotes; every other CLI is refused. Git goes through execFileMock so each call is recorded
+// with the number of threads spawned when it started, and so a test can hold one the way a slow network would.
+describe("checkout freshness", () => {
+  type State = Awaited<ReturnType<typeof setup>>;
+  const PRIMARY = { config: async () => ({ primaryHostId: "host_1" }), usageLimits: async () => ({}) };
+  const CTX = { projectId: "proj_1" };
+  const SURVEY = (question: string) => ({ mode: "survey", question, items: ["a.ts"] });
+  const FIRST_LINE = /^Started researcher thread thr_\d+ \(.*\)\. It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert\. Do not poll: end your turn\.$/;
+  const WARNING = /^Did not fast-forward your checkout to origin\/(main|the default branch): .+\. The (researcher|planner) reads it as it is\.$/;
+
+  let realExecPromise: Promise<(file: string, args: string[], options: object) => Promise<{ stdout: string; stderr: string }>> | undefined;
+  const realExec = async () => realExecPromise ??= (async () => {
+    const childProcess = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    return (await import("node:util")).promisify(childProcess.execFile) as any;
+  })();
+  const git = async (cwd: string, ...args: string[]) =>
+    (await (await realExec())("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd })).stdout.trim();
+
+  /** A bare origin with c0 on main, `chief` (the checkout under test, at c0) and `other` (a second clone that pushes). */
+  async function repos() {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "chief-fresh-")));
+    const origin = join(root, "origin.git");
+    await git(root, "init", "-q", "--bare", "-b", "main", origin);
+    const other = join(root, "other");
+    await git(root, "clone", "-q", origin, other);
+    await writeFile(join(other, "a.txt"), "c0\n");
+    await git(other, "add", "-A");
+    await git(other, "commit", "-q", "-m", "c0");
+    await git(other, "push", "-q", "origin", "HEAD:main");
+    const chief = join(root, "chief");
+    await git(root, "clone", "-q", "-b", "main", origin, chief);
+    let n = 0;
+    return {
+      root, chief, c0: await git(chief, "rev-parse", "HEAD"),
+      /** Pushes one more commit to origin/main from `other`; returns its SHA. */
+      push: async (file = "a.txt") => {
+        await writeFile(join(other, file), `change ${n += 1}\n`);
+        await git(other, "add", "-A");
+        await git(other, "commit", "-q", "-m", `change ${n}`);
+        await git(other, "push", "-q", "origin", "HEAD:main");
+        return git(other, "rev-parse", "HEAD");
+      },
+      head: () => git(chief, "rev-parse", "HEAD"),
+    };
+  }
+
+  type GitCall = { args: string[]; cwd: string; spawned: number };
+  /**
+   * A Chief whose environment is the clone `r.chief` (default branch main, on the primary host), plus a recorder for every git call.
+   * `projectPath` is the project source path the server compares with Chief's path to decide whether a planner shares it.
+   * `hold` may return a promise that delays a git call, or rejects like execFile's killed child; it sees the call's options.
+   */
+  async function world(opts: { projectPath?: "clone" | string; env?: Record<string, unknown> | "all"; r?: Awaited<ReturnType<typeof repos>>; behind?: boolean } = {}) {
+    const r = opts.r ?? await repos();
+    const projectPath = opts.projectPath === "clone" ? r.chief : opts.projectPath;
+    const state = await setup({ projectPath, system: PRIMARY });
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const cfg = { env: { path: r.chief, defaultBranch: "main" } as Record<string, unknown>, hostId: "host_1", everyEnvironment: false };
+    state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
+      id: environmentId, hostId: cfg.hostId, workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
+      ...(cfg.everyEnvironment || environmentId.startsWith("env_default") ? cfg.env : {}),
+    }));
+    const chief = (await start(state)).threadId;
+    state.live.set(chief, { ...state.live.get(chief)!, providerId: "codex" });
+    state.setThreadExecution({ model: "gpt-6-astra" });
+    const calls: GitCall[] = [];
+    let inflight = 0;
+    const hold: { git?: (args: string[], options: any) => Promise<void> | undefined } = {};
+    const real = await realExec();
+    execFileMock.mockImplementation((file: string, args: string[], options: any) => {
+      if (file !== "git") return Promise.reject(new Error(`unexpected CLI ${file}`));
+      calls.push({ args, cwd: options.cwd, spawned: state.spawned.length });
+      inflight += 1;
+      const run = (async () => { await hold.git?.(args, options); return real(file, args, options); })();
+      run.then(() => { inflight -= 1; }, () => { inflight -= 1; });
+      return run;
+    });
+    const ctx = { threadId: chief, ...CTX };
+    const tool = (name: string, params: object) => state.harness.behavior.callAgentTool(name, params, ctx) as Promise<string>;
+    let q = 0;
+    const w = {
+      r, state, chief, cfg, calls, hold, ctx,
+      inflight: () => inflight,
+      research: () => tool("chief_research", SURVEY(`Question ${q += 1}`)),
+      plan: () => tool("chief_plan", { title: `Plan ${q += 1}`, mission: "Propose how to fix totals" }),
+      cliPlan: (...extra: string[]) => state.harness.behavior.runCli(["plan", "--title", `Plan ${q += 1}`, "--mission", "Propose how to fix totals", ...extra], ctx),
+      /** Threads spawned by the call under test, excluding Chief itself. */
+      spawnedRole: (role: string) => state.spawned.filter((args: any) => args.pluginMetadata?.role === role),
+      rows: (role: string) => (state.db.prepare("SELECT thread_id FROM managed_threads WHERE role=? ORDER BY rowid").all(role) as { thread_id: string }[]).map((row) => row.thread_id),
+      setLive: (threadId: string, status: string) => state.live.set(threadId, { ...state.live.get(threadId)!, status } as any),
+    };
+    return w;
+  }
+  type World = Awaited<ReturnType<typeof world>>;
+
+  /** Exactly the base reply, then one warning line. */
+  function expectWarned(reply: string, base: RegExp, reason: RegExp) {
+    const lines = reply.split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(base);
+    expect(lines[1]).toMatch(WARNING);
+    expect(lines[1]).toMatch(reason);
+  }
+  const RESEARCH_BASE = FIRST_LINE;
+  const PLAN_BASE = /^Started planner “Plan · Plan \d+” in thread thr_\d+\. Its ready alert lists the wave schedule and the exact next call\.$/;
+  const CLI_PLAN_BASE = /^Started planner “Plan · Plan \d+” in thr_\d+\.$/;
+  const noWarning = (reply: string, base: RegExp) => { expect(reply).toMatch(base); expect(reply).not.toContain("Did not fast-forward"); };
+
+  const flush = async (ms = 0) => {
+    await vi.advanceTimersByTimeAsync(ms);
+    for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  /** A git call that never answers on its own: it fails when execFile's `timeout` option elapses, as a killed child does. */
+  const killedAfterTimeout = (options: any) => new Promise<void>((_, reject) => setTimeout(() => reject(Object.assign(new Error("Command failed: git (killed after timeout)"), { killed: true })), options.timeout));
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const withFakeTimers = async (body: () => Promise<void>) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+    try { await body(); } finally { vi.useRealTimers(); }
+  };
+  /** Starts a tool call and tracks whether it has resolved yet. */
+  const track = <T>(promise: Promise<T>) => {
+    const box = { done: false, value: undefined as T | undefined, error: undefined as unknown };
+    const settled = promise.then((value) => { box.done = true; box.value = value; }, (error) => { box.done = true; box.error = error; });
+    return Object.assign(box, { settled });
+  };
+
+  describe("success", () => {
+    test("chief_research fast-forwards a behind clone, spawns the researcher and adds no warning", async () => {
+      const w = await world();
+      const tip = await w.r.push();
+      const reply = await w.research();
+      noWarning(reply, RESEARCH_BASE);
+      expect(await w.r.head()).toBe(tip);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+      expect(w.calls.every((call) => call.cwd === w.r.chief && call.spawned === 1)).toBe(true);
+      expect(w.calls.some((call) => call.args[0] === "merge" && call.args.includes("--ff-only"))).toBe(true);
+    });
+
+    test("an already current clone is silent and never merges", async () => {
+      const w = await world();
+      noWarning(await w.research(), RESEARCH_BASE);
+      expect(w.calls.some((call) => call.args[0] === "merge")).toBe(false);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("chief_plan in a project whose checkout is Chief's fast-forwards it and adds no warning", async () => {
+      const w = await world({ projectPath: "clone" });
+      const tip = await w.r.push();
+      noWarning(await w.plan(), PLAN_BASE);
+      expect(await w.r.head()).toBe(tip);
+    });
+
+    test("chief_plan for a confirmed separate planner checkout runs no git and adds no warning, whatever the host", async () => {
+      for (const hostId of ["host_1", "host_2"]) {
+        const w = await world({ projectPath: "/elsewhere/worktree-default" });
+        w.cfg.hostId = hostId;
+        await w.r.push();
+        noWarning(await w.plan(), PLAN_BASE);
+        expect(w.calls).toEqual([]);
+        expect(await w.r.head()).toBe(w.r.c0);
+        expect(w.spawnedRole("planner")).toHaveLength(1);
+      }
+    });
+  });
+
+  describe("skip causes never block the spawn", () => {
+    test.each([
+      ["a dirty clone", async (w: World) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); }, /uncommitted changes/],
+      ["a local commit ahead", async (w: World) => {
+        await writeFile(join(w.r.chief, "mine.txt"), "mine\n");
+        await git(w.r.chief, "add", "-A");
+        await git(w.r.chief, "commit", "-q", "-m", "mine");
+      }, /1 commit\(s\) not on origin\/main/],
+      ["a bad origin", async (w: World) => { await git(w.r.chief, "remote", "set-url", "origin", join(w.r.root, "gone.git")); }, /git fetch failed/],
+      ["a remote host", async (w: World) => { w.cfg.hostId = "host_2"; }, /remote host/],
+      ["an environment without a path", async (w: World) => { delete w.cfg.env.path; }, /no checkout path/],
+      ["an environment without a default branch", async (w: World) => { delete w.cfg.env.defaultBranch; }, /default branch unknown/],
+    ])("chief_research with %s", async (_name, arrange, reason) => {
+      const w = await world();
+      await w.r.push();
+      await arrange(w);
+      const head = await w.r.head();
+      expectWarned(await w.research(), RESEARCH_BASE, reason);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+      expect(await w.r.head()).toBe(head);
+      if (/remote host|path|default branch/.test(String(reason))) expect(w.calls).toEqual([]);
+    });
+
+    test("an unreadable Chief thread or environment still spawns, with one warning and no git", async () => {
+      const w = await world();
+      await w.r.push();
+      w.state.harness.sdk.stub("environments.get", async () => { throw new Error("env lookup failed"); });
+      expectWarned(await w.research(), RESEARCH_BASE, /env lookup failed/);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+      expect(w.calls).toEqual([]);
+    });
+
+    test("an untracked file the fast-forward would overwrite is a merge-failed skip and the researcher still starts", async () => {
+      const w = await world();
+      await w.r.push("new.txt");
+      await writeFile(join(w.r.chief, "new.txt"), "mine\n");
+      expectWarned(await w.research(), RESEARCH_BASE, /git merge --ff-only failed/);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a planner call whose shared checkout is dirty skips with one warning and the planner still starts", async () => {
+      const w = await world({ projectPath: "clone" });
+      await w.r.push();
+      await writeFile(join(w.r.chief, "a.txt"), "dirty\n");
+      expectWarned(await w.plan(), PLAN_BASE, /uncommitted changes/);
+      expect(w.spawnedRole("planner")).toHaveLength(1);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+  });
+});
