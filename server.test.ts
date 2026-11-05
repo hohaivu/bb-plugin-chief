@@ -10992,6 +10992,12 @@ describe("checkout freshness", () => {
     const settled = promise.then((value) => { box.done = true; box.value = value; }, (error) => { box.done = true; box.error = error; });
     return Object.assign(box, { settled });
   };
+  /** Spins real event-loop turns until `cond` holds, for up to `ms` of real time. Fake timers never move here, and performance.now is not faked. */
+  const until = async (cond: () => boolean, ms = 3_000) => {
+    const end = performance.now() + ms;
+    while (!cond() && performance.now() < end) await new Promise((resolve) => setImmediate(resolve));
+    expect(cond()).toBe(true);
+  };
 
   describe("success", () => {
     test("chief_research fast-forwards a behind clone, spawns the researcher and adds no warning", async () => {
@@ -11358,10 +11364,6 @@ describe("checkout freshness", () => {
   });
 
   describe("deadlines: settled means stopped", () => {
-    const until = async (cond: () => boolean) => {
-      for (let i = 0; i < 5_000 && !cond(); i += 1) await new Promise((resolve) => setImmediate(resolve));
-      expect(cond()).toBe(true);
-    };
     const named = (w: World, name: string) => w.calls.filter((call) => call.args[0] === name);
 
     test("a held git fetch is killed twice, becomes a fetch-failed skip, and no git runs when the researcher starts", async () => {
@@ -11511,10 +11513,6 @@ describe("checkout freshness", () => {
     const alertText = (w: World) => w.state.sent.at(-1).input[0].text as string;
     const report = (w: World, threadId: string, extra: object = { state: "blocked", blocker: "stuck", recommendation: "retry" }) =>
       w.state.harness.behavior.callAgentTool("chief_report", extra, { threadId, projectId: "proj_1" });
-    const until = async (cond: () => boolean) => {
-      for (let i = 0; i < 5_000 && !cond(); i += 1) await new Promise((resolve) => setImmediate(resolve));
-      expect(cond()).toBe(true);
-    };
     const stateOf = (w: World, threadId: string) => (w.state.db.prepare("SELECT last_report_state AS s FROM managed_threads WHERE thread_id=?").get(threadId) as { s: string }).s;
     /** The line after `State:` in an alert or report file. */
     const afterState = (text: string) => { const lines = text.split("\n"); return lines[lines.findIndex((line) => line.startsWith("State:")) + 1]; };
