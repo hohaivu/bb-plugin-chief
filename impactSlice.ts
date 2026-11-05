@@ -12,13 +12,14 @@ export type ImpactSlice = { lines: string[]; entries: number; guidelines: string
 export type ImpactSliceSuccess = Exclude<ImpactSlice, { skipped: string }>;
 
 /** git with a 10 s timeout and 2 attempts, each bounded by the absolute `deadline`; past it, throws `deadline`.
- * `stop` optionally cancels the command with a hard kill. */
+ * `stop` optionally cancels the command with a hard kill. A call's `minLeftMs` is the time that must remain for a retry to start; otherwise the last error is thrown. */
 export function gitWithin(cwd: string, env: NodeJS.ProcessEnv, deadline: number, stop?: AbortSignal) {
-  return async (args: string[], noMatchOk = false) => {
+  return async (args: string[], noMatchOk = false, minLeftMs = 0) => {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const left = deadline - Date.now();
       if (left <= 0) throw new Error("deadline");
+      if (attempt > 0 && left < minLeftMs) break;
       try {
         if (stop?.aborted) throw new Error("stopped");
         const run = execFileAsync("git", args, { cwd, env, timeout: Math.min(10_000, left), maxBuffer: 8 * 1024 * 1024 });

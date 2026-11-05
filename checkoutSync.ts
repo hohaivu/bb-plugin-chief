@@ -29,7 +29,8 @@ export async function fastForward(opts: { cwd: string; env: NodeJS.ProcessEnv; b
     if (from === to) return { from, to };
     if (deadline - Date.now() < MERGE_MIN_MS) return { skipped: "timed out before the merge" };
     step = "git merge --ff-only failed";
-    await git(["merge", "--ff-only", "--quiet", remote]);
+    // --no-overwrite-ignore: an ignored untracked file that origin adds is never replaced. A retry, too, needs the full reserve.
+    await git(["merge", "--ff-only", "--no-overwrite-ignore", "--quiet", remote], false, MERGE_MIN_MS);
     return { from, to };
   } catch (error) {
     if ((error as Error)?.message === "deadline") return { skipped: "timed out" };
