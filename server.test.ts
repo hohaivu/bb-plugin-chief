@@ -10724,4 +10724,124 @@ describe("checkout freshness", () => {
       expect(w.calls).toHaveLength(before);
     });
   });
+
+  describe("deadlines: settled means stopped", () => {
+    const until = async (cond: () => boolean) => {
+      for (let i = 0; i < 5_000 && !cond(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+      expect(cond()).toBe(true);
+    };
+    const named = (w: World, name: string) => w.calls.filter((call) => call.args[0] === name);
+
+    test("a held git fetch is killed twice, becomes a fetch-failed skip, and no git runs when the researcher starts", async () => {
+      const w = await world();
+      await w.r.push();
+      w.hold.git = (args, options) => (args[0] === "fetch" ? killedAfterTimeout(options) : undefined);
+      await withFakeTimers(async () => {
+        const call = track(w.research());
+        await until(() => named(w, "fetch").length === 1);
+        await flush(10_000);
+        expect(call.done).toBe(false);
+        await until(() => named(w, "fetch").length === 2);
+        await flush(10_000);
+        await call.settled;
+        expect(w.inflight()).toBe(0);
+        expectWarned(call.value!, RESEARCH_BASE, /git fetch failed: .*killed after timeout/);
+      });
+      expect(w.calls.every((call) => call.spawned === 1)).toBe(true);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a held first git command takes two killed tries, then the researcher starts with the failure as the reason", async () => {
+      const w = await world();
+      w.hold.git = (_args, options) => killedAfterTimeout(options);
+      await withFakeTimers(async () => {
+        const call = track(w.research());
+        await until(() => w.calls.length === 1);
+        await flush(10_000);
+        await until(() => w.calls.length === 2);
+        await flush(10_000);
+        await call.settled;
+        expect(w.inflight()).toBe(0);
+        expectWarned(call.value!, RESEARCH_BASE, /killed after timeout/);
+      });
+      expect(w.calls.map((call) => call.args[0])).toEqual(["status", "status"]);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+    });
+
+    test.each([
+      ["3 s for the HEAD read leaves 9 s: skips before the merge", 3_000, false],
+      ["1 s for the HEAD read leaves 11 s: merges", 1_000, true],
+    ])("merge budget, %s", async (_name, headMs, merges) => {
+      const w = await world();
+      const tip = await w.r.push();
+      // Each hold moves the clock instead of waiting: status 9 s + fetch 9 s + HEAD read.
+      w.hold.git = (args) => {
+        if (args[0] === "status" || args[0] === "fetch") vi.setSystemTime(Date.now() + 9_000);
+        else if (args[0] === "rev-parse" && args[1] === "HEAD") vi.setSystemTime(Date.now() + headMs);
+        return undefined;
+      };
+      await withFakeTimers(async () => {
+        const reply = await w.research();
+        if (merges) noWarning(reply, RESEARCH_BASE);
+        else expectWarned(reply, RESEARCH_BASE, /timed out before the merge/);
+      });
+      expect(named(w, "merge")).toHaveLength(merges ? 1 : 0);
+      expect(await w.r.head()).toBe(merges ? tip : w.r.c0);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+    });
+
+    test.each([
+      ["chief_research", "researcher", async (w: World) => w.research(), RESEARCH_BASE],
+      ["chief_plan", "planner", async (w: World) => w.plan(), PLAN_BASE],
+    ] as const)("a held system.config lookup in %s times out after 5 s; releasing it later starts no git", async (_name, role, act, base) => {
+      const w = await world({ projectPath: "clone" });
+      await w.r.push();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let hits = 0;
+      w.state.harness.sdk.stub("system.config", async () => { hits += 1; await held; return { primaryHostId: "host_1" }; });
+      await withFakeTimers(async () => {
+        const call = track(act(w));
+        await until(() => hits === 1);
+        await flush(4_900);
+        expect(call.done).toBe(false);
+        await flush(200);
+        await call.settled;
+        expectWarned(call.value!, base, /timed out/);
+        release();
+        await flush(0);
+      });
+      expect(w.spawnedRole(role)).toHaveLength(1);
+      expect(w.calls).toEqual([]);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("a held project lookup in chief_plan times out after 5 s as unknown sharing: warning, planner spawned, no git", async () => {
+      const w = await world({ projectPath: "clone" });
+      await w.r.push();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let hits = 0;
+      // Earlier project reads (name, host) are not part of the freshness call; hold only the one after its system.config read.
+      let armed = false;
+      w.state.harness.sdk.stub("system.config", async () => { armed = true; return { primaryHostId: "host_1" }; });
+      w.state.harness.sdk.stub("projects.get", async () => {
+        if (armed) hits += 1;
+        if (armed && hits === 1) await held;
+        return { id: "proj_1", name: "P", kind: "standard", sources: [{ path: w.r.chief, hostId: "host_1", isDefault: true }] };
+      });
+      await withFakeTimers(async () => {
+        const call = track(w.plan());
+        await until(() => hits === 1);
+        await flush(5_100);
+        await call.settled;
+        expectWarned(call.value!, PLAN_BASE, /could not tell whether the planner shares it/);
+        release();
+        await flush(0);
+      });
+      expect(w.spawnedRole("planner")).toHaveLength(1);
+      expect(w.calls).toEqual([]);
+    });
+  });
 });
