@@ -11173,4 +11173,116 @@ describe("checkout freshness", () => {
       expect(actual).toEqual(golden.outputs);
     });
   });
+
+  // Preservation of #181's callers (chief_research, chief_plan, CLI plan) across the chief_sync refactor. The golden file was
+  // recorded on base 0e3ab0c by running this same describe there with ORACLE_OUT_FRESH set; here the head output of the same
+  // fixture must equal it. Covers success and every skip path, recording reply, HEAD outcome, spawns and the git calls made.
+  describe("checkout equivalence with base 0e3ab0c", () => {
+    type Run = (w: World) => Promise<unknown>;
+    type Scenario = { name: string; projectPath?: "clone" | string; run: Run };
+    const ownCommit = async (w: World) => {
+      await writeFile(join(w.r.chief, "mine.txt"), "mine\n");
+      await git(w.r.chief, "add", "-A");
+      await git(w.r.chief, "commit", "-q", "-m", "mine");
+    };
+    const badOrigin = (w: World) => git(w.r.chief, "remote", "set-url", "origin", join(w.r.root, "gone.git"));
+    const cli = async (w: World, ...extra: string[]) => {
+      const result = await w.cliPlan(...extra);
+      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+    };
+    const FIXTURE: Scenario[] = [
+      { name: "research, behind (fast-forward)", run: (w) => w.research() },
+      { name: "research, current", run: async (w) => { await git(w.r.chief, "pull", "-q", "--ff-only"); return w.research(); } },
+      { name: "research, dirty", run: async (w) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); return w.research(); } },
+      { name: "research, own commit", run: async (w) => { await ownCommit(w); return w.research(); } },
+      { name: "research, fetch fails", run: async (w) => { await badOrigin(w); return w.research(); } },
+      { name: "research, remote host", run: async (w) => { w.cfg.hostId = "host_2"; return w.research(); } },
+      { name: "research, no default branch", run: async (w) => { delete w.cfg.env.defaultBranch; return w.research(); } },
+      { name: "research, environment lookup throws", run: async (w) => { w.state.harness.sdk.stub("environments.get", async () => { throw new Error("env lookup failed"); }); return w.research(); } },
+      { name: "research, running researcher", run: async (w) => {
+        const first = await w.research();
+        w.setLive(w.rows("researcher")[0]!, "active");
+        await w.r.push();
+        return [first, await w.research()];
+      } },
+      { name: "research, running planner of unknown sharing", run: async (w) => {
+        const first = await w.plan();
+        w.setLive(w.rows("planner")[0]!, "active");
+        await w.r.push();
+        return [first, await w.research()];
+      } },
+      { name: "chief_plan, shared, behind (fast-forward)", projectPath: "clone", run: (w) => w.plan() },
+      { name: "chief_plan, shared, current", projectPath: "clone", run: async (w) => { await git(w.r.chief, "pull", "-q", "--ff-only"); return w.plan(); } },
+      { name: "chief_plan, shared, dirty", projectPath: "clone", run: async (w) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); return w.plan(); } },
+      { name: "chief_plan, shared, own commit", projectPath: "clone", run: async (w) => { await ownCommit(w); return w.plan(); } },
+      { name: "chief_plan, shared, fetch fails", projectPath: "clone", run: async (w) => { await badOrigin(w); return w.plan(); } },
+      { name: "chief_plan, shared, remote host", projectPath: "clone", run: async (w) => { w.cfg.hostId = "host_2"; return w.plan(); } },
+      { name: "chief_plan, shared, running planner", projectPath: "clone", run: async (w) => {
+        const first = await w.plan();
+        w.setLive(w.rows("planner")[0]!, "active");
+        await w.r.push();
+        return [first, await w.plan()];
+      } },
+      { name: "chief_plan, shared, running researcher", projectPath: "clone", run: async (w) => {
+        const first = await w.research();
+        w.setLive(w.rows("researcher")[0]!, "active");
+        await w.r.push();
+        return [first, await w.plan()];
+      } },
+      { name: "chief_plan, sharing unknown (projects.get throws)", projectPath: "clone", run: async (w) => {
+        w.state.harness.sdk.stub("projects.get", async () => { throw new Error("project lookup failed"); });
+        return w.plan();
+      } },
+      { name: "chief_plan, sharing unknown (environment has no path)", projectPath: "clone", run: async (w) => { delete w.cfg.env.path; return w.plan(); } },
+      { name: "chief_plan, confirmed separate checkout", projectPath: "/elsewhere/worktree-default", run: (w) => w.plan() },
+      { name: "CLI plan text, shared, behind (fast-forward)", projectPath: "clone", run: (w) => cli(w) },
+      { name: "CLI plan text, shared, current", projectPath: "clone", run: async (w) => { await git(w.r.chief, "pull", "-q", "--ff-only"); return cli(w); } },
+      { name: "CLI plan text, shared, dirty", projectPath: "clone", run: async (w) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); return cli(w); } },
+      { name: "CLI plan text, shared, own commit", projectPath: "clone", run: async (w) => { await ownCommit(w); return cli(w); } },
+      { name: "CLI plan text, shared, fetch fails", projectPath: "clone", run: async (w) => { await badOrigin(w); return cli(w); } },
+      { name: "CLI plan text, shared, remote host", projectPath: "clone", run: async (w) => { w.cfg.hostId = "host_2"; return cli(w); } },
+      { name: "CLI plan text, sharing unknown", projectPath: "clone", run: async (w) => { delete w.cfg.env.path; return cli(w); } },
+      { name: "CLI plan text, confirmed separate checkout", projectPath: "/elsewhere/worktree-default", run: (w) => cli(w) },
+      { name: "CLI plan --json, shared, behind (fast-forward)", projectPath: "clone", run: (w) => cli(w, "--json") },
+      { name: "CLI plan --json, shared, dirty", projectPath: "clone", run: async (w) => { await writeFile(join(w.r.chief, "a.txt"), "dirty\n"); return cli(w, "--json"); } },
+      { name: "CLI plan --json, sharing unknown", projectPath: "clone", run: async (w) => { delete w.cfg.env.path; return cli(w, "--json"); } },
+    ];
+    const fixtureHash = createHash("sha256").update(FIXTURE.map((s) => `${s.name}|${s.projectPath}`).join("\n")).digest("hex");
+    const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "checkoutFreshness.base0e3ab0c.oracle.json");
+
+    async function outputs() {
+      const out: Record<string, unknown> = {};
+      for (const scenario of FIXTURE) {
+        const w = await world({ projectPath: scenario.projectPath });
+        await w.r.push();
+        const replies = await scenario.run(w);
+        const head = await w.r.head();
+        const originMain = await git(w.r.chief, "rev-parse", "origin/main");
+        const normalize = (value: unknown) => JSON.parse(JSON.stringify(value).split(w.r.root).join("<root>").replace(/\b[0-9a-f]{40}\b/g, "<sha>"));
+        out[scenario.name] = normalize({
+          replies,
+          head: head === w.r.c0 ? "c0" : head === originMain ? "origin tip" : "local commit",
+          threads: { researcher: w.spawnedRole("researcher").length, planner: w.spawnedRole("planner").length },
+          gitCalls: w.calls.map((call) => ({ args: call.args, cwd: call.cwd, spawned: call.spawned })),
+        });
+      }
+      return out;
+    }
+
+    test("research, chief_plan and CLI plan replies, HEAD, spawns and git calls are identical to base 0e3ab0c for every skip case and the fast-forward", async () => {
+      const actual = await outputs();
+      if (process.env.ORACLE_OUT_FRESH) {
+        const meta = {
+          cwd: process.cwd(), runnerRoot: dirname(fileURLToPath(import.meta.url)),
+          head: await git(process.cwd(), "rev-parse", "HEAD"), fixtureHash, scenarios: FIXTURE.length,
+        };
+        await writeFile(process.env.ORACLE_OUT_FRESH, `${JSON.stringify({ meta, outputs: actual }, null, 2)}\n`);
+        return;
+      }
+      const golden = JSON.parse(await readFile(GOLDEN, "utf8")) as { meta: { head: string; fixtureHash: string }; outputs: Record<string, unknown> };
+      expect(golden.meta.head).toBe("0e3ab0c4b7f6aa27cd2bba93ef757e19b3a57610");
+      expect(golden.meta.fixtureHash).toBe(fixtureHash);
+      expect(actual).toEqual(golden.outputs);
+    }, 120_000);
+  });
 });

@@ -1,0 +1,1147 @@
+{
+  "meta": {
+    "cwd": "/Volumes/VuHo_T5/Develop/personal/research/bb-plugin-chief.oracle-base-0e3ab0c-tmp",
+    "runnerRoot": "/Volumes/VuHo_T5/Develop/personal/research/bb-plugin-chief.oracle-base-0e3ab0c-tmp",
+    "head": "0e3ab0c4b7f6aa27cd2bba93ef757e19b3a57610",
+    "fixtureHash": "2d7c74189eda6e0bdf2605621e2537f9f42a53d10dca1761454e84b6dc109fd6",
+    "scenarios": 32
+  },
+  "outputs": {
+    "research, behind (fast-forward)": {
+      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+      "head": "origin tip",
+      "threads": {
+        "researcher": 1,
+        "planner": 0
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "research, current": {
+      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+      "head": "origin tip",
+      "threads": {
+        "researcher": 1,
+        "planner": 0
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "research, dirty": {
+      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: it has uncommitted changes. The researcher reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 1,
+        "planner": 0
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "research, own commit": {
+      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: its branch has 1 commit(s) not on origin/main. The researcher reads it as it is.",
+      "head": "local commit",
+      "threads": {
+        "researcher": 1,
+        "planner": 0
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "research, fetch fails": {
+      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: git fetch failed: Command failed: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main fatal: '<root>/gone.git' does not appear to be. The researcher reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 1,
+        "planner": 0
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "research, remote host": {
+      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: the checkout is on a remote host, not the plugin server. The researcher reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 1,
+        "planner": 0
+      },
+      "gitCalls": []
+    },
+    "research, no default branch": {
+      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: default branch unknown. The researcher reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 1,
+        "planner": 0
+      },
+      "gitCalls": []
+    },
+    "research, environment lookup throws": {
+      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: env lookup failed. The researcher reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 1,
+        "planner": 0
+      },
+      "gitCalls": []
+    },
+    "research, running researcher": {
+      "replies": [
+        "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+        "Started researcher thread thr_3 (Research · survey · Question 2). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: researcher thr_2 is still running in it. The researcher reads it as it is."
+      ],
+      "head": "origin tip",
+      "threads": {
+        "researcher": 2,
+        "planner": 0
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "research, running planner of unknown sharing": {
+      "replies": [
+        "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/the default branch: could not tell whether the planner shares it (project checkout path unknown). The planner reads it as it is.",
+        "Started researcher thread thr_3 (Research · survey · Question 2). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: planner thr_2 is still running in it. The researcher reads it as it is."
+      ],
+      "head": "c0",
+      "threads": {
+        "researcher": 1,
+        "planner": 1
+      },
+      "gitCalls": []
+    },
+    "chief_plan, shared, behind (fast-forward)": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
+      "head": "origin tip",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "chief_plan, shared, current": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
+      "head": "origin tip",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "chief_plan, shared, dirty": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/main: it has uncommitted changes. The planner reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "chief_plan, shared, own commit": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/main: its branch has 1 commit(s) not on origin/main. The planner reads it as it is.",
+      "head": "local commit",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "chief_plan, shared, fetch fails": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/main: git fetch failed: Command failed: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main fatal: '<root>/gone.git' does not appear to be. The planner reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "chief_plan, shared, remote host": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/the default branch: the checkout is on a remote host, not the plugin server. The planner reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": []
+    },
+    "chief_plan, shared, running planner": {
+      "replies": [
+        "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
+        "Started planner “Plan · Plan 2” in thread thr_3. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/main: planner thr_2 is still running in it. The planner reads it as it is."
+      ],
+      "head": "origin tip",
+      "threads": {
+        "researcher": 0,
+        "planner": 2
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "chief_plan, shared, running researcher": {
+      "replies": [
+        "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+        "Started planner “Plan · Plan 2” in thread thr_3. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/main: researcher thr_2 is still running in it. The planner reads it as it is."
+      ],
+      "head": "origin tip",
+      "threads": {
+        "researcher": 1,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "chief_plan, sharing unknown (projects.get throws)": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/the default branch: could not tell whether the planner shares it (project checkout path unknown). The planner reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": []
+    },
+    "chief_plan, sharing unknown (environment has no path)": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/the default branch: could not tell whether the planner shares it (no checkout path). The planner reads it as it is.",
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": []
+    },
+    "chief_plan, confirmed separate checkout": {
+      "replies": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": []
+    },
+    "CLI plan text, shared, behind (fast-forward)": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "Started planner “Plan · Plan 1” in thr_2.\n",
+        "stderr": ""
+      },
+      "head": "origin tip",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "CLI plan text, shared, current": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "Started planner “Plan · Plan 1” in thr_2.\n",
+        "stderr": ""
+      },
+      "head": "origin tip",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "CLI plan text, shared, dirty": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "Started planner “Plan · Plan 1” in thr_2.\nDid not fast-forward your checkout to origin/main: it has uncommitted changes. The planner reads it as it is.\n",
+        "stderr": ""
+      },
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "CLI plan text, shared, own commit": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "Started planner “Plan · Plan 1” in thr_2.\nDid not fast-forward your checkout to origin/main: its branch has 1 commit(s) not on origin/main. The planner reads it as it is.\n",
+        "stderr": ""
+      },
+      "head": "local commit",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "CLI plan text, shared, fetch fails": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "Started planner “Plan · Plan 1” in thr_2.\nDid not fast-forward your checkout to origin/main: git fetch failed: Command failed: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main fatal: '<root>/gone.git' does not appear to be. The planner reads it as it is.\n",
+        "stderr": ""
+      },
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "CLI plan text, shared, remote host": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "Started planner “Plan · Plan 1” in thr_2.\nDid not fast-forward your checkout to origin/the default branch: the checkout is on a remote host, not the plugin server. The planner reads it as it is.\n",
+        "stderr": ""
+      },
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": []
+    },
+    "CLI plan text, sharing unknown": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "Started planner “Plan · Plan 1” in thr_2.\nDid not fast-forward your checkout to origin/the default branch: could not tell whether the planner shares it (no checkout path). The planner reads it as it is.\n",
+        "stderr": ""
+      },
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": []
+    },
+    "CLI plan text, confirmed separate checkout": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "Started planner “Plan · Plan 1” in thr_2.\n",
+        "stderr": ""
+      },
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": []
+    },
+    "CLI plan --json, shared, behind (fast-forward)": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\"\n}\n",
+        "stderr": ""
+      },
+      "head": "origin tip",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "fetch",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-parse",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "rev-list",
+            "--count",
+            "refs/remotes/origin/main..HEAD"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        },
+        {
+          "args": [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            "refs/remotes/origin/main"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "CLI plan --json, shared, dirty": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\",\n  \"warning\": \"Did not fast-forward your checkout to origin/main: it has uncommitted changes. The planner reads it as it is.\"\n}\n",
+        "stderr": ""
+      },
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": [
+        {
+          "args": [
+            "status",
+            "--porcelain",
+            "--untracked-files=no"
+          ],
+          "cwd": "<root>/chief",
+          "spawned": 1
+        }
+      ]
+    },
+    "CLI plan --json, sharing unknown": {
+      "replies": {
+        "exitCode": 0,
+        "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\",\n  \"warning\": \"Did not fast-forward your checkout to origin/the default branch: could not tell whether the planner shares it (no checkout path). The planner reads it as it is.\"\n}\n",
+        "stderr": ""
+      },
+      "head": "c0",
+      "threads": {
+        "researcher": 0,
+        "planner": 1
+      },
+      "gitCalls": []
+    }
+  }
+}
