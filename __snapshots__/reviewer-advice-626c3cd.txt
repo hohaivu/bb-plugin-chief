@@ -1,0 +1,535 @@
+=== approve: single managed worker ===
+--- approve: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: approve
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer approves. chief_complete (threadId: thr_2); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- approve: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer approves. chief_complete (threadId: thr_2); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+
+=== approve: whole plan, one target already complete ===
+--- approve: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Verdict: approve
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer approves the whole plan. chief_complete (threadId: thr_4); chief_complete (threadId: thr_5); each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- approve: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer approves the whole plan. chief_complete (threadId: thr_4); chief_complete (threadId: thr_5); each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+--- after completing the first branch: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer approves the whole plan. chief_complete (threadId: thr_5); each marks its pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+
+=== approve: unowned branch ===
+--- approve: alert
+[Chief lifecycle alert]
+Reviewer report from Review · feature/z (thr_2)
+State: ready
+Verdict: approve
+Verdict file: <storage>/chief/proj_1/thr_2/verdict-1.md
+The reviewer approves. chief_complete (threadId: thr_2), then mark the pull request ready yourself (no worker owns it). Nits listed with an approve are optional: start no worker round for them alone.
+Full report and last output: bb chief inspect thr_2
+Result: The discount is applied twice
+--- approve: Pending
+- reviewer “Review · feature/z” (thr_2): The reviewer approves. chief_complete (threadId: thr_2), then mark the pull request ready yourself (no worker owns it). Nits listed with an approve are optional: start no worker round for them alone.
+
+=== approve: a carried reject_streak of 3 still approves ===
+--- approve: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: approve
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer approves. chief_complete (threadId: thr_2); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- approve: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer approves. chief_complete (threadId: thr_2); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+--- approve carrying streak 3: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer approves. chief_complete (threadId: thr_2); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.
+
+=== fix: single plain worker ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+
+=== fix: single worker, regression flagged ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer requires changes. The reviewer reports this change introduced a new problem; make the fix's brief name it. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer requires changes. The reviewer reports this change introduced a new problem; make the fix's brief name it. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+
+=== fix: single unplanned tester ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_4)
+State: ready
+Full report: <storage>/chief/proj_1/thr_4/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_4/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_3, kind: worker) for product-code findings or chief_delegate (replaces: thr_3, kind: tester) for test-only findings; its findings are attached automatically. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. E…
+Full report and last output: bb chief inspect thr_4
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_4): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_3, kind: worker) for product-code findings or chief_delegate (replaces: thr_3, kind: tester) for test-only findings; its findings are attached automatically. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. Escalate if the disagreement is a genuine decision.
+
+=== fix: single plan tester ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_5)
+State: ready
+Full report: <storage>/chief/proj_1/thr_5/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_5/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_4, kind: worker) for product-code findings or chief_delegate (replaces: thr_4, kind: tester) for test-only findings; its findings are attached automatically. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. E…
+Full report and last output: bb chief inspect thr_5
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_5): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_4, kind: worker) for product-code findings or chief_delegate (replaces: thr_4, kind: tester) for test-only findings; its findings are attached automatically. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. Escalate if the disagreement is a genuine decision.
+
+=== fix: single worker on a test wave ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Full report: <storage>/chief/proj_1/thr_6/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_5, kind: worker) for product-code findings or chief_delegate (replaces: thr_5, kind: tester) for test-only findings; its findings are attached automatically. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. E…
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_5, kind: worker) for product-code findings or chief_delegate (replaces: thr_5, kind: tester) for test-only findings; its findings are attached automatically. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. Escalate if the disagreement is a genuine decision.
+
+=== fix: single worker on a planned spec chain ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_5)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_5/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_4, kind: worker) for product-code findings or chief_delegate (replaces: thr_4, kind: spec-writer) for docs findings; its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_5
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_5): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_4, kind: worker) for product-code findings or chief_delegate (replaces: thr_4, kind: spec-writer) for docs findings; its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+
+=== fix: single worker on an unplanned chain with a Spec Writer ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_4)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_4/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_3, kind: worker) for product-code findings or chief_delegate (replaces: thr_3, kind: spec-writer) for docs findings; its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_4
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_4): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_3, kind: worker) for product-code findings or chief_delegate (replaces: thr_3, kind: spec-writer) for docs findings; its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+
+=== fix: tester on a planned spec chain ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Full report: <storage>/chief/proj_1/thr_6/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_5, kind: worker) for product-code findings, chief_delegate (replaces: thr_5, kind: tester) for test-only findings or chief_delegate (replaces: thr_5, kind: spec-writer) for docs findings; its findings are attached automatically. Mixed findings on a tester's branch: a worker fixes the product code firs…
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_5, kind: worker) for product-code findings, chief_delegate (replaces: thr_5, kind: tester) for test-only findings or chief_delegate (replaces: thr_5, kind: spec-writer) for docs findings; its findings are attached automatically. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. Escalate if the disagreement is a genuine decision.
+
+=== fix: unowned branch, no pull request ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · feature/z (thr_2)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_2/verdict-1.md
+The reviewer requires changes, and no managed worker owns branch feature/z. Hand the fix to a fresh worker with chief_delegate (branch: feature/z; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_2
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · feature/z” (thr_2): The reviewer requires changes, and no managed worker owns branch feature/z. Hand the fix to a fresh worker with chief_delegate (branch: feature/z; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.
+
+=== fix: unowned branch with a pull request ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · feature/x (thr_2)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_2/verdict-1.md
+The reviewer requires changes, and no managed worker owns branch feature/x. Hand the fix to a fresh worker with chief_delegate (branch: feature/x, prUrl: https://github.com/acme/shop/pull/8; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_2
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · feature/x” (thr_2): The reviewer requires changes, and no managed worker owns branch feature/x. Hand the fix to a fresh worker with chief_delegate (branch: feature/x, prUrl: https://github.com/acme/shop/pull/8; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.
+
+=== fix: unowned branch, regression flagged ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · feature/z (thr_2)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_2/verdict-1.md
+The reviewer requires changes, and no managed worker owns branch feature/z. The reviewer reports this change introduced a new problem; make the fix's brief name it. Hand the fix to a fresh worker with chief_delegate (branch: feature/z; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_2
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · feature/z” (thr_2): The reviewer requires changes, and no managed worker owns branch feature/z. The reviewer reports this change introduced a new problem; make the fix's brief name it. Hand the fix to a fresh worker with chief_delegate (branch: feature/z; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.
+
+=== fix: plan of independent branches ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_4) / chief_delegate (replaces: thr_5); their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer requires changes. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_4) / chief_delegate (replaces: thr_5); their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.
+
+=== fix: plan of independent branches, regression flagged ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Full report: <storage>/chief/proj_1/thr_6/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. The reviewer reports this change introduced a new problem; make the fix's brief name it. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_4) / chief_delegate (replaces: thr_5); their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Esc…
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer requires changes. The reviewer reports this change introduced a new problem; make the fix's brief name it. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_4) / chief_delegate (replaces: thr_5); their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.
+
+=== fix: plan of independent branches, one a tester branch ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_7)
+State: ready
+Full report: <storage>/chief/proj_1/thr_7/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_7/verdict-1.md
+The reviewer requires changes. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_5, kind: worker) for product-code findings or chief_delegate (replaces: thr_5, kind: tester) for test-only findings / chief_delegate (replaces: thr_6); their findings are attached automatically. On thr_5 name the kind: kind: worker for product-code findings,…
+Full report and last output: bb chief inspect thr_7
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_7): The reviewer requires changes. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_5, kind: worker) for product-code findings or chief_delegate (replaces: thr_5, kind: tester) for test-only findings / chief_delegate (replaces: thr_6); their findings are attached automatically. On thr_5 name the kind: kind: worker for product-code findings, kind: tester for test-only findings. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.
+
+=== fix: plan of a legacy stack ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Full report: <storage>/chief/proj_1/thr_6/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — wave 1: thr_4, wave 2: thr_5 — then restack each later wave on it as each ready report directs, even one the findings do not name. Their findings are attached automatically, and t…
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer requires changes. Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — wave 1: thr_4, wave 2: thr_5 — then restack each later wave on it as each ready report directs, even one the findings do not name. Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.
+
+=== fix: plan of a legacy stack and a loose branch ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_7)
+State: ready
+Full report: <storage>/chief/proj_1/thr_7/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_7/verdict-1.md
+The reviewer requires changes. Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — wave 1: thr_4, wave 2: thr_5 — then restack each later wave on it as each ready report directs, even one the findings do not name. Hand the fixes on the other branches the finding…
+Full report and last output: bb chief inspect thr_7
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_7): The reviewer requires changes. Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — wave 1: thr_4, wave 2: thr_5 — then restack each later wave on it as each ready report directs, even one the findings do not name. Hand the fixes on the other branches the findings name to fresh workers in this turn: chief_delegate (replaces: thr_6). Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.
+
+=== fix: plan of a legacy stack and a loose branch, regression flagged ===
+--- fix: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_7)
+State: ready
+Full report: <storage>/chief/proj_1/thr_7/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_7/verdict-1.md
+The reviewer requires changes. The reviewer reports this change introduced a new problem; make the fix's brief name it. Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — wave 1: thr_4, wave 2: thr_5 — then restack each later wave on it as each ready report dir…
+Full report and last output: bb chief inspect thr_7
+Result: The discount is applied twice
+--- fix: Pending
+- reviewer “Review · Fix totals” (thr_7): The reviewer requires changes. The reviewer reports this change introduced a new problem; make the fix's brief name it. Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — wave 1: thr_4, wave 2: thr_5 — then restack each later wave on it as each ready report directs, even one the findings do not name. Hand the fixes on the other branches the findings name to fresh workers in this turn: chief_delegate (replaces: thr_6). Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.
+
+=== consult: plan with stacks ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Full report: <storage>/chief/proj_1/thr_6/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation, with every branch of the review (thr_4, thr_5) in its context — one consult unlocks the fix for each. Then hand its advice to fresh workers with chief_delegate (replaces: …): on the stacked waves 1 → 2 one at a time in wave order, the earliest wave the fin…
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation, with every branch of the review (thr_4, thr_5) in its context — one consult unlocks the fix for each. Then hand its advice to fresh workers with chief_delegate (replaces: …): on the stacked waves 1 → 2 one at a time in wave order, the earliest wave the findings name first, then each later wave restacked on it as its ready report directs; any other branch the findings name in this turn. Run exactly one more review once every wave is ready. If that review still requires changes, stop and escalate to the user.
+
+=== consult: plan with stacks and a loose branch ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_7)
+State: ready
+Full report: <storage>/chief/proj_1/thr_7/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_7/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation, with every branch of the review (thr_4, thr_5, thr_6) in its context — one consult unlocks the fix for each. Then hand its advice to fresh workers with chief_delegate (replaces: …): on the stacked waves 1 → 2 one at a time in wave order, the earliest wave …
+Full report and last output: bb chief inspect thr_7
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · Fix totals” (thr_7): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation, with every branch of the review (thr_4, thr_5, thr_6) in its context — one consult unlocks the fix for each. Then hand its advice to fresh workers with chief_delegate (replaces: …): on the stacked waves 1 → 2 one at a time in wave order, the earliest wave the findings name first, then each later wave restacked on it as its ready report directs; any other branch the findings name in this turn. Run exactly one more review once every wave is ready. If that review still requires changes, stop and escalate to the user.
+
+=== consult: plan without stacks ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Full report: <storage>/chief/proj_1/thr_6/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation, with every branch of the review (thr_4, thr_5) in its context — one consult unlocks the fix for each. Then hand its advice to one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review…
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation, with every branch of the review (thr_4, thr_5) in its context — one consult unlocks the fix for each. Then hand its advice to one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review. If that review still requires changes, stop and escalate to the user.
+
+=== consult: plan without stacks, one a tester branch ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_7)
+State: ready
+Full report: <storage>/chief/proj_1/thr_7/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_7/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_5) now, before any further delegation, with every branch of the review (thr_5, thr_6) in its context — one consult unlocks the fix for each. Then hand its advice to one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review…
+Full report and last output: bb chief inspect thr_7
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · Fix totals” (thr_7): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_5) now, before any further delegation, with every branch of the review (thr_5, thr_6) in its context — one consult unlocks the fix for each. Then hand its advice to one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review. On thr_5 name the kind: kind: worker for product-code findings, kind: tester for test-only findings. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. If that review still requires changes, stop and escalate to the user.
+
+=== consult: single managed worker ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_2) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_2) and run exactly one more review. If that review still requires changes, stop and escalate to the user.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_2) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_2) and run exactly one more review. If that review still requires changes, stop and escalate to the user.
+
+=== consult: single managed worker, regression flagged ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Full report: <storage>/chief/proj_1/thr_3/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_2) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_2) and run exactly one more review. If that review still requires changes, stop and escalate to the user. The …
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_2) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_2) and run exactly one more review. If that review still requires changes, stop and escalate to the user. The reviewer reports this change introduced a new problem; make the fix's brief name it.
+
+=== consult: single tested worker ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_4)
+State: ready
+Full report: <storage>/chief/proj_1/thr_4/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_4/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_3) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_3, kind: worker) for product-code findings or chief_delegate (replaces: thr_3, kind: tester) for test-only fin…
+Full report and last output: bb chief inspect thr_4
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · Fix totals” (thr_4): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_3) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_3, kind: worker) for product-code findings or chief_delegate (replaces: thr_3, kind: tester) for test-only findings and run exactly one more review. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests. If that review still requires changes, stop and escalate to the user.
+
+=== consult: single worker on a planned spec chain ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_5)
+State: ready
+Full report: <storage>/chief/proj_1/thr_5/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_5/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_4, kind: worker) for product-code findings or chief_delegate (replaces: thr_4, kind: spec-writer) for docs fin…
+Full report and last output: bb chief inspect thr_5
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · Fix totals” (thr_5): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: thr_4) now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (replaces: thr_4, kind: worker) for product-code findings or chief_delegate (replaces: thr_4, kind: spec-writer) for docs findings and run exactly one more review. If that review still requires changes, stop and escalate to the user.
+
+=== consult: unowned branch ===
+--- consult: alert
+[Chief lifecycle alert]
+Reviewer report from Review · feature/z (thr_2)
+State: ready
+Full report: <storage>/chief/proj_1/thr_2/verdict-1.md
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_2/verdict-1.md
+The reviewer still requires changes after 2 consecutive rounds. Call chief_consult with this branch and review in its context now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (branch: feature/z) and run exactly one more review. If that review still requires changes, stop and escal…
+Full report and last output: bb chief inspect thr_2
+Result: The discount is applied twice
+--- consult: Pending
+- reviewer “Review · feature/z” (thr_2): The reviewer still requires changes after 2 consecutive rounds. Call chief_consult with this branch and review in its context now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with chief_delegate (branch: feature/z) and run exactly one more review. If that review still requires changes, stop and escalate to the user.
+
+=== stop: single worker ===
+--- stop: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- stop: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+
+=== stop: plan ===
+--- stop: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- stop: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+
+=== stop: unowned branch ===
+--- stop: alert
+[Chief lifecycle alert]
+Reviewer report from Review · feature/z (thr_2)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_2/verdict-1.md
+The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+Full report and last output: bb chief inspect thr_2
+Result: The discount is applied twice
+--- stop: Pending
+- reviewer “Review · feature/z” (thr_2): The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+
+=== stop: regression flagged ===
+--- stop: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round. The reviewer reports this change introduced a new problem; make the fix's brief name it.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- stop: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer still requires changes after 3 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round. The reviewer reports this change introduced a new problem; make the fix's brief name it.
+
+=== stop: a carried reject_streak above 3 ===
+--- stop: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer still requires changes after 5 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- stop: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer still requires changes after 5 consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.
+
+=== null: the reviewer has no verdict ===
+--- reported: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- reported: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+--- verdict cleared: Pending
+(no Pending line)
+
+=== null: the covered worker was re-pointed by replaces ===
+--- reported: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- reported: Pending
+- reviewer “Review · Fix totals” (thr_3): The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: thr_2); its findings are attached automatically. Escalate if the disagreement is a genuine decision.
+--- after the replacement: Pending
+(no Pending line)
+
+=== null: a plan target was re-pointed by replaces ===
+--- reported: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_6)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_6/verdict-1.md
+The reviewer requires changes. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_4) / chief_delegate (replaces: thr_5); their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.
+Full report and last output: bb chief inspect thr_6
+Result: The discount is applied twice
+--- reported: Pending
+- reviewer “Review · Fix totals” (thr_6): The reviewer requires changes. Hand the fixes to fresh workers in this turn, one per branch the findings name: chief_delegate (replaces: thr_4) / chief_delegate (replaces: thr_5); their findings are attached automatically. Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.
+--- after replacing branch 1: Pending
+(no Pending line)
+--- after replacing branch 3: Pending
+(no Pending line)
+
+=== null: every covered worker is complete ===
+--- reported after the worker completed: alert
+[Chief lifecycle alert]
+Reviewer report from Review · Fix totals (thr_3)
+State: ready
+Verdict: request_changes
+Verdict file: <storage>/chief/proj_1/thr_3/verdict-1.md
+Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.
+Full report and last output: bb chief inspect thr_3
+Result: The discount is applied twice
+--- reported after the worker completed: Pending
+(no Pending line)
