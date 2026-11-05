@@ -5362,7 +5362,7 @@ describe("chief_research", () => {
     expect(phases).not.toContain(later);
   });
 
-  test("pre-flight refuses a provider that is out of quota or signed out, and fails open otherwise", async () => {
+  test("pre-flight refuses a provider that is not installed or out of quota, warns but starts when signed out, and fails open otherwise", async () => {
     let usage: (args: any) => unknown = () => ({});
     const state = await setup({ usageLimits: (args) => usage(args) });
     const planner = await roleThread(state, "planner");
@@ -5370,14 +5370,20 @@ describe("chief_research", () => {
     workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => ({ status: "succeeded", result: { rows: [], table: "t", failures: [] } }) });
     usage = () => ({ [provider]: { status: "ok", windows: [{ label: "5h", usedPercent: 100, resetsAt: "2026-10-08T12:00:00Z" }] } });
     await expect(call(state, planner, survey())).rejects.toThrow(/out of quota \(5h window at 100%, resets 2026-10-08T12:00:00Z\)/);
-    usage = () => ({ [provider]: { status: "unauthenticated" } });
-    await expect(call(state, planner, survey())).rejects.toThrow(/unauthenticated/);
+    usage = () => ({ [provider]: { status: "not_installed" } });
+    await expect(call(state, planner, survey())).rejects.toThrow(/not_installed/);
     expect(calls("run")).toHaveLength(0);
+    for (const status of ["unauthenticated", "expired"]) {
+      usage = () => ({ [provider]: { status } });
+      await call(state, planner, survey());
+      expect(state.harness.logEntries.some((entry) => entry.level === "warn" && entry.message.includes(`${provider} reports ${status}`))).toBe(true);
+    }
+    expect(calls("run")).toHaveLength(2);
     usage = () => ({ [provider]: { status: "error", message: "x" } });
     await call(state, planner, survey());
     usage = () => { throw new Error("rpc down"); };
     await call(state, planner, survey());
-    expect(calls("run")).toHaveLength(2);
+    expect(calls("run")).toHaveLength(4);
   });
 
   test.each([
