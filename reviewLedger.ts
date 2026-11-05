@@ -18,6 +18,8 @@ export interface ReviewTarget {
   branch: string | null;
 }
 
+export type ReviewEventCounts = Readonly<{ approve: number; request_changes: number }>;
+
 /** What the ledger reads of a managed_threads row; the server's ManagedRow satisfies it. */
 interface LedgerRow {
   thread_id: string;
@@ -206,5 +208,26 @@ export function createReviewLedger<Row extends LedgerRow>(
     return { approved: true } as const;
   }
 
-  return { targets, openReview, openReviews, lastPinnedReviewer, busyReview, covering, isCurrent, taskChain, ladder, rung, replacement, headApproval, repoint, addTargets, carriedStreak, seedStreak, recordVerdict, newestVerdict };
+  /** Read-only. How many approve and request_changes events each given reviewer gave. One event is one report
+   * (reviewer_thread_id, report_seq), however many target rows it wrote. A reviewer with history uses only its
+   * history; one from before reviewer_verdicts existed has none, so its current verdict counts once (null adds
+   * nothing). Not reject_streak, and no replacement chains. Returns an entry for each given reviewer, none other. */
+  function eventCounts(reviewers: readonly { thread_id: string; verdict: string | null }[]): ReadonlyMap<string, ReviewEventCounts> {
+    const counts = new Map<string, { approve: number; request_changes: number }>();
+    for (const reviewer of reviewers) counts.set(reviewer.thread_id, { approve: 0, request_changes: 0 });
+    const withHistory = new Set<string>();
+    const bump = (reviewerThreadId: string, verdict: string | null) => {
+      const entry = counts.get(reviewerThreadId)!;
+      if (verdict === "approve" || verdict === "request_changes") entry[verdict] += 1;
+    };
+    for (const event of db.prepare(`SELECT reviewer_thread_id, verdict FROM reviewer_verdicts GROUP BY reviewer_thread_id, report_seq`).all() as { reviewer_thread_id: string; verdict: string }[]) {
+      if (!counts.has(event.reviewer_thread_id)) continue;
+      withHistory.add(event.reviewer_thread_id);
+      bump(event.reviewer_thread_id, event.verdict);
+    }
+    for (const reviewer of reviewers) if (!withHistory.has(reviewer.thread_id)) bump(reviewer.thread_id, reviewer.verdict);
+    return counts;
+  }
+
+  return { targets, openReview, openReviews, lastPinnedReviewer, busyReview, covering, isCurrent, taskChain, ladder, rung, replacement, headApproval, repoint, addTargets, carriedStreak, seedStreak, recordVerdict, newestVerdict, eventCounts };
 }
