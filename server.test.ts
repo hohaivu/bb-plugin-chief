@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10537,6 +10537,18 @@ describe("checkout freshness", () => {
       expect(await w.r.head()).toBe(w.r.c0);
     });
 
+    test("an ignored untracked file that origin adds is not overwritten: merge-failed skip, the file and HEAD stay, the researcher still starts", async () => {
+      const w = await world();
+      await appendFile(join(w.r.chief, ".git", "info", "exclude"), "local.env\n");
+      await writeFile(join(w.r.chief, "local.env"), "SECRET=mine\n");
+      await w.r.push("local.env");
+      expect(await git(w.r.chief, "status", "--porcelain", "--untracked-files=no")).toBe("");
+      expectWarned(await w.research(), RESEARCH_BASE, /git merge --ff-only failed/);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+      expect(await readFile(join(w.r.chief, "local.env"), "utf8")).toBe("SECRET=mine\n");
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
     test("a planner call whose shared checkout is dirty skips with one warning and the planner still starts", async () => {
       const w = await world({ projectPath: "clone" });
       await w.r.push();
@@ -10792,6 +10804,36 @@ describe("checkout freshness", () => {
     });
 
     test.each([
+      ["11 s left at the merge: the retry would start with 1 s, so there is none", 19_000, 1],
+      ["30 s left at the merge: the retry starts with 20 s", 0, 2],
+    ])("a merge killed at its 10 s timeout, %s", async (_name, usedMs, merges) => {
+      const w = await world();
+      await w.r.push();
+      // The first git call moves the clock instead of waiting, leaving 30 s - usedMs for the merge.
+      let moved = false;
+      w.hold.git = (args, options) => {
+        if (!moved) { moved = true; vi.setSystemTime(Date.now() + usedMs); }
+        return args[0] === "merge" ? killedAfterTimeout(options) : undefined;
+      };
+      await withFakeTimers(async () => {
+        const call = track(w.research());
+        for (let n = 1; n <= merges; n += 1) {
+          await until(() => named(w, "merge").length === n);
+          expect(call.done).toBe(false);
+          await flush(10_000);
+        }
+        await call.settled;
+        expect(w.inflight()).toBe(0);
+        expectWarned(call.value!, RESEARCH_BASE, /git merge --ff-only failed: .*killed after timeout/);
+      });
+      expect(named(w, "merge")).toHaveLength(merges);
+      // Every git call, the merges included, finished before the researcher was launched, and the checkout is untouched.
+      expect(w.calls.every((call) => call.spawned === 1)).toBe(true);
+      expect(w.spawnedRole("researcher")).toHaveLength(1);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test.each([
       ["chief_research", "researcher", async (w: World) => w.research(), RESEARCH_BASE],
       ["chief_plan", "planner", async (w: World) => w.plan(), PLAN_BASE],
     ] as const)("a held system.config lookup in %s times out after 5 s; releasing it later starts no git", async (_name, role, act, base) => {
@@ -10914,17 +10956,22 @@ describe("checkout freshness", () => {
       });
     });
 
-    test("a held ls-remote: the report state and pending alert are committed first, the stamp keeps the local SHA after 12 s, and the call returns", async () => {
+    test("a held ls-remote on a long report: state, seq and pending alert are committed first; after 12 s the alert and the report file both keep Read at <sha> without the comparison", async () => {
       const w = await world();
       await w.research();
       const id = w.rows("researcher")[0]!;
+      await w.r.push(); // origin moved, so a working ls-remote would add the comparison clause
       w.hold.git = (args, options) => (args[0] === "ls-remote" ? killedAfterTimeout(options) : undefined);
+      const seqOf = () => (w.state.db.prepare("SELECT report_seq AS s FROM managed_threads WHERE thread_id=?").get(id) as { s: number }).s;
       await withFakeTimers(async () => {
-        const call = track(report(w, id));
+        // Longer than SUMMARY_MAX, so a report file is written.
+        const call = track(report(w, id, { state: "blocked", blocker: "stuck", recommendation: "retry", result: "word ".repeat(4_000) }));
         await until(() => w.calls.some((c) => c.args[0] === "ls-remote"));
-        // Required result first: committed while the optional comparison is still running.
+        // Required result first: committed while the optional comparison is still running; no file or full alert yet.
         expect(stateOf(w, id)).toBe("blocked");
-        expect(w.state.db.prepare("SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?").all(`${id}:report:%:pending-%`)).toHaveLength(1);
+        expect(seqOf()).toBe(1);
+        expect(w.state.db.prepare("SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?").all(`${id}:report:%:pending-1`)).toHaveLength(1);
+        expect(w.state.db.prepare("SELECT report_path AS p FROM managed_threads WHERE thread_id=?").get(id)).toEqual({ p: null });
         await flush(10_000);
         expect(call.done).toBe(false);
         await until(() => w.calls.filter((c) => c.args[0] === "ls-remote").length === 2);
@@ -10933,7 +10980,15 @@ describe("checkout freshness", () => {
         expect(call.error).toBeUndefined();
         expect(w.inflight()).toBe(0);
       });
-      expect(afterState(alertText(w))).toBe(`Read at ${w.r.c0.slice(0, 12)}`);
+      const path = /Full report: (\S+)/.exec(alertText(w))![1]!;
+      expect(path).toMatch(/report-1\.md$/);
+      const stamp = `Read at ${w.r.c0.slice(0, 12)}`;
+      expect(afterState(await readFile(path, "utf8"))).toBe(stamp);
+      expect(afterState(alertText(w))).toBe(stamp);
+      expect(`${alertText(w)}\n${await readFile(path, "utf8")}`).not.toContain("is now");
+      expect(stateOf(w, id)).toBe("blocked");
+      expect(seqOf()).toBe(1);
+      expect(w.state.db.prepare("SELECT report_path AS p FROM managed_threads WHERE thread_id=?").get(id)).toEqual({ p: path });
     });
 
     test("a held system.config read is bounded to 5 s: no stamp, no git, the report is delivered", async () => {

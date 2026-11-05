@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -107,6 +107,17 @@ describe("fastForward", () => {
     r.push("new.txt", "from origin\n");
     writeFileSync(join(r.chief, "new.txt"), "mine\n");
     expect(await fastForward(r.opts())).toEqual({ skipped: expect.stringMatching(/^git merge --ff-only failed: /) });
+    expect(r.head()).toBe(r.c0);
+  });
+
+  test("an ignored untracked file that origin adds is never overwritten: merge-failed skip, file bytes and HEAD unchanged", async () => {
+    const r = repos();
+    appendFileSync(join(r.chief, ".git", "info", "exclude"), "local.env\n");
+    writeFileSync(join(r.chief, "local.env"), "SECRET=mine\n");
+    r.push("local.env", "from origin\n");
+    expect(sh(r.chief, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    expect(await fastForward(r.opts())).toEqual({ skipped: expect.stringMatching(/^git merge --ff-only failed: /) });
+    expect(readFileSync(join(r.chief, "local.env"), "utf8")).toBe("SECRET=mine\n");
     expect(r.head()).toBe(r.c0);
   });
 
