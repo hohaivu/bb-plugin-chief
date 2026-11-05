@@ -10975,4 +10975,56 @@ describe("checkout freshness", () => {
       expect(w.calls.filter((call) => ["ls-remote", "rev-parse"].includes(call.args[0]!))).toEqual([]);
     });
   });
+
+  // Byte-equivalence with base 948c49c (before the fast-forward existed). The golden file was recorded on that commit by
+  // running this same describe with ORACLE_OUT set; here the head output of the same fixture must equal it. With ORACLE_OUT
+  // set, this describe writes {meta, outputs} to that path instead of comparing.
+  describe("checkout equivalence with base 948c49c", () => {
+    type Scenario = { name: string; projectPath: "clone" | "/elsewhere/worktree-default"; behind: boolean; call: "research" | "plan" | "cli-plan" | "cli-plan-json" };
+    const FIXTURE: Scenario[] = [
+      { name: "research, behind clone (fast-forward succeeds)", projectPath: "clone", behind: true, call: "research" },
+      { name: "research, current clone", projectPath: "clone", behind: false, call: "research" },
+      { name: "chief_plan, shared checkout, behind", projectPath: "clone", behind: true, call: "plan" },
+      { name: "chief_plan, shared checkout, current", projectPath: "clone", behind: false, call: "plan" },
+      { name: "chief_plan, confirmed separate checkout", projectPath: "/elsewhere/worktree-default", behind: true, call: "plan" },
+      { name: "CLI plan text, shared checkout, behind", projectPath: "clone", behind: true, call: "cli-plan" },
+      { name: "CLI plan text, confirmed separate checkout", projectPath: "/elsewhere/worktree-default", behind: true, call: "cli-plan" },
+      { name: "CLI plan --json, shared checkout, behind", projectPath: "clone", behind: true, call: "cli-plan-json" },
+      { name: "CLI plan --json, shared checkout, current", projectPath: "clone", behind: false, call: "cli-plan-json" },
+      { name: "CLI plan --json, confirmed separate checkout", projectPath: "/elsewhere/worktree-default", behind: true, call: "cli-plan-json" },
+    ];
+    const fixtureHash = createHash("sha256").update(JSON.stringify(FIXTURE)).digest("hex");
+    const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "checkoutFreshness.oracle.json");
+
+    async function outputs() {
+      const out: Record<string, unknown> = {};
+      for (const scenario of FIXTURE) {
+        const w = await world({ projectPath: scenario.projectPath });
+        if (scenario.behind) await w.r.push();
+        if (scenario.call === "research") out[scenario.name] = await w.research();
+        else if (scenario.call === "plan") out[scenario.name] = await w.plan();
+        else {
+          const result = await w.cliPlan(...(scenario.call === "cli-plan-json" ? ["--json"] : []));
+          out[scenario.name] = { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+        }
+      }
+      return out;
+    }
+
+    test("tool results and CLI text and --json are byte-identical to the base recording for the same fixture", async () => {
+      const actual = await outputs();
+      if (process.env.ORACLE_OUT) {
+        const meta = {
+          cwd: process.cwd(), runnerRoot: dirname(fileURLToPath(import.meta.url)),
+          head: await git(process.cwd(), "rev-parse", "HEAD"), fixtureHash, scenarios: FIXTURE.length,
+        };
+        await writeFile(process.env.ORACLE_OUT, `${JSON.stringify({ meta, outputs: actual }, null, 2)}\n`);
+        return;
+      }
+      const golden = JSON.parse(await readFile(GOLDEN, "utf8")) as { meta: { head: string; fixtureHash: string }; outputs: Record<string, unknown> };
+      expect(golden.meta.head).toBe("948c49cb6cac6f2e3066fe0e2164e22c809c8a4f");
+      expect(golden.meta.fixtureHash).toBe(fixtureHash);
+      expect(actual).toEqual(golden.outputs);
+    });
+  });
 });
