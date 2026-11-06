@@ -32,6 +32,24 @@ const AGENT_SKILL_IDS = ["chief", "chief-worker", "chief-role-read-only", "chief
 const HEAD_SHA = "a".repeat(40);
 const ghHead = (branch: string) => JSON.stringify({ headRefName: branch, headRefOid: HEAD_SHA, baseRefName: "main" });
 
+// Base oracles in __snapshots__/ predate the make-native lines. Expected text = the base oracle with exactly one line spliced in
+// after each anchor line; every other byte stays the base's, so a changed, moved or doubled line fails the exact compare.
+// The inserted lines are copied from wave 1's plan, not from the implementation.
+const REVIEWER_ANCHOR = "Classify the change, then check it by type:";
+const REVIEWER_NATIVE_LINE = "Native-design check, for feature work only (never a bug fix, nor a refactor or migration on its own; in a mixed change, only its feature part): look for these smells on lines the diff introduced: an alias that re-derives a value an existing function or field already returns; an `if (newKind)` branch in code that already dispatches on kind; a new file or component that mirrors an existing one for one variant; a new flag, option or boolean that duplicates what a type already encodes; a validation or download path beside the shared one; a test whose only purpose is \"nothing else changed\" (a test that proves a listed equivalence or preservation contract is not one); a second system for a concern that already has one (a counter, logger, retry helper, config reader, …). Report each as a finding whose message names, at file:line, the existing value, dispatch, component, type or system it duplicates, and whose fix folds the feature into it. Genuinely different behaviour is not a smell. A smell is a nit unless a listed contract rules it out (a reshape wave's contracts do); then it is an unmet contract. A reshape commit belongs to its feature: judge the feature and its reshape together as one feature against the plan's contracts, not the reshape commit as a refactor with the base commit as the oracle.";
+const PLANNER_ANCHOR = "- Workers never write or run tests: implementation waves hold no test work.";
+const PLANNER_RESHAPE_LINE = "- Big feature (new behaviour, not a bug fix, refactor, migration or docs- or test-only change, whose implementation touches 3+ modules or 10+ files): put one reshape wave between the chain's last feature implementation wave and its test wave. It is an ordinary implementation wave on the same chain (default `dependsOn`), whose worker continues the branch with `replaces:` the feature worker. Its body orders the make-native skill (load it when listed) and restates the steps: read the feature diff against the chain's base (`git diff origin/<base>...HEAD`); learn each touched area one or two levels deeper than the call sites; redesign the feature as if it were in the original spec, folding it into the existing types, dispatch and systems, with no new abstraction layer and genuinely different behaviour kept; apply Pareto (the common case simple, an edge case that would complicate it handled separately or failing clearly); `git grep` each removed symbol for leftovers; run the project's lint/analyze and build. The reshape worker never writes, edits, deletes or runs tests: make-native's step 5 is the tester's. It commits the reshape separately from the feature commits (`refactor` when behaviour is unchanged, `feat` when it changes), keeps every feature contract and the committed spec, and reports blocked when a better shape would break one. Its `## Contracts to verify` repeats the feature's contracts and adds: no make-native smell left in the feature diff. The chain's test wave body then also orders the tests rewritten to the reshaped design: delete tests whose only purpose is proving old behaviour survived the workaround, and update the rest. Never add a reshape wave to a bug fix, a refactor or a smaller feature.";
+const RESHAPE_CHECKLIST_LINE = "- A big feature (3+ modules or 10+ files of new behaviour) whose chain has no reshape wave before its test wave, a reshape wave on a bug fix, refactor or smaller change, or a reshape wave that writes or runs tests.";
+/** Base oracle text with `line` inserted after every line that starts with `anchor`; fails when no anchor line exists. */
+const spliceAfter = (base: string, anchor: string, line: string, expectedCount: number) => {
+  let count = 0;
+  const out = base.split("\n").flatMap((l) => l.startsWith(anchor) ? (count += 1, [l, line]) : [l]).join("\n");
+  expect(count).toBe(expectedCount);
+  return out;
+};
+const withReviewerLine = (base: string, count = 1) => spliceAfter(base, REVIEWER_ANCHOR, REVIEWER_NATIVE_LINE, count);
+const snapshotText = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", name), "utf8");
+
 const disposals: Array<() => Promise<void>> = [];
 afterEach(async () => {
   while (disposals.length) await disposals.pop()!();
@@ -5810,7 +5828,8 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     }
     // Byte equivalence: the files were captured from chief_review at the pre-fix oracle (8f7e4d6) on these same inputs.
     const portable = (text: string) => text.replaceAll(state.storageRoot, "<storage>");
-    await expect(portable(prompt)).toMatchFileSnapshot("./__snapshots__/review-no-waiver.prompt.txt");
+    // The prompt is the oracle plus the make-native reviewer line (the oracle file is untouched); the context is unchanged.
+    expect(portable(prompt)).toBe(withReviewerLine(await snapshotText("review-no-waiver.prompt.txt")));
     await expect(portable(context)).toMatchFileSnapshot("./__snapshots__/review-no-waiver.context.txt");
   });
 
@@ -5831,7 +5850,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     };
     const omitted = reviewBrief(input);
     expect(reviewBrief({ ...input, waiverLines: [] })).toEqual(omitted);
-    await expect(omitted.prompt).toMatchFileSnapshot("./__snapshots__/review-brief-no-waiverlines.prompt.txt");
+    expect(omitted.prompt).toBe(withReviewerLine(await snapshotText("review-brief-no-waiverlines.prompt.txt")));
     await expect(omitted.context).toMatchFileSnapshot("./__snapshots__/review-brief-no-waiverlines.context.txt");
   });
 
@@ -7940,6 +7959,10 @@ describe("tester role", () => {
       await approvePlan(state, chief.threadId, planner.threadId);
       const advisorPrompt = state.spawned.at(-1).prompt as string;
       expect(advisorPrompt).toContain("A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.");
+      // Contract (advisor plan-review checklist): the reshape line follows the test-wave line, and only a plan review has it.
+      expect(advisorPrompt).toContain(`- A chain without a final test wave, or test work inside an implementation wave.\n${RESHAPE_CHECKLIST_LINE}\n`);
+      await tool(state, "chief_consult", { title: "Totals", mission: "Why do totals go negative?" }, chief.threadId);
+      expect(state.spawned.at(-1).prompt).not.toContain(RESHAPE_CHECKLIST_LINE);
     });
 
     // ---- First-touch baseline specs (wave 2 tests) ----
@@ -8027,7 +8050,8 @@ describe("tester role", () => {
     // line, reworded line or extra gate item leaks into a chain that has no baseline.
     test("a spec chain with no baseline produces the prompts and alerts base 6d288a2 produced", async () => {
       const state = await setup();
-      expect(await existingOnlyFixture(state)).toBe(await oracleFile("spec-chain-6d288a2.txt"));
+      // Only the reviewer prompt changed: the make-native line follows its "Classify the change" line.
+      expect(await existingOnlyFixture(state)).toBe(withReviewerLine(await oracleFile("spec-chain-6d288a2.txt")));
     });
 
     // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief.
@@ -8035,7 +8059,8 @@ describe("tester role", () => {
     // Plan chains changed one bullet of both prompts (the `dependsOn: []` sentence now says an independent wave runs as its own chain); the rest is base's bytes.
     test("the planner prompt equals base 6d288a2's for a plain and a revision brief", async () => {
       const state = await setup();
-      expect(await plannerFixture(state)).toBe(await oracleFile("planner-6d288a2.txt"));
+      // Plain and revision briefs each gain the reshape rule right after the test-wave line (2 anchors); nothing else moves.
+      expect(await plannerFixture(state)).toBe(spliceAfter(await oracleFile("planner-6d288a2.txt"), PLANNER_ANCHOR, PLANNER_RESHAPE_LINE, 2));
     });
 
     // Contract (mixed chain, existing-only first): wave 1's Spec Writer and worker prompts are base 6d288a2's bytes although wave 2 has
@@ -10038,8 +10063,8 @@ describe("tester role", () => {
     // Plan chains changed one thing of the base snapshot: a pinned reviewer's fetch line now also checks the pinned commit out detached (`git fetch origin <branch> && git checkout --detach <sha>`).
     test("review attempt oracle", async () => {
       const head = await reviewAttemptFixture();
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "review-attempt-cf92d9c.txt"), "utf8");
-      expect(head).toBe(oracle);
+      // The make-native reviewer line follows each of the 31 reviewer prompts' "Classify the change" line; the rest is base's bytes.
+      expect(head).toBe(withReviewerLine(await snapshotText("review-attempt-cf92d9c.txt"), 31));
     }, 300_000);
 
     // A host lookup that never answers no longer holds chief_review (#177): the ancestry check's 20 s deadline covers the
