@@ -13,6 +13,7 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import plugin, { MIGRATIONS, RESEARCH_SCRIPTS } from "./server";
 import { checkPlan } from "./reportIntake";
+import { PR_AGENT_DIR } from "./prAgent";
 import { reviewBrief, type ReviewBriefInput } from "./reviewStart";
 import { managedSkills } from "./roles";
 import type { TodoItem } from "./server";
@@ -6928,6 +6929,62 @@ describe("tester role", () => {
       expect(state.spawned).toHaveLength(spawnedBefore + 1);
       expect(state.spawned.at(-1).environment).toMatchObject(fresh);
       expect(String(state.spawned.at(-1).prompt)).toContain(`git checkout --detach ${shaOf(2)}`);
+    });
+  });
+
+  // Contracts (review engine): the stored reviewEngine / prAgentDir settings are read when the review starts and reach the
+  // launched prompt and the reviewer's storage; an unset or unrecognised value is the base reviewer behaviour.
+  describe("reviewEngine setting reaches a started review", () => {
+    const PR = "https://github.com/acme/shop/pull/8";
+    const SHA = "1".repeat(40);
+    async function review(settings: Record<string, unknown>) {
+      const state = await setup({ projectPath: "/oracle/checkout", system: { usageLimits: async () => ({}), config: async () => ({ primaryHostId: "host_1" }) } });
+      execFileMock.mockImplementation(async (file: string, args: string[]) => {
+        if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: SHA, baseRefName: "main" }), stderr: "" };
+        throw new Error(`unexpected CLI ${file}`);
+      });
+      await state.harness.behavior.setSettings(settings);
+      const chief = (await start(state)).threadId;
+      await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", prUrl: PR }, chief);
+      const worker = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker'`).get() as any).thread_id as string;
+      await readyIdle(state, worker);
+      await tool(state, "chief_review", { workerThreadId: worker }, chief);
+      const reviewer = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='reviewer'`).get() as any).thread_id as string;
+      const file = (name: string) => readFile(join(state.storageRoot, reviewer, name), "utf8").catch(() => null);
+      return { prompt: String(state.spawned.at(-1).prompt), file, state };
+    }
+
+    test("the two settings default to reviewer and PR_AGENT_DIR", async () => {
+      const { state } = await review({});
+      const descriptors = (state.harness.registrations.settingsDescriptors as any);
+      expect(descriptors.reviewEngine).toMatchObject({ type: "string", default: "reviewer" });
+      expect(descriptors.prAgentDir).toMatchObject({ type: "string", default: PR_AGENT_DIR });
+    });
+
+    test.each([["no stored value", {}], ["an unrecognised value", { reviewEngine: "PR-AGENT" }], ["an empty value", { reviewEngine: "" }]])("%s: reviewer mode, no section, no engine file", async (_name, settings) => {
+      const { prompt, file } = await review(settings);
+      expect(prompt).not.toContain("## Review engine");
+      expect(await file("pr-agent-review.sh")).toBeNull();
+      expect(await file("review-helper.md")).toBeNull();
+      expect(await file("review-context.md")).not.toBeNull();
+    });
+
+    test("pr-agent: the section names the pinned pull request, the wrapper is written with the default directory", async () => {
+      const { prompt, file } = await review({ reviewEngine: "pr-agent" });
+      expect(prompt).toContain("## Review engine: pr-agent");
+      expect(prompt).toContain(`${PR} pinned to ${SHA} → pr-agent`);
+      expect(await file("pr-agent-review.sh")).toContain(PR_AGENT_DIR);
+      expect(await file("review-helper.md")).toBeNull();
+    });
+
+    test("both: the configured directory reaches the wrapper and the helper prompt is written without the section", async () => {
+      const { prompt, file } = await review({ reviewEngine: "both", prAgentDir: "/opt/custom-pr-agent" });
+      expect(prompt).toContain("## Review engine: both");
+      expect(await file("pr-agent-review.sh")).toContain("/opt/custom-pr-agent");
+      expect(await file("pr-agent-review.sh")).not.toContain(PR_AGENT_DIR);
+      const helper = (await file("review-helper.md"))!;
+      expect(helper).toContain("## review-context.md");
+      expect(helper).not.toContain("## Review engine");
     });
   });
 
