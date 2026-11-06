@@ -2,6 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { verdictPreview } from "./delegationBrief";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
 import type { ManagedSpawn } from "./managedSpawn";
+import { helperPrompt, isPinned, PR_AGENT_DIR, prAgentScript, prAgentSection, type EngineTarget, type ReviewEngine } from "./prAgent";
 import type { createReviewLedger } from "./reviewLedger";
 import { REVIEW_ONLY } from "./roles";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
@@ -371,6 +372,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   forge: { head: (pullRequest: string, cwd: string | null) => Promise<PinnedHead | null> };
   /** The environment git and the forge CLIs run with; not a git transport. */
   git: { env: () => NodeJS.ProcessEnv };
+  /** The review engine setting, read once when a worker review starts. */
+  engine: () => Promise<ReviewEngine>;
 }
 
 /** One target a review covers, frozen for the attempt: its row as captured before any await and the forge head read for it. */
@@ -464,21 +467,21 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     }
   }
 
-  /** Writes a reviewer's review-context.md: 3 attempts (1s, 2s backoff), then alerts Chief so it stops or nudges the reviewer. Never throws. */
-  async function writeReviewContext(threadId: string, content: string, workerThreadId: string) {
+  /** Writes a file into a reviewer's storage: 3 attempts (1s, 2s backoff), then alerts Chief with the consequence. Never throws. */
+  async function writeStorage(threadId: string, relPath: string, content: string, workerThreadId: string, consequence: string) {
     let error: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
       try {
-        await host.writeFile(threadId, "review-context.md", `${content}\n`);
+        await host.writeFile(threadId, relPath, `${content}\n`);
         return;
       } catch (caught) { error = caught; }
     }
     // The worker's row names the same Chief, for when the reviewer's own row cannot be read.
     const row = [store.get(threadId), store.get(workerThreadId)].find((candidate) => candidate?.chief_thread_id);
-    const message = `Could not write review-context.md for reviewer ${threadId} after 3 attempts: ${String(error)}. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.`;
+    const message = `Could not write ${relPath} for reviewer ${threadId} after 3 attempts: ${String(error)}. ${consequence}`;
     // The alert is the last resort; its own failure is logged rather than thrown after the reviewer has launched.
-    if (row) await Promise.resolve().then(() => host.alertChief(row, `review-context:${threadId}`, message)).catch((alertError) => host.logError(`${message} The Chief alert also failed: ${String(alertError)}`));
+    if (row) await Promise.resolve().then(() => host.alertChief(row, `${relPath.replace(/\.[^.]+$/, "")}:${threadId}`, message)).catch((alertError) => host.logError(`${message} The Chief alert also failed: ${String(alertError)}`));
     else host.logError(message);
   }
 
@@ -634,17 +637,31 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         chiefThreadId: worker.chief_thread_id,
         impactSlices,
       });
+      // A settings read never fails a review: any failure means the default engine.
+      const engine = await Promise.resolve().then(() => deps.engine()).catch((error): ReviewEngine => {
+        host.logError(`Could not read the review engine setting, using reviewer: ${String(error)}`);
+        return { mode: "reviewer", prAgentDir: PR_AGENT_DIR };
+      });
+      const engineTargets: EngineTarget[] = covered.map((target) => ({
+        threadId: target.row.thread_id, branch: target.head?.branch ?? target.row.branch, prUrl: target.row.pr_url, sha: target.head?.sha ?? null,
+        ...(target.since ? { since: target.since } : {}),
+      }));
       const thread = await managedSpawn.launch(prepared, {
         projectId: worker.project_id,
         environment: reuse ? { type: "reuse", environmentId: reuse.environmentId } : head
           ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
           : { type: "reuse", environmentId: live.environmentId! },
-        title, prompt,
+        title, prompt: engine.mode === "reviewer" ? prompt : [prompt, ...prAgentSection(engine.mode, engineTargets)].join("\n"),
       }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: mine.row.report_seq, reviewedHeadSha: head?.sha },
       (threadId) => ledger.addTargets(threadId, covered.map((target) => ({
         threadId: target.row.thread_id, reportSeq: target.row.report_seq, headSha: target.head?.sha ?? null, prUrl: target.row.pr_url, branch: target.row.branch,
       }))));
-      if (context) await writeReviewContext(thread.id, context, workerThreadId);
+      if (context) await writeStorage(thread.id, "review-context.md", context, workerThreadId, "The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.");
+      if (engine.mode !== "reviewer" && engineTargets.some(isPinned)) {
+        const fallback = "The reviewer falls back to a direct review.";
+        await writeStorage(thread.id, "pr-agent-review.sh", prAgentScript(engine.prAgentDir), workerThreadId, fallback);
+        if (engine.mode === "both") await writeStorage(thread.id, "review-helper.md", helperPrompt(prompt, context || null), workerThreadId, fallback);
+      }
       // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
       const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
       if (openReviews.length || streak) {

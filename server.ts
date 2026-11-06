@@ -15,6 +15,7 @@ import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger } f
 import { createManagedSpawn } from "./managedSpawn";
 import { cleanupEligible, deleteSafeBranch, ownedBranch } from "./cleanup";
 import { commitStamp, fastForward, stampLine } from "./checkoutSync";
+import { PR_AGENT_DIR, reviewEngine } from "./prAgent";
 import { createReviewStart } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import {
@@ -1106,6 +1107,18 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Clean up approved work",
       description: "After Chief completes a worker with an approving review (or a design wave with the owner's approval), a background cleanup worker archives its task's threads when nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there. Override and skipped-review (skipReview) completions are never cleaned up.",
       default: true,
+    },
+    reviewEngine: {
+      type: "string",
+      label: "Review engine",
+      description: "reviewer (default): the reviewer reads the code. pr-agent: the reviewer runs pr-agent on each pinned pull request and reports its result; other targets get a direct review. both: pr-agent plus a direct review in a helper thread, combined into one report. Any pr-agent failure falls back to a direct review. pr-agent never posts to the pull request.",
+      default: "reviewer",
+    },
+    prAgentDir: {
+      type: "string",
+      label: "pr-agent checkout",
+      description: "Directory where uv run pr-agent runs; it uses its own .secrets.toml.",
+      default: PR_AGENT_DIR,
     },
   });
 
@@ -2342,6 +2355,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     forge: { head: prHead },
     git: { env: forgeEnv },
+    engine: async () => reviewEngine(await settings.get()),
   });
 
   /** Why the project's checkout path cannot be used here, or null when it is on the server's primary host.

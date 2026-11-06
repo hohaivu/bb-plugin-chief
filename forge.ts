@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 
 /** POSIX single-quoting: the only interpolation this script does. */
-function quote(value: string) {
+export function quote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
