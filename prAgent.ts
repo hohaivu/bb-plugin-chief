@@ -207,8 +207,9 @@ exit 0
 
 const BAN = "The ban on running builds, linters, typecheckers and tests still holds.";
 
-/** The lines appended to the reviewer prompt for mode `pr-agent` or `both`. Every target appears once; with no pinned target only the heading and the direct line remain. */
-export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[]): string[] {
+/** The lines appended to the reviewer prompt for mode `pr-agent` or `both`. Every target appears once; with no pinned target only the heading and the direct line remain.
+ * `dir` is the absolute directory holding `pr-agent-review.sh` and `review-helper.md`, written before the reviewer is spawned and rendered literally into every command. */
+export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[], dir: string): string[] {
   const heading = `## Review engine: ${mode}`;
   const pinned = targets.filter(isPinned);
   if (!pinned.length) {
@@ -216,7 +217,7 @@ export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[
   }
   const both = mode === "both";
   const pairs = [...new Set(pinned.map((target) => `${target.prUrl} ${target.sha}`))];
-  const spawn = 'bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID" --parent-notifications off --title "Review helper" --prompt-file "$BB_THREAD_STORAGE/review-helper.md" --json';
+  const spawn = `bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID" --parent-notifications off --title "Review helper" --prompt-file "${dir}/review-helper.md" --json`;
   return [
     heading,
     `This section adds to the review above: every rule above holds unless this section names an exception. You may also run the commands named here. ${BAN} The reads a direct review needs (git fetch, git checkout, git diff, gh pr view, glab mr view) stay allowed.`,
@@ -228,12 +229,12 @@ export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[
         : `${where}: not pinned → direct review (no pinned pull request head)`;
     }),
     ...(both ? [
-      "Helper (start it first): a plain child thread does the direct review of every target in this checkout while you run pr-agent. If `$BB_THREAD_STORAGE/review-helper.md` is missing, wait 10 s and look once more; still missing: the direct half fails (`helper prompt missing`). Otherwise run, once:",
+      "Helper (start it first): a plain child thread does the direct review of every target in this checkout while you run pr-agent. If `${dir}/review-helper.md` is missing, wait 10 s and look once more; still missing: the direct half fails (`helper prompt missing`). Otherwise run, once:",
       spawn,
       "The helper id is `.id` of its output. A failed spawn or no id: the direct half fails (`helper spawn failed: <reason>`). While the helper may be running, run no git command that changes this checkout (fetch, checkout, reset): it shares the checkout.",
     ] : []),
     "Run pr-agent once for each pull request and commit pair below, each as a foreground Bash call with a tool timeout of 570000 ms (the script stops itself within 540 s):",
-    ...pairs.map((pair) => `bash "$BB_THREAD_STORAGE/pr-agent-review.sh" ${pair}`),
+    ...pairs.map((pair) => `bash "${dir}/pr-agent-review.sh" ${pair}`),
     "If the script file is missing, wait 10 s and look once more; still missing: the outcome of every pinned target is failure `wrapper missing`. A pair's outcome applies to every target that names it.",
     "Give every target exactly one outcome:",
     "- definitive: exit 0, exactly one JSON line on stdout, recommendation `changes_required` or `no_concerns_found`. Use its findings as given. Do not re-verify them in the code: this overrides \"inspect the pinned commit\" for this target only.",

@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { verdictPreview } from "./delegationBrief";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
@@ -352,6 +353,8 @@ export interface ReviewHost<Row> {
   checkoutSkip: (projectId: string) => Promise<string | null>;
   recordedCommands: (threadId: string) => Promise<RecordedCommand[] | null>;
   writeFile: (threadId: string, relPath: string, content: string) => Promise<unknown>;
+  /** Writes `name` (may name a subfolder) under Chief's data folder for `threadId` and returns the absolute path. Works before the reviewer exists. */
+  writeArtifact: (threadId: string, projectId: string, name: string, content: string) => Promise<string>;
   alertChief: (row: Row, key: string, message: string) => Promise<unknown>;
   logError: (message: string) => void;
 }
@@ -467,22 +470,28 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     }
   }
 
-  /** Writes a file into a reviewer's storage: 3 attempts (1s, 2s backoff), then alerts Chief with the consequence. Never throws. */
-  async function writeStorage(threadId: string, relPath: string, content: string, workerThreadId: string, consequence: string) {
+  /** Writes a file for a reviewer: 3 attempts (1s, 2s backoff), then alerts Chief with the consequence. Never throws; true when it landed.
+   * `write` defaults to the reviewer's own storage; `subject` names whom the file is for in the alert. */
+  async function writeStorage(
+    threadId: string, relPath: string, content: string, workerThreadId: string, consequence: string,
+    write: (relPath: string, content: string) => Promise<unknown> = (path, body) => host.writeFile(threadId, path, body),
+    subject = `reviewer ${threadId}`,
+  ) {
     let error: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
       try {
-        await host.writeFile(threadId, relPath, `${content}\n`);
-        return;
+        await write(relPath, `${content}\n`);
+        return true;
       } catch (caught) { error = caught; }
     }
     // The worker's row names the same Chief, for when the reviewer's own row cannot be read.
     const row = [store.get(threadId), store.get(workerThreadId)].find((candidate) => candidate?.chief_thread_id);
-    const message = `Could not write ${relPath} for reviewer ${threadId} after 3 attempts: ${String(error)}. ${consequence}`;
+    const message = `Could not write ${relPath} for ${subject} after 3 attempts: ${String(error)}. ${consequence}`;
     // The alert is the last resort; its own failure is logged rather than thrown after the reviewer has launched.
     if (row) await Promise.resolve().then(() => host.alertChief(row, `${relPath.replace(/\.[^.]+$/, "")}:${threadId}`, message)).catch((alertError) => host.logError(`${message} The Chief alert also failed: ${String(alertError)}`));
     else host.logError(message);
+    return false;
   }
 
   const startedReply = (created: boolean, title: string, threadId: string) => `${created ? "Started" : "Using existing"} “${title}” in thread ${threadId}.`;
@@ -646,22 +655,33 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         threadId: target.row.thread_id, branch: target.head?.branch ?? target.row.branch, prUrl: target.row.pr_url, sha: target.head?.sha ?? null,
         ...(target.since ? { since: target.since } : {}),
       }));
+      // The engine files go under Chief's data folder, keyed by the reviewed worker and its report, before the spawn: their absolute
+      // path is rendered literally into the reviewer's commands, and the reviewer's own storage is not known until it exists.
+      let engineDir: string | null = null;
+      if (engine.mode !== "reviewer" && engineTargets.some(isPinned)) {
+        const fallback = "The reviewer falls back to a direct review.";
+        const folder = `review-${mine.row.report_seq}`;
+        const subject = `the review of ${workerThreadId}`;
+        const toArtifact = (relPath: string, body: string) => host.writeArtifact(workerThreadId, worker.project_id, relPath, body);
+        const scriptPaths: string[] = [];
+        const written = await writeStorage(workerThreadId, `${folder}/pr-agent-review.sh`, prAgentScript(engine.prAgentDir), workerThreadId, fallback,
+          async (relPath, body) => { scriptPaths.push(await toArtifact(relPath, body)); }, subject);
+        if (written) {
+          engineDir = dirname(scriptPaths[0]!);
+          if (engine.mode === "both") await writeStorage(workerThreadId, `${folder}/review-helper.md`, helperPrompt(prompt, context || null), workerThreadId, fallback, toArtifact, subject);
+        }
+      }
       const thread = await managedSpawn.launch(prepared, {
         projectId: worker.project_id,
         environment: reuse ? { type: "reuse", environmentId: reuse.environmentId } : head
           ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
           : { type: "reuse", environmentId: live.environmentId! },
-        title, prompt: engine.mode === "reviewer" ? prompt : [prompt, ...prAgentSection(engine.mode, engineTargets)].join("\n"),
+        title, prompt: engine.mode === "reviewer" || !engineDir ? prompt : [prompt, ...prAgentSection(engine.mode, engineTargets, engineDir)].join("\n"),
       }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: mine.row.report_seq, reviewedHeadSha: head?.sha },
       (threadId) => ledger.addTargets(threadId, covered.map((target) => ({
         threadId: target.row.thread_id, reportSeq: target.row.report_seq, headSha: target.head?.sha ?? null, prUrl: target.row.pr_url, branch: target.row.branch,
       }))));
       if (context) await writeStorage(thread.id, "review-context.md", context, workerThreadId, "The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.");
-      if (engine.mode !== "reviewer" && engineTargets.some(isPinned)) {
-        const fallback = "The reviewer falls back to a direct review.";
-        await writeStorage(thread.id, "pr-agent-review.sh", prAgentScript(engine.prAgentDir), workerThreadId, fallback);
-        if (engine.mode === "both") await writeStorage(thread.id, "review-helper.md", helperPrompt(prompt, context || null), workerThreadId, fallback);
-      }
       // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
       const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
       if (openReviews.length || streak) {

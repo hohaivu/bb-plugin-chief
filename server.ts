@@ -2350,6 +2350,7 @@ export default async function plugin(bb: BbPluginApi) {
       checkoutSkip: checkoutHostSkip,
       recordedCommands,
       writeFile: writeStorageFile,
+      writeArtifact,
       alertChief,
       logError: (message) => bb.log.error(message),
     },

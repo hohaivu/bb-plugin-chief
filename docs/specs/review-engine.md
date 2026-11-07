@@ -9,11 +9,12 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 - **Engine**: the setting `reviewEngine`. Its values are `reviewer`, `pr-agent`, and `both`.
 - **Target**: one worker that a review covers. A target is pinned when the forge reports a head commit for its pull request. Otherwise it is not pinned.
 - **Outcome**: the one result an engine gives for a target: definitive, needs_review, failure, or not pinned.
-- **Wrapper**: the script `pr-agent-review.sh` in the reviewer's storage. It runs pr-agent and prints a translated result.
+- **Wrapper**: the script `pr-agent-review.sh` in the engine folder. It runs pr-agent and prints a translated result.
 - **Helper**: a plain BB child thread named `Review helper`. It does the direct review in `both` mode.
 - **Direct review**: the plain review in which the reviewer reads the code.
 - **Fallback**: a direct review that replaces a failed or inconclusive engine step.
 - **Reviewer storage**: `$BB_THREAD_STORAGE` of the reviewer thread.
+- **Engine folder**: `<BB data dir>/chief/<projectId>/<worker id>/review-<report number>/`, Chief's data folder for the reviewed worker. The code writes the wrapper and the helper prompt here before the reviewer is spawned, and the section names the absolute path in every command.
 
 ## Ownership and Entry Points
 
@@ -21,7 +22,7 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 | --- | --- | --- |
 | `reviewEngine(raw)` | `prAgent.ts` | Parses the two settings. It is the only validation point. |
 | `prAgentScript(dir)` | `prAgent.ts` | Returns the wrapper text, which includes the translation step. |
-| `prAgentSection(mode, targets)` | `prAgent.ts` | Returns the prompt lines that name the engine rules. |
+| `prAgentSection(mode, targets, dir)` | `prAgent.ts` | Returns the prompt lines that name the engine rules. |
 | `helperPrompt(reviewerPrompt, context)` | `prAgent.ts` | Returns the helper prompt. |
 | `startReview` | `reviewStart.ts` | Reads the engine once at review start. It appends the section and writes the files. |
 | `bb.settings.define` | `server.ts` | Defines `reviewEngine` and `prAgentDir`. |
@@ -104,8 +105,8 @@ A reviewer's ready report carries `findings`. Each finding has `file` (1 to 300 
 2. In `reviewer` mode, the prompt and the files stay as in the plain review.
 3. In another mode, the prompt is the plain prompt plus the engine section. The section lists every target once.
 4. After the launch, the code writes `review-context.md` first, as before.
-5. When some target is pinned, the code writes `pr-agent-review.sh`. In `both` mode it also writes `review-helper.md`.
-6. A write of either new file follows the same 3 attempts. After 3 failures one Chief alert names the file. The alert key is the path without its extension and `:<reviewer id>`. The text says the reviewer falls back to a direct review. The launch stays.
+5. When some target is pinned, the code writes `pr-agent-review.sh` to the engine folder before the launch. In `both` mode it also writes `review-helper.md` there. If the wrapper cannot be written, the prompt has no engine section and the reviewer does a direct review.
+6. A write of either new file follows the same 3 attempts. After 3 failures one Chief alert names the file. The alert key is the path under the engine folder without its extension and `:<worker id>`. The text says the reviewer falls back to a direct review. The launch stays.
 7. The reviewer runs the wrapper once for each distinct `<url> <sha>` pair. It then gives each target one outcome.
 8. The reviewer sends one `chief_report`.
 
