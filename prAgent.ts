@@ -229,7 +229,7 @@ export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[
         : `${where}: not pinned → direct review (no pinned pull request head)`;
     }),
     ...(both ? [
-      "Helper (start it first): a plain child thread does the direct review of every target in this checkout while you run pr-agent. If `${dir}/review-helper.md` is missing, wait 10 s and look once more; still missing: the direct half fails (`helper prompt missing`). Otherwise run, once:",
+      `Helper (start it first): a plain child thread does the direct review of every target in this checkout while you run pr-agent. If \`${dir}/review-helper.md\` is missing, wait 10 s and look once more; still missing: the direct half fails (\`helper prompt missing\`). Otherwise run, once:`,
       spawn,
       "The helper id is `.id` of its output. A failed spawn or no id: the direct half fails (`helper spawn failed: <reason>`). While the helper may be running, run no git command that changes this checkout (fetch, checkout, reset): it shares the checkout.",
     ] : []),

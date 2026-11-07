@@ -676,7 +676,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         environment: reuse ? { type: "reuse", environmentId: reuse.environmentId } : head
           ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
           : { type: "reuse", environmentId: live.environmentId! },
-        title, prompt: engine.mode === "reviewer" || !engineDir ? prompt : [prompt, ...prAgentSection(engine.mode, engineTargets, engineDir)].join("\n"),
+        title, prompt: engine.mode === "reviewer" || (!engineDir && engineTargets.some(isPinned)) ? prompt : [prompt, ...prAgentSection(engine.mode, engineTargets, engineDir ?? "")].join("\n"),
       }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: mine.row.report_seq, reviewedHeadSha: head?.sha },
       (threadId) => ledger.addTargets(threadId, covered.map((target) => ({
         threadId: target.row.thread_id, reportSeq: target.row.report_seq, headSha: target.head?.sha ?? null, prUrl: target.row.pr_url, branch: target.row.branch,
