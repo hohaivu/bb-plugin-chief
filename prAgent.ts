@@ -207,16 +207,20 @@ exit 0
 
 const BAN = "The ban on running builds, linters, typecheckers and tests still holds.";
 
-/** The lines appended to the reviewer prompt for mode `pr-agent` or `both`. Every target appears once; with no pinned target only the heading and the direct line remain. */
-export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[]): string[] {
+/** The lines appended to the reviewer prompt for mode `pr-agent` or `both`. Every target appears once; with no pinned target only the heading and the direct line remain.
+ * `dir` is the absolute directory holding `pr-agent-review.sh` and `review-helper.md`, written before the reviewer is spawned and rendered literally into every command.
+ * `helperWritten` false (both mode, helper prompt write failed): no helper lines, the reviewer does the direct half itself. */
+export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[], dir: string, helperWritten = true): string[] {
   const heading = `## Review engine: ${mode}`;
   const pinned = targets.filter(isPinned);
   if (!pinned.length) {
     return [heading, `No target has a pinned pull request head: review directly as described above, and start your result with \`Engine: ${mode} → direct (no pinned pull request head)\`.`];
   }
+  // `both` is the review contract; `withHelper` only says a helper can run. Without one the reviewer does the direct half itself.
   const both = mode === "both";
+  const withHelper = both && helperWritten;
   const pairs = [...new Set(pinned.map((target) => `${target.prUrl} ${target.sha}`))];
-  const spawn = 'bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID" --parent-notifications off --title "Review helper" --prompt-file "$BB_THREAD_STORAGE/review-helper.md" --json';
+  const spawn = `bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID" --parent-notifications off --title "Review helper" --prompt-file "${dir}/review-helper.md" --json`;
   return [
     heading,
     `This section adds to the review above: every rule above holds unless this section names an exception. You may also run the commands named here. ${BAN} The reads a direct review needs (git fetch, git checkout, git diff, gh pr view, glab mr view) stay allowed.`,
@@ -227,13 +231,13 @@ export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[
         ? `${where}: ${target.prUrl} pinned to ${target.sha} → pr-agent${target.since ? `; re-review since ${target.since}` : ""}`
         : `${where}: not pinned → direct review (no pinned pull request head)`;
     }),
-    ...(both ? [
-      "Helper (start it first): a plain child thread does the direct review of every target in this checkout while you run pr-agent. If `$BB_THREAD_STORAGE/review-helper.md` is missing, wait 10 s and look once more; still missing: the direct half fails (`helper prompt missing`). Otherwise run, once:",
+    ...(withHelper ? [
+      `Helper (start it first): a plain child thread does the direct review of every target in this checkout while you run pr-agent. If \`${dir}/review-helper.md\` is missing, wait 10 s and look once more; still missing: the direct half fails (\`helper prompt missing\`). Otherwise run, once:`,
       spawn,
       "The helper id is `.id` of its output. A failed spawn or no id: the direct half fails (`helper spawn failed: <reason>`). While the helper may be running, run no git command that changes this checkout (fetch, checkout, reset): it shares the checkout.",
     ] : []),
     "Run pr-agent once for each pull request and commit pair below, each as a foreground Bash call with a tool timeout of 570000 ms (the script stops itself within 540 s):",
-    ...pairs.map((pair) => `bash "$BB_THREAD_STORAGE/pr-agent-review.sh" ${pair}`),
+    ...pairs.map((pair) => `bash "${dir}/pr-agent-review.sh" ${pair}`),
     "If the script file is missing, wait 10 s and look once more; still missing: the outcome of every pinned target is failure `wrapper missing`. A pair's outcome applies to every target that names it.",
     "Give every target exactly one outcome:",
     "- definitive: exit 0, exactly one JSON line on stdout, recommendation `changes_required` or `no_concerns_found`. Use its findings as given. Do not re-verify them in the code: this overrides \"inspect the pinned commit\" for this target only.",
@@ -241,15 +245,18 @@ export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[
     `- failure: any non-zero exit, a tool error or tool timeout, or stdout that is not exactly one JSON line even with exit 0. The reason is the stderr line, else what you saw. ${both ? "The target has only the direct half." : "Review this target directly as described above."}`,
     `- not pinned: ${both ? "the direct half only." : "review it directly as described above."}`,
     "Re-review scope: for a definitive target with a re-review range, run `git diff --name-only <since>..<sha>`; translated findings on files outside that list go to result as nits, not to findings.",
-    ...(both ? [
+    ...(!both ? [] : !withHelper ? [
+      "Direct half: the helper prompt was not written, so you do it. After the last pr-agent call, review every target yourself as described above, including targets with a definitive `changes_required` or `no_concerns_found` outcome. This independent direct review does not re-verify or reclassify pr-agent's definitive findings.",
+      "Combine: your own direct findings for every target plus the pr-agent half under the outcomes above. Set `regression: true` when your direct review found a regression.",
+    ] : [
       "Direct half: after the last pr-agent call, run `bb thread wait <helper id> --status idle --timeout 540s` (tool timeout 570000 ms), then `bb thread show <helper id> --json` and read `.thread.status`. `idle`: read its result. `failed`: the direct half fails (`helper failed`). Anything else: wait the same way once more, then read the status again. Still not idle or failed: run `bb thread stop <helper id>`, then `bb thread show <helper id> --json`; `idle` or `failed` confirms the stop (reason `helper timeout`), else wait 10 s and check once more. Never use the checkout before the helper is idle, failed or confirmed stopped. If the stop cannot be confirmed, report blocked naming helper `<helper id>` (shared checkout): this is the only blocked path of this section.",
       "Read the result with `bb thread output <helper id>` and take the last fenced `json` block. It is valid only when: `verdict` is approve or request_changes; `findings` is an array whose items have file of 1-300 characters, message of 1-1000 characters, severity blocking or nit, and line an integer of 1 or more or absent; the verdict is request_changes if and only if a finding is blocking; `result` is a string; `regression`, when present, is a boolean. A `{\"blocked\": …}` block, no block, or any violation: the direct half fails (`helper result invalid: <what>`).",
       "Combine: the direct half is the helper's findings, or, when it failed, your own direct review of every target as described above, done only after the stop rule. The pr-agent half follows the outcomes above. Set `regression: true` when the helper or your own review found a regression.",
-    ] : []),
+    ]),
     "Aggregate once: findings are the union over all targets. Merge two findings only when target, file, line and problem are the same; a merged finding is blocking if either was. Never merge across targets. With more than one target, start each message with `[<branch>] `. The verdict is request_changes if and only if a blocking finding remains. Over 40 findings: keep every blocking finding, fill with nits, and name the dropped nit count in result; if blocking findings alone exceed 40, fold the blocking findings of one target and file into one finding that names the lines in its message, until 40 fit. Never drop a blocking finding.",
-    `Result: the first line is \`Engine: ${mode}\`, then one line per target: \`<branch>: pr-agent <recommendation>\` or \`<branch>: direct (<reason>)\`.${both ? " Add `direct half: helper` or `direct half: reviewer (<reason>)`." : ""}`,
+    `Result: the first line is \`Engine: ${mode}\`, then one line per target: \`<branch>: pr-agent <recommendation>\` or \`<branch>: direct (<reason>)\`.${withHelper ? " Add `direct half: helper` or `direct half: reviewer (<reason>)`." : both ? " Add `direct half: reviewer (helper prompt not written)`." : ""}`,
     "Send one chief_report.",
-    ...(both ? ["After chief_report is accepted, run `bb thread archive <helper id>`; if it fails, say so in your final message (the helper is archived with you as its lifecycle owner). Never archive the helper before the report is accepted."] : []),
+    ...(withHelper ? ["After chief_report is accepted, run `bb thread archive <helper id>`; if it fails, say so in your final message (the helper is archived with you as its lifecycle owner). Never archive the helper before the report is accepted."] : []),
   ];
 }
 

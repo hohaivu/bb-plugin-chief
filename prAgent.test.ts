@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { helperPrompt, PR_AGENT_DIR, prAgentScript, prAgentSection, reviewEngine, type EngineTarget } from "./prAgent";
+import { helperPrompt, PR_AGENT_DIR, prAgentScript, prAgentSection as renderSection, reviewEngine, type EngineTarget } from "./prAgent";
 
 // Contract: docs/specs/review-engine.md, "Engine Behaviour". prAgent.ts owns the setting parse, the wrapper script, the
 // translation table, the engine section and the helper prompt. The wrapper is executed for real with /bin/bash (3.2 on
@@ -435,7 +435,10 @@ const target = (over: Partial<EngineTarget> = {}): EngineTarget => ({ threadId: 
 const unpinned = (over: Partial<EngineTarget> = {}) => target({ threadId: "wrk-loose", branch: "feature/loose", prUrl: null, sha: null, ...over });
 const text = (lines: string[]) => lines.join("\n");
 const countOf = (haystack: string, needle: string) => haystack.split(needle).length - 1;
-const runLines = (lines: string[]) => lines.filter((line) => line.startsWith('bash "$BB_THREAD_STORAGE/pr-agent-review.sh"'));
+/** The engine folder Chief writes both files to before the reviewer exists: an absolute path, rendered literally into every command. */
+const ENGINE_DIR = "/data/chief/proj_1/wrk-one/review-2";
+const prAgentSection = (mode: "pr-agent" | "both", targets: EngineTarget[]) => renderSection(mode, targets, ENGINE_DIR);
+const runLines = (lines: string[]) => lines.filter((line) => line.startsWith(`bash "${ENGINE_DIR}/pr-agent-review.sh"`));
 /** The one line that names a target, whatever its state. */
 const lineOf = (lines: string[], threadId: string) => {
   const found = lines.filter((line) => line.includes(`worker ${threadId} `));
@@ -448,7 +451,7 @@ describe("prAgentSection: totality over the targets", () => {
     const lines = prAgentSection(mode, [target()]);
     expect(lines[0]).toBe(`## Review engine: ${mode}`);
     expect(lineOf(lines, "wrk-one")).toBe(`- worker wrk-one (branch feature/one): ${URL_} pinned to ${SHA} → pr-agent`);
-    expect(runLines(lines)).toEqual([`bash "$BB_THREAD_STORAGE/pr-agent-review.sh" ${URL_} ${SHA}`]);
+    expect(runLines(lines)).toEqual([`bash "${ENGINE_DIR}/pr-agent-review.sh" ${URL_} ${SHA}`]);
   });
 
   test("two pinned targets on different pull requests: both listed, one run command each", () => {
@@ -456,8 +459,8 @@ describe("prAgentSection: totality over the targets", () => {
     expect(lineOf(lines, "wrk-one")).toContain(`${URL_} pinned to ${SHA}`);
     expect(lineOf(lines, "wrk-two")).toContain(`${URL2} pinned to ${OTHER}`);
     expect(runLines(lines)).toEqual([
-      `bash "$BB_THREAD_STORAGE/pr-agent-review.sh" ${URL_} ${SHA}`,
-      `bash "$BB_THREAD_STORAGE/pr-agent-review.sh" ${URL2} ${OTHER}`,
+      `bash "${ENGINE_DIR}/pr-agent-review.sh" ${URL_} ${SHA}`,
+      `bash "${ENGINE_DIR}/pr-agent-review.sh" ${URL2} ${OTHER}`,
     ]);
   });
 
@@ -542,6 +545,42 @@ describe("prAgentSection: precedence and rules", () => {
   });
 });
 
+describe("prAgentSection: engine files are named by their literal absolute path", () => {
+  // Contract: a command whose script path is a shell variable is blocked by CC Safety Net (dynamic-shell-source), so the section
+  // renders the folder the plugin wrote the files to, not `$BB_THREAD_STORAGE`.
+  const FOLDERS = ["/data/chief/proj_1/wrk-one/review-2", "/Volumes/Other Disk/.bb/chief/proj_9/wrk-nine/review-11"];
+  const executed = (lines: string[]) => lines.filter((line) => line.startsWith("bash ") || line.startsWith("bb thread spawn"));
+
+  test.each(FOLDERS.flatMap((dir) => (["pr-agent", "both"] as const).map((mode) => [mode, dir] as const)))(
+    "%s, folder %s: every executed line names the folder and none uses $BB_THREAD_STORAGE",
+    (mode, dir) => {
+      const lines = renderSection(mode, [target(), unpinned()], dir);
+      const commands = executed(lines);
+      expect(commands).toHaveLength(mode === "both" ? 2 : 1);
+      for (const command of commands) {
+        expect(command).not.toContain("$BB_THREAD_STORAGE");
+        expect(command).toContain(`"${dir}/`);
+      }
+      expect(commands.filter((command) => command.startsWith("bash "))).toEqual([`bash "${dir}/pr-agent-review.sh" ${URL_} ${SHA}`]);
+      expect(text(lines)).not.toContain("$BB_THREAD_STORAGE");
+    },
+  );
+
+  test("both: the helper spawn's --prompt-file and the missing-file line name the same literal helper path", () => {
+    const [dir] = FOLDERS;
+    const lines = renderSection("both", [target()], dir!);
+    const spawnLine = lines.find((line) => line.startsWith("bb thread spawn"))!;
+    expect(spawnLine).toContain(`--prompt-file "${dir}/review-helper.md"`);
+    expect(lines.find((line) => line.startsWith("Helper (start it first)"))).toContain(`If \`${dir}/review-helper.md\` is missing`);
+  });
+
+  test("the wrapper's missing-file rule does not name a path variable", () => {
+    const line = prAgentSection("pr-agent", [target()]).find((candidate) => candidate.startsWith("If the script file is missing"))!;
+    expect(line).toBeDefined();
+    expect(line).not.toContain("$");
+  });
+});
+
 describe("prAgentSection: both mode helper lifecycle", () => {
   const lines = prAgentSection("both", [target(), unpinned()]);
   const body = text(lines);
@@ -552,13 +591,13 @@ describe("prAgentSection: both mode helper lifecycle", () => {
     expect(spawnLine).toContain('--lifecycle-owner-thread "$BB_THREAD_ID"');
     expect(spawnLine).toContain("--parent-notifications off");
     expect(spawnLine).toContain("--json");
-    expect(spawnLine).toContain('--prompt-file "$BB_THREAD_STORAGE/review-helper.md"');
+    expect(spawnLine).toContain(`--prompt-file "${ENGINE_DIR}/review-helper.md"`);
     expect(spawnLine).toContain("--parent-self");
     expect(countOf(body, "bb thread spawn")).toBe(1);
   });
 
   test("the helper starts before pr-agent runs", () => {
-    expect(body.indexOf("bb thread spawn")).toBeLessThan(body.indexOf('bash "$BB_THREAD_STORAGE/pr-agent-review.sh"'));
+    expect(body.indexOf("bb thread spawn")).toBeLessThan(body.indexOf(`bash "${ENGINE_DIR}/pr-agent-review.sh"`));
   });
 
   test("each wait is its own command with a 540 s timeout and a 570000 ms tool timeout", () => {
