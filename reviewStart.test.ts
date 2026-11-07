@@ -55,10 +55,13 @@ function world({ projectPath = null, heads = {}, engine }: Options = {}) {
   /** Writes the row exactly as managedSpawn.launch does (managedSpawn.ts:99-102), inside the same transaction as `inTransaction`. */
   let launched = 0;
   const launches: { id: string; args: any; row: any }[] = [];
+  /** Every spawn and every file write, in the order they happened. */
+  const events: string[] = [];
   const managedSpawn = {
     prepare: vi.fn(async (_projectId: string, _pick: unknown) => ({ execution: {}, sectionId: "section" })),
     launch: vi.fn(async (_prepared: unknown, args: any, row: any, inTransaction?: (threadId: string) => void) => {
       const id = `R${++launched}`;
+      events.push("launch");
       launches.push({ id, args, row });
       db.transaction(() => {
         store.insert({ ...row, threadId: id, projectId: args.projectId, parentThreadId: row.chiefThreadId, title: args.title, state: "starting", status: "idle" });
@@ -77,7 +80,12 @@ function world({ projectPath = null, heads = {}, engine }: Options = {}) {
     reusableEnvironment: vi.fn(async (_threadId: string): Promise<{ environmentId: string; hostId: string } | null> => null),
     checkoutSkip: vi.fn(async (_projectId: string): Promise<string | null> => null),
     recordedCommands: vi.fn(async (_threadId: string) => []),
-    writeFile: vi.fn(async (_threadId: string, _relPath: string, _content: string): Promise<unknown> => undefined),
+    writeFile: vi.fn(async (_threadId: string, relPath: string, _content: string): Promise<unknown> => { events.push(`storage:${relPath}`); }),
+    /** Chief's data folder: <data dir>/chief/<project>/<thread>/<name>. Answers the absolute path, as the real one does. */
+    writeArtifact: vi.fn(async (threadId: string, projectId: string, name: string, _content: string): Promise<string> => {
+      events.push(`artifact:${name}`);
+      return `/data/chief/${projectId}/${threadId}/${name}`;
+    }),
     alertChief: vi.fn(async (_row: ManagedRow, _key: string, _message: string): Promise<unknown> => undefined),
     logError: vi.fn((_message: string) => undefined),
   };
@@ -112,7 +120,7 @@ function world({ projectPath = null, heads = {}, engine }: Options = {}) {
     db.prepare(`SELECT worker_thread_id, report_seq, head_sha, pr_url, branch FROM review_targets WHERE reviewer_thread_id=? ORDER BY worker_thread_id`).all(reviewerId) as any[];
   const contexts = () => host.writeFile.mock.calls.filter(([, relPath]) => relPath === "review-context.md").map(([, , content]) => content);
   return {
-    db, store, ledger, review, chief, managedSpawn, launches, forge, host, worker, nextReport, row, targetRows, contexts,
+    db, store, ledger, review, chief, managedSpawn, launches, events, forge, host, worker, nextReport, row, targetRows, contexts,
     covering: (ids: string[]) => { covers = ids; },
   };
 }
@@ -633,6 +641,12 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
   const engineOf = (mode: "pr-agent" | "both") => async () => ({ mode, prAgentDir: DIR });
   const writesOf = (w: ReturnType<typeof world>) => w.host.writeFile.mock.calls.map(([, relPath]) => relPath);
   const fileOf = (w: ReturnType<typeof world>, name: string) => w.host.writeFile.mock.calls.find(([, relPath]) => relPath === name)?.[2] as string | undefined;
+  /** Engine files go to Chief's data folder under `review-<report number>/`; the names are given relative to that folder. */
+  const artifactsOf = (w: ReturnType<typeof world>) => w.host.writeArtifact.mock.calls.map(([, , name]) => name.replace(/^review-\d+\//, ""));
+  const artifactOf = (w: ReturnType<typeof world>, name: string) => w.host.writeArtifact.mock.calls.find(([, , written]) => written.endsWith(`/${name}`))?.[3] as string | undefined;
+  /** The folder the prompt must name for worker W1's first report on project `proj`. */
+  const FOLDER = "/data/chief/proj/W1/review-1";
+  const executedLines = (prompt: string) => prompt.split("\n").filter((line) => line.startsWith("bash ") || line.startsWith("bb thread spawn"));
 
   /** The same fixture in reviewer mode: the prompt every other mode must extend. */
   async function plain(build: (w: ReturnType<typeof world>) => void, heads: Options["heads"]) {
@@ -644,7 +658,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
   const pinnedOne = (w: ReturnType<typeof world>) => w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
   const heads1 = { [pr(1)]: headOf("feature/one") };
 
-  test("pr-agent, one pinned target: the prompt is the reviewer prompt plus the section, the context is written first, then the wrapper with the configured directory", async () => {
+  test("pr-agent, one pinned target: the prompt is the reviewer prompt plus the section, the wrapper (with the configured directory) sits in Chief's folder at the literal path the prompt names", async () => {
     const base = await plain(pinnedOne, heads1);
     const w = world({ heads: heads1, engine: engineOf("pr-agent") });
     pinnedOne(w);
@@ -654,10 +668,14 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     const prompt: string = w.launches[0]!.args.prompt;
     expect(prompt.startsWith(`${base.prompt}\n## Review engine: pr-agent\n`)).toBe(true);
     expect(prompt).toContain(`- worker W1 (branch feature/one): ${pr(1)} pinned to ${SHA_B} → pr-agent`);
-    expect(prompt).toContain(`bash "$BB_THREAD_STORAGE/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
-    expect(writesOf(w)).toEqual(["review-context.md", "pr-agent-review.sh"]);
+    expect(prompt).toContain(`bash "${FOLDER}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
+    expect(executedLines(prompt)).toEqual([`bash "${FOLDER}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`]);
+    expect(prompt).not.toContain("$BB_THREAD_STORAGE/pr-agent-review.sh");
+    expect(artifactsOf(w)).toEqual(["pr-agent-review.sh"]);
+    expect(w.host.writeArtifact.mock.calls[0]!.slice(0, 2)).toEqual(["W1", "proj"]);
+    expect(writesOf(w)).toEqual(["review-context.md"]);
     expect(fileOf(w, "review-context.md")).toBe(base.context);
-    const script = fileOf(w, "pr-agent-review.sh")!;
+    const script = artifactOf(w, "pr-agent-review.sh")!;
     expect(script.startsWith("#!")).toBe(true);
     expect(script).toContain(DIR);
     expect(w.host.writeFile.mock.calls.every(([threadId]) => threadId === "R1")).toBe(true);
@@ -671,13 +689,52 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
     await w.review.startReview(w.chief, "W1");
 
-    expect(writesOf(w)).toEqual(["review-context.md", "pr-agent-review.sh", "review-helper.md"]);
-    const helper = fileOf(w, "review-helper.md")!;
+    expect(artifactsOf(w)).toEqual(["pr-agent-review.sh", "review-helper.md"]);
+    expect(writesOf(w)).toEqual(["review-context.md"]);
+    const helper = artifactOf(w, "review-helper.md")!;
     expect(helper).toContain(`\n\n${base.prompt}\n\n## review-context.md\n${base.context}\n`.trimEnd());
     expect(helper).not.toContain("## Review engine");
     expect(helper).not.toContain("pr-agent-review.sh\" ");
     expect(w.launches[0]!.args.prompt).toContain("## Review engine: both");
     expect(w.launches[0]!.args.prompt).toContain("bb thread spawn");
+  });
+
+  test("both: the helper spawn and the wrapper run name the literal folder; no executed line uses $BB_THREAD_STORAGE", async () => {
+    const w = world({ heads: heads1, engine: engineOf("both") });
+    pinnedOne(w);
+
+    await w.review.startReview(w.chief, "W1");
+
+    const prompt: string = w.launches[0]!.args.prompt;
+    const commands = executedLines(prompt);
+    expect(commands).toHaveLength(2);
+    expect(commands.find((line) => line.startsWith("bb thread spawn"))).toContain(`--prompt-file "${FOLDER}/review-helper.md"`);
+    expect(commands.find((line) => line.startsWith("bash "))).toBe(`bash "${FOLDER}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
+    for (const command of commands) expect(command).not.toContain("$BB_THREAD_STORAGE");
+  });
+
+  test.each(["pr-agent", "both"] as const)("%s: the engine files are written before the reviewer is spawned, review-context.md after", async (mode) => {
+    const w = world({ heads: heads1, engine: engineOf(mode) });
+    pinnedOne(w);
+
+    await w.review.startReview(w.chief, "W1");
+
+    expect(w.events).toEqual([
+      "artifact:review-1/pr-agent-review.sh",
+      ...(mode === "both" ? ["artifact:review-1/review-helper.md"] : []),
+      "launch",
+      "storage:review-context.md",
+    ]);
+  });
+
+  test("the folder is keyed by the reviewed report number", async () => {
+    const w = world({ heads: heads1, engine: engineOf("pr-agent") });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one", reports: 3 });
+
+    await w.review.startReview(w.chief, "W1");
+
+    expect(w.host.writeArtifact.mock.calls.map(([, , name]) => name)).toEqual(["review-3/pr-agent-review.sh"]);
+    expect(w.launches[0]!.args.prompt).toContain(`bash "/data/chief/proj/W1/review-3/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
   });
 
   test("a plan review with two pinned targets lists both and names both pairs for the wrapper", async () => {
@@ -692,9 +749,8 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     const prompt: string = w.launches[0]!.args.prompt;
     expect(prompt).toContain(`- worker W1 (branch feature/one): ${pr(1)} pinned to ${SHA_B} → pr-agent`);
     expect(prompt).toContain(`- worker W2 (branch feature/two): ${pr(2)} pinned to ${SHA_A} → pr-agent`);
-    expect(prompt).toContain(`pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
-    expect(prompt).toContain(`pr-agent-review.sh" ${pr(2)} ${SHA_A}`);
-    expect(writesOf(w)).toContain("pr-agent-review.sh");
+    expect(executedLines(prompt)).toEqual([`bash "${FOLDER}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`, `bash "${FOLDER}/pr-agent-review.sh" ${pr(2)} ${SHA_A}`]);
+    expect(artifactsOf(w)).toEqual(["pr-agent-review.sh"]);
   });
 
   test("mixed pinning: the unpinned target is listed as a direct review and the wrapper is still written for the pinned one", async () => {
@@ -709,7 +765,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     const prompt: string = w.launches[0]!.args.prompt;
     expect(prompt).toContain("- worker W2 (branch feature/two): not pinned → direct review (no pinned pull request head)");
     expect(prompt).toContain(`- worker W1 (branch feature/one): ${pr(1)} pinned to ${SHA_B} → pr-agent`);
-    expect(writesOf(w)).toContain("pr-agent-review.sh");
+    expect(artifactsOf(w)).toEqual(["pr-agent-review.sh"]);
   });
 
   test.each(["pr-agent", "both"] as const)("%s with a single target that has no head: the direct line, no wrapper, no helper file", async (mode) => {
@@ -724,6 +780,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     expect(prompt).not.toContain("pr-agent-review.sh");
     expect(prompt).not.toContain("bb thread spawn");
     expect(writesOf(w)).toEqual(["review-context.md"]);
+    expect(w.host.writeArtifact).not.toHaveBeenCalled();
   });
 
   test("an engine read that rejects is the reviewer-mode prompt and files, and one log line", async () => {
@@ -735,6 +792,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
     expect(w.launches[0]!.args.prompt).toBe(base.prompt);
     expect(writesOf(w)).toEqual(["review-context.md"]);
+    expect(w.host.writeArtifact).not.toHaveBeenCalled();
     expect(w.host.logError).toHaveBeenCalledTimes(1);
   });
 
@@ -748,54 +806,64 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     expect(w.launches[0]!.args.prompt).toBe(base.launches[0]!.args.prompt);
     expect(w.launches[0]!.args.prompt).not.toContain("## Review engine");
     expect(writesOf(w)).toEqual(writesOf(base));
-    expect(writesOf(w)).not.toContain("pr-agent-review.sh");
-    expect(writesOf(w)).not.toContain("review-helper.md");
+    expect(w.host.writeArtifact).not.toHaveBeenCalled();
   });
 
   describe("a failed engine file never undoes the launch", () => {
     const FALLBACK = "The reviewer falls back to a direct review.";
-    /** Fails every write of `names`; the others succeed. */
+    /** Fails every write of `names` (to Chief's folder or the reviewer's storage); the others succeed. */
     async function failing(mode: "pr-agent" | "both", names: string[]) {
       const w = world({ heads: heads1, engine: engineOf(mode) });
       pinnedOne(w);
-      w.host.writeFile.mockImplementation(async (_threadId, relPath) => { if (names.includes(relPath)) throw new Error("disk full"); });
+      const fails = (name: string) => names.some((failed) => name.endsWith(failed));
+      w.host.writeFile.mockImplementation(async (_threadId, relPath) => { if (fails(relPath)) throw new Error("disk full"); });
+      w.host.writeArtifact.mockImplementation(async (threadId, projectId, name) => {
+        if (fails(name)) throw new Error("disk full");
+        return `/data/chief/${projectId}/${threadId}/${name}`;
+      });
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       const run = w.review.startReview(w.chief, "W1");
       await vi.advanceTimersByTimeAsync(12_000);
       const out = await run;
       return { w, out };
     }
+    const attempts = (w: ReturnType<typeof world>, name: string) => w.host.writeArtifact.mock.calls.filter(([, , written]) => written.endsWith(name)).length;
 
-    test("the wrapper write fails 3 times: the thread is returned, one alert names the file, the review-context.md write is untouched", async () => {
+    test("the wrapper write fails 3 times: the reviewer is still launched with the plain prompt, one alert names the file, the review-context.md write is untouched", async () => {
+      const base = await plain(pinnedOne, heads1);
       const { w, out } = await failing("pr-agent", ["pr-agent-review.sh"]);
 
       expect(out).toMatchObject({ threadId: "R1", created: true });
-      expect(w.host.writeFile.mock.calls.filter(([, relPath]) => relPath === "pr-agent-review.sh")).toHaveLength(3);
+      expect(attempts(w, "pr-agent-review.sh")).toBe(3);
       expect(w.host.writeFile.mock.calls.filter(([, relPath]) => relPath === "review-context.md")).toHaveLength(1);
+      expect(w.launches[0]!.args.prompt).toBe(base.prompt);
       expect(w.host.alertChief).toHaveBeenCalledTimes(1);
       const [alertRow, key, message] = w.host.alertChief.mock.calls[0]!;
-      expect(alertRow.thread_id).toBe("R1");
-      expect(key).toBe("pr-agent-review:R1");
-      expect(message).toBe(`Could not write pr-agent-review.sh for reviewer R1 after 3 attempts: Error: disk full. ${FALLBACK}`);
+      expect(alertRow.chief_thread_id).toBe("chief");
+      expect(key).toMatch(/pr-agent-review:W1$/);
+      expect(message).toContain("pr-agent-review.sh");
+      expect(message).toContain("after 3 attempts: Error: disk full");
+      expect(message).toContain(FALLBACK);
       expect(w.targetRows("R1")).toHaveLength(1);
     });
 
-    test("both: a helper-file failure alerts under its own key, and the wrapper and context stay written", async () => {
+    test("both: a helper-file failure alerts under its own key, the wrapper stays written and the launch stays", async () => {
       const { w, out } = await failing("both", ["review-helper.md"]);
 
       expect(out).toMatchObject({ threadId: "R1" });
-      expect(w.host.alertChief.mock.calls.map(([, key]) => key)).toEqual(["review-helper:R1"]);
+      expect(w.host.alertChief.mock.calls.map(([, key]) => key)).toEqual([expect.stringMatching(/review-helper:W1$/)]);
       expect(w.host.alertChief.mock.calls[0]![2]).toContain("review-helper.md");
       expect(w.host.alertChief.mock.calls[0]![2]).toContain(FALLBACK);
-      expect(w.host.writeFile.mock.calls.filter(([, relPath]) => relPath === "pr-agent-review.sh")).toHaveLength(1);
+      expect(attempts(w, "pr-agent-review.sh")).toBe(1);
+      expect(attempts(w, "review-helper.md")).toBe(3);
     });
 
-    test("the context and the wrapper both fail: two alerts, each under its own unchanged key, the context's keeps its own consequence", async () => {
+    test("the context and the wrapper both fail: two alerts, each under its own key, the context's keeps its own consequence", async () => {
       const { w, out } = await failing("pr-agent", ["review-context.md", "pr-agent-review.sh"]);
 
       expect(out).toMatchObject({ threadId: "R1" });
-      expect(w.host.alertChief.mock.calls.map(([, key]) => key)).toEqual(["review-context:R1", "pr-agent-review:R1"]);
-      expect(w.host.alertChief.mock.calls[0]![2]).toBe("Could not write review-context.md for reviewer R1 after 3 attempts: Error: disk full. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.");
+      expect(w.host.alertChief.mock.calls.map(([, key]) => key)).toEqual([expect.stringMatching(/pr-agent-review:W1$/), "review-context:R1"]);
+      expect(w.host.alertChief.mock.calls[1]![2]).toBe("Could not write review-context.md for reviewer R1 after 3 attempts: Error: disk full. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.");
     });
   });
 });

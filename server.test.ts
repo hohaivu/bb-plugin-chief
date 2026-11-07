@@ -6950,8 +6950,10 @@ describe("tester role", () => {
       await readyIdle(state, worker);
       await tool(state, "chief_review", { workerThreadId: worker }, chief);
       const reviewer = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='reviewer'`).get() as any).thread_id as string;
-      const file = (name: string) => readFile(join(state.storageRoot, reviewer, name), "utf8").catch(() => null);
-      return { prompt: String(state.spawned.at(-1).prompt), file, state };
+      // review-context.md is in the reviewer's storage; the engine files are in Chief's data folder for the worker, keyed by its report.
+      const engineDir = join(state.storageRoot, "chief", "proj_1", worker, "review-1");
+      const file = (name: string) => readFile(join(name === "review-context.md" ? join(state.storageRoot, reviewer) : engineDir, name), "utf8").catch(() => null);
+      return { prompt: String(state.spawned.at(-1).prompt), file, engineDir, state };
     }
 
     test("the two settings default to reviewer and PR_AGENT_DIR", async () => {
@@ -6970,16 +6972,19 @@ describe("tester role", () => {
     });
 
     test("pr-agent: the section names the pinned pull request, the wrapper is written with the default directory", async () => {
-      const { prompt, file } = await review({ reviewEngine: "pr-agent" });
+      const { prompt, file, engineDir } = await review({ reviewEngine: "pr-agent" });
       expect(prompt).toContain("## Review engine: pr-agent");
       expect(prompt).toContain(`${PR} pinned to ${SHA} → pr-agent`);
+      expect(prompt).toContain(`bash "${engineDir}/pr-agent-review.sh" ${PR} ${SHA}`);
+      expect(prompt).not.toContain("$BB_THREAD_STORAGE/pr-agent-review.sh");
       expect(await file("pr-agent-review.sh")).toContain(PR_AGENT_DIR);
       expect(await file("review-helper.md")).toBeNull();
     });
 
     test("both: the configured directory reaches the wrapper and the helper prompt is written without the section", async () => {
-      const { prompt, file } = await review({ reviewEngine: "both", prAgentDir: "/opt/custom-pr-agent" });
+      const { prompt, file, engineDir } = await review({ reviewEngine: "both", prAgentDir: "/opt/custom-pr-agent" });
       expect(prompt).toContain("## Review engine: both");
+      expect(prompt).toContain(`--prompt-file "${engineDir}/review-helper.md"`);
       expect(await file("pr-agent-review.sh")).toContain("/opt/custom-pr-agent");
       expect(await file("pr-agent-review.sh")).not.toContain(PR_AGENT_DIR);
       const helper = (await file("review-helper.md"))!;
