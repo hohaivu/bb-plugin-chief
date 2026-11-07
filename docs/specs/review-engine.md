@@ -104,8 +104,8 @@ A reviewer's ready report carries `findings`. Each finding has `file` (1 to 300 
 1. `startReview` builds the brief as in the plain review.
 2. In `reviewer` mode, the prompt and the files stay as in the plain review.
 3. In another mode, the prompt is the plain prompt plus the engine section. The section lists every target once.
-4. After the launch, the code writes `review-context.md` first, as before.
-5. When some target is pinned, the code writes `pr-agent-review.sh` to the engine folder before the launch. In `both` mode it also writes `review-helper.md` there. If the wrapper cannot be written, the prompt has no engine section and the reviewer does a direct review.
+4. After the launch, the code writes `review-context.md`, as before.
+5. Before the launch, when some target is pinned, the code writes `pr-agent-review.sh` to the engine folder. In `both` mode it also writes `review-helper.md` there. If the wrapper cannot be written, the prompt has no engine section and the reviewer does a direct review.
 6. A write of either new file follows the same 3 attempts. After 3 failures one Chief alert names the file. The alert key is the path under the engine folder without its extension and `:<worker id>`. The text says the reviewer falls back to a direct review. The launch stays.
 7. The reviewer runs the wrapper once for each distinct `<url> <sha>` pair. It then gives each target one outcome.
 8. The reviewer sends one `chief_report`.
