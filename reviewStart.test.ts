@@ -828,9 +828,13 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
   describe("a failed engine file never undoes the launch", () => {
     const FALLBACK = "The reviewer falls back to a direct review.";
     /** Fails every write of `names` (to Chief's folder or the reviewer's storage); the others succeed. */
-    async function failing(mode: "pr-agent" | "both", names: string[]) {
-      const w = world({ heads: heads1, engine: engineOf(mode) });
+    async function failing(mode: "pr-agent" | "both", names: string[], mixed = false) {
+      const w = world({ heads: mixed ? { [pr(1)]: headOf("feature/one"), [pr(2)]: null } : heads1, engine: engineOf(mode) });
       pinnedOne(w);
+      if (mixed) {
+        w.worker("W2", { prUrl: pr(2), branch: "feature/two" });
+        w.covering(["W1", "W2"]);
+      }
       const fails = (name: string) => names.some((failed) => name.endsWith(failed));
       w.host.writeFile.mockImplementation(async (_threadId, relPath) => { if (fails(relPath)) throw new Error("disk full"); });
       w.host.writeArtifact.mockImplementation(async (threadId, projectId, name, _content, hostId) => {
@@ -875,17 +879,54 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     });
 
     // Contract (docs/specs/review-engine.md, Flow 5): a helper prompt that cannot be written leaves no helper lines and no helper spawn command; the
-    // reviewer does the direct half itself. Regression: still naming the helper path makes the reviewer spawn a helper on a file that is not there.
-    test("both: a helper-file failure drops the helper lines and the spawn command, keeps the wrapper run, and tells the reviewer to do the direct half itself", async () => {
-      const { w } = await failing("both", ["review-helper.md"]);
+    // reviewer does the direct half itself: a direct review of EVERY target (definitive pr-agent outcomes and the unpinned target included) combined with
+    // the pr-agent outcomes. Regression: dropping the both-mode obligation with the helper lets a definitive pr-agent result stand in for the review.
+    // The plan is mixed (one pinned, one unpinned target) so a direct half limited to the wrapper's targets fails too.
+    test("both: a helper-file failure drops the helper lines and the spawn command, keeps the wrapper run, and tells the reviewer to review every target directly and combine", async () => {
+      const { w } = await failing("both", ["review-helper.md"], true);
 
       const prompt: string = w.launches[0]!.args.prompt;
       expect(prompt).toContain("## Review engine: both");
       expect(executedLines(prompt)).toEqual([`bash "${folderOf(w)}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`]);
-      expect(prompt).not.toContain("bb thread spawn");
-      expect(prompt).not.toContain("review-helper.md");
-      expect(prompt).not.toContain("Helper (start it first)");
-      expect(prompt).toContain("direct half: reviewer (helper prompt not written)");
+      // No helper lifecycle: nothing to spawn, wait for, stop, read or archive, and no stop-confirmation rule.
+      for (const gone of ["bb thread spawn", "review-helper.md", "Helper (start it first)", "<helper id>", "bb thread wait", "bb thread show", "bb thread stop", "bb thread output", "bb thread archive", "helper prompt missing", "helper failed", "helper timeout", "shared checkout"]) {
+        expect(prompt).not.toContain(gone);
+      }
+      // The direct half is the reviewer's, over every target, definitive outcomes included.
+      expect(prompt).toContain("Direct half: the helper prompt was not written, so you do it.");
+      expect(prompt).toContain("review every target yourself as described above, including targets with a definitive `changes_required` or `no_concerns_found` outcome");
+      expect(prompt).toContain("does not re-verify or reclassify pr-agent's definitive findings");
+      expect(prompt).toContain("Combine: your own direct findings for every target plus the pr-agent half under the outcomes above. Set `regression: true` when your direct review found a regression.");
+      // Both-mode outcome rules, not the pr-agent-only ones.
+      expect(prompt).toContain("Its findings stay nits; the direct half covers the target.");
+      expect(prompt).not.toContain("confirm, drop or reclassify each");
+      expect(prompt).toContain("The target has only the direct half.");
+      expect(prompt).toContain("- not pinned: the direct half only.");
+      expect(prompt).toContain("- worker W2 (branch feature/two): not pinned → direct review (no pinned pull request head)");
+      expect(prompt).toContain("Aggregate once:");
+      expect(prompt).toContain("Send one chief_report.");
+      expect(prompt).toContain("Result: the first line is `Engine: both`");
+      expect(prompt).toContain("Add `direct half: reviewer (helper prompt not written)`.");
+      expect(prompt).not.toContain("`direct half: helper`");
+    });
+
+    // Control: with the helper written, the same plan keeps the helper lifecycle and the helper-based direct half.
+    test("both: a written helper prompt keeps the helper lines, the spawn command and the helper-based direct half", async () => {
+      const { w } = await failing("both", [], true);
+
+      const prompt: string = w.launches[0]!.args.prompt;
+      expect(executedLines(prompt)).toEqual([
+        expect.stringContaining(`--prompt-file "${folderOf(w)}/review-helper.md"`),
+        `bash "${folderOf(w)}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`,
+      ]);
+      expect(prompt).toContain("Helper (start it first)");
+      expect(prompt).toContain("bb thread wait <helper id> --status idle --timeout 540s");
+      expect(prompt).toContain("Combine: the direct half is the helper's findings");
+      expect(prompt).toContain("Add `direct half: helper` or `direct half: reviewer (<reason>)`.");
+      expect(prompt).toContain("run `bb thread archive <helper id>`");
+      expect(prompt).toContain("Its findings stay nits; the direct half covers the target.");
+      expect(prompt).not.toContain("the helper prompt was not written");
+      expect(prompt).not.toContain("direct half: reviewer (helper prompt not written)");
     });
 
     test("the context and the wrapper both fail: two alerts, each under its own key, the context's keeps its own consequence", async () => {
