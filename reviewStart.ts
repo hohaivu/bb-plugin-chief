@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { verdictPreview } from "./delegationBrief";
@@ -353,8 +354,9 @@ export interface ReviewHost<Row> {
   checkoutSkip: (projectId: string) => Promise<string | null>;
   recordedCommands: (threadId: string) => Promise<RecordedCommand[] | null>;
   writeFile: (threadId: string, relPath: string, content: string) => Promise<unknown>;
-  /** Writes `name` (may name a subfolder) under Chief's data folder for `threadId` and returns the absolute path. Works before the reviewer exists. */
-  writeArtifact: (threadId: string, projectId: string, name: string, content: string) => Promise<string>;
+  /** Writes `name` (may name a subfolder) under Chief's data folder for `threadId` and returns the absolute path. Works before the reviewer exists.
+   * `hostId` writes on that host instead of the thread's own. */
+  writeArtifact: (threadId: string, projectId: string, name: string, content: string, hostId?: string) => Promise<string>;
   alertChief: (row: Row, key: string, message: string) => Promise<unknown>;
   logError: (message: string) => void;
 }
@@ -655,20 +657,21 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         threadId: target.row.thread_id, branch: target.head?.branch ?? target.row.branch, prUrl: target.row.pr_url, sha: target.head?.sha ?? null,
         ...(target.since ? { since: target.since } : {}),
       }));
-      // The engine files go under Chief's data folder, keyed by the reviewed worker and its report, before the spawn: their absolute
+      // The engine files go under Chief's data folder on the reviewer's host, in a folder unique to this attempt, before the spawn: their absolute
       // path is rendered literally into the reviewer's commands, and the reviewer's own storage is not known until it exists.
       let engineDir: string | null = null;
+      let helperWritten = true;
       if (engine.mode !== "reviewer" && engineTargets.some(isPinned)) {
         const fallback = "The reviewer falls back to a direct review.";
-        const folder = `review-${mine.row.report_seq}`;
+        const folder = `review-${mine.row.report_seq}/${randomUUID().slice(0, 8)}`;
         const subject = `the review of ${workerThreadId}`;
-        const toArtifact = (relPath: string, body: string) => host.writeArtifact(workerThreadId, worker.project_id, relPath, body);
+        const toArtifact = (relPath: string, body: string) => host.writeArtifact(workerThreadId, worker.project_id, relPath, body, hostId ?? undefined);
         const scriptPaths: string[] = [];
         const written = await writeStorage(workerThreadId, `${folder}/pr-agent-review.sh`, prAgentScript(engine.prAgentDir), workerThreadId, fallback,
           async (relPath, body) => { scriptPaths.push(await toArtifact(relPath, body)); }, subject);
         if (written) {
           engineDir = dirname(scriptPaths[0]!);
-          if (engine.mode === "both") await writeStorage(workerThreadId, `${folder}/review-helper.md`, helperPrompt(prompt, context || null), workerThreadId, fallback, toArtifact, subject);
+          if (engine.mode === "both") helperWritten = await writeStorage(workerThreadId, `${folder}/review-helper.md`, helperPrompt(prompt, context || null), workerThreadId, fallback, toArtifact, subject);
         }
       }
       const thread = await managedSpawn.launch(prepared, {
@@ -676,7 +679,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         environment: reuse ? { type: "reuse", environmentId: reuse.environmentId } : head
           ? { type: "host", hostId: hostId as string, workspace: { type: "managed-worktree", baseBranch: { kind: "named" as const, name: head.branch } } }
           : { type: "reuse", environmentId: live.environmentId! },
-        title, prompt: engine.mode === "reviewer" || (!engineDir && engineTargets.some(isPinned)) ? prompt : [prompt, ...prAgentSection(engine.mode, engineTargets, engineDir ?? "")].join("\n"),
+        title, prompt: engine.mode === "reviewer" || (!engineDir && engineTargets.some(isPinned)) ? prompt : [prompt, ...prAgentSection(engine.mode, engineTargets, engineDir ?? "", helperWritten)].join("\n"),
       }, { role: "reviewer", chiefThreadId: worker.chief_thread_id, workerThreadId, reviewedReportSeq: mine.row.report_seq, reviewedHeadSha: head?.sha },
       (threadId) => ledger.addTargets(threadId, covered.map((target) => ({
         threadId: target.row.thread_id, reportSeq: target.row.report_seq, headSha: target.head?.sha ?? null, prUrl: target.row.pr_url, branch: target.row.branch,

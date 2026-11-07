@@ -3030,14 +3030,16 @@ export default async function plugin(bb: BbPluginApi) {
    * thread's host, so every Chief instance and worktree of a project shares them and nothing lands in a checkout.
    * Falls back to the thread's storage root when the data dir is unknown. */
   const dataDirs = new Map<string, string | null>();
-  async function artifactDir(threadId: string, projectId: string) {
-    const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
+  async function artifactDir(threadId: string, projectId: string, onHost?: string) {
+    const location = await bb.sdk.threads.storageLocation({ threadId });
+    const hostId = onHost ?? location.hostId, storageRootPath = location.storageRootPath;
     if (!dataDirs.has(hostId)) {
       // ponytail: per-process cache; a moved BB data dir needs a plugin reload
       let reason = "its thread storage root is unknown";
       const dataDir = await bb.sdk.hosts.get({ hostId }).then((host) => host.threadStorageRootPath ? dirname(host.threadStorageRootPath) : null)
         .catch((error) => { reason = `reading it failed: ${String(error)}`; return null; });
       if (dataDir) dataDirs.set(hostId, dataDir);
+      else if (onHost) throw new Error(`Host ${hostId}'s BB data dir is unavailable (${reason})`); // the thread's storage root is on another host
       else {
         bb.log.warn(`Host ${hostId}'s BB data dir is unavailable (${reason}); writing Chief artifacts to thread storage instead.`);
         // Recorded before the path is used, so a thread's storage that holds evidence is never cleared; if this throws, so does the artifact write.
@@ -3049,8 +3051,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** Writes one of Chief's artifacts to its shared folder and returns the absolute path. */
-  async function writeArtifact(threadId: string, projectId: string, name: string, content: string) {
-    const { hostId, dir } = await artifactDir(threadId, projectId);
+  async function writeArtifact(threadId: string, projectId: string, name: string, content: string, onHost?: string) {
+    const { hostId, dir } = await artifactDir(threadId, projectId, onHost);
     return atomicWrite(hostId, join(dir, name), content);
   }
 

@@ -14,7 +14,7 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 - **Direct review**: the plain review in which the reviewer reads the code.
 - **Fallback**: a direct review that replaces a failed or inconclusive engine step.
 - **Reviewer storage**: `$BB_THREAD_STORAGE` of the reviewer thread.
-- **Engine folder**: `<BB data dir>/chief/<projectId>/<worker id>/review-<report number>/`, Chief's data folder for the reviewed worker. The code writes the wrapper and the helper prompt here before the reviewer is spawned, and the section names the absolute path in every command.
+- **Engine folder**: `<BB data dir>/chief/<projectId>/<worker id>/review-<report number>/<attempt id>/`, Chief's data folder for the reviewed worker, on the host the reviewer runs on. The attempt id is a fresh 8-character id for each review start, so a repeat review never reads another attempt's files. The code writes the wrapper and the helper prompt here before the reviewer is spawned, and the section names the absolute path, as that host returned it, in every command.
 
 ## Ownership and Entry Points
 
@@ -105,8 +105,8 @@ A reviewer's ready report carries `findings`. Each finding has `file` (1 to 300 
 2. In `reviewer` mode, the prompt and the files stay as in the plain review.
 3. In another mode, the prompt is the plain prompt plus the engine section. The section lists every target once.
 4. After the launch, the code writes `review-context.md`, as before.
-5. Before the launch, when some target is pinned, the code writes `pr-agent-review.sh` to the engine folder. In `both` mode it also writes `review-helper.md` there. If the wrapper cannot be written, the prompt has no engine section and the reviewer does a direct review.
-6. A write of either new file follows the same 3 attempts. After 3 failures one Chief alert names the file. The alert key is `review-<report number>/<file name without extension>:<worker id>`, for example `review-3/pr-agent-review:<worker id>`. The text says the reviewer falls back to a direct review. The launch stays.
+5. Before the launch, when some target is pinned, the code writes `pr-agent-review.sh` to the engine folder. In `both` mode it also writes `review-helper.md` there. If the wrapper cannot be written, the prompt has no engine section and the reviewer does a direct review. If the helper prompt cannot be written, the section has no helper lines and no helper spawn command: the reviewer does the direct half itself and the result line says `direct half: reviewer (helper prompt not written)`.
+6. A write of either new file follows the same 3 attempts. After 3 failures one Chief alert names the file. The alert key is `review-<report number>/<attempt id>/<file name without extension>:<worker id>`, for example `review-3/1a2b3c4d/pr-agent-review:<worker id>`. The text says the reviewer falls back to a direct review. The launch stays.
 7. The reviewer runs the wrapper once for each distinct `<url> <sha>` pair. It then gives each target one outcome.
 8. The reviewer sends one `chief_report`.
 

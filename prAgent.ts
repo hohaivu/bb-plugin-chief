@@ -208,14 +208,16 @@ exit 0
 const BAN = "The ban on running builds, linters, typecheckers and tests still holds.";
 
 /** The lines appended to the reviewer prompt for mode `pr-agent` or `both`. Every target appears once; with no pinned target only the heading and the direct line remain.
- * `dir` is the absolute directory holding `pr-agent-review.sh` and `review-helper.md`, written before the reviewer is spawned and rendered literally into every command. */
-export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[], dir: string): string[] {
+ * `dir` is the absolute directory holding `pr-agent-review.sh` and `review-helper.md`, written before the reviewer is spawned and rendered literally into every command.
+ * `helperWritten` false (both mode, helper prompt write failed): no helper lines, the reviewer does the direct half itself. */
+export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[], dir: string, helperWritten = true): string[] {
   const heading = `## Review engine: ${mode}`;
   const pinned = targets.filter(isPinned);
   if (!pinned.length) {
     return [heading, `No target has a pinned pull request head: review directly as described above, and start your result with \`Engine: ${mode} → direct (no pinned pull request head)\`.`];
   }
-  const both = mode === "both";
+  // `both` without its helper prompt keeps the heading and result line but has only the direct half of the reviewer: no helper lines.
+  const both = mode === "both" && helperWritten;
   const pairs = [...new Set(pinned.map((target) => `${target.prUrl} ${target.sha}`))];
   const spawn = `bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID" --parent-notifications off --title "Review helper" --prompt-file "${dir}/review-helper.md" --json`;
   return [
@@ -248,7 +250,7 @@ export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[
       "Combine: the direct half is the helper's findings, or, when it failed, your own direct review of every target as described above, done only after the stop rule. The pr-agent half follows the outcomes above. Set `regression: true` when the helper or your own review found a regression.",
     ] : []),
     "Aggregate once: findings are the union over all targets. Merge two findings only when target, file, line and problem are the same; a merged finding is blocking if either was. Never merge across targets. With more than one target, start each message with `[<branch>] `. The verdict is request_changes if and only if a blocking finding remains. Over 40 findings: keep every blocking finding, fill with nits, and name the dropped nit count in result; if blocking findings alone exceed 40, fold the blocking findings of one target and file into one finding that names the lines in its message, until 40 fit. Never drop a blocking finding.",
-    `Result: the first line is \`Engine: ${mode}\`, then one line per target: \`<branch>: pr-agent <recommendation>\` or \`<branch>: direct (<reason>)\`.${both ? " Add `direct half: helper` or `direct half: reviewer (<reason>)`." : ""}`,
+    `Result: the first line is \`Engine: ${mode}\`, then one line per target: \`<branch>: pr-agent <recommendation>\` or \`<branch>: direct (<reason>)\`.${both ? " Add `direct half: helper` or `direct half: reviewer (<reason>)`." : mode === "both" ? " Add `direct half: reviewer (helper prompt not written)`." : ""}`,
     "Send one chief_report.",
     ...(both ? ["After chief_report is accepted, run `bb thread archive <helper id>`; if it fails, say so in your final message (the helper is archived with you as its lifecycle owner). Never archive the helper before the report is accepted."] : []),
   ];
