@@ -81,10 +81,11 @@ function world({ projectPath = null, heads = {}, engine }: Options = {}) {
     checkoutSkip: vi.fn(async (_projectId: string): Promise<string | null> => null),
     recordedCommands: vi.fn(async (_threadId: string) => []),
     writeFile: vi.fn(async (_threadId: string, relPath: string, _content: string): Promise<unknown> => { events.push(`storage:${relPath}`); }),
-    /** Chief's data folder: <data dir>/chief/<project>/<thread>/<name>. Answers the absolute path, as the real one does. */
-    writeArtifact: vi.fn(async (threadId: string, projectId: string, name: string, _content: string): Promise<string> => {
+    /** Chief's data folder: <that host's data dir>/chief/<project>/<thread>/<name>. Answers the absolute path on the host it was asked to write on;
+     * with no host it is the thread's own host, `host_worker`, which is never a reviewer host in these fixtures. */
+    writeArtifact: vi.fn(async (threadId: string, projectId: string, name: string, _content: string, hostId?: string): Promise<string> => {
       events.push(`artifact:${name}`);
-      return `/data/chief/${projectId}/${threadId}/${name}`;
+      return `/data/${hostId ?? "host_worker"}/chief/${projectId}/${threadId}/${name}`;
     }),
     alertChief: vi.fn(async (_row: ManagedRow, _key: string, _message: string): Promise<unknown> => undefined),
     logError: vi.fn((_message: string) => undefined),
@@ -641,11 +642,20 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
   const engineOf = (mode: "pr-agent" | "both") => async () => ({ mode, prAgentDir: DIR });
   const writesOf = (w: ReturnType<typeof world>) => w.host.writeFile.mock.calls.map(([, relPath]) => relPath);
   const fileOf = (w: ReturnType<typeof world>, name: string) => w.host.writeFile.mock.calls.find(([, relPath]) => relPath === name)?.[2] as string | undefined;
-  /** Engine files go to Chief's data folder under `review-<report number>/`; the names are given relative to that folder. */
-  const artifactsOf = (w: ReturnType<typeof world>) => w.host.writeArtifact.mock.calls.map(([, , name]) => name.replace(/^review-\d+\//, ""));
+  /** Engine files go to Chief's data folder under `review-<report number>/<attempt id>/`; the names are given relative to that folder. */
+  const ATTEMPT = /^review-\d+\/[0-9a-f]{8}\//;
+  const artifactsOf = (w: ReturnType<typeof world>) => w.host.writeArtifact.mock.calls.map(([, , name]) => name.replace(ATTEMPT, ""));
   const artifactOf = (w: ReturnType<typeof world>, name: string) => w.host.writeArtifact.mock.calls.find(([, , written]) => written.endsWith(`/${name}`))?.[3] as string | undefined;
-  /** The folder the prompt must name for worker W1's first report on project `proj`. */
-  const FOLDER = "/data/chief/proj/W1/review-1";
+  /** The attempt folder a start wrote its files to (`review-<n>/<id>`), taken from the writes; every write of one start must share it. */
+  const folderOfStart = (calls: Array<[string, string, string, string, string?]>) => {
+    const folders = new Set(calls.map(([, , name]) => name.slice(0, name.lastIndexOf("/"))));
+    expect([...folders]).toHaveLength(1);
+    const [folder] = [...folders];
+    expect(folder).toMatch(/^review-\d+\/[0-9a-f]{8}$/);
+    return folder!;
+  };
+  /** The absolute folder the prompt must name for worker W1 on project `proj`, as the reviewer's host `host` (default `host_proj`) returned it. */
+  const folderOf = (w: ReturnType<typeof world>, host = "host_proj") => `/data/${host}/chief/proj/W1/${folderOfStart(w.host.writeArtifact.mock.calls as any)}`;
   const executedLines = (prompt: string) => prompt.split("\n").filter((line) => line.startsWith("bash ") || line.startsWith("bb thread spawn"));
 
   /** The same fixture in reviewer mode: the prompt every other mode must extend. */
@@ -668,6 +678,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     const prompt: string = w.launches[0]!.args.prompt;
     expect(prompt.startsWith(`${base.prompt}\n## Review engine: pr-agent\n`)).toBe(true);
     expect(prompt).toContain(`- worker W1 (branch feature/one): ${pr(1)} pinned to ${SHA_B} → pr-agent`);
+    const FOLDER = folderOf(w);
     expect(prompt).toContain(`bash "${FOLDER}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
     expect(executedLines(prompt)).toEqual([`bash "${FOLDER}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`]);
     expect(prompt).not.toContain("$BB_THREAD_STORAGE/pr-agent-review.sh");
@@ -706,6 +717,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     await w.review.startReview(w.chief, "W1");
 
     const prompt: string = w.launches[0]!.args.prompt;
+    const FOLDER = folderOf(w);
     const commands = executedLines(prompt);
     expect(commands).toHaveLength(2);
     expect(commands.find((line) => line.startsWith("bb thread spawn"))).toContain(`--prompt-file "${FOLDER}/review-helper.md"`);
@@ -719,9 +731,10 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
     await w.review.startReview(w.chief, "W1");
 
+    const folder = folderOfStart(w.host.writeArtifact.mock.calls as any);
     expect(w.events).toEqual([
-      "artifact:review-1/pr-agent-review.sh",
-      ...(mode === "both" ? ["artifact:review-1/review-helper.md"] : []),
+      `artifact:${folder}/pr-agent-review.sh`,
+      ...(mode === "both" ? [`artifact:${folder}/review-helper.md`] : []),
       "launch",
       "storage:review-context.md",
     ]);
@@ -733,8 +746,10 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
     await w.review.startReview(w.chief, "W1");
 
-    expect(w.host.writeArtifact.mock.calls.map(([, , name]) => name)).toEqual(["review-3/pr-agent-review.sh"]);
-    expect(w.launches[0]!.args.prompt).toContain(`bash "/data/chief/proj/W1/review-3/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
+    const folder = folderOfStart(w.host.writeArtifact.mock.calls as any);
+    expect(folder).toMatch(/^review-3\//);
+    expect(w.host.writeArtifact.mock.calls.map(([, , name]) => name)).toEqual([`${folder}/pr-agent-review.sh`]);
+    expect(w.launches[0]!.args.prompt).toContain(`bash "/data/host_proj/chief/proj/W1/${folder}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
   });
 
   test("a plan review with two pinned targets lists both and names both pairs for the wrapper", async () => {
@@ -749,6 +764,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     const prompt: string = w.launches[0]!.args.prompt;
     expect(prompt).toContain(`- worker W1 (branch feature/one): ${pr(1)} pinned to ${SHA_B} → pr-agent`);
     expect(prompt).toContain(`- worker W2 (branch feature/two): ${pr(2)} pinned to ${SHA_A} → pr-agent`);
+    const FOLDER = folderOf(w);
     expect(executedLines(prompt)).toEqual([`bash "${FOLDER}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`, `bash "${FOLDER}/pr-agent-review.sh" ${pr(2)} ${SHA_A}`]);
     expect(artifactsOf(w)).toEqual(["pr-agent-review.sh"]);
   });
@@ -817,9 +833,9 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       pinnedOne(w);
       const fails = (name: string) => names.some((failed) => name.endsWith(failed));
       w.host.writeFile.mockImplementation(async (_threadId, relPath) => { if (fails(relPath)) throw new Error("disk full"); });
-      w.host.writeArtifact.mockImplementation(async (threadId, projectId, name) => {
+      w.host.writeArtifact.mockImplementation(async (threadId, projectId, name, _content, hostId) => {
         if (fails(name)) throw new Error("disk full");
-        return `/data/chief/${projectId}/${threadId}/${name}`;
+        return `/data/${hostId}/chief/${projectId}/${threadId}/${name}`;
       });
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       const run = w.review.startReview(w.chief, "W1");
@@ -858,12 +874,124 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       expect(attempts(w, "review-helper.md")).toBe(3);
     });
 
+    // Contract (docs/specs/review-engine.md, Flow 5): a helper prompt that cannot be written leaves no helper lines and no helper spawn command; the
+    // reviewer does the direct half itself. Regression: still naming the helper path makes the reviewer spawn a helper on a file that is not there.
+    test("both: a helper-file failure drops the helper lines and the spawn command, keeps the wrapper run, and tells the reviewer to do the direct half itself", async () => {
+      const { w } = await failing("both", ["review-helper.md"]);
+
+      const prompt: string = w.launches[0]!.args.prompt;
+      expect(prompt).toContain("## Review engine: both");
+      expect(executedLines(prompt)).toEqual([`bash "${folderOf(w)}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`]);
+      expect(prompt).not.toContain("bb thread spawn");
+      expect(prompt).not.toContain("review-helper.md");
+      expect(prompt).not.toContain("Helper (start it first)");
+      expect(prompt).toContain("direct half: reviewer (helper prompt not written)");
+    });
+
     test("the context and the wrapper both fail: two alerts, each under its own key, the context's keeps its own consequence", async () => {
       const { w, out } = await failing("pr-agent", ["review-context.md", "pr-agent-review.sh"]);
 
       expect(out).toMatchObject({ threadId: "R1" });
       expect(w.host.alertChief.mock.calls.map(([, key]) => key)).toEqual([expect.stringMatching(/pr-agent-review:W1$/), "review-context:R1"]);
       expect(w.host.alertChief.mock.calls[1]![2]).toBe("Could not write review-context.md for reviewer R1 after 3 attempts: Error: disk full. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.");
+    });
+  });
+
+  // Contract (docs/specs/review-engine.md, Engine folder): the folder holds a fresh attempt id for each review start, so a repeat review of the
+  // same worker and report never reads another attempt's files. Regression: one folder per worker and report lets attempt 2 run attempt 1's prompt.
+  describe("per-attempt engine folder", () => {
+    /** One pinned worker; attempt 1 finishes (its reviewer reports) and the pull request moves to a new head, so a second review starts on the same report. */
+    async function twoAttempts(mode: "pr-agent" | "both", second?: (w: ReturnType<typeof world>) => void) {
+      const w = world({ heads: heads1, engine: engineOf(mode) });
+      pinnedOne(w);
+      const first = await w.review.startReview(w.chief, "W1");
+      const firstWrites = [...w.host.writeArtifact.mock.calls] as any[];
+      w.nextReport(first.threadId);
+      w.forge.head.mockResolvedValue(headOf("feature/one", SHA_A));
+      second?.(w);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const run = w.review.startReview(w.chief, "W1");
+      await vi.advanceTimersByTimeAsync(12_000);
+      const out = await run;
+      vi.useRealTimers();
+      const secondWrites = w.host.writeArtifact.mock.calls.slice(firstWrites.length) as any[];
+      return { w, out, firstWrites, secondWrites };
+    }
+
+    test.each(["pr-agent", "both"] as const)("%s: two reviews of the same worker and report write to different folders, and the second prompt names only its own files", async (mode) => {
+      const { w, out, firstWrites, secondWrites } = await twoAttempts(mode);
+
+      expect(out).toMatchObject({ threadId: "R2", created: true });
+      const [first, second] = [folderOfStart(firstWrites), folderOfStart(secondWrites)];
+      expect(first).toMatch(/^review-1\//);
+      expect(second).toMatch(/^review-1\//);
+      expect(second).not.toBe(first);
+      const prompt: string = w.launches[1]!.args.prompt;
+      expect(prompt).not.toContain(first);
+      expect(prompt).toContain(`bash "/data/host_proj/chief/proj/W1/${second}/pr-agent-review.sh" ${pr(1)} ${SHA_A}`);
+      if (mode === "both") expect(prompt).toContain(`--prompt-file "/data/host_proj/chief/proj/W1/${second}/review-helper.md"`);
+      // Attempt 1's prompt still names attempt 1's folder: the later start did not rewrite it.
+      expect(w.launches[0]!.args.prompt).toContain(`/data/host_proj/chief/proj/W1/${first}/pr-agent-review.sh`);
+    });
+
+    test("both: attempt 1 wrote its helper prompt, attempt 2's helper writes all fail: attempt 2 never spawns attempt 1's helper prompt and falls back to the direct half", async () => {
+      const { w, firstWrites, secondWrites } = await twoAttempts("both", (world2) => {
+        const succeed = world2.host.writeArtifact.getMockImplementation()!;
+        world2.host.writeArtifact.mockImplementation(async (threadId, projectId, name, content, hostId) => {
+          if (name.endsWith("review-helper.md")) throw new Error("disk full");
+          return succeed(threadId, projectId, name, content, hostId);
+        });
+      });
+
+      const first = folderOfStart(firstWrites);
+      expect(firstWrites.map(([, , name]) => name.replace(ATTEMPT, ""))).toEqual(["pr-agent-review.sh", "review-helper.md"]);
+      expect(secondWrites.filter(([, , name]) => name.endsWith("review-helper.md"))).toHaveLength(3);
+      const prompt: string = w.launches[1]!.args.prompt;
+      expect(prompt).not.toContain("bb thread spawn");
+      expect(prompt).not.toContain("review-helper.md");
+      expect(prompt).not.toContain(first);
+      expect(prompt).toContain("direct half: reviewer (helper prompt not written)");
+      expect(w.host.alertChief.mock.calls.map(([, key]) => key)).toEqual([expect.stringMatching(/\/review-helper:W1$/)]);
+    });
+  });
+
+  // Contract (docs/specs/review-engine.md, Engine folder): the engine files are written on the host the reviewer runs on, and the section names the
+  // paths that host returned. Regression: writing on the worker's host renders paths the reviewer's host does not have.
+  describe("engine files on the reviewer's host", () => {
+    const hostsOf = (w: ReturnType<typeof world>) => w.host.writeArtifact.mock.calls.map(([, , , , hostId]) => hostId);
+
+    test("a pinned review writes every engine file on the project's reviewer host, not the worker's host, and the prompt names that host's paths", async () => {
+      const w = world({ heads: heads1, engine: engineOf("both") });
+      w.host.projectHost.mockResolvedValue("host_reviewer");
+      pinnedOne(w);
+
+      await w.review.startReview(w.chief, "W1");
+
+      expect(hostsOf(w)).toEqual(["host_reviewer", "host_reviewer"]);
+      const prompt: string = w.launches[0]!.args.prompt;
+      const folder = folderOf(w, "host_reviewer");
+      expect(executedLines(prompt)).toEqual([
+        expect.stringContaining(`--prompt-file "${folder}/review-helper.md"`),
+        `bash "${folder}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`,
+      ]);
+      expect(prompt).not.toContain("/data/host_worker/");
+      expect(prompt).not.toContain("/data/host_proj/");
+      expect(w.managedSpawn.prepare).toHaveBeenCalledWith("proj", { role: "reviewer", hostId: "host_reviewer" });
+    });
+
+    test("a review that reuses an earlier reviewer's worktree writes the engine files on that worktree's host", async () => {
+      const w = world({ heads: heads1, engine: engineOf("pr-agent") });
+      pinnedOne(w);
+      const first = await w.review.startReview(w.chief, "W1");
+      w.nextReport(first.threadId);
+      w.nextReport("W1");
+      w.host.reusableEnvironment.mockResolvedValue({ environmentId: "env_rev", hostId: "host_rev" });
+
+      await w.review.startReview(w.chief, "W1");
+
+      expect(hostsOf(w)).toEqual(["host_proj", "host_rev"]);
+      expect(w.launches[1]!.args.prompt).toContain(`bash "/data/host_rev/chief/proj/W1/review-2/`);
+      expect(w.launches[1]!.args.prompt).not.toContain("/data/host_proj/");
     });
   });
 });
