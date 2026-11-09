@@ -16,13 +16,13 @@ export interface BbTasksDeps {
 const TASKS_TIMEOUT_MS = 30_000;
 const AVAILABLE_TTL_MS = 5 * 60_000;
 const DECISION_LABEL = "needs-decision";
+const parse = (text: string) => { try { return JSON.parse(text); } catch { return null; } };
 const STATUS: Record<TrackerStatus, string> = { planning: "todo", working: "in_progress", review: "in_review", done: "done" };
 
 export function bbTasksTracker(deps: BbTasksDeps): Tracker {
   /** Runs `bb tasks <args> --json` as the server, not as a thread. A failure throws "<code>: <message>". */
   async function run(args: string[]) {
     const { BB_THREAD_ID: _thread, BB_PROJECT_ID: _project, ...env } = process.env;
-    const parse = (text: string) => { try { return JSON.parse(text); } catch { return null; } };
     let stdout: string;
     try {
       ({ stdout } = await deps.execFileAsync(process.env.BB_CLI ?? "bb", ["tasks", ...args, "--json"], {

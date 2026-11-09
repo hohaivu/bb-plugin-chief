@@ -4,6 +4,7 @@
 
 import { createHash } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { ManagedRow } from "./server";
 import { clip } from "./text";
 import type { Tracker, TrackerStatus } from "./tracker";
 
@@ -27,21 +28,6 @@ const ANSWER_POLL_MS = 60_000;
 const sha = (text: string) => createHash("sha1").update(text).digest("hex").slice(0, 12);
 const errorText = (error: unknown) => clip(error instanceof Error ? error.message : String(error), 1_000);
 
-/** What the tracker sync reads of a managed_threads row; the server's ManagedRow satisfies it. */
-export interface TrackerRow {
-  thread_id: string;
-  role: string;
-  state: string;
-  title: string;
-  project_id: string;
-  created_at: number;
-  plan_thread_id: string | null;
-  worker_thread_id: string | null;
-  replaces_thread_id: string | null;
-  plan_waves: string | null;
-  pr_url: string | null;
-}
-
 interface UnitRow {
   root_thread_id: string; project_id: string; tracker_project: string; title: string; description: string; marker: string;
   task_id: string | null; create_state: "sent" | "failed" | null; create_attempts: number;
@@ -54,17 +40,19 @@ interface ReceiptRow {
 /** What a sent decision remembers once its payload is cleared. */
 type Posted = { id: string; number: number; concernedThreadId: string };
 
-export function createTrackerSync<Row extends TrackerRow>(deps: {
+export function createTrackerSync(deps: {
   db: ReturnType<BbPluginApi["storage"]["database"]>;
   log: Pick<BbPluginApi["log"], "info" | "warn" | "error">;
   /** Null when the setting selects no adapter. A rejected settings read is also null. */
   config: () => Promise<{ tracker: Tracker; projects: Map<string, string> } | null>;
-  get: (id: string) => Row | undefined;
-  all: () => Row[];
+  get: (id: string) => ManagedRow | undefined;
+  all: () => ManagedRow[];
+  /** The ids of a replaces: chain, from the given row back to its oldest ancestor. */
+  taskChain: (id: string) => string[];
   /** The worker ids a reviewer covers. */
   reviewTargets: (reviewerId: string) => string[];
   /** Whether a planner's plan is absorbed. */
-  planDone: (planner: Row) => boolean;
+  planDone: (planner: ManagedRow) => boolean;
   /** Whether the pull request is merged; null when the forge could not say. */
   prMerged: (url: string, projectId: string) => Promise<boolean | null>;
   /** Writes one outbox alert to the live Chief of that thread and returns its dedupe key; null when there is none. Synchronous: it runs inside a transaction. */
@@ -82,26 +70,13 @@ export function createTrackerSync<Row extends TrackerRow>(deps: {
     db.prepare(`INSERT OR IGNORE INTO tracker_receipts (root_thread_id, kind, ref, payload, created_at) VALUES (?, ?, ?, ?, ?)`).run(rootId, kind, ref, payload, Date.now());
   const posted = (receipt: ReceiptRow) => JSON.parse(receipt.result ?? "{}") as Posted;
 
-  /** The oldest row of a replaces_thread_id chain. Loop-safe. */
-  function chainStart(row: Row) {
-    const seen = new Set<string>();
-    let current = row;
-    while (current.replaces_thread_id && !seen.has(current.thread_id)) {
-      seen.add(current.thread_id);
-      const previous = get(current.replaces_thread_id);
-      if (!previous) break;
-      current = previous;
-    }
-    return current;
-  }
-
   /** The unit a thread belongs to, by its root thread id; null for a thread that is no part of a tracked unit. */
-  function root(row: Row | undefined, depth = 0): string | null {
+  function root(row: ManagedRow | undefined, depth = 0): string | null {
     if (!row || depth > 3) return null;
-    if (row.role === "planner") return chainStart(row).thread_id;
+    if (row.role === "planner") return deps.taskChain(row.thread_id).at(-1)!;
     if (row.role === "worker") {
       const planner = row.plan_thread_id ? get(row.plan_thread_id) : undefined;
-      return planner ? root(planner, depth + 1) : chainStart(row).thread_id;
+      return planner ? root(planner, depth + 1) : deps.taskChain(row.thread_id).at(-1)!;
     }
     if (row.role === "advisor") {
       if (row.plan_thread_id) return root(get(row.plan_thread_id), depth + 1);
@@ -118,8 +93,8 @@ export function createTrackerSync<Row extends TrackerRow>(deps: {
   function describe(rootId: string) {
     const top = get(rootId);
     if (!top) return null;
-    const newest = (a: Row, b: Row) => b.created_at - a.created_at;
-    let threads: Row[];
+    const newest = (a: ManagedRow, b: ManagedRow) => b.created_at - a.created_at;
+    let threads: ManagedRow[];
     let phase: "planning" | "working" | "finished";
     if (top.role === "planner") {
       const planners = all().filter((r) => r.role === "planner" && (r.thread_id === rootId || r.replaces_thread_id === rootId));
@@ -154,7 +129,7 @@ export function createTrackerSync<Row extends TrackerRow>(deps: {
   }
 
   /** A unit that can take receipts: it exists and its create did not fail. */
-  const openUnit = (row: Row) => {
+  const openUnit = (row: ManagedRow) => {
     const rootId = root(row);
     const unit = rootId ? unitOf(rootId) : undefined;
     return unit && unit.create_state !== "failed" ? unit : undefined;
@@ -186,14 +161,15 @@ export function createTrackerSync<Row extends TrackerRow>(deps: {
     }
   }
 
-  async function sendReceipts(tracker: Tracker, unit: UnitRow, threads: Row[]) {
+  async function sendReceipts(tracker: Tracker, unit: UnitRow, threads: ManagedRow[]) {
     const pending = db.prepare(`SELECT * FROM tracker_receipts WHERE root_thread_id=? AND state IS NULL AND kind<>'answer' ORDER BY created_at, rowid`)
       .all(unit.root_thread_id) as ReceiptRow[];
     for (const r of pending) {
       if (r.kind === "unthread") {
         // Detach only after this thread and its successor are attached.
         const needs = [r.ref, ...threads.filter((t) => t.replaces_thread_id === r.ref).map((t) => t.thread_id)];
-        const states = needs.map((id) => (db.prepare(`SELECT state FROM tracker_receipts WHERE root_thread_id=? AND kind='thread' AND ref=?`).get(unit.root_thread_id, id) as { state: string | null } | undefined)?.state ?? null);
+        const attached = new Map(receiptsOf(unit.root_thread_id, "thread").map((t) => [t.ref, t.state]));
+        const states = needs.map((id) => attached.get(id) ?? null);
         if (states.includes("failed")) { settle(r, "failed", null, "an attach it depends on failed"); continue; }
         if (states.some((state) => state !== "sent")) continue;
       }
@@ -327,10 +303,10 @@ export function createTrackerSync<Row extends TrackerRow>(deps: {
           })();
           await sendReceipts(tracker, unit, facts.threads);
         });
-        await step("status", unitOf(unit.root_thread_id) ?? unit, async () => syncStatus(tracker, unitOf(unit.root_thread_id) ?? unit, facts.phase, facts.prUrls));
+        await step("status", unit, () => syncStatus(tracker, unit, facts.phase, facts.prUrls));
       }
-      await step("flag", unit, async () => syncFlag(tracker, unitOf(unit.root_thread_id) ?? unit));
-      await step("answers", unit, async () => pollAnswers(tracker, unitOf(unit.root_thread_id) ?? unit));
+      await step("flag", unit, () => syncFlag(tracker, unit));
+      await step("answers", unit, () => pollAnswers(tracker, unit));
     }
   }
 
@@ -339,7 +315,7 @@ export function createTrackerSync<Row extends TrackerRow>(deps: {
 
   return {
     /** A new plan or an undelegated worker begins a unit, when its project is mapped. */
-    start: (row: Row, description: string) => hook("start", ({ projects }) => {
+    start: (row: ManagedRow, description: string) => hook("start", ({ projects }) => {
       const project = projects.get(row.project_id);
       const rootId = root(row);
       if (!project || !rootId) return;
@@ -348,12 +324,12 @@ export function createTrackerSync<Row extends TrackerRow>(deps: {
         .run(rootId, row.project_id, project, row.title.replace(/^Plan · /, ""), `${clip(description, 4_000)}\n\n${marker}`, marker, Date.now());
     }),
     /** Queues the files an accepted report wrote. */
-    attachFiles: (row: Row, files: { name: string; content: string }[]) => hook("attachFiles", () => {
+    attachFiles: (row: ManagedRow, files: { name: string; content: string }[]) => hook("attachFiles", () => {
       const unit = openUnit(row);
       if (unit) for (const file of files) addReceipt(unit.root_thread_id, "file", `${row.thread_id}:${file.name}`, file.content);
     }),
     /** Queues a decision comment for a request Chief escalated. The same request on a unit posts once. */
-    decide: (row: Row, request: string) => hook("decide", () => {
+    decide: (row: ManagedRow, request: string) => hook("decide", () => {
       const unit = openUnit(row);
       if (!unit) return;
       const ref = sha(request);

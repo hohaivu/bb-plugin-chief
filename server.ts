@@ -2933,13 +2933,13 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   const selectTracker = trackerSelector({ execFileAsync, serverPath });
-  const trackerSync = createTrackerSync<ManagedRow>({
+  const trackerSync = createTrackerSync({
     db, log: bb.log,
     config: () => settings.get().then((value) => {
       const tracker = selectTracker(value.tracker);
       return tracker ? { tracker, projects: trackerProjects(value.trackerProjects) } : null;
     }).catch((error) => { bb.log.warn(`Tracker setting not read; the tracker is off: ${String(error)}`); return null; }),
-    get: store.get, all: store.all,
+    get: store.get, all: store.all, taskChain: ledger.taskChain,
     reviewTargets: (reviewerId) => ledger.targets(reviewerId).map((target) => target.worker_thread_id),
     planDone: progress.plannerAbsorbed,
     prMerged: async (url, projectId) => prMerged(url, await projectPath(projectId)),
