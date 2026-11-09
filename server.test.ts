@@ -7010,11 +7010,21 @@ describe("tester role", () => {
     test("the two settings default to reviewer and PR_AGENT_DIR", async () => {
       const { state } = await review({});
       const descriptors = (state.harness.registrations.settingsDescriptors as any);
-      expect(descriptors.reviewEngine).toMatchObject({ type: "string", default: "reviewer" });
+      expect(descriptors.reviewEngine).toMatchObject({ type: "select", options: ["reviewer", "pr-agent", "both"], default: "reviewer" });
       expect(descriptors.prAgentDir).toMatchObject({ type: "string", default: PR_AGENT_DIR });
     });
 
-    test.each([["no stored value", {}], ["an unrecognised value", { reviewEngine: "PR-AGENT" }], ["an empty value", { reviewEngine: "" }]])("%s: reviewer mode, no section, no engine file", async (_name, settings) => {
+    // Contract: the settings page offers exactly the values already stored (reviewEngine reviewer|pr-agent|both, tracker none|bb-tasks), so no stored
+    // value needs a migration; Tracker projects stays a string setting (same stored format) edited as a multiline field, one mapping per line.
+    test("the tracker settings keep their stored formats: tracker is a select, trackerProjects a multiline string", async () => {
+      const { state } = await review({});
+      const descriptors = (state.harness.registrations.settingsDescriptors as any);
+      expect(descriptors.tracker).toMatchObject({ type: "select", options: ["none", "bb-tasks"], default: "none" });
+      expect(descriptors.trackerProjects).toMatchObject({ type: "string", experimental_multiline: true, default: "" });
+    });
+
+    // An unrecognised or empty reviewEngine can no longer be stored (the select rejects it); reviewEngine() in prAgent.test.ts still owns that fallback.
+    test.each([["no stored value", {}]])("%s: reviewer mode, no section, no engine file", async (_name, settings) => {
       const { prompt, file } = await review(settings);
       expect(prompt).not.toContain("## Review engine");
       expect(await file("pr-agent-review.sh")).toBeNull();
