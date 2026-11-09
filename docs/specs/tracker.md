@@ -10,11 +10,12 @@ The tracker domain mirrors Chief work to tasks in an external task tracker. bb T
 - **Adapter**: the one file that knows the commands and words of one tracker. `trackerBbTasks.ts` is the only adapter.
 - **Task**: the tracker record that mirrors one unit.
 - **Unit**: one piece of Chief work that has one task. A row in `tracker_units` stores it.
-- **Root**: the thread that names a unit. For a plan, the root is the oldest planner of its `replaces_thread_id` chain. For unplanned work, the root is the oldest worker of that chain.
+- **Root**: the thread that names a unit. For a plan, the root is the oldest planner of its `replaces_thread_id` chain. For unplanned work, the root is the oldest worker of that chain. When that worker shares a `pr_url` or `branch` with an earlier worker of the same project, the root is the root of the oldest such worker.
 - **Effective plan**: the newest planner of a plan family with `plan_waves` in the state `ready` or `complete`. If none exists, it is the root planner. A family is the root planner and the planners that revise it.
 - **Tip**: the newest worker of an unplanned `replaces:` chain.
 - **Receipt**: one remote write that the plugin owes the tracker. A row in `tracker_receipts` stores it. `state IS NULL` means pending. The other states are `sent` and `failed`.
-- **Marker**: a line of text that proves an earlier call reached the tracker. A unit marker is `chief-unit:<12 hex>`. A decision marker is `chief-decision:<ref>`.
+- **Marker**: a line of text that proves an earlier call reached the tracker. A unit marker is `chief-unit:<12 hex>`. A decision marker is `chief-decision:<ref>`. A request marker is `chief-request:<thread id>`.
+- **Joined chain**: an unplanned `replaces:` chain whose root comes from earlier work on the same pull request or branch.
 - **Decision**: a **Need you** request that Chief posts as a comment on the task.
 - **Flag**: the label that shows an open decision on the task.
 - **Sync pass**: one run of `sync()`.
@@ -123,7 +124,7 @@ A thrown error in the cycle logs a warning. The loop continues.
 | `linkPullRequest(taskId, url)` | Records the pull request URL on the task. A second call with the same URL changes nothing. |
 | `attachFile(taskId, { name, content })` | Attaches a file to the task. |
 | `comments(taskId)` | Returns the comments, oldest first, each as `{ id, byOwner, body, at }`. |
-| `postDecision(taskId, body)` | Posts the body as given and returns the comment id. It is the only method that posts a comment. |
+| `postComment(taskId, body)` | Posts the body as given and returns the comment id. It is the only method that posts a comment: decision comments and follow-up request comments. |
 | `setDecisionFlag(project, taskId, open)` | Sets or clears the flag. |
 
 `server.ts` selects the adapter at the composition seam. The sync receives `Tracker | null`. Replacing bb Tasks needs one new adapter file, one import in `server.ts`, and the text of the `tracker` setting.
@@ -142,7 +143,7 @@ A thrown error in the cycle logs a warning. The loop continues.
 | `linkPullRequest` | `show <id>`. If the description lacks the URL, `update <id> --description` adds the line `Pull request: <url>`. |
 | `attachFile` | Writes the content to a temporary folder on the plugin server. It runs `attachment add <id> --file <path> --name <name>`. It removes the folder in `finally`. |
 | `comments` | `show <id>`. A comment of `kind` `user` has `byOwner` true. |
-| `postDecision` | `comment <id> --body <body> --author Chief`. It never passes `--notify`. |
+| `postComment` | `comment <id> --body <body> --author Chief`. It never passes `--notify`. |
 | `setDecisionFlag` | Open: ensure the label `needs-decision` exists in the project, then `update <id> --add-label needs-decision`. Closed: `update <id> --remove-label needs-decision`. The adapter caches the label check for each project. |
 
 Reasons:
@@ -158,7 +159,7 @@ A unit is one root. `trackerSync` resolves the root of a row. It walks every cha
 | --- | --- |
 | Planner | The oldest planner of its `replaces_thread_id` chain. |
 | Worker with `plan_thread_id` | The root of that planner. |
-| Unplanned worker | The oldest row of its `replaces_thread_id` chain. |
+| Unplanned worker | The oldest row of its `replaces_thread_id` chain. If that row shares a `pr_url` or `branch` with an earlier worker of the same project, the root of the oldest such worker. The state of the earlier worker does not matter. |
 | Advisor with `plan_thread_id` | The root of that planner. |
 | Advisor with `worker_thread_id` | The root of that worker. |
 | Reviewer | The root of the worker of its first review target, else of its `worker_thread_id`. |
@@ -168,15 +169,15 @@ A row with no root has no task. Escalation and verdicts on it post nothing.
 
 **Planned unit.** The root is a planner. A planner cannot revise a revision, so the family has one level.
 
-- Threads: the family planners and the workers whose `plan_thread_id` is in the family.
-- Phase `finished`: `planDone` is true for the effective plan.
-- Phase `working`: some worker has `plan_thread_id` equal to the effective plan.
+- Threads: the family planners, the workers whose `plan_thread_id` is in the family, and the joined chains.
+- Phase `finished`: `planDone` is true for the effective plan and the tip of every joined chain is `complete`.
+- Phase `working`: some worker has `plan_thread_id` equal to the effective plan, or the tip of a joined chain is not `complete`.
 - Phase `planning`: all other cases.
 
 **Unplanned unit.** The root is a worker.
 
-- Threads: the whole `replaces:` chain. The tip is the newest worker of the chain.
-- Phase `finished`: the tip state is `complete`.
+- Threads: the whole `replaces:` chain and the joined chains. The tip is the newest worker of a chain.
+- Phase `finished`: the tip of the root chain and the tip of every joined chain are `complete`.
 - Phase `working`: all other cases. A completed, replaced predecessor never finishes the unit.
 
 A thread is superseded when another thread of the unit replaces it. The pull request URLs of a unit are the distinct non-null `pr_url` values of its workers.
@@ -187,7 +188,8 @@ A thread is superseded when another thread of the unit replaces it. The pull req
 | --- | --- |
 | `chief_plan` with no `revises` | Creates the unit. Task status `planning`. The planner is attached. |
 | `chief_plan` with `revises` | No new task. The planner is attached to the task of the root. |
-| `chief_delegate` with no plan and no `replaces` | Creates the unit. Task status `working`. The worker is attached. |
+| `chief_delegate` with no plan and no `replaces`, on no earlier work | Creates the unit. Task status `working`. The worker is attached. |
+| `chief_delegate` with no plan and no `replaces`, on the pull request or branch of earlier work | No new task. One request comment on the existing task. The worker is attached. The status follows the phase: back to `working`, then review, then done. |
 | A delegated worker | Attached to the task of its unit. |
 | A replaced thread | Detached after the attach of its successor is `sent`. |
 | A pull request URL on a worker | Linked to the task. |
@@ -199,7 +201,17 @@ A thread is superseded when another thread of the unit replaces it. The pull req
 
 A unit that is `done` and gets a new fix worker moves back to `working`, because the sync derives the status from local rows on each pass. A pull request closed with no merge leaves the task in `review`.
 
-Chief posts no comment except a decision comment. The plugin posts no milestone, plan summary, verdict, or completion comment. It creates no subtask.
+Chief posts no comment except decision comments and follow-up request comments. A change request on a pull request is the same work, so one pull request gets one task. The plugin posts no milestone, plan summary, verdict, or completion comment. It creates no subtask.
+
+The request comment has this layout:
+
+```
+**Follow-up request** (Chief)
+
+<mission, clipped to 4,000>
+
+chief-request:<thread id>
+```
 
 ### Hooks
 
@@ -207,7 +219,7 @@ Each hook first reads the settings. When the setting selects no adapter, the hoo
 
 | Hook | Caller | Effect |
 | --- | --- | --- |
-| `start(row, description)` | `startPlan` (when `revises` is absent), `startWorker` (no `replaces`, no plan) | Finds the root. If the project is unmapped, returns. Otherwise `INSERT OR IGNORE` the unit. Title: the row title without the `Plan · ` prefix. Description: the mission, clipped to 4,000 characters, then a blank line and the unit marker. |
+| `start(row, description)` | `startPlan` (when `revises` is absent), `startWorker` (no `replaces`, no plan) | Finds the root. If the project is unmapped, returns. Otherwise `INSERT OR IGNORE` the unit. Title: the row title without the `Plan · ` prefix. Description: the mission, clipped to 4,000 characters, then a blank line and the unit marker. When the unit of the root already exists and the root is not the row, the `thread` receipt carries the request comment. When the unit does not exist, the hook creates it under the earlier root and posts no comment. |
 | `attachFiles(row, files)` | `trackFiles` in `reportIntake.ts` | If the unit does not exist or its create failed, returns. Otherwise inserts one `file` receipt for each file, with ref `<source thread id>:<name>` and the content as payload. |
 | `decide(row, request)` | `chief_escalate` | See Decisions. |
 | `sync()` | The supervisor, after `forgeComments.drain()` | The reconcile pass. |
@@ -260,6 +272,7 @@ The desired status:
 - On failure, the sync stores `last_error`.
 - At 5 attempts, the receipt becomes `failed`, its payload becomes NULL, and the code logs a warning. The sync never alerts Chief.
 - A `failed` receipt never counts as done.
+- A `thread` receipt with a payload first posts its request comment, then attaches the thread. On a retry, the sync first looks for a comment with the marker `chief-request:<thread id>` and posts nothing if it exists.
 - A `decision` receipt with earlier attempts first looks for a comment with its marker. If the comment exists, the receipt becomes `sent` with that comment id, and the sync posts nothing.
 
 ### Decisions and answers
@@ -289,7 +302,7 @@ The same request on the same unit twice inserts no second receipt. Chief posts o
 **Answer poll.** The sync polls only for a unit that has a `sent` decision with no `answered_at`. It polls at most once in 60 s for each unit, with a clock in memory.
 
 1. Read `comments(task)`.
-2. Keep the comments that satisfy all conditions: `byOwner` is true, the body has no `chief-decision:`, no `answer` receipt has the comment id, and the comment came after the oldest open decision comment.
+2. Keep the comments that satisfy all conditions: `byOwner` is true, the body has no `chief-decision:` and no `chief-request:`, no `answer` receipt has the comment id, and the comment came after the oldest open decision comment.
 3. For each candidate in order, find the open decisions. These are `sent` and unanswered decisions whose comment came before the candidate.
 4. If the body starts with `#N` that names an open decision, that decision matches.
 5. Otherwise, if exactly one decision is open, that decision matches.
@@ -344,7 +357,7 @@ The only change of a tool schema is the optional `merge` parameter of `chief_esc
 | Contract | Reason |
 | --- | --- |
 | The Chief model never runs tracker commands. | Plugin code owns every tracker call, so the sync can retry and deduplicate them. |
-| Chief posts no tracker comment except decision comments. | Not stated in the plan. |
+| Chief posts no tracker comment except decision comments and follow-up request comments. | Not stated in the plan. |
 | A merge-only request posts no decision. | Merge permission is not a decision. The review status of the task is the signal. |
 | `tracker.ts` and `trackerSync.ts` name no tracker. | One adapter file holds all tracker words, so the adapter is replaceable. |
 | Off, unmapped, and unavailable states are no-ops for every tool. | The feature changes no behaviour without opt-in. |
@@ -366,6 +379,8 @@ The only change of a tool schema is the optional `merge` parameter of `chief_esc
 - A project that is unmapped, or a tracker that is off, never gets work from before the switch.
 - The status has no `canceled` or `blocked` value.
 - The 60 s poll clock lives in memory.
+- A reused branch name joins the earlier task, because the branch is a join key.
+- A follow-up that Chief routes through a new `chief_plan` gets its own task. A plan has no branch or pull request at plan time.
 
 ## Non-goals
 
