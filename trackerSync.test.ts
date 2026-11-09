@@ -825,6 +825,34 @@ describe("follow-up joins the unit", () => {
     expect(w.called("setStatus")).toEqual([["setStatus", "T1", "working"], ["setStatus", "T1", "review"]]);
   });
 
+  // Contract (spec, Unit of work): the earlier work of a follow-up is the work before it in the store's persisted order, (created_at,
+  // insertion), so two workers created in the same millisecond still share one unit. The first ID sorts after the later one on purpose:
+  // the order is the store's, not alphabetical.
+  // Regression: a strict created_at comparison, which leaves equal-time workers in two units and two tasks.
+  test.each<[string, Partial<ManagedRow>]>([
+    ["pull request", { pr_url: PR_A }],
+    ["branch", { branch: "feat/x" }],
+  ])("two workers with the same %s and an identical created_at share one unit and one task", async (_name, key) => {
+    const w = world();
+    const created = vi.fn();
+    w.behave.createTask = async () => { created(); return "T1"; };
+    await earlierWork(w, { thread_id: "Z-first", created_at: 500, ...key });
+    const b = await followUp(w, { thread_id: "A-later", created_at: 500, ...key });
+    await w.sync.sync();
+    expect(created).toHaveBeenCalledTimes(1);
+    expect(w.units().map((u) => u.root_thread_id)).toEqual(["Z-first"]);
+    expect(w.called("postComment")).toEqual([["postComment", "T1", request("A-later", "Fix the review comment.")]]);
+    expect(w.called("attachThread")).toEqual([["attachThread", "T1", "A-later"]]);
+    expect(w.called("setStatus")).toEqual([["setStatus", "T1", "working"]]);
+    // Ownership is stable: another pass changes nothing, and the unit still ends with its tip.
+    w.drain();
+    await w.sync.sync();
+    expect(w.writes()).toEqual([]);
+    b.state = "complete";
+    await w.sync.sync();
+    expect(w.units()).toHaveLength(1);
+  });
+
   describe("retry", () => {
     test("an attach that failed after the comment posted: the retry posts no second comment, attaches, and drops the payload", async () => {
       const w = world();
