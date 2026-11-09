@@ -1,0 +1,350 @@
+[
+  {
+    "step": "two Chiefs, no todos: roster of thr_1",
+    "value": "Pending: none.\nchief | starting | live:idle | Chief · Asha | thr_1"
+  },
+  {
+    "step": "two Chiefs, no todos: roster of thr_1 with waiting and complete",
+    "value": "Pending: none.\nchief | starting | live:idle | Chief · Asha | thr_1"
+  },
+  {
+    "step": "two Chiefs, no todos: roster of thr_2",
+    "value": "Pending: none.\nchief | starting | live:idle | Chief · Asha · 2 | thr_2"
+  },
+  {
+    "step": "two Chiefs, no todos: roster of thr_2 with waiting and complete",
+    "value": "Pending: none.\nchief | starting | live:idle | Chief · Asha · 2 | thr_2"
+  },
+  {
+    "step": "two Chiefs, no todos: bb chief status",
+    "value": {
+      "exitCode": 0,
+      "stdout": "Pending: none.\nchief | starting | live:idle | Chief · Asha | thr_1\nchief | starting | live:idle | Chief · Asha · 2 | thr_2\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "two Chiefs, no todos: bb chief status --json",
+    "value": {
+      "exitCode": 0,
+      "stdout": "{\n  \"sectionId\": \"sec_chief\",\n  \"threads\": [\n    {\n      \"threadId\": \"thr_1\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_2\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha · 2\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    }\n  ]\n}\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "todos added, after: collapsed: roster of thr_1",
+    "value": "Pending:\n- todo #1: Alpha\n- 2 waiting todos (#2, #3) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #4 (Chief thr_2): Delta\nchief | starting | live:idle | Chief · Asha | thr_1"
+  },
+  {
+    "step": "todos added, after: collapsed: roster of thr_1 with waiting and complete",
+    "value": "Pending:\n- todo #1: Alpha\n- todo #2: Bravo (after: user signs)\n- todo #3: Charlie (after: PR #42 merges)\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #4 (Chief thr_2): Delta\nchief | starting | live:idle | Chief · Asha | thr_1"
+  },
+  {
+    "step": "todos added, after: collapsed: roster of thr_2",
+    "value": "Pending:\n- todo #4: Delta\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief thr_1): Alpha\n- 2 waiting other-Chief todos (#2, #3) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.\nchief | starting | live:idle | Chief · Asha · 2 | thr_2"
+  },
+  {
+    "step": "todos added, after: collapsed: roster of thr_2 with waiting and complete",
+    "value": "Pending:\n- todo #4: Delta\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief thr_1): Alpha\n- todo #2 (Chief thr_1): Bravo (after: user signs)\n- todo #3 (Chief thr_1): Charlie (after: PR #42 merges)\nchief | starting | live:idle | Chief · Asha · 2 | thr_2"
+  },
+  {
+    "step": "todos added, after: collapsed: bb chief status",
+    "value": {
+      "exitCode": 0,
+      "stdout": "Pending:\n- todo #1 (Chief thr_1): Alpha\n- todo #2 (Chief thr_1): Bravo (after: user signs)\n- todo #3 (Chief thr_1): Charlie (after: PR #42 merges)\n- todo #4 (Chief thr_2): Delta\nchief | starting | live:idle | Chief · Asha | thr_1\nchief | starting | live:idle | Chief · Asha · 2 | thr_2\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "todos added, after: collapsed: bb chief status --json",
+    "value": {
+      "exitCode": 0,
+      "stdout": "{\n  \"sectionId\": \"sec_chief\",\n  \"threads\": [\n    {\n      \"threadId\": \"thr_1\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_2\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha · 2\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    }\n  ]\n}\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "todos updated and closed: roster of thr_1",
+    "value": "Pending:\n- todo #1: Alpha, renamed\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #4 (Chief thr_2): Delta\nchief | starting | live:idle | Chief · Asha | thr_1"
+  },
+  {
+    "step": "todos updated and closed: roster of thr_1 with waiting and complete",
+    "value": "Pending:\n- todo #1: Alpha, renamed\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #4 (Chief thr_2): Delta\nchief | starting | live:idle | Chief · Asha | thr_1\n- todo #2 [done]: Bravo (after: user signs)\n- todo #3 [dropped]: Charlie (after: PR #42 merges)"
+  },
+  {
+    "step": "todos updated and closed: roster of thr_2",
+    "value": "Pending:\n- todo #4: Delta\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief thr_1): Alpha, renamed\nchief | starting | live:idle | Chief · Asha · 2 | thr_2"
+  },
+  {
+    "step": "todos updated and closed: roster of thr_2 with waiting and complete",
+    "value": "Pending:\n- todo #4: Delta\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief thr_1): Alpha, renamed\nchief | starting | live:idle | Chief · Asha · 2 | thr_2\n- todo #2 (Chief thr_1) [done]: Bravo (after: user signs)\n- todo #3 (Chief thr_1) [dropped]: Charlie (after: PR #42 merges)"
+  },
+  {
+    "step": "todos updated and closed: bb chief status",
+    "value": {
+      "exitCode": 0,
+      "stdout": "Pending:\n- todo #1 (Chief thr_1): Alpha, renamed\n- todo #4 (Chief thr_2): Delta\nchief | starting | live:idle | Chief · Asha | thr_1\nchief | starting | live:idle | Chief · Asha · 2 | thr_2\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "todos updated and closed: bb chief status --json",
+    "value": {
+      "exitCode": 0,
+      "stdout": "{\n  \"sectionId\": \"sec_chief\",\n  \"threads\": [\n    {\n      \"threadId\": \"thr_1\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_2\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha · 2\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    }\n  ]\n}\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "a ready worker and an undelivered alert: roster of thr_1",
+    "value": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1: Alpha, renamed\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #4 (Chief thr_2): Delta\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md\nchief | starting | live:idle | Chief · Asha | thr_1"
+  },
+  {
+    "step": "a ready worker and an undelivered alert: roster of thr_1 with waiting and complete",
+    "value": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1: Alpha, renamed\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #4 (Chief thr_2): Delta\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md\nchief | starting | live:idle | Chief · Asha | thr_1\n- todo #2 [done]: Bravo (after: user signs)\n- todo #3 [dropped]: Charlie (after: PR #42 merges)"
+  },
+  {
+    "step": "a ready worker and an undelivered alert: roster of thr_2",
+    "value": "Pending:\n- todo #4: Delta\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief thr_1): Alpha, renamed\nchief | starting | live:idle | Chief · Asha · 2 | thr_2"
+  },
+  {
+    "step": "a ready worker and an undelivered alert: roster of thr_2 with waiting and complete",
+    "value": "Pending:\n- todo #4: Delta\nOther Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief thr_1): Alpha, renamed\nchief | starting | live:idle | Chief · Asha · 2 | thr_2\n- todo #2 (Chief thr_1) [done]: Bravo (after: user signs)\n- todo #3 (Chief thr_1) [dropped]: Charlie (after: PR #42 merges)"
+  },
+  {
+    "step": "a ready worker and an undelivered alert: bb chief status",
+    "value": {
+      "exitCode": 0,
+      "stdout": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1 (Chief thr_1): Alpha, renamed\n- todo #4 (Chief thr_2): Delta\nchief | starting | live:idle | Chief · Asha | thr_1\nchief | starting | live:idle | Chief · Asha · 2 | thr_2\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "a ready worker and an undelivered alert: bb chief status --json",
+    "value": {
+      "exitCode": 0,
+      "stdout": "{\n  \"sectionId\": \"sec_chief\",\n  \"threads\": [\n    {\n      \"threadId\": \"thr_1\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_2\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha · 2\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_3\",\n      \"role\": \"worker\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": \"thr_1\",\n      \"workerThreadId\": null,\n      \"title\": \"Fix checkout totals\",\n      \"state\": \"ready\",\n      \"status\": \"idle\",\n      \"result\": \"Ready for the successor\",\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    }\n  ]\n}\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "before any hand-off: chief_todos rows",
+    "value": [
+      {
+        "id": 1,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_1",
+        "text": "Alpha, renamed",
+        "after": null,
+        "state": "open"
+      },
+      {
+        "id": 2,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_1",
+        "text": "Bravo",
+        "after": "user signs",
+        "state": "done"
+      },
+      {
+        "id": 3,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_1",
+        "text": "Charlie",
+        "after": "PR #42 merges",
+        "state": "dropped"
+      },
+      {
+        "id": 4,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_2",
+        "text": "Delta",
+        "after": null,
+        "state": "open"
+      }
+    ]
+  },
+  {
+    "step": "before any hand-off: alert_outbox rows",
+    "value": [
+      {
+        "dedupe_key": "thr_3:report:0:<hash>",
+        "target_thread_id": "thr_1",
+        "source_thread_id": "thr_3",
+        "delivered": 0
+      }
+    ]
+  },
+  {
+    "step": "before any hand-off: alert messages sent",
+    "value": []
+  },
+  {
+    "step": "A archived, hand-off to B: chief_todos rows",
+    "value": [
+      {
+        "id": 1,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_2",
+        "text": "Alpha, renamed",
+        "after": null,
+        "state": "open"
+      },
+      {
+        "id": 2,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_2",
+        "text": "Bravo",
+        "after": "user signs",
+        "state": "done"
+      },
+      {
+        "id": 3,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_2",
+        "text": "Charlie",
+        "after": "PR #42 merges",
+        "state": "dropped"
+      },
+      {
+        "id": 4,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_2",
+        "text": "Delta",
+        "after": null,
+        "state": "open"
+      }
+    ]
+  },
+  {
+    "step": "A archived, hand-off to B: alert_outbox rows",
+    "value": [
+      {
+        "dedupe_key": "thr_3:report:0:<hash>",
+        "target_thread_id": "thr_2",
+        "source_thread_id": "thr_3",
+        "delivered": 1
+      }
+    ]
+  },
+  {
+    "step": "A archived, hand-off to B: alert messages sent",
+    "value": [
+      {
+        "threadId": "thr_2",
+        "text": "[Chief lifecycle alert]\nWorker report from Fix checkout totals (thr_3)\nState: ready\nFull report: <storage>/chief/proj_1/thr_3/report-1.md\nWorkers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without …\nRecorded: none recorded\nResult (clipped, full text in the report file): Ready for the successor"
+      }
+    ]
+  },
+  {
+    "step": "after the hand-off to B: roster of thr_2",
+    "value": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1: Alpha, renamed\n- todo #4: Delta\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md\nchief | idle | live:idle | Chief · Asha · 2 | thr_2"
+  },
+  {
+    "step": "after the hand-off to B: roster of thr_2 with waiting and complete",
+    "value": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1: Alpha, renamed\n- todo #4: Delta\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md\nchief | idle | live:idle | Chief · Asha · 2 | thr_2\n- todo #2 [done]: Bravo (after: user signs)\n- todo #3 [dropped]: Charlie (after: PR #42 merges)"
+  },
+  {
+    "step": "after the hand-off to B: bb chief status",
+    "value": {
+      "exitCode": 0,
+      "stdout": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1 (Chief thr_2): Alpha, renamed\n- todo #4 (Chief thr_2): Delta\nchief | complete | live:idle | Chief · Asha | thr_1\nchief | idle | live:idle | Chief · Asha · 2 | thr_2\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "after the hand-off to B: bb chief status --json",
+    "value": {
+      "exitCode": 0,
+      "stdout": "{\n  \"sectionId\": \"sec_chief\",\n  \"threads\": [\n    {\n      \"threadId\": \"thr_1\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha\",\n      \"state\": \"complete\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_2\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha · 2\",\n      \"state\": \"idle\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_3\",\n      \"role\": \"worker\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": \"thr_2\",\n      \"workerThreadId\": null,\n      \"title\": \"Fix checkout totals\",\n      \"state\": \"ready\",\n      \"status\": \"idle\",\n      \"result\": \"Ready for the successor\",\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    }\n  ]\n}\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "B archived: the replacement Chief threads",
+    "value": [
+      "thr_4"
+    ]
+  },
+  {
+    "step": "B archived, hand-off to the replacement: chief_todos rows",
+    "value": [
+      {
+        "id": 1,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_4",
+        "text": "Alpha, renamed",
+        "after": null,
+        "state": "open"
+      },
+      {
+        "id": 2,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_4",
+        "text": "Bravo",
+        "after": "user signs",
+        "state": "done"
+      },
+      {
+        "id": 3,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_4",
+        "text": "Charlie",
+        "after": "PR #42 merges",
+        "state": "dropped"
+      },
+      {
+        "id": 4,
+        "project_id": "proj_1",
+        "chief_thread_id": "thr_4",
+        "text": "Delta",
+        "after": null,
+        "state": "open"
+      }
+    ]
+  },
+  {
+    "step": "B archived, hand-off to the replacement: alert_outbox rows",
+    "value": [
+      {
+        "dedupe_key": "thr_3:report:0:<hash>",
+        "target_thread_id": "thr_2",
+        "source_thread_id": "thr_3",
+        "delivered": 1
+      }
+    ]
+  },
+  {
+    "step": "B archived, hand-off to the replacement: alert messages sent",
+    "value": [
+      {
+        "threadId": "thr_2",
+        "text": "[Chief lifecycle alert]\nWorker report from Fix checkout totals (thr_3)\nState: ready\nFull report: <storage>/chief/proj_1/thr_3/report-1.md\nWorkers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without …\nRecorded: none recorded\nResult (clipped, full text in the report file): Ready for the successor"
+      }
+    ]
+  },
+  {
+    "step": "after the hand-off to the replacement: roster of thr_4",
+    "value": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1: Alpha, renamed\n- todo #4: Delta\nchief | starting | live:idle | Chief · Asha · 3 | thr_4\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md"
+  },
+  {
+    "step": "after the hand-off to the replacement: roster of thr_4 with waiting and complete",
+    "value": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1: Alpha, renamed\n- todo #4: Delta\nchief | starting | live:idle | Chief · Asha · 3 | thr_4\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md\n- todo #2 [done]: Bravo (after: user signs)\n- todo #3 [dropped]: Charlie (after: PR #42 merges)"
+  },
+  {
+    "step": "after the hand-off to the replacement: bb chief status",
+    "value": {
+      "exitCode": 0,
+      "stdout": "Pending:\n- worker “Fix checkout totals” (thr_3): Workers never test: delegate a tester on this branch first — chief_delegate (replaces: thr_3, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: thr_3), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: thr_3, skipReview: your reason).\n- todo #1 (Chief thr_4): Alpha, renamed\n- todo #4 (Chief thr_4): Delta\nchief | complete | live:idle | Chief · Asha | thr_1\nchief | complete | live:idle | Chief · Asha · 2 | thr_2\nworker | ready | live:idle | Fix checkout totals | thr_3\n  unplanned: Bounded test fixture\n  result: Ready for the successor\n  report: <storage>/chief/proj_1/thr_3/report-1.md\nchief | starting | live:idle | Chief · Asha · 3 | thr_4\n",
+      "stderr": ""
+    }
+  },
+  {
+    "step": "after the hand-off to the replacement: bb chief status --json",
+    "value": {
+      "exitCode": 0,
+      "stdout": "{\n  \"sectionId\": \"sec_chief\",\n  \"threads\": [\n    {\n      \"threadId\": \"thr_1\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha\",\n      \"state\": \"complete\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_2\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha · 2\",\n      \"state\": \"complete\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_3\",\n      \"role\": \"worker\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": \"thr_4\",\n      \"workerThreadId\": null,\n      \"title\": \"Fix checkout totals\",\n      \"state\": \"ready\",\n      \"status\": \"idle\",\n      \"result\": \"Ready for the successor\",\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    },\n    {\n      \"threadId\": \"thr_4\",\n      \"role\": \"chief\",\n      \"projectId\": \"proj_1\",\n      \"chiefThreadId\": null,\n      \"workerThreadId\": null,\n      \"title\": \"Chief · Asha · 3\",\n      \"state\": \"starting\",\n      \"status\": \"idle\",\n      \"result\": null,\n      \"blocker\": null,\n      \"recommendation\": null,\n      \"createdAt\": 1700000000000,\n      \"updatedAt\": 1700000000000\n    }\n  ]\n}\n",
+      "stderr": ""
+    }
+  }
+]
