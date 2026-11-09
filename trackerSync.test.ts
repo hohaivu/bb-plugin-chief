@@ -62,7 +62,7 @@ function world() {
     attachFile: rec("attachFile", async () => {}),
     comments: rec("comments", async () => [...remote.comments]),
     // Like the real adapter, Chief's own comment comes back as an owner (user) comment.
-    postDecision: rec("postDecision", async (_task: string, body: string) => {
+    postComment: rec("postComment", async (_task: string, body: string) => {
       const id = `c${++remote.seq}`;
       remote.comments.push({ id, byOwner: true, body, at: Date.now() });
       return id;
@@ -83,7 +83,7 @@ function world() {
     add(row: Partial<ManagedRow> & { thread_id: string; role: ManagedRow["role"] }) {
       const full = {
         project_id: "proj_1", title: row.thread_id, state: "active", plan_waves: null, plan_thread_id: null, worker_thread_id: null,
-        replaces_thread_id: null, pr_url: null, created_at: ++seq, ...row,
+        replaces_thread_id: null, pr_url: null, branch: null, created_at: ++seq, ...row,
       } as ManagedRow;
       rows.push(full);
       return full;
@@ -502,7 +502,7 @@ describe("decisions", () => {
     const planner = await plannedUnit(w);
     await w.sync.decide(planner, "Pick A or B.");
     await w.sync.sync();
-    expect(w.called("postDecision")).toEqual([["postDecision", "T1", body(1, "Pick A or B.")]]);
+    expect(w.called("postComment")).toEqual([["postComment", "T1", body(1, "Pick A or B.")]]);
     expect(w.called("setDecisionFlag")).toEqual([["setDecisionFlag", "ABC", "T1", true]]);
   });
 
@@ -513,7 +513,7 @@ describe("decisions", () => {
     await w.sync.decide(planner, "Pick A or B.");
     await w.sync.decide(planner, "Ship now or wait?");
     await w.sync.sync();
-    expect(w.called("postDecision")).toEqual([["postDecision", "T1", body(1, "Pick A or B.")], ["postDecision", "T1", body(2, "Ship now or wait?")]]);
+    expect(w.called("postComment")).toEqual([["postComment", "T1", body(1, "Pick A or B.")], ["postComment", "T1", body(2, "Ship now or wait?")]]);
   });
 
   test("a row with no unit takes no decision", async () => {
@@ -532,7 +532,7 @@ describe("decisions", () => {
     expect(w.units()[0].flagged).toBe(0);
     w.drain();
     await w.sync.sync();
-    expect(w.called("postDecision")).toEqual([]);
+    expect(w.called("postComment")).toEqual([]);
     expect(w.called("setDecisionFlag")).toEqual([["setDecisionFlag", "ABC", "T1", true]]);
     expect(w.units()[0].flagged).toBe(1);
     expect(w.receipts("decision")).toHaveLength(1);
@@ -541,12 +541,12 @@ describe("decisions", () => {
   test("a post that succeeded but looked failed is found by its marker on retry: no second comment", async () => {
     const w = world();
     const planner = await plannedUnit(w);
-    w.behave.postDecision = async (_task: string, text: string) => { w.remote.comments.push({ id: "c-ghost", byOwner: true, body: text, at: Date.now() }); throw new Error("timeout"); };
+    w.behave.postComment = async (_task: string, text: string) => { w.remote.comments.push({ id: "c-ghost", byOwner: true, body: text, at: Date.now() }); throw new Error("timeout"); };
     await w.sync.decide(planner, "Pick A or B.");
     await w.sync.sync();
     expect(w.receipts("decision")[0]).toMatchObject({ state: null, attempts: 1 });
     await w.sync.sync();
-    expect(w.called("postDecision")).toHaveLength(1);
+    expect(w.called("postComment")).toHaveLength(1);
     expect(w.receipts("decision")[0]).toMatchObject({ state: "sent", payload: null });
     expect(JSON.parse(w.receipts("decision")[0].result)).toEqual({ id: "c-ghost", number: 1, concernedThreadId: "P1" });
   });
@@ -713,6 +713,217 @@ describe("answers", () => {
     expect(messages).toHaveLength(2);
     expect(messages[0]).toContain("decision #1");
     for (const message of messages) expect(message).not.toMatch(/bb tasks|bb\s+task/i);
+  });
+});
+
+describe("follow-up joins the unit", () => {
+  // Contracts come from docs/specs/tracker.md (Unit of work, Mirroring, Hooks start, Receipt rules, Answer poll, Known Limits).
+  const request = (id: string, mission: string) => `**Follow-up request** (Chief)\n\n${mission}\n\nchief-request:${id}`;
+  /** Unplanned worker U1 whose unit has task T1, finished and settled. */
+  async function earlierWork(w: World, extra: Partial<ManagedRow>) {
+    const earlier = w.add({ thread_id: "U1", role: "worker", title: "Alpha", ...extra });
+    await w.sync.start(earlier, "Mission A");
+    await w.sync.sync();
+    earlier.state = "complete";
+    await w.sync.sync();
+    w.drain();
+    return earlier;
+  }
+  const followUp = async (w: World, extra: Partial<ManagedRow> = {}, mission = "Fix the review comment.") => {
+    const row = w.add({ thread_id: "U2", role: "worker", title: "Beta", ...extra });
+    await w.sync.start(row, mission);
+    return row;
+  };
+
+  test("same pull request: no second task; one request comment before the attach; review → working → review → done", async () => {
+    const w = world();
+    await earlierWork(w, { pr_url: PR_A });
+    expect(w.units()[0].status).toBe("review");
+    const b = await followUp(w, { pr_url: PR_A });
+    expect(w.units()).toHaveLength(1);
+    await w.sync.sync();
+    expect(w.called("createTask")).toEqual([]);
+    expect(w.called("postComment")).toEqual([["postComment", "T1", request("U2", "Fix the review comment.")]]);
+    expect(w.writes()).toEqual([
+      ["postComment", "T1", request("U2", "Fix the review comment.")],
+      ["attachThread", "T1", "U2"],
+      ["setStatus", "T1", "working"],
+    ]);
+    // Two passes equal one pass.
+    w.drain();
+    await w.sync.sync();
+    expect(w.writes()).toEqual([]);
+    b.state = "complete";
+    await w.sync.sync();
+    expect(w.called("setStatus")).toEqual([["setStatus", "T1", "review"]]);
+    w.prMerged.mockResolvedValue(true);
+    at(5 * 60_000);
+    await w.sync.sync();
+    expect(w.called("setStatus")).toEqual([["setStatus", "T1", "review"], ["setStatus", "T1", "done"]]);
+    expect(w.units()).toHaveLength(1);
+  });
+
+  test("same branch and no pull request: joins; a done unit goes back to working, then done with no pull request", async () => {
+    const w = world();
+    await earlierWork(w, { branch: "feat/x" });
+    expect(w.units()[0].status).toBe("done");
+    const b = await followUp(w, { branch: "feat/x" });
+    await w.sync.sync();
+    expect(w.units()).toHaveLength(1);
+    expect(w.called("createTask")).toEqual([]);
+    expect(w.called("postComment")).toHaveLength(1);
+    expect(w.called("setStatus")).toEqual([["setStatus", "T1", "working"]]);
+    b.state = "complete";
+    await w.sync.sync();
+    expect(w.called("setStatus")).toEqual([["setStatus", "T1", "working"], ["setStatus", "T1", "done"]]);
+  });
+
+  test("the request mission is clipped to 4,000 characters between the header and the marker", async () => {
+    const w = world();
+    await earlierWork(w, { pr_url: PR_A });
+    await followUp(w, { pr_url: PR_A }, "m".repeat(9_000));
+    await w.sync.sync();
+    const [, , body] = w.called("postComment")[0]!;
+    expect((body as string).startsWith("**Follow-up request** (Chief)\n\nmmm")).toBe(true);
+    expect((body as string).endsWith("m…\n\nchief-request:U2")).toBe(true);
+    expect((body as string).length).toBe("**Follow-up request** (Chief)\n\n".length + 4_000 + "\n\nchief-request:U2".length);
+  });
+
+  test.each<[string, Partial<ManagedRow>]>([
+    ["a different pull request and branch", { pr_url: PR_B, branch: "feat/other" }],
+    ["no pull request and no branch", {}],
+  ])("unrelated work (%s) gets its own unit and task and posts no request comment", async (_name, extra) => {
+    const w = world();
+    await earlierWork(w, { pr_url: PR_A, branch: "feat/x" });
+    w.behave.createTask = async () => "T2";
+    await followUp(w, extra);
+    await w.sync.sync();
+    expect(w.units().map((u) => u.root_thread_id)).toEqual(["U1", "U2"]);
+    expect(w.called("createTask")).toHaveLength(1);
+    expect(w.called("postComment")).toEqual([]);
+    expect(w.called("attachThread")).toEqual([["attachThread", "T2", "U2"]]);
+  });
+
+  test("planned earlier work: the follow-up joins the planner's unit; working while it runs, finished when its tip completes", async () => {
+    const w = world();
+    const planner = await plannedUnit(w);
+    planner.state = "ready"; planner.plan_waves = PLAN_WAVES;
+    w.add({ thread_id: "W1", role: "worker", plan_thread_id: "P1", pr_url: PR_A, state: "complete" });
+    await w.sync.join(w.rows.find((r) => r.thread_id === "W1")!);
+    w.planDone.add("P1");
+    await w.sync.sync();
+    expect(w.units()[0].status).toBe("review");
+    w.drain();
+    const b = await followUp(w, { pr_url: PR_A });
+    await w.sync.sync();
+    expect(w.units()).toHaveLength(1);
+    expect(w.called("createTask")).toEqual([]);
+    expect(w.called("postComment")).toEqual([["postComment", "T1", request("U2", "Fix the review comment.")]]);
+    expect(w.called("setStatus")).toEqual([["setStatus", "T1", "working"]]);
+    b.state = "complete";
+    await w.sync.sync();
+    expect(w.called("setStatus")).toEqual([["setStatus", "T1", "working"], ["setStatus", "T1", "review"]]);
+  });
+
+  describe("retry", () => {
+    test("an attach that failed after the comment posted: the retry posts no second comment, attaches, and drops the payload", async () => {
+      const w = world();
+      await earlierWork(w, { pr_url: PR_A });
+      w.behave.attachThread = flaky(1, async () => {});
+      await followUp(w, { pr_url: PR_A });
+      expect(w.receipts("thread").find((r) => r.ref === "U2")).toMatchObject({ state: null, payload: request("U2", "Fix the review comment.") });
+      await w.sync.sync();
+      expect(w.receipts("thread").find((r) => r.ref === "U2")).toMatchObject({ state: null, attempts: 1 });
+      await w.sync.sync();
+      expect(w.called("postComment")).toHaveLength(1);
+      expect(w.called("attachThread")).toEqual([["attachThread", "T1", "U2"], ["attachThread", "T1", "U2"]]);
+      expect(w.receipts("thread").find((r) => r.ref === "U2")).toMatchObject({ state: "sent", payload: null });
+    });
+
+    test("five failed attaches: one comment in all, the receipt fails and its payload is dropped", async () => {
+      const w = world();
+      await earlierWork(w, { pr_url: PR_A });
+      w.behave.attachThread = async () => { throw new Error("attach down"); };
+      await followUp(w, { pr_url: PR_A });
+      for (let i = 0; i < 5; i++) await w.sync.sync();
+      expect(w.called("postComment")).toHaveLength(1);
+      expect(w.receipts("thread").find((r) => r.ref === "U2")).toMatchObject({ state: "failed", payload: null, attempts: 5 });
+    });
+  });
+
+  test("the follow-up's reviewer, replacement and decisions land on the earlier unit; the replaced follow-up is detached after its successor attaches", async () => {
+    const w = world();
+    await earlierWork(w, { pr_url: PR_A });
+    const b = await followUp(w, { pr_url: PR_A });
+    await w.sync.sync();
+    w.drain();
+    const reviewer = w.add({ thread_id: "R1", role: "reviewer", worker_thread_id: "U2" });
+    w.targets = { R1: ["U2"] };
+    await w.sync.attachFiles(reviewer, [{ name: "verdict.md", content: "# verdict" }]);
+    await w.sync.decide(b, "Pick A or B.");
+    b.state = "complete";
+    const successor = w.add({ thread_id: "U3", role: "worker", replaces_thread_id: "U2" });
+    await w.sync.join(successor);
+    expect(w.units()).toHaveLength(1);
+    expect(new Set(w.receipts().map((r) => r.root_thread_id))).toEqual(new Set(["U1"]));
+    await w.sync.sync();
+    expect(w.called("attachFile")).toEqual([["attachFile", "T1", { name: "verdict.md", content: "# verdict" }]]);
+    expect(w.called("postComment")).toHaveLength(1);
+    expect(w.called("postComment")[0]![2]).toContain("Pick A or B.");
+    expect(w.called("attachThread")).toEqual([["attachThread", "T1", "U3"]]);
+    expect(w.called("detachThread")).toEqual([["detachThread", "T1", "U2"]]);
+    expect(w.names().indexOf("detachThread")).toBeGreaterThan(w.names().indexOf("attachThread"));
+    // The replaced follow-up finished, but its successor runs: the unit stays working until the tip completes.
+    expect(w.units()[0].status).toBe("working");
+    successor.state = "complete";
+    await w.sync.sync();
+    expect(w.units()[0].status).toBe("review");
+  });
+
+  test("a follow-up request comment is never taken as the owner's answer to an open decision", async () => {
+    const w = world();
+    await earlierWork(w, { pr_url: PR_A });
+    await w.sync.decide(w.rows[0]!, "Pick A or B.");
+    await w.sync.sync();
+    expect(w.receipts("decision")[0]).toMatchObject({ state: "sent", answered_at: null });
+    w.drain();
+    at(61_000);
+    await followUp(w, { pr_url: PR_A });
+    await w.sync.sync();
+    expect(w.called("postComment")).toEqual([["postComment", "T1", request("U2", "Fix the review comment.")]]);
+    // The adapter returns Chief's own comment as an owner comment, newer than the open decision; the poll ran and ignored it.
+    expect(w.remote.comments.map((c) => c.byOwner)).toEqual([true, true]);
+    expect(w.called("comments").length).toBeGreaterThan(0);
+    expect(w.answerAlert).not.toHaveBeenCalled();
+    expect(w.receipts("answer")).toEqual([]);
+    expect(w.receipts("decision")[0].answered_at).toBeNull();
+  });
+
+  test("earlier work from while the tracker was off: one unit under the earlier root with the follow-up's title and mission, and no request comment", async () => {
+    const w = world();
+    w.cfg = null;
+    await w.sync.start(w.add({ thread_id: "U1", role: "worker", title: "Alpha", pr_url: PR_A, state: "complete" }), "Mission A");
+    expect(w.rowCount()).toBe(0);
+    w.cfg = { tracker: w.tracker, projects: new Map([["proj_1", "ABC"]]) };
+    await followUp(w, { pr_url: PR_A });
+    await w.sync.sync();
+    const marker = `chief-unit:${sha12("U1")}`;
+    expect(w.units()).toMatchObject([{ root_thread_id: "U1", title: "Beta", description: `Fix the review comment.\n\n${marker}`, task_id: "T1" }]);
+    expect(w.called("createTask")).toEqual([["createTask", { project: "ABC", title: "Beta", description: `Fix the review comment.\n\n${marker}` }]]);
+    expect(w.called("attachThread")).toEqual([["attachThread", "T1", "U2"]]);
+    expect(w.called("postComment")).toEqual([]);
+    expect(w.receipts("thread")).toMatchObject([{ ref: "U2", payload: null, state: "sent" }]);
+  });
+
+  test("off: the follow-up writes no row and makes no call", async () => {
+    const w = world();
+    await earlierWork(w, { pr_url: PR_A });
+    const before = w.rowCount();
+    w.cfg = null;
+    await followUp(w, { pr_url: PR_A });
+    await w.sync.sync();
+    expect(w.rowCount()).toBe(before);
+    expect(w.calls).toEqual([]);
   });
 });
 
