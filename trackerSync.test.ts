@@ -95,6 +95,8 @@ function world() {
     writes: () => calls.filter(([name]) => !["available", "findTask", "comments"].includes(name as string)),
     units: () => db.prepare(`SELECT * FROM tracker_units`).all() as any[],
     receipts: (kind?: string) => (kind ? db.prepare(`SELECT * FROM tracker_receipts WHERE kind=? ORDER BY rowid`).all(kind) : db.prepare(`SELECT * FROM tracker_receipts ORDER BY rowid`).all()) as any[],
+    /** How many times the store was scanned. */
+    scans: 0,
     rowCount: () => (db.prepare(`SELECT (SELECT COUNT(*) FROM tracker_units) + (SELECT COUNT(*) FROM tracker_receipts) AS n`).get() as { n: number }).n,
     sync: undefined as unknown as ReturnType<typeof createTrackerSync>,
   };
@@ -102,7 +104,7 @@ function world() {
   w.sync = createTrackerSync({
     db, log: w.log,
     config: async () => { if (w.cfg === "reject") throw new Error("settings unreadable"); return w.cfg; },
-    get, all: () => rows,
+    get, all: () => { w.scans++; return rows; },
     taskChain: (id) => {
       const chain: string[] = [];
       for (let row = get(id); row && !chain.includes(row.thread_id); row = row.replaces_thread_id ? get(row.replaces_thread_id) : undefined) chain.push(row.thread_id);
@@ -1002,6 +1004,30 @@ describe("follow-up joins the unit", () => {
       await w.sync.sync();
       expect(w.rowCount()).toBe(0);
       expect(w.writes()).toEqual([]);
+    });
+  });
+
+  describe("cost", () => {
+    /** Three units with a task, plus `n` unrelated unplanned workers (own pull request each) that are not part of any unit. Returns the store scans of one settled sync pass. */
+    async function scansWith(n: number) {
+      const w = world();
+      for (const id of ["U1", "U2", "U3"]) {
+        await w.sync.start(w.add({ thread_id: id, role: "worker", pr_url: `https://github.com/acme/shop/pull/${id}` }), `Mission ${id}`);
+      }
+      await w.sync.sync();
+      for (let i = 0; i < n; i++) w.add({ thread_id: `H${i}`, role: "worker", state: "complete", pr_url: `https://github.com/acme/shop/pull/h${i}` });
+      w.drain();
+      w.scans = 0;
+      await w.sync.sync();
+      expect(w.units()).toHaveLength(3); // unrelated history does not join any unit
+      return w.scans;
+    }
+
+    test("one sync pass scans the store a bounded number of times, whatever the history size", async () => {
+      const few = await scansWith(5);
+      const many = await scansWith(200);
+      expect(many).toBe(few);
+      expect(many).toBeLessThan(50);
     });
   });
 
