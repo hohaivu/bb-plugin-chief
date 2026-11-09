@@ -34,7 +34,7 @@ Callers in `server.ts` construct comment content for task events:
 - `enqueueVerdictComments`: creates review verdict comments on covered pull requests.
 - `enqueueBlockedComment`: creates blocked status comments on pull requests or issues.
 - `enqueueCompletionComment`: creates completion comments on tracking issues or pull requests.
-- `chief_escalate`: creates escalation comments that mention the repository owner.
+- `chief_escalate`: creates escalation comments that mention the repository owner. The tool takes an optional `merge`. The forge **Need you** comment is unchanged by it. See `tracker.md`.
 
 ## Flows and States
 
