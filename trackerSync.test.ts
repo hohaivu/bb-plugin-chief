@@ -855,6 +855,48 @@ describe("follow-up joins the unit", () => {
     expect(w.units()).toHaveLength(1);
   });
 
+  // Contract (spec, Unit of work): a follow-up belongs to the unit of the earlier work, and the unit works while the follow-up runs.
+  // Regression: a position map built once per pass that does not know a thread added during an adapter await; the follow-up then
+  // resolves to itself, is left out of the unit, and the unit closes while the follow-up works.
+  test("a follow-up started during an adapter await joins its unit within the same pass: the task stays working, not done", async () => {
+    const w = world();
+    let tasks = 0;
+    w.behave.createTask = async () => `T${++tasks}`;
+    const u1 = w.add({ thread_id: "U1", role: "worker", title: "Alpha", pr_url: PR_A });
+    await w.sync.start(u1, "Mission U1");
+    at(1);
+    const u2 = w.add({ thread_id: "U2", role: "worker", title: "Beta", pr_url: PR_B });
+    await w.sync.start(u2, "Mission U2");
+    await w.sync.sync();
+    u2.state = "complete";
+    await w.sync.sync();
+    expect(w.units().map((u) => [u.root_thread_id, u.task_id, u.status])).toEqual([["U1", "T1", "working"], ["U2", "T2", "review"]]);
+    // The pass below would close T2 as merged unless the follow-up counts as part of its unit.
+    w.prMerged.mockResolvedValue(true);
+    at(5 * 60_000);
+    const entered = deferred();
+    const gate = deferred();
+    w.behave.setStatus = async (task: string) => { if (task === "T1") { entered.resolve(); await gate.promise; } };
+    u1.state = "complete";
+    w.drain();
+    const pass = w.sync.sync();
+    await entered.promise; // the pass is waiting on the adapter for the first task
+    const b = w.add({ thread_id: "B", role: "worker", title: "Gamma", pr_url: PR_B });
+    await w.sync.start(b, "Fix the review comment.");
+    gate.resolve();
+    await pass;
+    expect(w.units().map((u) => [u.root_thread_id, u.status])).toEqual([["U1", "review"], ["U2", "working"]]);
+    expect(w.called("createTask")).toEqual([]);
+    expect(w.called("setStatus")).toEqual([["setStatus", "T1", "review"], ["setStatus", "T2", "working"]]);
+    expect(w.called("postComment")).toEqual([["postComment", "T2", request("B", "Fix the review comment.")]]);
+    expect(w.called("attachThread")).toEqual([["attachThread", "T2", "B"]]);
+    // T2 stays working while the follow-up runs, however many passes follow.
+    w.drain();
+    await w.sync.sync();
+    expect(w.writes().filter((c) => c[1] === "T2")).toEqual([]);
+    expect(w.units().find((u) => u.root_thread_id === "U2")!.status).toBe("working");
+  });
+
   describe("retry", () => {
     test("an attach that failed after the comment posted: the retry posts no second comment, attaches, and drops the payload", async () => {
       const w = world();
@@ -1026,6 +1068,31 @@ describe("follow-up joins the unit", () => {
     test("one sync pass scans the store a bounded number of times, whatever the history size", async () => {
       const few = await scansWith(5);
       const many = await scansWith(200);
+      expect(many).toBe(few);
+      expect(many).toBeLessThan(50);
+    });
+
+    /** One task whose unit holds `n` joined follow-ups on its pull request, each replaced by a successor; the last successor is still running. Returns the store scans of one settled sync pass. */
+    async function scansWithFollowUps(n: number) {
+      const w = world();
+      await w.sync.start(w.add({ thread_id: "U1", role: "worker", state: "complete", pr_url: PR_A }), "Mission U1");
+      await w.sync.sync();
+      for (let i = 0; i < n; i++) {
+        w.add({ thread_id: `F${i}`, role: "worker", state: "complete", pr_url: PR_A });
+        w.add({ thread_id: `R${i}`, role: "worker", state: i === n - 1 ? "active" : "complete", pr_url: PR_A, replaces_thread_id: `F${i}` });
+      }
+      w.drain();
+      w.scans = 0;
+      await w.sync.sync();
+      // Every follow-up chain was followed to its tip: the last one is running, so the unit works.
+      expect(w.units()).toHaveLength(1);
+      expect(w.called("setStatus")).toEqual([["setStatus", "T1", "working"]]);
+      return w.scans;
+    }
+
+    test("a task with many joined follow-ups and replacements costs the same number of store scans as one with few", async () => {
+      const few = await scansWithFollowUps(5);
+      const many = await scansWithFollowUps(200);
       expect(many).toBe(few);
       expect(many).toBeLessThan(50);
     });
