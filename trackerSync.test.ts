@@ -196,7 +196,7 @@ describe("bootstrap", () => {
     expect(w.log.warn).not.toHaveBeenCalled();
     await w.sync.sync();
     expect(w.units()[0]).toMatchObject({ create_state: "failed", create_attempts: 5, task_id: null });
-    expect(w.receipts()).toMatchObject([{ kind: "file", state: "failed", payload: null }]);
+    expect(w.receipts()).toMatchObject([{ kind: "thread", ref: "P1", state: "failed", payload: null }, { kind: "file", state: "failed", payload: null }]);
     expect(w.log.warn).toHaveBeenCalledTimes(1);
     expect(w.answerAlert).not.toHaveBeenCalled();
     expect(w.deliver).not.toHaveBeenCalled();
@@ -205,6 +205,14 @@ describe("bootstrap", () => {
     await w.sync.attachFiles(planner, [{ name: "plan-2.md", content: "x" }]);
     expect(w.called("createTask")).toHaveLength(5);
     expect(w.receipts("file")).toHaveLength(1);
+  });
+
+  test("a worker that joins while the tracker is on is attached on the next pass", async () => {
+    const w = world();
+    await plannedUnit(w);
+    await w.sync.join(w.add({ thread_id: "W1", role: "worker", plan_thread_id: "P1" }));
+    await w.sync.sync();
+    expect(w.called("attachThread")).toEqual([["attachThread", "T1", "W1"]]);
   });
 });
 
@@ -267,6 +275,7 @@ describe("receipts", () => {
     w.add({ thread_id: "U1", role: "worker", state: "complete" });
     w.add({ thread_id: "U2", role: "worker", replaces_thread_id: "U1" });
     await w.sync.start(w.rows[0]!, "m");
+    await w.sync.join(w.rows[1]!);
     w.behave.attachThread = async (_task: string, thread: string) => { if (thread === "U1") throw new Error("attach down"); };
     for (let i = 0; i < 5; i++) await w.sync.sync();
     expect(w.receipts("thread").map((r) => [r.ref, r.state])).toEqual([["U1", "failed"], ["U2", "sent"]]);
@@ -279,6 +288,7 @@ describe("receipts", () => {
     w.add({ thread_id: "U1", role: "worker", state: "complete" });
     w.add({ thread_id: "U2", role: "worker", replaces_thread_id: "U1" });
     await w.sync.start(w.rows[0]!, "m");
+    await w.sync.join(w.rows[1]!);
     w.behave.attachThread = flaky(2, async () => {});
     await w.sync.sync();
     expect(w.called("detachThread")).toEqual([]);
@@ -290,7 +300,7 @@ describe("receipts", () => {
   test("a receipt stops at 5 attempts: one warning, no Chief alert, no further calls", async () => {
     const w = world();
     await plannedUnit(w);
-    w.add({ thread_id: "W1", role: "worker", plan_thread_id: "P1" });
+    await w.sync.join(w.add({ thread_id: "W1", role: "worker", plan_thread_id: "P1" }));
     w.behave.attachThread = async () => { throw new Error("attach down"); };
     for (let i = 0; i < 4; i++) await w.sync.sync();
     expect(w.log.warn).not.toHaveBeenCalled();
@@ -401,6 +411,7 @@ describe("status", () => {
     const first = w.add({ thread_id: "U1", role: "worker", state: "complete" });
     const second = w.add({ thread_id: "U2", role: "worker", replaces_thread_id: "U1" });
     await w.sync.start(first, "m");
+    await w.sync.join(second);
     await w.sync.sync();
     expect(w.calls).toEqual([
       ["available"],
@@ -665,18 +676,30 @@ describe("answers", () => {
     expect(w.called("comments")).toEqual([]);
   });
 
-  test("a failing flag never blocks the answer, and a failed flag-clear never repeats its alert", async () => {
+  test("a failed flag-clear never blocks or repeats the answer; a later clear lands without a second alert", async () => {
     const w = world();
     const planner = await plannedUnit(w);
-    w.behave.setDecisionFlag = async () => { throw new Error("flag down"); };
     await w.sync.decide(planner, "Pick A or B.");
     await w.sync.sync();
+    expect(w.units()[0].flagged).toBe(1);
+    w.behave.setDecisionFlag = async (_project: string, _task: string, open: boolean) => { if (!open) throw new Error("flag down"); };
+    w.drain();
     at(61_000);
     w.remote.comments.push({ id: "o1", byOwner: true, body: "Use option A.", at: Date.now() });
     await w.sync.sync();
     expect(w.answerAlert).toHaveBeenCalledTimes(1);
     for (let i = 1; i <= 3; i++) { at(61_000 + i * 61_000); await w.sync.sync(); }
-    expect(w.called("setDecisionFlag").length).toBeGreaterThan(1);
+    // The clear was attempted on every pass after the answer, and failed each time.
+    expect(w.called("setDecisionFlag")).toEqual([["setDecisionFlag", "ABC", "T1", false], ["setDecisionFlag", "ABC", "T1", false], ["setDecisionFlag", "ABC", "T1", false]]);
+    expect(w.units()[0].flagged).toBe(1);
+    expect(w.answerAlert).toHaveBeenCalledTimes(1);
+    expect(w.deliver).toHaveBeenCalledTimes(1);
+    delete w.behave.setDecisionFlag;
+    w.drain();
+    at(61_000 + 5 * 61_000);
+    await w.sync.sync();
+    expect(w.called("setDecisionFlag")).toEqual([["setDecisionFlag", "ABC", "T1", false]]);
+    expect(w.units()[0].flagged).toBe(0);
     expect(w.answerAlert).toHaveBeenCalledTimes(1);
     expect(w.deliver).toHaveBeenCalledTimes(1);
   });
@@ -706,29 +729,37 @@ describe("off, unmapped and unavailable", () => {
     expect(w.calls).toEqual([]);
   });
 
-  test("switching off keeps every row and stops every call; switching back resumes, with nothing recorded while off", async () => {
+  test("switching off keeps rows and stops calls; switching back resumes pending work and never backfills what happened while off", async () => {
     const w = world();
     const planner = await plannedUnit(w);
     await w.sync.decide(planner, "Pick A or B.");
     await w.sync.sync();
+    // Recorded while on, still unsent when the tracker is switched off.
+    await w.sync.join(w.add({ thread_id: "W0", role: "worker", plan_thread_id: "P1" }));
     const before = w.rowCount();
     const cfg = w.cfg;
     w.cfg = null;
     w.drain();
-    // While off: a new decision, a new unit and a new thread. Nothing is recorded; no call is made.
+    // While off: a new decision, a new unit, a joining worker and its files. Nothing is recorded; no call is made.
     await w.sync.decide(planner, "Ship now or wait?");
     await w.sync.start(w.add({ thread_id: "U1", role: "worker" }), "m");
-    const worker = w.add({ thread_id: "W1", role: "worker", plan_thread_id: "P1" });
+    const offWorker = w.add({ thread_id: "W1", role: "worker", plan_thread_id: "P1", pr_url: PR_A });
+    await w.sync.join(offWorker);
+    await w.sync.attachFiles(offWorker, [{ name: "f.md", content: "x" }]);
     at(61_000);
     w.remote.comments.push({ id: "o1", byOwner: true, body: "Use option A.", at: Date.now() });
     await w.sync.sync();
     expect(w.rowCount()).toBe(before);
     expect(w.calls).toEqual([]);
     expect(w.answerAlert).not.toHaveBeenCalled();
-    // Back on: pending receipts and answer polling resume.
+    // Back on: the pending attach and the answer poll resume; the off-period worker is never attached or linked.
     w.cfg = cfg;
     await w.sync.sync();
-    expect(w.called("attachThread")).toEqual([["attachThread", "T1", worker.thread_id]]);
+    await w.sync.sync();
+    expect(w.called("attachThread")).toEqual([["attachThread", "T1", "W0"]]);
+    expect(w.called("linkPullRequest")).toEqual([]);
+    expect(w.called("attachFile")).toEqual([]);
+    expect(w.receipts("thread").map((r) => r.ref)).toEqual(["P1", "W0"]);
     expect(w.answerAlert).toHaveBeenCalledTimes(1);
     expect(w.receipts("decision")).toHaveLength(1);
     expect(w.units()).toHaveLength(1);
