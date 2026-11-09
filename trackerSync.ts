@@ -71,15 +71,28 @@ export function createTrackerSync(deps: {
     db.prepare(`INSERT OR IGNORE INTO tracker_receipts (root_thread_id, kind, ref, payload, created_at) VALUES (?, ?, ?, ?, ?)`).run(rootId, kind, ref, payload, Date.now());
   const posted = (receipt: ReceiptRow) => JSON.parse(receipt.result ?? "{}") as Posted;
 
-  /** One root map for one sync pass or hook call: a single scan of the store, then every thread's unit by its root thread id (null for a thread that is no part of a tracked unit). */
+  /** One root map per sync pass or hook call: every thread's unit by its root thread id (null for a thread that is no part of a tracked unit). The map is built from one scan and rebuilt only when `rows()` finds the managed rows changed since, so a thread added during an adapter await is never missed. */
   function rootMap() {
-    const ordered = all();
-    const position = new Map(ordered.map((r, i) => [r.thread_id, i]));
-    // The first worker (in persisted order) holding each pull request or branch; a head joins it when that worker comes before the head.
+    let signature: string | null = null;
+    let roots = new Map<string, string | null>();
+    let ordered: ManagedRow[] = [];
+    let position = new Map<string, number>();
+    let first = new Map<string, number>();
+    // A head joins the first worker (in persisted order) holding its pull request or branch, when that worker comes before the head.
     const keys = (r: ManagedRow) => [r.pr_url ? `pr\0${r.project_id}\0${r.pr_url}` : "", r.branch ? `branch\0${r.project_id}\0${r.branch}` : ""].filter(Boolean);
-    const first = new Map<string, number>();
-    ordered.forEach((r, i) => { if (r.role === "worker") for (const key of keys(r)) if (!first.has(key)) first.set(key, i); });
-    const roots = new Map<string, string | null>();
+    /** The current rows, oldest first; the map is rebuilt when what it resolves from changed. */
+    function rows() {
+      ordered = all();
+      const next = ordered.map((r) => [r.thread_id, r.role, r.project_id, r.pr_url, r.branch, r.replaces_thread_id, r.plan_thread_id, r.worker_thread_id].join("\0")).join("\n");
+      if (next !== signature) {
+        signature = next;
+        roots = new Map();
+        position = new Map(ordered.map((r, i) => [r.thread_id, i]));
+        first = new Map();
+        ordered.forEach((r, i) => { if (r.role === "worker") for (const key of keys(r)) if (!first.has(key)) first.set(key, i); });
+      }
+      return ordered;
+    }
     function resolve(row: ManagedRow | undefined, seen: Set<string>): string | null {
       if (!row || seen.has(row.thread_id)) return null;
       seen.add(row.thread_id);
@@ -105,11 +118,12 @@ export function createTrackerSync(deps: {
       }
       return null;
     }
-    return (row: ManagedRow | undefined) => {
+    return Object.assign((row: ManagedRow | undefined) => {
       if (!row) return null;
+      if (signature === null) rows();
       if (!roots.has(row.thread_id)) roots.set(row.thread_id, resolve(row, new Set()));
       return roots.get(row.thread_id)!;
-    };
+    }, { rows });
   }
 
   /** The unit's threads, its phase and its pull requests, from the local rows. */
@@ -117,27 +131,31 @@ export function createTrackerSync(deps: {
     const top = get(rootId);
     if (!top) return null;
     const newest = (a: ManagedRow, b: ManagedRow) => b.created_at - a.created_at;
+    const all = root.rows();
+    const successors = new Map<string, ManagedRow[]>();
+    for (const r of all) if (r.role === "worker" && r.replaces_thread_id) successors.set(r.replaces_thread_id, [...(successors.get(r.replaces_thread_id) ?? []), r]);
+    for (const list of successors.values()) list.sort(newest);
     /** A worker and the workers that replace it, oldest first. */
     const chainFrom = (head: ManagedRow) => {
       const chain = [head];
       for (;;) {
-        const next = all().filter((r) => r.role === "worker" && r.replaces_thread_id === chain[chain.length - 1]!.thread_id && !chain.includes(r)).sort(newest)[0];
+        const next = successors.get(chain[chain.length - 1]!.thread_id)?.find((r) => !chain.includes(r));
         if (!next) break;
         chain.push(next);
       }
       return chain;
     };
-    const joined = all()
+    const joined = all
       .filter((r) => r.role === "worker" && !r.plan_thread_id && !r.replaces_thread_id && r.thread_id !== rootId && root(r) === rootId)
       .map(chainFrom);
     const joinedBusy = joined.some((chain) => chain[chain.length - 1]!.state !== "complete");
     let threads: ManagedRow[];
     let phase: "planning" | "working" | "finished";
     if (top.role === "planner") {
-      const planners = all().filter((r) => r.role === "planner" && (r.thread_id === rootId || r.replaces_thread_id === rootId));
+      const planners = all.filter((r) => r.role === "planner" && (r.thread_id === rootId || r.replaces_thread_id === rootId));
       const ids = new Set(planners.map((p) => p.thread_id));
       const effective = planners.filter((p) => p.plan_waves && (p.state === "ready" || p.state === "complete")).sort(newest)[0] ?? top;
-      const workers = all().filter((r) => r.role === "worker" && r.plan_thread_id && ids.has(r.plan_thread_id));
+      const workers = all.filter((r) => r.role === "worker" && r.plan_thread_id && ids.has(r.plan_thread_id));
       threads = [...planners, ...workers, ...joined.flat()];
       phase = deps.planDone(effective) && !joinedBusy ? "finished"
         : workers.some((w) => w.plan_thread_id === effective.thread_id) || joinedBusy ? "working" : "planning";
