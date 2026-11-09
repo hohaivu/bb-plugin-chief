@@ -8,6 +8,7 @@
 | Report intake | [report-intake.md](specs/report-intake.md) | `reportIntake.ts` (`createReportIntake`, `checkReport`, `reportAlert`, `verdictFileBody`, `reportFileBody`), `server.ts` (`chief_report`, adapters) | One owner for `chief_report` acceptance and publication: required state first, then optional files and the alert. |
 | Tool-call stability | [tool-call-stability.md](specs/tool-call-stability.md) | `server.ts` (`bb.agents.configure`, `experimental_contributeEnv`, `delegateShape`/`planParams`/`consultParams`/`spawnParams`, CLI `plan`/`consult`/`delegate`) | How Chief and managed threads get chief_* tool schemas before their first call, and which tool inputs default. |
 | Review engine | [review-engine.md](specs/review-engine.md) | `prAgent.ts`, `reviewStart.ts` (`startReview`), `server.ts` (settings `reviewEngine`/`prAgentDir`) | How a worker reviewer forms its verdict: reading code, pr-agent per pinned target, or both, with a direct-review fallback. |
+| Work list | [work-list.md](specs/work-list.md) | `server.ts` (`chief_roster` Pending block, `chief_todos`, `bb chief status`, `handOver`, `unpinPendingTab`) | Chief's work list is the roster's Pending block; the Chief to-do side panel is removed. |
 
 ## Active decisions
 

@@ -1,16 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   definePluginApp,
   experimental_useSidebarThreads,
   experimental_ProviderModelPicker as ProviderModelPicker,
   useBbNavigate,
-  useRealtime,
-  useRealtimeConnectionState,
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import type { ModelConfiguration, ModelSelection, ResearchConfiguration, rpcContract, TodoItem } from "./server";
+import type { ModelConfiguration, ModelSelection, ResearchConfiguration, rpcContract } from "./server";
 
 const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
@@ -558,95 +556,6 @@ function NewChiefButton({ projectId }: { projectId: string; threadId: string; is
   );
 }
 
-/** Text with every thread id turned into a navigate button. */
-function Linked({ text }: { text: string }) {
-  const navigate = useBbNavigate();
-  return (
-    <>
-      {text.split(/(thr_[a-z0-9]+)/).map((piece, index) =>
-        index % 2 ? (
-          <button key={index} type="button" onClick={() => navigate.toThread(piece)} className="cursor-pointer underline underline-offset-2 hover:text-primary">
-            {piece}
-          </button>
-        ) : piece,
-      )}
-    </>
-  );
-}
-
-function TodoEntry({ item }: { item: TodoItem }) {
-  return (
-    <li className="flex items-start gap-2 text-xs">
-      <input type="checkbox" checked={item.done} readOnly disabled aria-label={item.label} className="mt-0.5" />
-      <div className={item.done ? "line-through text-muted-foreground" : "text-foreground"}>
-        <Linked text={item.label} /> <span className="text-muted-foreground">(<Linked text={item.id} />, {item.status})</span>
-        {item.action ? <div className="text-xs text-muted-foreground"><Linked text={item.action} /></div> : null}
-      </div>
-    </li>
-  );
-}
-
-/** This Chief's to-do checklist: every managed thread and project todo, done items collapsed. */
-function ChiefPendingPanel({ threadId }: { threadId: string }) {
-  const rpc = useRpc<typeof rpcContract>();
-  const [pending, setPending] = useState<{ chief: boolean; items: TodoItem[]; doneOmitted: number } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-
-  const load = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      setPending(await rpc.call("pending", { threadId }));
-      setError(null);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setIsLoading(false);
-    }
-  }, [rpc, threadId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-  useRealtime("pending", () => void load());
-  // Signals published while the socket was down are lost, so refetch on reconnect.
-  const connection = useRealtimeConnectionState();
-  const previousConnection = useRef(connection);
-  useEffect(() => {
-    if (connection === "connected" && previousConnection.current !== "connected") void load();
-    previousConnection.current = connection;
-  }, [connection, load]);
-
-  return (
-    <div className="space-y-2">
-      <div className="flex justify-end">
-        <button
-          type="button"
-          disabled={isLoading}
-          onClick={() => void load()}
-          className="h-7 shrink-0 cursor-pointer rounded-md border border-input px-3 text-xs font-medium disabled:opacity-50"
-        >
-          {isLoading ? "Refreshing…" : "Refresh"}
-        </button>
-      </div>
-      {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      {pending && !pending.chief ? <p className="text-sm text-muted-foreground">Not a Chief thread.</p> : null}
-      {pending?.chief && !pending.items.length ? <p className="text-sm text-muted-foreground">Nothing tracked yet.</p> : null}
-      {pending?.chief && pending.items.some((item) => !item.done) ? (
-        <ul className="space-y-1">{pending.items.filter((item) => !item.done).map((item) => <TodoEntry key={item.id} item={item} />)}</ul>
-      ) : null}
-      {pending?.chief && pending.items.some((item) => item.done) ? (
-        <details>
-          <summary className="cursor-pointer text-xs text-muted-foreground">
-            Done ({pending.items.filter((item) => item.done).length}{pending.doneOmitted ? `, ${pending.doneOmitted} older not shown` : ""})
-          </summary>
-          <ul className="mt-1 space-y-1">{pending.items.filter((item) => item.done).map((item) => <TodoEntry key={item.id} item={item} />)}</ul>
-        </details>
-      ) : null}
-    </div>
-  );
-}
-
 export default definePluginApp((app) => {
   app.slots.homepageSection({
     id: "start-chief",
@@ -674,11 +583,5 @@ export default definePluginApp((app) => {
     id: "new-chief",
     title: "New Chief",
     component: NewChiefButton,
-  });
-  app.slots.threadPanelAction({
-    id: "pending",
-    title: "Chief to-do",
-    icon: "Crown",
-    component: ChiefPendingPanel,
   });
 });

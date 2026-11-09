@@ -49,8 +49,6 @@ const MAX_RESULT_LENGTH = 8_000;
 const MAX_NUDGE_LENGTH = 500;
 const REVIEW_IDLE_WAIT_MS = 60_000;
 const REVIEW_IDLE_POLL_MS = 2_000;
-// ponytail: done capped at 50, newest first
-const MAX_DONE_ITEMS = 50;
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 /** chief_continue calls per stall episode that re-arm the stall clock; later ones still deliver the nudge but leave the alert schedule alone. A report resets the count. */
 const MAX_STALL_RESETS = 2;
@@ -227,15 +225,6 @@ const modelConfigurationSchema = z.object({
   })),
 });
 export type ModelConfiguration = z.infer<typeof modelConfigurationSchema>;
-
-const todoItemSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  status: z.string(),
-  action: z.string().nullable(),
-  done: z.boolean(),
-});
-export type TodoItem = z.infer<typeof todoItemSchema>;
 
 const managedThreadSchema = z.object({
   threadId: z.string(),
@@ -454,10 +443,6 @@ export const rpcContract = defineRpcContract({
   role: {
     input: z.object({ threadId: z.string() }).strict(),
     output: z.object({ role: roleSchema.nullable() }).strict(),
-  },
-  pending: {
-    input: z.object({ threadId: z.string() }).strict(),
-    output: z.object({ chief: z.boolean(), items: z.array(todoItemSchema), doneOmitted: z.number() }).strict(),
   },
 });
 
@@ -1185,14 +1170,13 @@ export default async function plugin(bb: BbPluginApi) {
     `INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(provider_id, model) DO UPDATE SET until_at=MAX(until_at, excluded.until_at), reason=excluded.reason, updated_at=excluded.updated_at`,
   );
-  let pendingReady = false; // set once everything pendingSnapshot() touches is initialised
-  // The sweep and the Pending publish follow a reload only once pendingReady, as before the store existed.
+  let pendingReady = false; // set once the state the sweep reads is initialised
+  // The sweep follows a reload only once pendingReady, as before the store existed.
   const store = createThreadStore<ManagedRow>(db, {
     onReload: () => {
       if (!pendingReady) return;
       // ponytail: sweeps on every reload, O(planners × rows); index by plan_thread_id if rosters grow large.
       void sweep();
-      publishPending();
     },
   });
   const ledger = createReviewLedger<ManagedRow>(db, store.get, store, { busy: (status) => BUSY_STATUSES.has(status) });
@@ -1206,7 +1190,6 @@ export default async function plugin(bb: BbPluginApi) {
   const rulesCache = new Map<string, string>();
   const alertDeliveries = new Map<string, Promise<boolean>>();
 
-  let publishedPending: string | null = null; // ponytail: in-memory dedupe; lost on reload → one extra signal
   const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
   const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
   const { onSpecChain } = progress;
@@ -1251,18 +1234,10 @@ export default async function plugin(bb: BbPluginApi) {
     sweeping = (async () => {
       do {
         sweepAgain = false;
-        if (await completeAbsorbed()) publishPending();
+        await completeAbsorbed();
       } while (sweepAgain);
     })().catch((error) => bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`)).finally(() => { sweeping = null; });
     return sweeping;
-  }
-  function publishPending() {
-    // ponytail: recomputes every Chief's Pending block per reload; debounce if rosters grow large.
-    const next = JSON.stringify(pendingSnapshot());
-    if (next !== publishedPending) {
-      publishedPending = next;
-      bb.realtime.publish("pending", null);
-    }
   }
   function toManaged(row: ManagedRow): ManagedThread {
     return {
@@ -1627,7 +1602,6 @@ export default async function plugin(bb: BbPluginApi) {
     store.insert({
       threadId: thread.id, role: "chief", projectId: target, title, state: "starting", status: thread.status,
     });
-    void pinPendingTab(thread.id);
     return { threadId: thread.id, created: true as const };
   }
 
@@ -1659,25 +1633,18 @@ export default async function plugin(bb: BbPluginApi) {
     });
   }
 
-  /** Best-effort: appends the pending panel tab to a Chief thread once. Never throws. */
-  async function pinPendingTab(threadId: string) {
+  /** Best-effort: drops the pending panel tab an earlier version pinned on a Chief thread. Never throws. */
+  async function unpinPendingTab(threadId: string) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const { revision, tabs } = await bb.sdk.threads.tabs.get({ threadId });
-        if (tabs.some((tab) => tab.kind === "plugin-panel" && tab.pluginId === bb.pluginId && tab.actionId === "pending")) return;
-        await bb.sdk.threads.tabs.update({
-          threadId, expectedRevision: revision,
-          tabs: [...tabs, {
-            // Must match the host's id so opening the action finds this tab: get-bb/bb
-            // packages/client-core/src/panel/fixed-panel-tabs-state.ts buildFixedPanelTabId.
-            kind: "plugin-panel", id: `plugin-panel:${encodeURIComponent(`${bb.pluginId}:pending:`)}:none`, pluginId: bb.pluginId,
-            actionId: "pending", title: "Chief to-do", paramsJson: null,
-          }],
-        });
+        const kept = tabs.filter((tab) => !(tab.kind === "plugin-panel" && tab.pluginId === bb.pluginId && tab.actionId === "pending"));
+        if (kept.length === tabs.length) return;
+        await bb.sdk.threads.tabs.update({ threadId, expectedRevision: revision, tabs: kept });
         return;
       } catch (error) {
         // ponytail: retries any error once, not only revision conflicts
-        if (attempt === 1) bb.log.warn(`Could not pin the pending tab on ${threadId}: ${String(error)}`);
+        if (attempt === 1) bb.log.warn(`Could not unpin the pending tab on ${threadId}: ${String(error)}`);
       }
     }
   }
@@ -2294,14 +2261,6 @@ export default async function plugin(bb: BbPluginApi) {
     return work.layout === "single"
       ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with ${handoff(work.target)}; its findings are attached automatically.${work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} Escalate if the disagreement is a genuine decision.`
       : `The reviewer requires changes, and no managed worker owns branch ${row.branch}.${flagged} Hand the fix to a fresh worker with chief_delegate (branch: ${row.branch}${row.pr_url ? `, prUrl: ${row.pr_url}` : ""}; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.`;
-  }
-
-  /** The one open/done test: the panel's unchecked items are exactly Pending's actions plus work
-   * still in progress. A worker is open until complete; a planner, reviewer, or advisor only while
-   * it runs or names a next action. */
-  function isOpenItem(row: ManagedRow) {
-    if (["complete", "archived", "deleted"].includes(row.state)) return false;
-    return row.role === "worker" || BUSY_STATUSES.has(row.state) || nextAction(row) !== null;
   }
 
   /** Live status of a worker. When its row is already ready, waits up to REVIEW_IDLE_WAIT_MS
@@ -3755,46 +3714,6 @@ export default async function plugin(bb: BbPluginApi) {
     return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(store.get(chiefThreadId)?.project_id, !includeWaiting, chiefThreadId)), limit);
   }
 
-  /** The panel's checklist: action threads, in-progress threads (newest first), open
-   * todos, then done threads and closed todos by recency, capped at MAX_DONE_ITEMS. */
-  function todoItems(chiefThreadId: string): { items: TodoItem[]; doneOmitted: number } {
-    const rows = rosterForChief(chiefThreadId, true).filter((row) => row.thread_id !== chiefThreadId).reverse();
-    const threadItem = (row: ManagedRow, done: boolean) => ({
-      id: row.thread_id, label: `${row.role} “${row.title}”`, status: row.state, action: done ? null : nextAction(row), done,
-    });
-    const projectId = store.get(chiefThreadId)?.project_id;
-    const todoItem = (todo: TodoRow) => {
-      const owner = todoOwnerLabel(todo, chiefThreadId);
-      return {
-        id: `todo #${todo.id}`,
-        label: `${todo.text}${todo.after ? ` (after: ${todo.after})` : ""}${owner ? ` — ${todo.chief_thread_id ? `from ${owner}` : owner}` : ""}`,
-        status: owner ? (todo.chief_thread_id ? "other Chief" : "unowned") : todo.state,
-        action: null, done: todo.state !== "open",
-      };
-    };
-    const openTodos = (projectId ? todosForProject.all(projectId) as TodoRow[] : []);
-    const open = rows.filter(isOpenItem).map((row) => threadItem(row, false));
-    const doneRows = [
-      ...rows.filter((row) => !isOpenItem(row)).map((row) => [row.updated_at, threadItem(row, true)] as const),
-      ...(projectId ? closedTodosForProject.all(projectId) as TodoRow[] : []).filter((todo) => todo.chief_thread_id === chiefThreadId).map((todo) => [todo.updated_at, todoItem(todo)] as const),
-    ].sort((a, b) => b[0] - a[0]);
-    return {
-      items: [
-        ...open.filter((item) => item.action),
-        ...open.filter((item) => !item.action),
-        ...openTodos.filter((todo) => todo.chief_thread_id === chiefThreadId).map(todoItem),
-        ...openTodos.filter((todo) => todo.chief_thread_id !== chiefThreadId).map(todoItem),
-        ...doneRows.slice(0, MAX_DONE_ITEMS).map(([, item]) => item),
-      ],
-      doneOmitted: Math.max(0, doneRows.length - MAX_DONE_ITEMS),
-    };
-  }
-
-  /** Every active Chief's checklist, only to detect a change worth a realtime signal. */
-  function pendingSnapshot() {
-    return store.all().filter(isActiveChief).map((chief) => [chief.thread_id, todoItems(chief.thread_id)]);
-  }
-
   async function lastOutput(threadId: string) {
     try {
       return (await bb.sdk.threads.output({ threadId })).output;
@@ -4505,8 +4424,6 @@ export default async function plugin(bb: BbPluginApi) {
     create: ({ projectId }) => createChief(projectId),
     // The header badge asks for one thread's role on every thread it renders on: not the roster.
     role: ({ threadId }) => ({ role: store.get(threadId)?.role ?? null }),
-    pending: ({ threadId }) =>
-      isActiveChief(store.get(threadId)) ? { chief: true, ...todoItems(threadId) } : { chief: false, items: [], doneOmitted: 0 },
     modelConfiguration: async () => ({
       hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
         const connected = host.status === "connected";
@@ -4783,6 +4700,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   pendingReady = true;
+  for (const chief of store.all().filter(isActiveChief)) void unpinPendingTab(chief.thread_id);
   try {
     await reconcile(); // each reconciled row's reload sweeps rows absorbed before this version
   } catch (error) {
