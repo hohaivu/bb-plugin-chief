@@ -4820,6 +4820,23 @@ describe("auto-completing absorbed supporting threads", () => {
     expect(stateOf(state, reviewer)).toBe("complete");
   });
 
+  // Contract (work-list spec, Contracts that stay): the sweep still runs on `failed` events (the `idle` case is the test above) once pendingReady is set.
+  test("a busy reviewer is swept once it fails", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
+    state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" });
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
+    await call(state, "chief_complete", { threadId: worker.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId);
+    await settle();
+    expect(stateOf(state, reviewer)).toBe("active");
+    state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "failed" });
+    await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(reviewer)!, lastAssistantText: "boom" });
+    await settle();
+    expect(stateOf(state, reviewer)).toBe("complete");
+  });
+
   test("replaces: completes the prior worker's advisor and hides the re-pointed reviewer's stale line", async () => {
     const state = await setup();
     const chief = await start(state);
