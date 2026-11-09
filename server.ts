@@ -1119,7 +1119,8 @@ export default async function plugin(bb: BbPluginApi) {
       default: true,
     },
     reviewEngine: {
-      type: "string",
+      type: "select",
+      options: ["reviewer", "pr-agent", "both"],
       label: "Review engine",
       description: "reviewer (default): the reviewer reads the code. pr-agent: the reviewer runs pr-agent on each pinned pull request and reports its result; other targets get a direct review. both: pr-agent plus a direct review in a helper thread, combined into one report. Any pr-agent failure falls back to a direct review. pr-agent never posts to the pull request.",
       default: "reviewer",
@@ -1131,7 +1132,8 @@ export default async function plugin(bb: BbPluginApi) {
       default: PR_AGENT_DIR,
     },
     tracker: {
-      type: "string",
+      type: "select",
+      options: ["none", "bb-tasks"],
       label: "Task tracker",
       description: "none (default) or bb-tasks: mirror Chief work to bb Tasks. Off deletes nothing.",
       default: "none",
@@ -1139,6 +1141,7 @@ export default async function plugin(bb: BbPluginApi) {
     trackerProjects: {
       type: "string",
       label: "Tracker projects",
+      experimental_multiline: true,
       description: "One Chief project = tracker project per line, e.g. proj_abc=ABC",
       default: "",
     },
