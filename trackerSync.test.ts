@@ -915,6 +915,68 @@ describe("follow-up joins the unit", () => {
     expect(w.receipts("thread")).toMatchObject([{ ref: "U2", payload: null, state: "sent" }]);
   });
 
+  describe("chains of any length", () => {
+    // Each worker matches only its predecessor: A=(P1,b1) B=(P1,b2) C=(P2,b2) D=(P2,b3) E=(P3,b3) F=(P3,b4) G=(P4,b4).
+    const PRS = [1, 1, 2, 2, 3, 3, 4].map((n) => `https://github.com/acme/shop/pull/${n + 10}`);
+    const BRANCHES = ["b1", "b2", "b2", "b3", "b3", "b4", "b4"];
+    const IDS = ["A", "B", "C", "D", "E", "F", "G"];
+    /** A..F started and finished one after another; G is returned unstarted. */
+    async function sixDone(w: World) {
+      for (let i = 0; i < 6; i++) {
+        const row = w.add({ thread_id: IDS[i]!, role: "worker", title: IDS[i], pr_url: PRS[i]!, branch: BRANCHES[i]! });
+        await w.sync.start(row, `Mission ${IDS[i]}`);
+        await w.sync.sync();
+        row.state = "complete";
+        await w.sync.sync();
+      }
+      w.drain();
+    }
+
+    test("the seventh worker joins the first one's task; its reviewer-of-the-sixth's files and its decisions land there; the task goes back to working", async () => {
+      const w = world();
+      await sixDone(w);
+      expect(w.units().map((u) => u.root_thread_id)).toEqual(["A"]);
+      expect(w.units()[0].status).toBe("review");
+      const g = w.add({ thread_id: "G", role: "worker", title: "G", pr_url: PRS[6]!, branch: BRANCHES[6]! });
+      await w.sync.start(g, "Mission G");
+      const reviewer = w.add({ thread_id: "RF", role: "reviewer", worker_thread_id: "F" });
+      w.targets = { RF: ["F"] };
+      await w.sync.attachFiles(reviewer, [{ name: "verdict.md", content: "# verdict F" }]);
+      await w.sync.decide(g, "Pick A or B.");
+      await w.sync.decide(reviewer, "Pick C or D.");
+      expect(w.units()).toHaveLength(1);
+      expect(new Set(w.receipts().map((r) => r.root_thread_id))).toEqual(new Set(["A"]));
+      await w.sync.sync();
+      expect(w.called("createTask")).toEqual([]);
+      expect(w.called("postComment").filter((c) => (c[2] as string).includes("chief-request:G"))).toEqual([["postComment", "T1", request("G", "Mission G")]]);
+      expect(w.called("attachThread")).toEqual([["attachThread", "T1", "G"]]);
+      expect(w.called("attachFile")).toEqual([["attachFile", "T1", { name: "verdict.md", content: "# verdict F" }]]);
+      expect(w.called("postComment").filter((c) => (c[2] as string).includes("Pick "))).toHaveLength(2);
+      // G is part of A's unit: its pull request is linked and the unit works while G runs.
+      expect(w.called("linkPullRequest")).toEqual([["linkPullRequest", "T1", PRS[6]]]);
+      expect(w.called("setStatus")).toEqual([["setStatus", "T1", "working"]]);
+      // Two passes equal one pass.
+      w.drain();
+      await w.sync.sync();
+      expect(w.writes()).toEqual([]);
+      g.state = "complete";
+      await w.sync.sync();
+      expect(w.called("setStatus")).toEqual([["setStatus", "T1", "review"]]);
+    });
+
+    test("a cycle in the earlier-work links ends the walk: the thread belongs to no unit", async () => {
+      const w = world();
+      // A worker planned by an advisor that is, in turn, tied back to that worker.
+      w.add({ thread_id: "X", role: "advisor", plan_thread_id: "W" });
+      const worker = w.add({ thread_id: "W", role: "worker", plan_thread_id: "X" });
+      await w.sync.start(worker, "Mission W");
+      expect(w.log.warn).not.toHaveBeenCalled(); // a runaway walk would be caught by the hook and logged here
+      await w.sync.sync();
+      expect(w.rowCount()).toBe(0);
+      expect(w.writes()).toEqual([]);
+    });
+  });
+
   test("off: the follow-up writes no row and makes no call", async () => {
     const w = world();
     await earlierWork(w, { pr_url: PR_A });
