@@ -203,13 +203,7 @@ Timeouts can also be set with `bb plugin config chief set researchSurveyTimeoutM
 action, in the same wording its lifecycle alert already used, so the two never disagree. Chief
 is instructed to call `chief_roster` at the start of every turn and again after any compaction,
 so the Pending block — not memory — is what it works from.
-On a Chief thread the side panel's **Actions → Chief to-do** is a read-only checklist of
-every managed thread and todo: items with a next action first, then in-progress threads and
-open todos, with done items (the newest 50) struck through in a collapsed group. An item is unchecked only
-while it names a next action (the same one Pending shows) or is still in progress; supporting
-threads close with their worker. It updates
-live as managed threads change (and refetches after the realtime connection reconnects).
-Chief's own todos — including queued work nobody has delegated yet — live there too as
+Chief's own todos — including queued work nobody has delegated yet — live in the Pending block as
 `todo #N` lines: `chief_roster` with `todo: { text, after? }` adds one, `todo: { id, text?, after?, state? }`
 changes or closes it (`done`/`dropped`); Chief is told to use them instead of Memory files, TodoWrite,
 or Task tools. Each todo records the Chief thread that added it. Every Chief still sees all the
