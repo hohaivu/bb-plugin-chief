@@ -71,12 +71,13 @@ export function createTrackerSync(deps: {
   const posted = (receipt: ReceiptRow) => JSON.parse(receipt.result ?? "{}") as Posted;
 
   /** The unit a thread belongs to, by its root thread id; null for a thread that is no part of a tracked unit. */
-  function root(row: ManagedRow | undefined, depth = 0): string | null {
-    if (!row || depth > 5) return null;
+  function root(row: ManagedRow | undefined, seen = new Set<string>()): string | null {
+    if (!row || seen.has(row.thread_id)) return null;
+    seen.add(row.thread_id);
     if (row.role === "planner") return deps.taskChain(row.thread_id).at(-1)!;
     if (row.role === "worker") {
       const planner = row.plan_thread_id ? get(row.plan_thread_id) : undefined;
-      if (planner) return root(planner, depth + 1);
+      if (planner) return root(planner, seen);
       const headId = deps.taskChain(row.thread_id).at(-1)!;
       const head = get(headId);
       if (!head || !(head.pr_url || head.branch)) return headId;
@@ -86,15 +87,15 @@ export function createTrackerSync(deps: {
         .filter((r) => r.role === "worker" && r.project_id === head.project_id && r.created_at < head.created_at
           && ((head.pr_url && r.pr_url === head.pr_url) || (head.branch && r.branch === head.branch)))
         .sort((a, b) => a.created_at - b.created_at)[0];
-      return earlier ? root(earlier, depth + 1) : headId;
+      return earlier ? root(earlier, seen) : headId;
     }
     if (row.role === "advisor") {
-      if (row.plan_thread_id) return root(get(row.plan_thread_id), depth + 1);
-      return row.worker_thread_id ? root(get(row.worker_thread_id), depth + 1) : null;
+      if (row.plan_thread_id) return root(get(row.plan_thread_id), seen);
+      return row.worker_thread_id ? root(get(row.worker_thread_id), seen) : null;
     }
     if (row.role === "reviewer") {
       const target = deps.reviewTargets(row.thread_id)[0] ?? row.worker_thread_id;
-      return target ? root(get(target), depth + 1) : null;
+      return target ? root(get(target), seen) : null;
     }
     return null;
   }
