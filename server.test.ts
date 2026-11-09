@@ -95,7 +95,9 @@ async function setup(options: { rules?: string; hostStatus?: string; providerAva
   /** Runs on the migrated database right before the plugin starts: seeds state a restart would find. */
   seed?: (ctx: { bb: any; db: any; live: Map<string, ReturnType<typeof makeThreadResponse>>; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => void;
   /** Runs in every tabs.get after it read its snapshot, before it returns it: a hook may race a write or never settle. */
-  onTabsGet?: (ctx: { threadId: string; call: number; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => Promise<void> | void } = {}) {
+  onTabsGet?: (ctx: { threadId: string; call: number; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => Promise<void> | void,
+  /** Runs in every threads.getPluginMetadata before it answers: a hook may hold the spawn-recovery lookup open while a launch lands. */
+  onPluginMetadata?: (threadId: string) => Promise<void> | void } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -222,7 +224,7 @@ async function setup(options: { rules?: string; hostStatus?: string; providerAva
             && (archived !== false || !t.archivedAt) && (includeHidden || t.visibility !== "hidden"));
         },
         archive: async ({ threadId }: { threadId: string }) => { archivedThreads.push(threadId); return { ok: true }; },
-        getPluginMetadata: async ({ threadId }: { threadId: string }) => pluginMetadataStore.get(threadId) ?? {},
+        getPluginMetadata: async ({ threadId }: { threadId: string }) => { await options.onPluginMetadata?.(threadId); return pluginMetadataStore.get(threadId) ?? {}; },
         storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_storage", storageRootPath: join(storageRoot, threadId) }),
         get: async ({ threadId }: { threadId: string }) => {
           const failures = getFailures.get(threadId) ?? 0;
@@ -367,7 +369,7 @@ async function delegate(
     ...(forge?.kind ? ["--kind", forge.kind] : []),
     "--json",
   ], { threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.stderr).toBe(0);
   return JSON.parse(result.stdout!) as { threadId: string; projectId: string };
 }
 
@@ -12688,6 +12690,67 @@ describe("tracker integration", () => {
     expect(answerAlerts(state).map((message) => message.input[0].text).sort()).toEqual([
       `[Chief lifecycle alert]\n${ANSWERED(1, "#1 Option A")}`, `[Chief lifecycle alert]\n${ANSWERED(2, "#2 Later")}`,
     ]);
+  });
+
+  // Contract (spec, Unit of work; recovery of a thread whose launch has not inserted its row): a spawn-seeded recovery has no pull request
+  // or branch, so it inserts a row only when none exists once its lookup returns. A follow-up whose launch row (with its PR and branch)
+  // landed while the lookup awaited stays on the earlier unit: its report files and decisions reach the original task, and no task is added.
+  // The three callers of that recovery are the worker's own chief_report (reportIntake), chief_research (managedRow) and Chief's
+  // chief_inspect (resolveTarget). launched: false is the control: with no launch, recovery still inserts the row.
+  // Regression: an unconditional recovery insert at any one of them, which upserts the keys to null so the thread drops out of its unit.
+  describe.each<[string, "worker" | "chief", string, object, string | undefined]>([
+    ["chief_report (reportIntake)", "worker", "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, undefined],
+    ["chief_research (managedRow)", "worker", "chief_research", { mode: "survey", question: "Who calls this?", items: ["a.ts"] }, "not available to a managed worker"],
+    ["chief_inspect (resolveTarget)", "chief", "chief_inspect", {}, undefined],
+  ])("stale spawn recovery through %s", (_name, caller, tool, params, rejection) => {
+    test.each([true, false])("launch row landed during the lookup: %s", async (launched) => {
+      const hold = { id: "", gate: Promise.resolve(), entered: () => {}, taken: false };
+      const state = await setup({ onPluginMetadata: async (id) => { if (id === hold.id && !hold.taken) { hold.taken = true; hold.entered(); await hold.gate; } } });
+      const tasks = tasksCli();
+      await on(state);
+      const chief = (await start(state)).threadId;
+      const keys = { prUrl: "https://github.com/acme/shop/pull/1", branch: "feature/x" };
+      const first = (await delegate(state, chief, "Fix checkout totals", keys)).threadId;
+      await completeWorker(state, chief, first);
+      await settled(state, tasks);
+      expect(tasks.of("create")).toHaveLength(1);
+
+      // The follow-up's thread exists and is ours, but its launch has not inserted a row yet.
+      const id = `thr_${state.spawned.length + 1}`;
+      state.addLive(id, "proj_1", "Follow-up", "chief");
+      state.live.get(id)!.parentThreadId = chief;
+      state.seedPluginMetadata(id, { role: "worker", chiefThreadId: chief });
+      let release!: () => void;
+      hold.id = id;
+      hold.gate = new Promise<void>((resolve) => { release = resolve; });
+      const entered = new Promise<void>((resolve) => { hold.entered = resolve; });
+      const callerId = caller === "chief" ? chief : id;
+      const stale = call(state, tool, caller === "chief" ? { threadId: id } : params, callerId).then(() => undefined, (error: Error) => error);
+      await entered;
+      if (launched) expect((await delegate(state, chief, "Fix checkout totals", keys)).threadId).toBe(id);
+      release();
+      const error = await stale;
+      if (rejection) expect(error?.message).toContain(rejection); else expect(error).toBeUndefined();
+
+      const row = () => state.db.prepare("SELECT role, pr_url, branch FROM managed_threads WHERE thread_id=?").get(id);
+      if (!launched) {
+        expect(row()).toEqual({ role: "worker", pr_url: null, branch: null });
+        return;
+      }
+      expect(row()).toEqual({ role: "worker", pr_url: keys.prUrl, branch: keys.branch });
+      // Later work of the follow-up lands on the original task: its reviewer's verdict file and its decision.
+      if (tool !== "chief_report") await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, id);
+      const review = await chiefReview(state, chief, { workerThreadId: id });
+      await call(state, "chief_report", { state: "ready", result: "Checked", ...APPROVE }, review.threadId);
+      await call(state, "chief_escalate", { threadId: id, request: "Which total rule?" }, chief);
+      await settled(state, tasks);
+      expect(tasks.of("create")).toHaveLength(1);
+      expect([...tasks.tasks.keys()]).toEqual(["task_1"]);
+      expect(tasks.of("attach").filter((a) => a[3] === id)).toEqual([["attach", "task_1", "--thread", id]]);
+      expect(tasks.attachments.map((a) => [a.task, a.name])).toEqual([["task_1", "verdict-1.md"]]);
+      expect(tasks.of("comment").map((a) => a[1])).toEqual(["task_1", "task_1"]);
+      expect(tasks.of("comment").map((a) => a[3])).toEqual([expect.stringContaining(`chief-request:${id}`), decisionBody(1, "Which total rule?")]);
+    });
   });
 
   // Contract (spec, Failure handling): a bb tasks CLI that never resolves blocks none of chief_plan, chief_delegate, chief_report, chief_escalate.

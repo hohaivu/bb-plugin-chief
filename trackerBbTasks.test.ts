@@ -61,7 +61,7 @@ describe("environment and command line of every call", () => {
     await tracker.linkPullRequest("01X", "https://example.test/pr/1");
     await tracker.attachFile("01X", { name: "plan-1.md", content: "x" });
     await tracker.comments("01X");
-    await tracker.postDecision("01X", "body");
+    await tracker.postComment("01X", "body");
     await tracker.setDecisionFlag("ABC", "01X", true);
     await tracker.setDecisionFlag("ABC", "01X", false);
     expect(calls.length).toBeGreaterThan(12);
@@ -143,10 +143,10 @@ describe("createTask, findTask, linkPullRequest", () => {
 });
 
 describe("decisions", () => {
-  test("postDecision posts the body verbatim as Chief, never with --notify, and returns the comment id", async () => {
+  test("postComment posts the body verbatim as Chief, never with --notify, and returns the comment id", async () => {
     const { argv, tracker } = fake(() => ok({ comment: { id: "01COMMENT" } }));
     const body = "**Decision #1** (Chief)\n\nPick one.\n\nchief-decision:abc";
-    expect(await tracker.postDecision("01X", body)).toBe("01COMMENT");
+    expect(await tracker.postComment("01X", body)).toBe("01COMMENT");
     expect(argv()).toEqual([["tasks", "comment", "01X", "--body", body, "--author", "Chief", "--json"]]);
     expect(argv()[0]).not.toContain("--notify");
   });

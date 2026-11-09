@@ -3139,7 +3139,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function managedRow(threadId: string, callerProjectId: string) {
     const { row, pending } = await lookupRow(threadId, callerProjectId);
     if (pending) {
-      store.insert(pending);
+      if (!store.get(threadId)) store.insert(pending);
       return store.get(threadId);
     }
     return row;
@@ -3461,7 +3461,7 @@ export default async function plugin(bb: BbPluginApi) {
             ? spawnMetadataSchema.safeParse(await bb.sdk.threads.getPluginMetadata({ threadId }).catch(() => null))
             : undefined;
           if (seeded?.success && seeded.data.role !== "chief" && seeded.data.chiefThreadId === chiefThreadId) {
-            store.insert({
+            if (!store.get(threadId)) store.insert({
               threadId: live.id,
               role: seeded.data.role,
               projectId: live.projectId,

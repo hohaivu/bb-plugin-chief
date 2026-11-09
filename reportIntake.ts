@@ -459,7 +459,8 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     }
     const errors = checkReport(candidate, { ...params, fails: reportFails, findings: reportFindings }, plan);
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
-    if (found.pending) store.insert(found.pending);
+    // The launch row may have landed while the lookup awaited; keep it, as a recovery candidate has no PR or branch.
+    if (found.pending && !store.get(threadId)) store.insert(found.pending);
     const row = store.get(threadId)!;
     // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, test?, spec?}[], with bodies not yet trimmed if JSON-decoded.
     const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;

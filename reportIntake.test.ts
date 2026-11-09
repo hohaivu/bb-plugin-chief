@@ -410,6 +410,27 @@ describe("a refusal writes nothing", () => {
     await w.intake.report("w9", { state: "ready", result: "Done." }, "proj");
     expect(w.rowOf("w9")).toMatchObject({ report_seq: 1, state: "ready" });
   });
+
+  // Contract (docs/specs/tracker.md, Unit of work + docs/specs/report-intake.md, Target): a recovery candidate has no pull request or
+  // branch, so it only becomes a row when none exists once the report validates. A launch row that landed while the lookup awaited
+  // (its PR and branch are the unit's join keys) is kept as it is. The no-row case is the control: recovery still inserts.
+  // Regression: an unconditional insert of the stale candidate, which upserts the keys to null and drops the thread out of its unit.
+  test.each([
+    { launched: false, row: { title: "w9", pr_url: null, branch: null } },
+    { launched: true, row: { title: "Launched", pr_url: "https://github.com/acme/shop/pull/1", branch: "feat/x" } },
+  ])("a recovery candidate that returns after the launch row landed (launched: $launched) leaves $row", async ({ launched, row }) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const w = world({ lookupRow: async (id) => { await gate; return { pending: w.pendingRows.get(id) }; } });
+    w.pendingRows.set("w9", { threadId: "w9", role: "worker", projectId: "proj", chiefThreadId: "chief1", title: "w9", state: "active" });
+
+    const report = w.intake.report("w9", { state: "ready", result: "Done." }, "proj");
+    if (launched) w.store.insert({ threadId: "w9", role: "worker", projectId: "proj", chiefThreadId: "chief1", title: "Launched", state: "active", prUrl: row.pr_url, branch: row.branch });
+    release();
+
+    expect(await report).toBe(true);
+    expect(w.rowOf("w9")).toMatchObject({ ...row, report_seq: 1, state: "ready" });
+  });
 });
 
 describe("reviewer findings at the owner", () => {
