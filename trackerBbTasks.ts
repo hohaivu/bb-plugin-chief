@@ -89,7 +89,7 @@ export function bbTasksTracker(deps: BbTasksDeps): Tracker {
         id: comment.id, byOwner: comment.kind === "user", body: comment.body, at: Date.parse(comment.createdAt),
       }));
     },
-    async postDecision(taskId, body) {
+    async postComment(taskId, body) {
       const posted = await run(["comment", taskId, "--body", body, "--author", "Chief"]);
       const id = posted.comment?.id ?? posted.id;
       if (typeof id !== "string") throw new Error("comment returned no comment id");

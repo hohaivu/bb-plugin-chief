@@ -18,8 +18,8 @@ export interface Tracker {
   attachFile(taskId: string, file: { name: string; content: string }): Promise<void>;
   /** Oldest first. */
   comments(taskId: string): Promise<TrackerComment[]>;
-  /** Posts body verbatim and returns the comment id. */
-  postDecision(taskId: string, body: string): Promise<string>;
+  /** Posts body verbatim and returns the comment id. The only method that posts a comment: decision and follow-up request comments. */
+  postComment(taskId: string, body: string): Promise<string>;
   setDecisionFlag(project: string, taskId: string, open: boolean): Promise<void>;
 }
 
