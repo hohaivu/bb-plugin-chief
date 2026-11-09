@@ -10746,9 +10746,10 @@ describe("tool-call stability", () => {
 
   // Contract: non-Claude preservation and Claude preservation, against base 7178582 through resolveAgentConfiguration.
   // Allowed differences: (a) title leaves `required` and gets a new description on chief_delegate/plan/consult/spawn;
-  // (b) claude-code: the one preload line; (c) everything else, including every codex instruction, is identical.
+  // (b) claude-code: the one preload line; (c) everything else, including every codex instruction, is identical; (e) chief_escalate
+  // gains the optional boolean `merge` (tracker spec), the only schema change of that feature.
   // Regression: any stray change to tool selection or order, to a tool schema, to codex instructions or to claude instructions.
-  test("tool-config oracle: head equals base 7178582 apart from the title schema and the claude-code preload line", async () => {
+  test("tool-config oracle: head equals base 7178582 apart from the title schema, chief_escalate's optional merge field and the claude-code preload line", async () => {
     const base = JSON.parse(await readFile(snapshotPath, "utf8")) as Fixture;
     const full = await head();
     // Allowed difference (d): Chief alone gets chief_sync (PR 183). Checked here, then dropped so the rest still compares against base.
@@ -10758,6 +10759,11 @@ describe("tool-call stability", () => {
       catalog: Object.fromEntries(Object.entries(full.catalog).filter(([name]) => name !== "chief_sync")),
       entries: full.entries.map((entry) => ({ ...entry, tools: entry.tools.filter((name) => name !== "chief_sync") })),
     };
+    // Allowed difference (e): chief_escalate gains the optional boolean `merge` (tracker spec). Checked here, then dropped so the rest still compares against base.
+    const escalate = now.catalog["chief_escalate"]!;
+    expect(escalate.inputSchema.properties.merge).toMatchObject({ type: "boolean" });
+    expect(escalate.inputSchema.required ?? []).not.toContain("merge");
+    delete escalate.inputSchema.properties.merge;
     expect(now.entries.map((entry) => entry.key)).toEqual(base.entries.map((entry) => entry.key));
     expect(Object.keys(now.catalog)).toEqual(Object.keys(base.catalog));
 
