@@ -32,6 +32,8 @@ export interface ReportIntakeAdapters {
   actionLine(row: ManagedRow): string;
   recordedCommands(threadId: string): Promise<RecordedCommand[] | null>;
   reportStamp(threadId: string): Promise<string | null>;
+  /** Hands the files an accepted report wrote to the tracker sync. Called after the commit and before the alert; never awaited, never throws. */
+  trackFiles(row: ManagedRow, files: { name: string; content: string }[]): void;
   warn(message: string): void;
 }
 
@@ -431,7 +433,7 @@ export function reportFileBody(input: {
 
 /** The one owner of chief_report acceptance and publication: required state commits first, then the optional files and the alert. */
 export function createReportIntake(adapters: ReportIntakeAdapters): { report(threadId: string, params: ReportParams, callerProjectId: string): Promise<boolean> } {
-  const { db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, warn } = adapters;
+  const { db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, trackFiles, warn } = adapters;
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
     const found = await lookupRow(threadId, callerProjectId);
     // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
@@ -556,13 +558,15 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const reviewerVerdict = row.role === "reviewer" && !!verdict;
     // Best-effort: the verdict is in the DB either way, so a failed write only loses the file.
     let verdictPath: string | null = null;
+    let verdictBody: string | null = null;
     const reviewedTargets = reviewerVerdict ? ledger.targets(threadId) : [];
     if (reviewerVerdict) {
       try {
-        verdictPath = await writeArtifact(threadId, row.project_id, verdictName, verdictFileBody({
+        verdictBody = verdictFileBody({
           threadId, verdict, regressionFlag, reviewedTargets, workerThreadId: row.worker_thread_id, reviewedHeadSha: row.reviewed_head_sha,
           findingList, result: params.result, recommendation: params.recommendation,
-        }));
+        });
+        verdictPath = await writeArtifact(threadId, row.project_id, verdictName, verdictBody);
       } catch (error) {
         warn(`Could not write ${threadId}'s verdict file: ${String(error)}`);
       }
@@ -599,6 +603,11 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     // newer report, nor to a result chief_complete replaced meanwhile (even with identical text). Always runs, so a
     // report without a verdict still clears the previous verdict_path as the main UPDATE used to.
     store.attachReportFiles(threadId, seq, resultRev, verdictPath, reportPath);
+    const files = [
+      ...(planWaves && planInput ? planWaves.map((wave, index) => ({ name: basename(wave.path), content: `${typeof planInput === "string" ? planInput : planInput[index]!.body}\n` })) : []),
+      ...(verdictPath && verdictBody !== null ? [{ name: verdictName, content: verdictBody }] : []),
+    ];
+    if (files.length) trackFiles(current, files);
     const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
     return alertChief(store.get(threadId) ?? current, `report:${current.active_cycle}:${contentKey}`, alert);
   }
