@@ -71,38 +71,49 @@ export function createTrackerSync(deps: {
     db.prepare(`INSERT OR IGNORE INTO tracker_receipts (root_thread_id, kind, ref, payload, created_at) VALUES (?, ?, ?, ?, ?)`).run(rootId, kind, ref, payload, Date.now());
   const posted = (receipt: ReceiptRow) => JSON.parse(receipt.result ?? "{}") as Posted;
 
-  /** The unit a thread belongs to, by its root thread id; null for a thread that is no part of a tracked unit. */
-  function root(row: ManagedRow | undefined, seen = new Set<string>()): string | null {
-    if (!row || seen.has(row.thread_id)) return null;
-    seen.add(row.thread_id);
-    if (row.role === "planner") return deps.taskChain(row.thread_id).at(-1)!;
-    if (row.role === "worker") {
-      const planner = row.plan_thread_id ? get(row.plan_thread_id) : undefined;
-      if (planner) return root(planner, seen);
-      const headId = deps.taskChain(row.thread_id).at(-1)!;
-      const head = get(headId);
-      if (!head || !(head.pr_url || head.branch)) return headId;
-      // A follow-up on the pull request or branch of earlier work joins that work's unit, whatever the earlier worker's state.
-      // shortcut: scans all() for each call, so a pass is O(units x workers^2); build one join map per pass if passes get slow.
-      const ordered = all();
-      const earlier = ordered.slice(0, ordered.findIndex((r) => r.thread_id === headId))
-        .find((r) => r.role === "worker" && r.project_id === head.project_id
-          && ((head.pr_url && r.pr_url === head.pr_url) || (head.branch && r.branch === head.branch)));
-      return earlier ? root(earlier, seen) : headId;
+  /** One root map for one sync pass or hook call: a single scan of the store, then every thread's unit by its root thread id (null for a thread that is no part of a tracked unit). */
+  function rootMap() {
+    const ordered = all();
+    const position = new Map(ordered.map((r, i) => [r.thread_id, i]));
+    // The first worker (in persisted order) holding each pull request or branch; a head joins it when that worker comes before the head.
+    const keys = (r: ManagedRow) => [r.pr_url ? `pr\0${r.project_id}\0${r.pr_url}` : "", r.branch ? `branch\0${r.project_id}\0${r.branch}` : ""].filter(Boolean);
+    const first = new Map<string, number>();
+    ordered.forEach((r, i) => { if (r.role === "worker") for (const key of keys(r)) if (!first.has(key)) first.set(key, i); });
+    const roots = new Map<string, string | null>();
+    function resolve(row: ManagedRow | undefined, seen: Set<string>): string | null {
+      if (!row || seen.has(row.thread_id)) return null;
+      seen.add(row.thread_id);
+      if (row.role === "planner") return deps.taskChain(row.thread_id).at(-1)!;
+      if (row.role === "worker") {
+        const planner = row.plan_thread_id ? get(row.plan_thread_id) : undefined;
+        if (planner) return resolve(planner, seen);
+        const headId = deps.taskChain(row.thread_id).at(-1)!;
+        const head = get(headId);
+        if (!head || !(head.pr_url || head.branch)) return headId;
+        // A follow-up on the pull request or branch of earlier work joins that work's unit, whatever the earlier worker's state.
+        const at = position.get(headId) ?? -1;
+        const earliest = Math.min(...keys(head).map((key) => first.get(key) ?? Infinity));
+        return earliest < at ? resolve(ordered[earliest], seen) : headId;
+      }
+      if (row.role === "advisor") {
+        if (row.plan_thread_id) return resolve(get(row.plan_thread_id), seen);
+        return row.worker_thread_id ? resolve(get(row.worker_thread_id), seen) : null;
+      }
+      if (row.role === "reviewer") {
+        const target = deps.reviewTargets(row.thread_id)[0] ?? row.worker_thread_id;
+        return target ? resolve(get(target), seen) : null;
+      }
+      return null;
     }
-    if (row.role === "advisor") {
-      if (row.plan_thread_id) return root(get(row.plan_thread_id), seen);
-      return row.worker_thread_id ? root(get(row.worker_thread_id), seen) : null;
-    }
-    if (row.role === "reviewer") {
-      const target = deps.reviewTargets(row.thread_id)[0] ?? row.worker_thread_id;
-      return target ? root(get(target), seen) : null;
-    }
-    return null;
+    return (row: ManagedRow | undefined) => {
+      if (!row) return null;
+      if (!roots.has(row.thread_id)) roots.set(row.thread_id, resolve(row, new Set()));
+      return roots.get(row.thread_id)!;
+    };
   }
 
   /** The unit's threads, its phase and its pull requests, from the local rows. */
-  function describe(rootId: string) {
+  function describe(rootId: string, root: ReturnType<typeof rootMap>) {
     const top = get(rootId);
     if (!top) return null;
     const newest = (a: ManagedRow, b: ManagedRow) => b.created_at - a.created_at;
@@ -150,7 +161,7 @@ export function createTrackerSync(deps: {
   }
 
   /** A unit that can take receipts: it exists and its create did not fail. */
-  const openUnit = (row: ManagedRow) => {
+  const openUnit = (row: ManagedRow, root = rootMap()) => {
     const rootId = root(row);
     const unit = rootId ? unitOf(rootId) : undefined;
     return unit && unit.create_state !== "failed" ? unit : undefined;
@@ -323,8 +334,9 @@ export function createTrackerSync(deps: {
     for (const unit of db.prepare(`SELECT * FROM tracker_units WHERE task_id IS NULL AND create_state IS NULL ORDER BY created_at`).all() as UnitRow[]) {
       await step("create", unit, () => create(tracker, unit));
     }
+    const root = rootMap();
     for (const unit of db.prepare(`SELECT * FROM tracker_units WHERE task_id IS NOT NULL ORDER BY created_at`).all() as UnitRow[]) {
-      const facts = describe(unit.root_thread_id);
+      const facts = describe(unit.root_thread_id, root);
       if (facts) {
         // Receipts were recorded by the hooks while the tracker was on; the pass never discovers threads or pull requests itself.
         await step("receipts", unit, () => sendReceipts(tracker, unit, facts.threads));
@@ -339,8 +351,8 @@ export function createTrackerSync(deps: {
   let again = false;
 
   /** Records a spawned thread's attachment intent: its thread (with a request comment to post first, when given), the thread it replaces and its pull request. Only a hook that ran while the tracker was on calls this. */
-  const attach = (row: ManagedRow, note?: string) => {
-    const unit = openUnit(row);
+  const attach = (row: ManagedRow, note?: string, root = rootMap()) => {
+    const unit = openUnit(row, root);
     if (!unit) return;
     const prior = row.replaces_thread_id;
     db.transaction(() => {
@@ -356,6 +368,7 @@ export function createTrackerSync(deps: {
     /** A new plan or an undelegated worker begins a unit, when its project is mapped. */
     start: (row: ManagedRow, description: string) => hook("start", ({ projects }) => {
       const project = projects.get(row.project_id);
+      const root = rootMap();
       const rootId = root(row);
       if (!project || !rootId) return;
       const marker = `chief-unit:${sha(rootId)}`;
@@ -363,7 +376,7 @@ export function createTrackerSync(deps: {
       db.prepare(`INSERT OR IGNORE INTO tracker_units (root_thread_id, project_id, tracker_project, title, description, marker, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .run(rootId, row.project_id, project, row.title.replace(/^Plan · /, ""), `${clip(description, 4_000)}\n\n${marker}`, marker, Date.now());
       // Follow-up work on a unit that already has a task says what it is for once; a unit made now already holds the mission.
-      attach(row, existed && rootId !== row.thread_id ? `**Follow-up request** (Chief)\n\n${clip(description, 4_000)}\n\nchief-request:${row.thread_id}` : undefined);
+      attach(row, existed && rootId !== row.thread_id ? `**Follow-up request** (Chief)\n\n${clip(description, 4_000)}\n\nchief-request:${row.thread_id}` : undefined, root);
     }),
     /** Queues the files an accepted report wrote. */
     attachFiles: (row: ManagedRow, files: { name: string; content: string }[]) => hook("attachFiles", () => {
