@@ -7023,7 +7023,8 @@ describe("tester role", () => {
       expect(descriptors.trackerProjects).toMatchObject({ type: "string", experimental_multiline: true, default: "" });
     });
 
-    test.each([["no stored value", {}], ["an unrecognised value", { reviewEngine: "PR-AGENT" }], ["an empty value", { reviewEngine: "" }]])("%s: reviewer mode, no section, no engine file", async (_name, settings) => {
+    // An unrecognised or empty reviewEngine can no longer be stored (the select rejects it); reviewEngine() in prAgent.test.ts still owns that fallback.
+    test.each([["no stored value", {}]])("%s: reviewer mode, no section, no engine file", async (_name, settings) => {
       const { prompt, file } = await review(settings);
       expect(prompt).not.toContain("## Review engine");
       expect(await file("pr-agent-review.sh")).toBeNull();
