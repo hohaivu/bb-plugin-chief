@@ -1742,7 +1742,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (earlier.thread_id !== newId && !BUSY_STATUSES.has(earlier.state) && !terminal(earlier.state)) store.completeSuperseded(earlier.thread_id, now);
         }
       } : undefined);
-    if (!params.revises) void trackerSync.start(store.get(thread.id)!, params.mission);
+    void (params.revises ? trackerSync.join(store.get(thread.id)!) : trackerSync.start(store.get(thread.id)!, params.mission));
     return { threadId: thread.id, title, projectId, ...(warning ? { warning } : {}) };
   }
 
@@ -1958,7 +1958,7 @@ export default async function plugin(bb: BbPluginApi) {
         ledger.repoint(prior.thread_id, thread.id, now);
       });
     }
-    if (!prior && !planThreadId) void trackerSync.start(store.get(thread.id)!, params.mission);
+    void (!prior && !planThreadId ? trackerSync.start(store.get(thread.id)!, params.mission) : trackerSync.join(store.get(thread.id)!));
     return { threadId: thread.id, title: params.title, projectId };
   }
 

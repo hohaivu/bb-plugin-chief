@@ -113,9 +113,8 @@ export function createTrackerSync(deps: {
       threads = chain;
       phase = chain[chain.length - 1]!.state === "complete" ? "finished" : "working";
     } else return null;
-    const superseded = threads.filter((t) => threads.some((o) => o.replaces_thread_id === t.thread_id));
     const prUrls = [...new Set(threads.filter((t) => t.role === "worker" && t.pr_url).map((t) => t.pr_url!))];
-    return { threads, superseded, phase, prUrls };
+    return { threads, phase, prUrls };
   }
 
   /** Runs one hook body only when a tracker is selected. Never awaits the adapter and never throws. */
@@ -167,9 +166,10 @@ export function createTrackerSync(deps: {
     for (const r of pending) {
       if (r.kind === "unthread") {
         // Detach only after this thread and its successor are attached.
+        // A successor spawned while the tracker was off has no receipt and is not waited for.
         const needs = [r.ref, ...threads.filter((t) => t.replaces_thread_id === r.ref).map((t) => t.thread_id)];
         const attached = new Map(receiptsOf(unit.root_thread_id, "thread").map((t) => [t.ref, t.state]));
-        const states = needs.map((id) => attached.get(id) ?? null);
+        const states = needs.filter((id) => attached.has(id)).map((id) => attached.get(id) ?? null);
         if (states.includes("failed")) { settle(r, "failed", null, "an attach it depends on failed"); continue; }
         if (states.some((state) => state !== "sent")) continue;
       }
@@ -295,14 +295,8 @@ export function createTrackerSync(deps: {
     for (const unit of db.prepare(`SELECT * FROM tracker_units WHERE task_id IS NOT NULL ORDER BY created_at`).all() as UnitRow[]) {
       const facts = describe(unit.root_thread_id);
       if (facts) {
-        await step("receipts", unit, async () => {
-          db.transaction(() => {
-            for (const t of facts.threads) addReceipt(unit.root_thread_id, "thread", t.thread_id, null);
-            for (const t of facts.superseded) addReceipt(unit.root_thread_id, "unthread", t.thread_id, null);
-            for (const url of facts.prUrls) addReceipt(unit.root_thread_id, "pr", url, null);
-          })();
-          await sendReceipts(tracker, unit, facts.threads);
-        });
+        // Receipts were recorded by the hooks while the tracker was on; the pass never discovers threads or pull requests itself.
+        await step("receipts", unit, () => sendReceipts(tracker, unit, facts.threads));
         await step("status", unit, () => syncStatus(tracker, unit, facts.phase, facts.prUrls));
       }
       await step("flag", unit, () => syncFlag(tracker, unit));
@@ -313,7 +307,21 @@ export function createTrackerSync(deps: {
   let running: Promise<void> | null = null;
   let again = false;
 
+  /** Records a spawned thread's attachment intent: its thread, the thread it replaces and its pull request. Only a hook that ran while the tracker was on calls this. */
+  const attach = (row: ManagedRow) => {
+    const unit = openUnit(row);
+    if (!unit) return;
+    const prior = row.replaces_thread_id;
+    db.transaction(() => {
+      addReceipt(unit.root_thread_id, "thread", row.thread_id, null);
+      if (prior && receiptsOf(unit.root_thread_id, "thread").some((t) => t.ref === prior)) addReceipt(unit.root_thread_id, "unthread", prior, null);
+      if (row.role === "worker" && row.pr_url) addReceipt(unit.root_thread_id, "pr", row.pr_url, null);
+    })();
+  };
+
   return {
+    /** A thread that joins an existing unit: a plan revision, a plan's worker or a replacement. Nothing is recorded while the tracker is off, and nothing is filled in later. */
+    join: (row: ManagedRow) => hook("join", () => attach(row)),
     /** A new plan or an undelegated worker begins a unit, when its project is mapped. */
     start: (row: ManagedRow, description: string) => hook("start", ({ projects }) => {
       const project = projects.get(row.project_id);
@@ -322,6 +330,7 @@ export function createTrackerSync(deps: {
       const marker = `chief-unit:${sha(rootId)}`;
       db.prepare(`INSERT OR IGNORE INTO tracker_units (root_thread_id, project_id, tracker_project, title, description, marker, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .run(rootId, row.project_id, project, row.title.replace(/^Plan · /, ""), `${clip(description, 4_000)}\n\n${marker}`, marker, Date.now());
+      attach(row);
     }),
     /** Queues the files an accepted report wrote. */
     attachFiles: (row: ManagedRow, files: { name: string; content: string }[]) => hook("attachFiles", () => {
