@@ -46,6 +46,7 @@ export function createTrackerSync(deps: {
   /** Null when the setting selects no adapter. A rejected settings read is also null. */
   config: () => Promise<{ tracker: Tracker; projects: Map<string, string> } | null>;
   get: (id: string) => ManagedRow | undefined;
+  /** Every row, oldest first: equal created_at keep their insertion order (the store's ORDER BY created_at, rowid). A worker's earlier workers are the rows before it. */
   all: () => ManagedRow[];
   /** The ids of a replaces: chain, from the given row back to its oldest ancestor. */
   taskChain: (id: string) => string[];
@@ -83,10 +84,10 @@ export function createTrackerSync(deps: {
       if (!head || !(head.pr_url || head.branch)) return headId;
       // A follow-up on the pull request or branch of earlier work joins that work's unit, whatever the earlier worker's state.
       // shortcut: scans all() for each call, so a pass is O(units x workers^2); build one join map per pass if passes get slow.
-      const earlier = all()
-        .filter((r) => r.role === "worker" && r.project_id === head.project_id && r.created_at < head.created_at
-          && ((head.pr_url && r.pr_url === head.pr_url) || (head.branch && r.branch === head.branch)))
-        .sort((a, b) => a.created_at - b.created_at)[0];
+      const ordered = all();
+      const earlier = ordered.slice(0, ordered.findIndex((r) => r.thread_id === headId))
+        .find((r) => r.role === "worker" && r.project_id === head.project_id
+          && ((head.pr_url && r.pr_url === head.pr_url) || (head.branch && r.branch === head.branch)));
       return earlier ? root(earlier, seen) : headId;
     }
     if (row.role === "advisor") {
