@@ -16,7 +16,6 @@ import { checkPlan } from "./reportIntake";
 import { PR_AGENT_DIR } from "./prAgent";
 import { reviewBrief, type ReviewBriefInput } from "./reviewStart";
 import { managedSkills } from "./roles";
-import type { TodoItem } from "./server";
 
 // Stands in for git/gh/glab so pull-request resolution tests never shell out for real.
 const execFileMock = vi.hoisted(() => vi.fn());
@@ -90,7 +89,13 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { rules?: string; hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object } = {}) {
+async function setup(options: { rules?: string; hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
+  /** tabs.update fails this many times from the start, so a plugin start can meet it. */
+  failTabsUpdates?: number;
+  /** Runs on the migrated database right before the plugin starts: seeds state a restart would find. */
+  seed?: (ctx: { bb: any; db: any; live: Map<string, ReturnType<typeof makeThreadResponse>>; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => void;
+  /** Runs in every tabs.get after it read its snapshot, before it returns it: a hook may race a write or never settle. */
+  onTabsGet?: (ctx: { threadId: string; call: number; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => Promise<void> | void } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -111,7 +116,9 @@ async function setup(options: { rules?: string; hostStatus?: string; providerAva
   const stopped: string[] = [];
   const catalogReads: (string | undefined)[] = [];
   const tabsStore = new Map<string, { revision: number; tabs: any[] }>();
-  let tabsUpdateFailures = 0;
+  let tabsUpdateFailures = options.failTabsUpdates ?? 0;
+  let tabsGets = 0;
+  const tabsUpdates: Array<{ threadId: string; expectedRevision: number; tabs: any[] }> = [];
   const archivedEnvs: string[] = [];
   const archivedThreads: string[] = [];
   // Clean, on feature/x, and pushed (origin/feature/x exists with nothing ahead).
@@ -249,8 +256,14 @@ async function setup(options: { rules?: string; hostStatus?: string; providerAva
         },
         output: async ({ threadId }: { threadId: string }) => ({ output: `last output from ${threadId}` }),
         tabs: {
-          get: async ({ threadId }: { threadId: string }) => tabsStore.get(threadId) ?? { revision: 0, tabs: [] },
+          get: async ({ threadId }: { threadId: string }) => {
+            const snapshot = structuredClone(tabsStore.get(threadId) ?? { revision: 0, tabs: [] });
+            tabsGets += 1;
+            await options.onTabsGet?.({ threadId, call: tabsGets, tabsStore });
+            return snapshot;
+          },
           update: async ({ threadId, expectedRevision, tabs }: any) => {
+            tabsUpdates.push({ threadId, expectedRevision, tabs });
             if (tabsUpdateFailures > 0) { tabsUpdateFailures -= 1; throw new Error("tabs update failed"); }
             const current = tabsStore.get(threadId) ?? { revision: 0, tabs: [] };
             if (current.revision !== expectedRevision) throw new Error("revision conflict");
@@ -270,6 +283,10 @@ async function setup(options: { rules?: string; hostStatus?: string; providerAva
       },
     },
   });
+  if (options.seed) {
+    bb.storage.migrate(bb.storage.database(), MIGRATIONS);
+    options.seed({ bb, db: bb.storage.database(), live, tabsStore });
+  }
   await plugin(bb);
   disposals.push(() => harness.lifecycle.dispose());
 
@@ -302,6 +319,8 @@ async function setup(options: { rules?: string; hostStatus?: string; providerAva
     setProjectDefaults(next: { providerId: string; model: string } | null) { projectDefaults = next; },
     projectDefaultsReads: () => projectDefaultsReads,
     tabs: (threadId: string) => tabsStore.get(threadId)?.tabs ?? [],
+    tabsGets: () => tabsGets,
+    tabsUpdates,
     seedTabs(threadId: string, tabs: any[]) { tabsStore.set(threadId, { revision: 7, tabs }); },
     failTabsUpdates(count: number) { tabsUpdateFailures = count; },
     setPatch(next: string) { patch = next; },
@@ -636,39 +655,106 @@ describe("Chief backend", () => {
     expect(state.spawned[0]).toMatchObject({ projectId: "proj_2", title: "Chief · Second" });
   });
 
-  test("pins one Chief pending tab after the user's tabs when Chief starts", async () => {
+  // Contract (work-list spec, Removed): spawning a Chief neither reads nor writes thread tabs.
+  test("starting a Chief makes no tabs call", async () => {
     const state = await setup();
     state.seedTabs("thr_1", [{ kind: "git-diff", id: "user_diff" }]);
     await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
-    await new Promise((resolve) => setTimeout(resolve, 5));
-
-    expect(state.tabs("thr_1")).toEqual([
-      { kind: "git-diff", id: "user_diff" },
-      { kind: "plugin-panel", id: "plugin-panel:chief%3Apending%3A:none", pluginId: "chief", actionId: "pending", title: "Chief to-do", paramsJson: null },
-    ]);
+    await state.harness.behavior.callRpc("create", { projectId: "proj_1" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(state.tabsGets()).toBe(0);
+    expect(state.tabsUpdates).toEqual([]);
+    expect(state.tabs("thr_1")).toEqual([{ kind: "git-diff", id: "user_diff" }]);
   });
 
-  test("pins the pending tab under the host's canonical id", async () => {
-    const pluginId = "chief.dev:v2/@x";
-    const state = await setup({ pluginId });
-    await state.harness.behavior.callRpc("start", { projectId: "proj_1" });
-    await new Promise((resolve) => setTimeout(resolve, 5));
-
-    // Host recipe (buildFixedPanelTabId): path `${pluginId}:${actionId}:${paramsJson ?? ""}`, encoded once, then `:none`.
-    const hostId = "plugin-panel:chief.dev%3Av2%2F%40x%3Apending%3A:none";
-    expect(state.tabs("thr_1")).toEqual([
-      { kind: "plugin-panel", id: hostId, pluginId, actionId: "pending", title: "Chief to-do", paramsJson: null },
-    ]);
-  });
-
-  test("a failing tab pin never fails Chief start", async () => {
+  // Contract (work-list spec, Removed): the `pending` RPC and its realtime signal are gone; no store reload, sweep or state change publishes the channel.
+  test("the pending RPC is unknown and nothing publishes the pending realtime channel", async () => {
     const state = await setup();
-    state.failTabsUpdates(2);
-    expect(await state.harness.behavior.callRpc("start", { projectId: "proj_1" })).toEqual({ threadId: "thr_1", created: true });
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(state.tabs("thr_1")).toEqual([]);
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    await expect(state.harness.behavior.callRpc("pending", { threadId: chief.threadId })).rejects.toThrow();
+
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals"); // store write -> reload
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_roster", { todo: { text: "Follow up" } }, opts);
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(worker.threadId)!, lastAssistantText: "done" }); // sweep
+    await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(worker.threadId)!, lastAssistantText: "boom" });
+    await state.supervisorCycle();
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, ...CLOSE_OUT }, opts);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(state.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "pending")).toEqual([]);
+  });
+
+  // Contract (work-list spec, Added: startup unpin): at plugin start each active Chief loses a stale `pending` plugin-panel tab, and only that tab.
+  describe("plugin start unpins the stale pending tab", () => {
+    const stale = { kind: "plugin-panel", id: "plugin-panel:chief%3Apending%3A:none", pluginId: "chief", actionId: "pending", title: "Chief to-do", paramsJson: null };
+    const userDiff = { kind: "git-diff", id: "user_diff" };
+    // Looks like the stale tab but belongs to another plugin, or to another action of this one: both must stay.
+    const otherPluginPending = { ...stale, id: "plugin-panel:other%3Apending%3A:none", pluginId: "other" };
+    const ownOtherAction = { ...stale, id: "plugin-panel:chief%3Anotes%3A:none", actionId: "notes", title: "Notes" };
+    const chiefRow = (db: any, id: string, state: string) => {
+      db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, created_at, updated_at) VALUES (?, 'chief', 'proj_1', 'Chief · Asha', ?, 'idle', 1, 1)`).run(id, state);
+    };
+    const liveChief = (live: Map<string, any>, id: string) => live.set(id, makeThreadResponse({ id, projectId: "proj_1", environmentId: `env_${id}`, title: "Chief · Asha", sectionId: null, visibility: "visible", status: "idle", originPluginId: "chief" }));
+    const withChiefs = (tabs: Record<string, any[]>, states: Record<string, string> = { thr_old: "idle" }) => ({ db, live, tabsStore }: any) => {
+      for (const [id, state] of Object.entries(states)) { chiefRow(db, id, state); liveChief(live, id); }
+      for (const [id, list] of Object.entries(tabs)) tabsStore.set(id, { revision: 7, tabs: list });
+    };
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+    test("an active Chief loses exactly that tab; the other tabs keep their order and content", async () => {
+      const state = await setup({ seed: withChiefs({ thr_old: [userDiff, stale, otherPluginPending, ownOtherAction] }) });
+      await vi.waitFor(() => expect(state.tabs("thr_old")).toEqual([userDiff, otherPluginPending, ownOtherAction]));
+      expect(state.tabsUpdates).toEqual([{ threadId: "thr_old", expectedRevision: 7, tabs: [userDiff, otherPluginPending, ownOtherAction] }]);
+    });
+
+    test("every active Chief is unpinned; a complete Chief's tabs are left alone", async () => {
+      const state = await setup({ seed: withChiefs(
+        { thr_old: [stale], thr_idle: [userDiff, stale], thr_done: [stale] },
+        { thr_old: "active", thr_idle: "idle", thr_done: "complete" },
+      ) });
+      await vi.waitFor(() => expect([state.tabs("thr_old"), state.tabs("thr_idle")]).toEqual([[], [userDiff]]));
+      expect(state.tabs("thr_done")).toEqual([stale]);
+    });
+
+    test("an active Chief without that tab gets no tabs.update", async () => {
+      const state = await setup({ seed: withChiefs({ thr_old: [userDiff, otherPluginPending, ownOtherAction] }) });
+      await vi.waitFor(() => expect(state.tabsGets()).toBe(1)); // it looked
+      await settle();
+      expect(state.tabsUpdates).toEqual([]);
+      expect(state.tabs("thr_old")).toEqual([userDiff, otherPluginPending, ownOtherAction]);
+    });
+
+    test("a revision conflict on the first tabs.update retries once and succeeds", async () => {
+      const late = { kind: "git-diff", id: "late_tab" };
+      // The user adds a tab between the unpin's read and its write.
+      const state = await setup({
+        seed: withChiefs({ thr_old: [userDiff, stale] }),
+        onTabsGet: ({ threadId, call, tabsStore }) => {
+          if (call === 1) tabsStore.set(threadId, { revision: 8, tabs: [userDiff, stale, late] });
+        },
+      });
+      await vi.waitFor(() => expect(state.tabs("thr_old")).toEqual([userDiff, late]));
+      expect(state.tabsUpdates.map((update) => update.expectedRevision)).toEqual([7, 8]);
+    });
+
+    test("two failures log a warning once; start completes and nothing throws", async () => {
+      let warn: any;
+      const state = await setup({ failTabsUpdates: 2, seed: (ctx) => { warn = vi.spyOn(ctx.bb.log, "warn"); withChiefs({ thr_old: [userDiff, stale] })(ctx); } });
+      await vi.waitFor(() => expect(state.tabsUpdates).toHaveLength(2));
+      await settle();
+      expect(warn.mock.calls.map(([message]: [string]) => message).filter((message: string) => message.startsWith("Could not unpin the pending tab on thr_old"))).toHaveLength(1);
+      expect(state.tabs("thr_old")).toEqual([userDiff, stale]);
+      expect((await status(state)).threads.find((row) => row.threadId === "thr_old")).toBeDefined();
+    });
+
+    test("plugin start does not wait for the tabs read", async () => {
+      // setup() resolves only if plugin start does, and the tabs read never settles.
+      const state = await setup({ seed: withChiefs({ thr_old: [stale] }), onTabsGet: () => new Promise<void>(() => {}) });
+      await vi.waitFor(() => expect(state.tabsGets()).toBe(1));
+      expect(state.tabs("thr_old")).toEqual([stale]);
+    });
   });
 
   test("creates multiple independent Chiefs for one project", async () => {
@@ -2385,23 +2471,17 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const roster = async (params: object) => String(await state.harness.behavior.callAgentTool("chief_roster", params, opts));
-    const todo = async () => ((await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { items: TodoItem[] }).items.find((item) => item.id === "todo #1");
-    const signals = () => state.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "pending").length;
 
-    const count = signals();
     const added = await roster({ todo: { text: "Rebase onto main", after: "PR #42 merges" } });
     expect(added.startsWith("Pending:\n- 1 waiting todo (#1) hidden")).toBe(true);
     expect(await roster({ includeWaiting: true })).toContain("- todo #1: Rebase onto main (after: PR #42 merges)");
-    expect(await todo()).toMatchObject({ id: "todo #1", label: "Rebase onto main (after: PR #42 merges)", status: "open", done: false });
-    expect(signals()).toBe(count + 1);
     const cli = await state.harness.behavior.runCli(["status", "--project", "proj_1"]);
     // The operator shell has no viewing Chief, so the todo carries its owner.
     expect(cli.stdout).toContain(`- todo #1 (Chief ${chief.threadId}): Rebase onto main (after: PR #42 merges)`);
 
     expect(await roster({ todo: { id: 1, text: "Rebase onto #43", after: "" } })).toContain("- todo #1: Rebase onto #43");
-    expect(await todo()).toMatchObject({ label: "Rebase onto #43", done: false });
     await roster({ todo: { id: 1, state: "done" } });
-    expect(await todo()).toMatchObject({ label: "Rebase onto #43", status: "done", done: true });
+    expect(await roster({})).not.toContain("todo #1");
     expect(await roster({ includeComplete: true })).toContain("- todo #1 [done]: Rebase onto #43");
 
     await expect(roster({ todo: { after: "later" } })).rejects.toThrow("needs text");
@@ -2444,65 +2524,6 @@ describe("Chief backend", () => {
     await expect(state.harness.behavior.callAgentTool(
       "chief_roster", { todo: { text: "Sneaky" } }, { threadId: worker.threadId, projectId: "proj_1" },
     )).rejects.toThrow("requires an active registered Chief");
-  });
-
-  test("the pending RPC lists every item and signals only on change", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const opts = { threadId: chief.threadId, projectId: "proj_1" };
-    const signals = () => state.harness.inspection.realtimeSignals.filter((signal) => signal.channel === "pending").length;
-    const items = async () => ((await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { items: TodoItem[] }).items;
-
-    let count = signals();
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
-    expect(signals()).toBeGreaterThan(count);
-    expect(await items()).toEqual([expect.objectContaining({ id: worker.threadId, label: "worker “Fix checkout totals”", action: null, done: false })]);
-    expect(await state.harness.behavior.callRpc("pending", { threadId: worker.threadId })).toEqual({ chief: false, items: [], doneOmitted: 0 });
-    count = signals();
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
-    expect(signals()).toBe(count + 1);
-
-    const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    const [item] = await items();
-    expect(item).toMatchObject({ id: worker.threadId, status: "ready", done: false });
-    expect(roster).toContain(item!.action!);
-
-    count = signals();
-    await state.supervisorCycle();
-    await state.harness.behavior.callAgentTool("chief_roster", {}, opts);
-    expect(signals()).toBe(count);
-
-    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Shipped", ...CLOSE_OUT }, opts);
-    expect(signals()).toBe(count + 1);
-    expect(await items()).toEqual([expect.objectContaining({ id: worker.threadId, status: "complete", action: null, done: true })]);
-  });
-
-  test("the to-do list orders action, in-progress, open todos, then capped done", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const opts = { threadId: chief.threadId, projectId: "proj_1" };
-    const roster = (params: object) => state.harness.behavior.callAgentTool("chief_roster", params, opts);
-    const pending = async () => (await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { items: TodoItem[]; doneOmitted: number };
-
-    const ready = await delegate(state, chief.threadId, "Ready work");
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: ready.threadId, projectId: "proj_1" });
-    const active = await delegate(state, chief.threadId, "Active work");
-    await roster({ todo: { text: "Open todo" } });
-    await roster({ todo: { text: "Dropped todo" } });
-    await roster({ todo: { id: 2, state: "dropped" } });
-
-    let list = await pending();
-    expect(list.items.map((item) => item.id)).toEqual([ready.threadId, active.threadId, "todo #1", "todo #2"]);
-    expect(list.items.some((item) => item.id === chief.threadId)).toBe(false);
-    expect(list.items[3]).toMatchObject({ status: "dropped", done: true });
-    expect(list.doneOmitted).toBe(0);
-
-    const insert = state.db.prepare(`INSERT INTO chief_todos (project_id, chief_thread_id, text, after, state, created_at, updated_at) VALUES ('proj_1', ?, ?, NULL, 'done', 1, 1)`);
-    for (let index = 0; index < 51; index++) insert.run(chief.threadId, `Old ${index}`);
-    list = await pending();
-    expect(list.items.filter((item) => item.done)).toHaveLength(50);
-    expect(list.items.filter((item) => item.done)[0]!.id).toBe("todo #2"); // newest first
-    expect(list.doneOmitted).toBe(2);
   });
 
   test("the roster's Pending block uses the same wording as the lifecycle alert", async () => {
@@ -4975,7 +4996,7 @@ describe("auto-completing absorbed supporting threads", () => {
     ]);
   });
 
-  test("panel unchecked actions equal Pending lines; action-less supporting rows are done", async () => {
+  test("the roster Pending lines list only threads with a next action; supporting and in-progress rows are not listed", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
@@ -4992,18 +5013,13 @@ describe("auto-completing absorbed supporting threads", () => {
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(advisor.threadId)!, lastAssistantText: "hm" });
 
-    const { items } = (await state.harness.behavior.callRpc("pending", { threadId: chief.threadId })) as { items: TodoItem[] };
     const roster = String(await call(state, "chief_roster", {}, chief.threadId));
     const pendingLines = roster.split("\n").filter((line) => /\(thr_[^)]+\): /.test(line));
-    const actions = items.filter((item) => !item.done && item.action);
-    expect(actions.map((item) => `- ${item.label} (${item.id}): ${item.action}`).sort()).toEqual([...pendingLines].sort());
-    const rows = (await status(state)).threads;
-    for (const item of items.filter((item) => !item.done && !item.action && !item.id.startsWith("todo"))) {
-      const row = rows.find((row) => row.threadId === item.id)!;
-      expect(row.role === "worker" || ["active", "starting", "stopping", "pending"].includes(row.state)).toBe(true);
-    }
-    expect(items.find((item) => item.id === planner.threadId)).toMatchObject({ status: "ready", done: true });
-    expect(items.find((item) => item.id === advisor.threadId)).toMatchObject({ status: "idle", done: true });
+    // Only a thread with a next action is listed; the planner, the idle advisor, the planned worker in progress and the worker already under review are not.
+    expect([...pendingLines].sort()).toEqual([
+      `- reviewer “Review · Blocked review target” (${reviewer.threadId}): Blocked: No access — decide or escalate to the user.`,
+      `- worker “Ready work” (${ready.threadId}): ${readyAction(ready.threadId)}`,
+    ]);
   });
 
   test("chief_complete lists open todos for a worker; instructions name the close-todo rule", async () => {
