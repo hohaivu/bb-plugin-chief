@@ -167,6 +167,8 @@ Each contract carries its reason.
 - A reviewer verdict has `verdict-<seq>.md` as its full report. The intake never writes `report-<seq>.md` for it. Reason: its verdict file is the full report.
 - The attach is guarded by `report_seq`, and `report_path` also by `result_rev`. The attach always runs. Reason: see the baseline contract.
 
+- After the commit, the intake hands accepted plan files and verdict files to the tracker sync (`trackFiles`). The call runs before the delivery and never delays or changes the alert. See `tracker.md`.
+
 ### Invariants
 
 - Required state commits before the optional work after the transaction. Reason: the required result must not depend on optional work.
@@ -193,3 +195,4 @@ Each contract carries its reason.
 - `forge-comments.md`: the comments that the transaction enqueues.
 - `checkout-freshness.md`: the stamp in researcher and planner reports.
 - `plan-chains.md`: the plan waves and the review ledger.
+- `tracker.md`: the tracker sync that receives the plan and verdict files.

@@ -35,6 +35,7 @@ function world(over: Partial<ReportIntakeAdapters> = {}) {
   const attached: unknown[][] = [];
   const delivered: { key: string; message: string }[] = [];
   const warned: string[] = [];
+  const tracked: { thread: string; files: { name: string; content: string }[]; logBefore: string[] }[] = [];
   const planLog: unknown[] = [];
   const count = (table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
   const rowOf = (id: string) => db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(id) as Record<string, unknown>;
@@ -79,6 +80,7 @@ function world(over: Partial<ReportIntakeAdapters> = {}) {
     actionLine: () => { log.push("actionLine"); return "Next: continue."; },
     recordedCommands: async () => { log.push("recordedCommands"); return []; },
     reportStamp: async () => { log.push("reportStamp"); return "Read at abc1234"; },
+    trackFiles: (row, files) => { tracked.push({ thread: row.thread_id, files, logBefore: [...log] }); },
     warn: (message) => { warned.push(message); },
     ...over,
   };
@@ -97,7 +99,7 @@ function world(over: Partial<ReportIntakeAdapters> = {}) {
     seed("r1", "reviewer", { workerThreadId: "w1" });
     db.prepare(`INSERT INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq, head_sha) VALUES ('r1', 'w1', 1, 'abc')`).run();
   };
-  return { db, store, intake, log, writes, attached, delivered, warned, planLog, count, rowOf, stores, seed, seedReviewer, pendingRows };
+  return { db, store, intake, log, writes, attached, delivered, warned, tracked, planLog, count, rowOf, stores, seed, seedReviewer, pendingRows };
 }
 
 const finding = { file: "a.ts", line: 3, severity: "blocking", message: "wrong" } as const;
@@ -305,6 +307,44 @@ const PLAN = [
   { body: "# Plan\n\n## Contracts to verify\n- Totals stay non-negative\n\n## What we're NOT doing\n- x" },
   { body: "# Tests\n\n## Contracts to verify\n- Totals tested", test: true },
 ];
+
+// Contract (plan 3, contract 11): an accepted planner report hands its plan files, and a reviewer verdict its verdict file, to the
+// tracker after the commit and before the alert. A report with no files hands over nothing.
+// Regression: files tracked before the commit (a refused report would leak), after the alert, with the wrong name or content, or for a file-less report.
+describe("files handed to the tracker", () => {
+  test("a planner's plan files go over with their names and bodies, after the commit and before the alert", async () => {
+    const w = world();
+    w.seed("p1", "planner");
+    await w.intake.report("p1", { state: "ready", plan: PLAN, result: "Planned." }, "proj");
+    expect(w.tracked.map(({ thread, files }) => [thread, files])).toEqual([["p1", [
+      { name: "plan-1.md", content: `${PLAN[0]!.body}\n` },
+      { name: "plan-2.md", content: `${PLAN[1]!.body}\n` },
+    ]]]);
+    expect(w.tracked[0]!.logBefore.at(-1)).toBe("attachReportFiles");
+    expect(w.log.at(-1)).toBe("alertChief");
+  });
+
+  test("a reviewer's verdict file goes over with the very content that was written", async () => {
+    const w = world();
+    w.seedReviewer();
+    await w.intake.report("r1", REQUEST_CHANGES, "proj");
+    expect(w.tracked).toEqual([{ thread: "r1", files: [{ name: "verdict-1.md", content: w.writes[0]!.content }], logBefore: expect.any(Array) }]);
+    expect(w.tracked[0]!.logBefore.at(-1)).toBe("attachReportFiles");
+  });
+
+  test("a verdict whose file could not be written, a worker report and a refused report hand over nothing", async () => {
+    const failing = world({ writeArtifact: async () => { throw new Error("disk full"); } });
+    failing.seedReviewer();
+    await failing.intake.report("r1", APPROVE, "proj");
+    const plain = world();
+    plain.seed("w1", "worker");
+    await plain.intake.report("w1", { state: "ready", result: "Done" }, "proj");
+    const refused = world();
+    refused.seedReviewer();
+    await expect(refused.intake.report("r1", { ...APPROVE, findings: [finding] }, "proj")).rejects.toThrow();
+    expect([failing.tracked, plain.tracked, refused.tracked]).toEqual([[], [], []]);
+  });
+});
 
 describe("a refusal writes nothing", () => {
   test.each([

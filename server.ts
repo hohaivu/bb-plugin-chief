@@ -11,6 +11,9 @@ import {
 import { z } from "zod";
 import { forgeInitScript } from "./forge";
 import { cliAdapters, createForgeComments, FORGE_COMMENTS_TABLE, sanitizeForge } from "./forgeComments";
+import { trackerProjects } from "./tracker";
+import { trackerSelector } from "./trackerBbTasks";
+import { TRACKER_TABLES, createTrackerSync } from "./trackerSync";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
 import { cleanupEligible, deleteSafeBranch, ownedBranch } from "./cleanup";
@@ -172,6 +175,27 @@ async function markPrReady(pullRequest: string, cwd: string | null): Promise<{ r
     error = clip(String(failure), 200);
   }
   return { ready: false, error };
+}
+
+/** Whether a pull request is merged, with whichever forge CLI hosts it. Null when no forge CLI could say. */
+async function prMerged(pullRequest: string, cwd: string | null): Promise<boolean | null> {
+  try {
+    const { target, repo, forges } = await pullRequestForges(pullRequest, cwd);
+    for (const candidate of forges) {
+      const [cli, args] = candidate === "github"
+        ? ["gh", ["pr", "view", target, "--json", "state", ...(repo ? ["--repo", repo] : [])]]
+        : ["glab", ["mr", "view", target, "-F", "json", ...(repo ? ["--repo", repo] : [])]];
+      try {
+        const { stdout } = await execFileAsync(cli as string, args as string[], { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
+        return String((JSON.parse(stdout) as { state?: unknown }).state).toLowerCase() === "merged";
+      } catch {
+        // Try the next forge.
+      }
+    }
+  } catch {
+    // Unknown: the caller changes nothing.
+  }
+  return null;
 }
 
 /** What a spawn seeds into a thread's pluginMetadata, read back in bb.agents.configure.
@@ -1048,6 +1072,7 @@ export const MIGRATIONS = [
     `ALTER TABLE chief_models_v8 RENAME TO chief_models`,
     // One owner per shared worktree and cleanup action: the first cleanup job to reach the decisive teardown observation claims it; other jobs on that environment skip it.
     `CREATE TABLE IF NOT EXISTS cleanup_environment_claims (environment_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('branch','trouble','stuck')), thread_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (environment_id, action))`,
+    ...TRACKER_TABLES,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1104,6 +1129,18 @@ export default async function plugin(bb: BbPluginApi) {
       label: "pr-agent checkout",
       description: "Directory where uv run pr-agent runs; it uses its own .secrets.toml.",
       default: PR_AGENT_DIR,
+    },
+    tracker: {
+      type: "string",
+      label: "Task tracker",
+      description: "none (default) or bb-tasks: mirror Chief work to bb Tasks. Off deletes nothing.",
+      default: "none",
+    },
+    trackerProjects: {
+      type: "string",
+      label: "Tracker projects",
+      description: "One Chief project = tracker project per line, e.g. proj_abc=ABC",
+      default: "",
     },
   });
 
@@ -1705,6 +1742,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (earlier.thread_id !== newId && !BUSY_STATUSES.has(earlier.state) && !terminal(earlier.state)) store.completeSuperseded(earlier.thread_id, now);
         }
       } : undefined);
+    void (params.revises ? trackerSync.join(store.get(thread.id)!) : trackerSync.start(store.get(thread.id)!, params.mission));
     return { threadId: thread.id, title, projectId, ...(warning ? { warning } : {}) };
   }
 
@@ -1920,6 +1958,7 @@ export default async function plugin(bb: BbPluginApi) {
         ledger.repoint(prior.thread_id, thread.id, now);
       });
     }
+    void (!prior && !planThreadId ? trackerSync.start(store.get(thread.id)!, params.mission) : trackerSync.join(store.get(thread.id)!));
     return { threadId: thread.id, title: params.title, projectId };
   }
 
@@ -2893,6 +2932,27 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
+  const selectTracker = trackerSelector({ execFileAsync, serverPath });
+  const trackerSync = createTrackerSync({
+    db, log: bb.log,
+    config: () => settings.get().then((value) => {
+      const tracker = selectTracker(value.tracker);
+      return tracker ? { tracker, projects: trackerProjects(value.trackerProjects) } : null;
+    }).catch((error) => { bb.log.warn(`Tracker setting not read; the tracker is off: ${String(error)}`); return null; }),
+    get: store.get, all: store.all, taskChain: ledger.taskChain,
+    reviewTargets: (reviewerId) => ledger.targets(reviewerId).map((target) => target.worker_thread_id),
+    planDone: (planner) => !!planner.plan_waves && progress.plannerAbsorbed(planner),
+    prMerged: async (url, projectId) => prMerged(url, await projectPath(projectId)),
+    // The live Chief of the thread: its own, else the project's active one.
+    answerAlert: (threadId, key, message) => {
+      const source = store.get(threadId);
+      const own = source?.chief_thread_id ? store.get(source.chief_thread_id) : undefined;
+      const chiefId = isActiveChief(own) ? own.thread_id : source ? chiefForProject(source.project_id)?.thread_id : undefined;
+      return source && chiefId ? writeAlert({ ...source, chief_thread_id: chiefId }, key, message) : null;
+    },
+    deliver: deliverAlert,
+  });
+
   /** Which attempt at a task this is: the worker's position in its replaces: chain. */
   const taskRound = (workerThreadId: string) => ledger.taskChain(workerThreadId).length;
   /** Agent- or tool-originated text, made safe for the forge and bounded. */
@@ -3085,6 +3145,7 @@ export default async function plugin(bb: BbPluginApi) {
   const intake = createReportIntake({
     db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment,
     appendPlanLog, recordedCommands, reportStamp,
+    trackFiles: (row, files) => void trackerSync.attachFiles(row, files),
     actionLine: (current) => nextAction(current, true) ?? waveWaitLine(current)
       ?? (current.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or timeout it reports. Nothing to review or complete." : null)
       ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
@@ -3282,6 +3343,7 @@ export default async function plugin(bb: BbPluginApi) {
           await retryAlerts();
           await observeCleanup();
           void forgeComments.drain();
+          void trackerSync.sync();
         } catch (error) {
           bb.log.warn(`Supervisor reconciliation failed: ${String(error)}`);
         }
@@ -4266,8 +4328,9 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: z.object({
       threadId: z.string(),
       request: z.string().trim().min(1).max(12_000).describe("The full request, as you will write it in chat under Need you."),
+      merge: z.boolean().optional().describe("true when the request only asks permission to merge: no tracker decision is posted"),
     }),
-    async execute({ threadId, request }, context) {
+    async execute({ threadId, request, merge }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
       const concerned = await controlledTarget(threadId, caller);
@@ -4276,6 +4339,7 @@ export default async function plugin(bb: BbPluginApi) {
       const url = concerned.pr_url ?? concerned.issue_url
         ?? (concerned.role === "reviewer" ? ledger.targets(concerned.thread_id).map((target) => target.pr_url ?? store.get(target.worker_thread_id)?.pr_url).find(Boolean) : undefined)
         ?? (concerned.role === "planner" ? concerned.plan_issue_url : undefined);
+      if (!merge) void trackerSync.decide(concerned, request);
       if (!url) return chatOnly;
       const id = `escalate:${threadId}:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;
       const queued = forgeComments.enqueue({

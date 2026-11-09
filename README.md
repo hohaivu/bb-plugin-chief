@@ -213,6 +213,16 @@ owned by another live Chief works but starts with a warning. When a Chief is sup
 orphan sweep, `bb chief adopt`) its todos move to the successor.
 Open todos with an `after:` condition show in Pending as one count line; `chief_roster includeWaiting: true` lists them.
 
+### Tracker
+
+Chief can mirror its work to a task tracker. It is off by default.
+
+- Settings: `tracker` (`none` or `bb-tasks`) selects the adapter. `trackerProjects` maps each Chief project to a tracker project, one `proj_abc=ABC` entry per line. A project with no entry is not mirrored.
+- Mirrored: each new plan or undelegated worker becomes one task. Its planners and workers are attached to the task, and a replaced worker is detached after its successor is attached. Pull request links, the plan files and the reviewer verdict files are added. The task status follows the work: planning, working, review (a pull request is open), done (every pull request is merged, or there is none). `chief_escalate` posts one decision comment (`Decision #N`) and sets a `needs-decision` flag until the owner answers.
+- Not mirrored: milestone, plan, verdict or completion comments, subtasks, work started before the tracker was on, and researcher or consult-only threads. Merge-only requests (`chief_escalate` with `merge: true`) post no decision.
+- Answers: the plugin polls the task. One owner comment answers one decision (start it with `#N` when several are open) and reaches Chief once, as a lifecycle alert, through the plugin only. The tracker's own notify setting plays no part, and Chief never runs tracker commands.
+- Switching `tracker` off deletes nothing and stops every tracker call. Switching it back on resumes pending work.
+
 ## CLI
 
 ```sh
