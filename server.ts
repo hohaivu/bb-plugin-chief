@@ -2941,7 +2941,7 @@ export default async function plugin(bb: BbPluginApi) {
     }).catch((error) => { bb.log.warn(`Tracker setting not read; the tracker is off: ${String(error)}`); return null; }),
     get: store.get, all: store.all, taskChain: ledger.taskChain,
     reviewTargets: (reviewerId) => ledger.targets(reviewerId).map((target) => target.worker_thread_id),
-    planDone: progress.plannerAbsorbed,
+    planDone: (planner) => !!planner.plan_waves && progress.plannerAbsorbed(planner),
     prMerged: async (url, projectId) => prMerged(url, await projectPath(projectId)),
     // The live Chief of the thread: its own, else the project's active one.
     answerAlert: (threadId, key, message) => {
