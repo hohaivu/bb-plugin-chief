@@ -325,7 +325,7 @@ export function createNextAction(ctx: Ctx) {
 
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn: ctx.managedSpawn, controlsThread: (...a) => ctx.controlsThread(...a),
-    plan: { reviewRefusal, retestDebts: progress.retestDebts, reviewTargetsFor, planWavesFor, specWriters },
+    plan: { reviewRefusal, retestDebts: progress.retestDebts, reviewTargetsFor, planWavesFor, specWriters, taskWriters: ctx.taskWriters },
     host: {
       settledLive: async (worker) => {
         const live = await waitIdleAfterReport(worker);

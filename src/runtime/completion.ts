@@ -1,13 +1,14 @@
 import { type ManagedRow, terminal } from "../types";
 import { clip } from "../core/text";
-import { markPrReady, prHead } from "../forge/forge";
+import { forgeEnv, markPrReady, prHead } from "../forge/forge";
+import { docsCommits } from "../review/impactSlice";
 import { BUSY_STATUSES, MAX_RESULT_LENGTH } from "./constants";
 import { overrideSchema } from "../tools/shapes";
 import type { Ctx } from "./context";
 import { isWriter } from "../plan/waveSchedule";
 
 export function createCompletion(ctx: Ctx) {
-  const { bb, isDesignWave, isTestWave, latestWorker, ledger, planWavesFor, progress, sideLane, store } = ctx;
+  const { bb, chainOwner, isDesignWave, isTestWave, latestWorker, ledger, planWavesFor, progress, sideLane, store, taskWriters } = ctx;
   /** Why a worker may not complete yet, or null when its newest review covers what it would ship.
    * With a pull request the verdict must be an approve given for the PR head the forge reports now;
    * without one it must be an approve for the worker's current report. A design-wave worker needs the owner's recorded approval instead.
@@ -28,6 +29,32 @@ export function createCompletion(ctx: Ctx) {
     }
   }
 
+  /** The skipReview docs/ check: refuses when the pushed branch has a docs/ commit no Spec Writer of this task is recorded on (Chief-Spec-Writer trailer).
+   * Fail open: when the history cannot be read the skip proceeds and the returned note says so. Null when clean. */
+  async function docsGate(row: ManagedRow, refuse: (why: string) => never): Promise<string | null> {
+    const skipped = (reason: string) => `docs/ check skipped: ${reason}; skipReview proceeded without it.`;
+    const path = await ctx.projectPath(row.project_id);
+    if (!path) return skipped("no local checkout of the project on the plugin server");
+    const hostSkip = await ctx.checkoutHostSkip(row.project_id);
+    if (hostSkip) return skipped(hostSkip);
+    let head: { branch: string; sha?: string; base?: string };
+    if (row.pr_url) {
+      const pr = await prHead(row.pr_url, path);
+      if (!pr) return skipped("cannot read the pull request head from the forge");
+      head = pr;
+    } else if (row.branch) head = { branch: row.branch };
+    else return skipped("no task branch");
+    const found = await docsCommits({ cwd: path, env: forgeEnv(), deadlineMs: 20_000, head });
+    if ("skipped" in found) return skipped(found.skipped);
+    const allowed = new Set(taskWriters(row, ledger.taskChain(row.thread_id)).map((writer) => writer.thread_id));
+    const offending = found.commits.filter((commit) => !commit.writer || !commit.writer.split(",").some((id) => allowed.has(id.trim())));
+    if (!offending.length) return null;
+    const owner = row.plan_thread_id && row.plan_wave != null ? chainOwner(row.plan_thread_id, planWavesFor(row.plan_thread_id), row.plan_wave) : undefined;
+    const route = `chief_delegate (${row.plan_thread_id && owner ? `planThreadId: ${row.plan_thread_id}, wave: ${owner.plan_wave}, ` : ""}replaces: ${owner?.thread_id ?? row.thread_id}, kind: spec-writer)`;
+    const shown = offending.slice(0, 10).map((commit) => `${commit.sha.slice(0, 9)} ${clip(commit.subject, 80)} (${commit.paths.slice(0, 5).join(", ")})`).join("; ");
+    return refuse(`the branch has docs/ commits no Spec Writer of this task is recorded on: ${shown}${offending.length > 10 ? `; …${offending.length - 10} more` : ""}. A missing Chief-Spec-Writer trailer means unknown ownership (legacy Spec Writer commits have none). History stays as it is. Routes: chief_review (workerThreadId: ${row.thread_id}) — the reviewer attributes legacy writer commits by their reported range and accepts a Spec Writer's adopted correction; to correct the docs first, ${route} naming these commits in its mission, then follow its ready alert; or override with your reason.`);
+  }
+
   /** override is the one bypass of a worker's review requirement; its reason is recorded in the stored result.
    * skipReview completes a worker without a review by Chief's judgment: refused only for invalid state, never cleaned up. */
   async function markComplete(threadId: string, result?: string, override?: string, skipReview?: string, testsSkipped?: string) {
@@ -41,6 +68,7 @@ export function createCompletion(ctx: Ctx) {
     let approved = false;
     let reviewSkipped: string | null = null;
     let testsSkippedReason: string | null = null;
+    let docsNote: string | null = null;
     // An implementation-lane Spec Writer never counts as done work: its worker (or, on a test wave, the rerun tester) follows. Only a waived test wave ends on one. A side-lane writer completes like a worker.
     if (row.role === "worker" && isWriter(row.kind) && !sideLane(row)) {
       const waves = planWavesFor(row.plan_thread_id);
@@ -75,6 +103,7 @@ export function createCompletion(ctx: Ctx) {
       if (row.last_report_state !== "ready" && !waived) refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
       const busy = ledger.busyReview(threadId);
       if (busy) refuse(`review ${busy.thread_id} is still running; wait for its verdict.`);
+      docsNote = await docsGate(row, refuse);
       reviewSkipped = reason.data!;
     } else if (row.role === "worker") {
       const refusal = await completionRefusal(row);
@@ -95,7 +124,7 @@ export function createCompletion(ctx: Ctx) {
     ctx.enqueueCompletionComment(completed, overrideReason);
     const cleanup: "queued" | "override" | "unapproved" | "off" | null = row.role !== "worker" ? null
       : overrideNote !== null ? "override" : !approved ? "unapproved" : ctx.state.cleanupActive ? "queued" : "off";
-    return { row: completed, overridden: overrideNote !== null, skipped: reviewSkipped !== null, cleanup };
+    return { row: completed, overridden: overrideNote !== null, skipped: reviewSkipped !== null, cleanup, docsNote };
   }
 
   /** chief_owner_approval: records the owner's approval on a design-wave worker whose latest report was ready.

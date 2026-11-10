@@ -182,6 +182,18 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return !latest || !isSettled(latest);
   }
 
+  /** The Spec Writers of one task, the one provenance rule for docs/ commits: the writers in the task's replaces: chain (chainIds, from the
+   * review ledger), plus the side-lane writers on the waves of the row's plan chain, in any state. Never a writer of another plan, chain or task. */
+  function taskWriters(row: Row, chainIds: string[]): Row[] {
+    const planThreadId = row.plan_thread_id;
+    const chainWaves = planThreadId && row.plan_wave != null ? chainOf(rawWaves(planThreadId), row.plan_wave) : [];
+    const found = [
+      ...chainIds.flatMap((id) => rows().get(id) ?? []).filter((other) => isWriter(other.kind)),
+      ...(planThreadId ? specWriters(planThreadId).filter((other) => other.plan_wave != null && chainWaves.includes(other.plan_wave)) : []),
+    ];
+    return [...new Map(found.map((other) => [other.thread_id, other])).values()];
+  }
+
   /** The newest of a chain's rows, a live one before a finished one. */
   const newestLive = (chainRows: Row[]): Row | undefined => {
     const sorted = [...chainRows].sort((a, b) => a.created_at - b.created_at);
@@ -250,5 +262,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(latestWorker(worker.plan_thread_id!, tip)?.state ?? ""));
   }
 
-  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }

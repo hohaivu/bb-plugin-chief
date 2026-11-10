@@ -190,7 +190,6 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
           ? "The plan file is your source of truth. Pre-plan specs may be stale for the domains this wave touches: where they conflict with the plan, follow the plan and name the conflict in your report. A Spec Writer records this change in docs/ in parallel: do not wait for it and do not implement against its docs."
           : "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
       ...specDocs,
-      "- Never change docs/: only a Spec Writer does.",
       ...(tester ? [
         "- Before you derive tests, for each Spec Writer listed above run `git merge-base --is-ancestor <Fold head> HEAD`, using the Fold head from that writer's report. If it fails, report blocked: that writer's docs are not in your HEAD. A report with no Fold head (an implementation-lane writer) needs no check.",
         "- Code that contradicts the docs: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: worker)`. Docs that are wrong: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.",
@@ -258,9 +257,16 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ...(tester ? ["- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, compare old and new behaviour through tests on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression."] : []),
     "- A blocked report must include the blocker and your recommended decision or next action.",
     "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
-    ...(specWriter ? ["- Only the Tester writes tests. Never write, edit or run tests, builds or linters. Change only files under docs/: never code, tests, config or root guideline files."] : tester ? [] : [
-      "- Never write, edit or run tests of any kind (unit, integration, end-to-end, screenshot or golden); a tester does. Verify with lint/analyze, build and the Verify command.",
-      "- When the change touches code, run the project's lint/analyze and build after your last commit (and the Verify command when given) and list each with its exit status under Automated Verification. Reviewers read code only and never run them, and Chief may complete without a review, so your recorded runs are the only build/lint evidence.",
+    ...(specWriter ? [
+      "- Only the Tester writes tests. Never write, edit or run tests, builds or linters. Change only files under docs/: never code, tests, config or root guideline files.",
+      "- Every commit you make carries the trailer Chief-Spec-Writer: commit with git commit --trailer \"Chief-Spec-Writer: $BB_THREAD_ID\". A rebase keeps it. Never squash or amend it away.",
+      "- When your mission names docs/ commits that another role made, check each one. Correct the docs in your own commits (a revert is a correction). List each such commit's sha under \"## Adopted docs commits\" in your ready result.",
+    ] : [
+      "- Never change docs/: only a Spec Writer does, on every wave and on unplanned work. When the task needs a docs/ change, do not make it: list it under \"## Docs needed\" in your ready result and its summary. Chief routes it to a Spec Writer.",
+      ...(tester ? [] : [
+        "- Never write, edit or run tests of any kind (unit, integration, end-to-end, screenshot or golden); a tester does. Verify with lint/analyze, build and the Verify command.",
+        "- When the change touches code, run the project's lint/analyze and build after your last commit (and the Verify command when given) and list each with its exit status under Automated Verification. Reviewers read code only and never run them, and Chief may complete without a review, so your recorded runs are the only build/lint evidence.",
+      ]),
     ]),
     "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ...(kind === "designer" ? [

@@ -123,18 +123,20 @@ export function createPlanLifecycle<Row extends PlanRow>(
           throw new Error(`${prior.thread_id} is wave ${prior.plan_wave}'s Spec Writer, which works in its own side worktree: only its docs fix replaces it — chief_delegate (planThreadId: ${prior.plan_thread_id}, wave: ${prior.plan_wave}, replaces: ${prior.thread_id}, kind: spec-writer). Product and test work continues the chain's implementation row — ${ownerCall(wave)}${kind === "tester" ? ", kind: tester" : ""}.`);
         }
       }
-      // (d) A Spec Writer on a spec wave is a side-lane writer (first, or its own repair); anywhere else it replaces the latest row of a spec-bearing chain.
+      // (d) A Spec Writer is a side-lane writer on an unwaived spec wave (first, or its own repair); on any other wave except a design-only one it replaces the chain's current implementation row.
       if (isWriter(kind)) {
-        const latest = waveRows.at(-1);
-        if (scheduled.specsSkipped) throw new Error(`Specs on wave ${wave} were bypassed (${scheduled.specsSkipped}); no Spec Writer runs on it.`);
-        if (scheduled.design) throw new Error(`Wave ${wave} is design-only: no Spec Writer runs on it.`);
+        if (scheduled.design) {
+          const next = successorOf(waves, wave);
+          const nextOwner = next !== null ? chainOwner(planThreadId, waves, next) : undefined;
+          throw new Error(`Wave ${wave} is design-only: it changes no repository files. Route its docs need to wave ${next ?? "<its successor>"}: put it in that wave's Spec Writer mission when the wave is spec: true, else chief_delegate (planThreadId: ${planThreadId}, wave: ${next ?? "<its successor>"}, replaces: ${nextOwner?.thread_id ?? "<that wave's chain owner>"}, kind: spec-writer) once its worker has reported.`);
+        }
         if (lane === "side") {
           const live = specWriters(planThreadId, wave).filter((row) => !["complete", "archived", "deleted"].includes(row.state) && row.thread_id !== prior?.thread_id);
           if (live.length) throw new Error(`Wave ${wave}'s Spec Writer ${live[0]!.thread_id} is still live: fix its docs with chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${live[0]!.thread_id}, kind: spec-writer).`);
-        } else if (!(latest && prior?.thread_id === latest.thread_id && specChain(planThreadId, waves, wave))) {
-          throw new Error(latest && prior?.thread_id !== latest.thread_id && specChain(planThreadId, waves, wave)
-            ? `A Spec Writer on wave ${wave} replaces its latest worker: chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${latest.thread_id}, kind: spec-writer).`
-            : `Wave ${wave}: no spec on this chain, so no Spec Writer runs on it.`);
+        } else if (!(owner && prior?.thread_id === owner.thread_id && prior.plan_wave === wave)) {
+          throw new Error(owner
+            ? `A Spec Writer here replaces the chain's current implementation row: chief_delegate (planThreadId: ${planThreadId}, wave: ${owner.plan_wave}, replaces: ${owner.thread_id}, kind: spec-writer).`
+            : `A Spec Writer here replaces the chain's current implementation row, but no worker has started wave ${wave}'s chain yet.`);
         }
       }
       if (isWriter(kind)) {
