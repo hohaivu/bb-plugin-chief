@@ -23,7 +23,7 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
 
-The pipeline as one flowchart, with its roles and support tools, is in [docs/software-factory.md](docs/software-factory.md).
+The pipeline as a sequence chart, with its roles and support tools, is in [docs/software-factory.md](docs/software-factory.md).
 
 ## Project rules
 

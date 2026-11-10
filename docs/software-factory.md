@@ -6,7 +6,7 @@ This page shows how Chief turns one owner request into a merged pull request. Th
 
 ## Chart
 
-A solid arrow is a tool call or a push. A dashed arrow is a `chief_report` that the plugin turns into a lifecycle alert for Chief, or an owner message. Every managed thread reports to Chief only. Threads never message each other.
+A solid arrow is a tool call or a push. A dashed arrow is a `chief_report` that the plugin turns into a lifecycle alert for Chief, or an owner message. Every managed thread reports to Chief only. Threads never message each other. The one exception is the pull-only plan log (`chief_log`), which carries no alert.
 
 ```mermaid
 sequenceDiagram
