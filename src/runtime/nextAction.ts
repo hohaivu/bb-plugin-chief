@@ -4,7 +4,7 @@ import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
 import { createReviewStart } from "../review/reviewStart";
 import { type ManagedRow } from "../types";
 import { clip } from "../core/text";
-import { isWriter, type PlanWave } from "../plan/waveSchedule";
+import { chainOf, isWriter, type PlanWave } from "../plan/waveSchedule";
 import { BUSY_STATUSES } from "./constants";
 import { bounded } from "./exec";
 import { forgeEnv, prHead } from "../forge/forge";
@@ -240,15 +240,17 @@ export function createNextAction(ctx: Ctx) {
       return `The reviewer approves. ${complete}. Nits listed with an approve are optional: start no worker round for them alone.`;
     }
     // A tester's branch: a product fix goes to a worker, a test fix to a tester; replacing it needs the kind.
-    // Docs findings go to the wave's Spec Writer when it runs on a side lane; a side-lane target is only ever fixed by one.
-    const docsOwner = (target: RepairTarget) => {
-      const row = store.get(target.threadId);
-      return (row?.plan_thread_id && target.wave != null ? latestSideWriter(row.plan_thread_id, target.wave)?.thread_id : undefined) ?? target.threadId;
+    // Docs findings go to the side-lane Spec Writers of the target's whole chain (a test wave has none of its own); a side-lane target is only ever fixed by one. A chain without one (legacy, unplanned) falls back to the target itself.
+    const docsHandoff = (target: RepairTarget) => {
+      const plan = store.get(target.threadId)?.plan_thread_id;
+      const writers = plan && target.wave != null ? chainOf(planWavesFor(plan), target.wave).flatMap((wave) => latestSideWriter(plan, wave) ?? []) : [];
+      if (writers.length < 2) return `chief_delegate (replaces: ${writers[0]?.thread_id ?? target.threadId}, kind: spec-writer) for docs findings`;
+      return writers.map((writer) => `chief_delegate (replaces: ${writer.thread_id}, kind: spec-writer) for wave ${writer.plan_wave} docs findings`).join(" or ");
     };
     const handoff = (target: RepairTarget) => target.lane === "side"
       ? `chief_delegate (replaces: ${target.threadId}, kind: spec-writer) for docs findings`
       : target.spec
-      ? `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings${target.tested ? `, chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings` : ""} or chief_delegate (replaces: ${docsOwner(target)}, kind: spec-writer) for docs findings`
+      ? `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings${target.tested ? `, chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings` : ""} or ${docsHandoff(target)}`
       : target.tested
       ? `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings or chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings`
       : `chief_delegate (replaces: ${target.threadId})`;
