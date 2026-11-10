@@ -1,4 +1,4 @@
-import { chainOf, heads, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
+import { chainOf, heads, isReady, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
 import type { createWaveSchedule } from "./waveSchedule";
 import type { createReviewLedger, ReviewTarget } from "../review/reviewLedger";
 
@@ -22,9 +22,9 @@ export interface ProgressRow {
   regression: number | null;
 }
 
-/** One worker a reviewer covers: its wave, whether it is a tester branch (a tester row or a worker on a test wave),
+/** One worker a reviewer covers: its lane (a side-lane Spec Writer or an implementation row), its wave, whether it is a tester branch (a tester row or a worker on a test wave),
  * and whether it sits on a spec-bearing chain. */
-export interface RepairTarget { threadId: string; wave: number | null; tested: boolean; spec: boolean }
+export interface RepairTarget { threadId: string; wave: number | null; tested: boolean; spec: boolean; lane: "side" | "implementation" }
 /** What a reviewer verdict covers: a whole plan (stacks are legacy chains fixed in wave order; loose is every other
  * open target), one managed worker, or a branch no worker owns. */
 export type RepairWork =
@@ -55,7 +55,12 @@ export function createPlanProgress<Row extends ProgressRow>(
   ledger: ReturnType<typeof createReviewLedger<Row>>,
   states: ProgressStates,
 ) {
-  const { planWavesFor, isDesignWave, isTestWave, specChain, waveWorkers, specOwed, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
+  const { planWavesFor, isDesignWave, isTestWave, specChain, sideLane, waveWorkers, specWriters, latestWriter, writerPending, chainOwner, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
+
+  /** Spec waves of a plan (or of the given waves) whose Spec Writer is owed, with their newest writer if any. */
+  function pendingWriters(planThreadId: string, waves: PlanWave[], among: number[] = waves.map((_, index) => index + 1)) {
+    return among.filter((n) => writerPending(planThreadId, waves, n)).map((wave) => ({ wave, writer: latestWriter(planThreadId, wave) }));
+  }
 
   /** A same-wave fix worker's later wave to restack, or null. Set only when the worker replaces a worker of its own
    * wave (a fix round, not a first-time hand-off between waves) and the wave that builds on it has a live worker.
@@ -77,30 +82,33 @@ export function createPlanProgress<Row extends ProgressRow>(
     | { kind: "superseded"; latest: Row }
     | { kind: "restack" | "restacked"; waves: PlanWave[]; next: number; successor: Row }
     | { kind: "betweenWaves"; waves: PlanWave[]; next: number }
-    | { kind: "implement"; waves: PlanWave[]; wave: number }
-    | { kind: "pending"; waves: PlanWave[]; pending: number[] } {
+    | { kind: "sideWriter" }
+    | { kind: "pending"; waves: PlanWave[]; pending: number[] }
+    | { kind: "writers"; waves: PlanWave[]; writers: { wave: number; writer: Row | undefined }[] } {
     if (isDesignWave(worker)) return { kind: "design" };
     const waves = planWavesFor(worker.plan_thread_id);
     if (!waves.length || worker.plan_wave == null) return null;
     const planThreadId = worker.plan_thread_id!;
+    // A side-lane Spec Writer is one of the plan's review targets; the one review starts from an implementation chain tip.
+    if (sideLane(worker)) {
+      const newest = specWriters(planThreadId, worker.plan_wave).at(-1);
+      return newest && newest.thread_id !== worker.thread_id ? { kind: "superseded", latest: newest } : { kind: "sideWriter" };
+    }
     const latest = waveWorkers(planThreadId, worker.plan_wave).at(-1);
     if (latest && latest.thread_id !== worker.thread_id) return { kind: "superseded", latest };
-    // Implementation is owed on this wave (its Spec Writer is latest), or on the wave a test wave tests.
-    const parent = waves[worker.plan_wave - 1]?.test ? parentOf(waves, worker.plan_wave) : null;
-    for (const wave of [worker.plan_wave, ...(parent !== null ? [parent] : [])]) {
-      if (specOwed(planThreadId, waves, wave)) return { kind: "implement", waves, wave };
-    }
     const stack = restackOf(worker, waves);
     if (stack) return { kind: stack.restacked ? "restacked" : "restack", waves, next: stack.next, successor: stack.successor };
     const next = successorOf(waves, worker.plan_wave);
     if (next !== null) return { kind: "betweenWaves", waves, next };
     const pending = pendingWaves(planThreadId, waves);
-    return pending.length ? { kind: "pending", waves, pending } : null;
+    if (pending.length) return { kind: "pending", waves, pending };
+    const writers = pendingWriters(planThreadId, waves);
+    return writers.length ? { kind: "writers", waves, writers } : null;
   }
 
   /** The waves a ready chain-tip worker waits on, or null. */
   function waitingOn(row: Row): { waves: PlanWave[]; pending: number[] } | null {
-    if (row.role !== "worker" || row.state !== "ready" || !row.plan_thread_id || row.plan_wave == null) return null;
+    if (row.role !== "worker" || row.state !== "ready" || !row.plan_thread_id || row.plan_wave == null || sideLane(row)) return null;
     const waves = planWavesFor(row.plan_thread_id);
     if (successorOf(waves, row.plan_wave) !== null) return null;
     const pending = pendingWaves(row.plan_thread_id, waves);
@@ -116,39 +124,67 @@ export function createPlanProgress<Row extends ProgressRow>(
     | { kind: "restack"; waves: PlanWave[]; next: number; successor: Row }
     | { kind: "nextWave"; waves: PlanWave[]; next: number }
     | { kind: "unplanned" }
-    | { kind: "implement"; waves: PlanWave[] }
+    | { kind: "unplannedWriter" }
+    | { kind: "waitWriters"; waves: PlanWave[]; pending: { wave: number; writer: Row | undefined }[] }
+    | { kind: "tester"; waves: PlanWave[]; test: number; replaces: Row }
     | { kind: "retest"; waves: PlanWave[] }
     | { kind: "review"; waves: PlanWave[]; namer: Row; targets: Row[] } {
     const waves = planWavesFor(row.plan_thread_id);
-    const next = row.plan_thread_id && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
+    const planThreadId = row.plan_thread_id;
+    // The plan's one review, named on an implementation chain tip once every wave and every Spec Writer is ready.
+    // The targets whose current report no review covers yet; the plan's one call is named on the first of them
+    // (whichever tip a replaces: successor or an earlier review left stale), so Pending never drops it.
+    // Only an implementation chain tip can start the review (reviewBlock), so a stale earlier wave or a Spec Writer is never the namer.
+    const reviewStep = () => {
+      const targets = reviewTargetsFor(row);
+      const tipRows = targets.filter((target) => !sideLane(target) && successorOf(waves, target.plan_wave!) === null);
+      const stale = targets.filter((target) => !ledger.isCurrent(target) && (sideLane(target) || tipRows.includes(target)));
+      if (!stale.length) return null;
+      const staleTips = stale.filter((target) => tipRows.includes(target));
+      const namers = staleTips.length ? staleTips : tipRows;
+      const namer = namers.find((target) => target.state === "ready") ?? namers[0];
+      if (!namer || (!forAlert && namer.thread_id !== row.thread_id)) return null;
+      return { kind: "review" as const, waves, namer, targets };
+    };
+    if (planThreadId && row.plan_wave != null && sideLane(row)) {
+      const chain = chainOf(waves, row.plan_wave);
+      if (pendingWriters(planThreadId, waves, chain).length) return null;
+      // The last writer of the chain is ready: release the test wave that waited for it.
+      for (const test of chain) {
+        const parent = parentOf(waves, test);
+        const tested = parent === null ? undefined : waveWorkers(planThreadId, parent).at(-1);
+        if (waves[test - 1]!.test && !waves[test - 1]!.testsSkipped && tested && isReady(tested) && !waveWorkers(planThreadId, test).length) {
+          return { kind: "tester", waves, test, replaces: chainOwner(planThreadId, waves, parent!)! };
+        }
+      }
+      return pendingWaves(planThreadId, waves).length || pendingWriters(planThreadId, waves).length ? null : reviewStep();
+    }
+    const next = planThreadId && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
     const design = !!waves[row.plan_wave! - 1]?.design;
     if (next !== null && design) return { kind: "designNext", waves, next };
     if (design) return { kind: "designDone", waves };
-    // A Spec Writer that is its spec wave's latest row (or an unplanned one) hands off to the worker.
-    if (row.kind === "spec-writer" && (!row.plan_thread_id || row.plan_wave == null || !waves.length
-      || (specOwed(row.plan_thread_id, waves, row.plan_wave) && waveWorkers(row.plan_thread_id, row.plan_wave).at(-1)?.thread_id === row.thread_id))) return { kind: "implement", waves };
+    // An unplanned Spec Writer hands off to its worker, after a ready report.
+    if (row.kind === "spec-writer" && (!planThreadId || row.plan_wave == null || !waves.length)) return { kind: "unplannedWriter" };
     const stack = restackOf(row, waves);
     if (stack) return stack.restacked ? null : { kind: "restack", waves, next: stack.next, successor: stack.successor };
-    if (next !== null) return { kind: "nextWave", waves, next };
-    if (!row.plan_thread_id || row.plan_wave == null || !waves.length) return { kind: "unplanned" };
+    if (next !== null) {
+      // A test wave waits for every Spec Writer of its chain: the Tester derives its tests from the committed docs.
+      const waiting = waves[next - 1]!.test ? pendingWriters(planThreadId!, waves, chainOf(waves, row.plan_wave!)) : [];
+      return waiting.length ? { kind: "waitWriters", waves, pending: waiting } : { kind: "nextWave", waves, next };
+    }
+    if (!planThreadId || row.plan_wave == null || !waves.length) return { kind: "unplanned" };
     // A worker changed code on a test wave after the tests ran: offer a rerun until a review covers that report.
     const wave = waves[row.plan_wave - 1];
     if (wave?.test && !wave.testsSkipped && row.kind !== "tester" && !ledger.isCurrent(row)) return { kind: "retest", waves };
     if (waitingOn(row)) return null;
-    const targets = reviewTargetsFor(row);
-    // The targets whose current report no review covers yet. The plan's one call is named on the first of them
-    // (whichever tip a replaces: successor or an earlier review left stale), so Pending never drops it.
-    // Only a chain tip can start the review (reviewBlock), so a stale earlier wave is never the namer.
-    const stale = targets.filter((target) => !ledger.isCurrent(target) && successorOf(waves, target.plan_wave!) === null);
-    if (!stale.length) return null;
-    const namer = stale.find((target) => target.state === "ready") ?? stale[0]!;
-    if (!forAlert && namer.thread_id !== row.thread_id) return null;
-    return { kind: "review", waves, namer, targets };
+    const writers = pendingWriters(planThreadId, waves);
+    if (writers.length) return { kind: "waitWriters", waves, pending: writers };
+    return reviewStep();
   }
 
   /** A reviewer verdict's open branches: the covered targets, those whose worker is not complete yet, and whether
    * the review spans a plan. stacks groups the open targets of one chain (two or more, each in wave order): they build
-   * on each other, so they are fixed one at a time. loose is every other open target. Null when a covered target was re-pointed to a fresh worker (its findings were handed off)
+   * on each other, so they are fixed one at a time. loose is every other open target, a side-lane Spec Writer always (it never builds on an implementation row). Null when a covered target was re-pointed to a fresh worker (its findings were handed off)
    * or every covered worker is already complete. */
   function fixRound(reviewer: { thread_id: string }): { covered: ReviewTarget[]; open: ReviewTarget[]; plan: boolean; stacks: ReviewTarget[][]; loose: ReviewTarget[] } | null {
     const covered = ledger.targets(reviewer.thread_id);
@@ -159,7 +195,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     const chains = new Map<string, { target: ReviewTarget; wave: number }[]>();
     for (const target of open) {
       const worker = rows().get(target.worker_thread_id);
-      if (!worker?.plan_thread_id || worker.plan_wave == null) continue;
+      if (!worker?.plan_thread_id || worker.plan_wave == null || sideLane(worker)) continue;
       const key = `${worker.plan_thread_id}:${chainOf(planWavesFor(worker.plan_thread_id), worker.plan_wave)[0]}`;
       chains.set(key, [...(chains.get(key) ?? []), { target, wave: worker.plan_wave }]);
     }
@@ -183,7 +219,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     if (!round) return null;
     const target = (threadId: string): RepairTarget => {
       const row = rows().get(threadId);
-      return { threadId, wave: row?.plan_wave ?? null, tested: !!row && (row.kind === "tester" || isTestWave(row)), spec: !!row && onSpecChain(row) };
+      return { threadId, wave: row?.plan_wave ?? null, tested: !!row && (row.kind === "tester" || isTestWave(row)), spec: !!row && onSpecChain(row), lane: row && sideLane(row) ? "side" : "implementation" };
     };
     const ofTarget = (entry: ReviewTarget) => target(entry.worker_thread_id);
     const work: RepairWork = round.plan
@@ -235,12 +271,13 @@ export function createPlanProgress<Row extends ProgressRow>(
     return { done, total: waves.length, segments };
   }
 
-  /** Whether a planner is absorbed: every chain's tip has a complete worker, and every linked worker is terminal. */
+  /** Whether a planner is absorbed: every chain's tip has a complete worker, every linked worker and side-lane Spec Writer is terminal, and no spec wave still owes its writer. */
   function plannerAbsorbed(planner: Row): boolean {
     const linked = waveWorkers(planner.thread_id);
     const waves = planWavesFor(planner.thread_id);
-    return tips(waves).every((tip) => !chainOf(waves, tip).some((n) => specOwed(planner.thread_id, waves, n)))
-      && tips(planWavesFor(planner.thread_id)).every((tip) => linked.some((w) => w.plan_wave === tip && w.state === "complete"))
+    return !pendingWriters(planner.thread_id, waves).length
+      && specWriters(planner.thread_id).every((w) => states.terminal(w.state))
+      && tips(waves).every((tip) => linked.some((w) => w.plan_wave === tip && w.state === "complete"))
       && linked.every((w) => states.terminal(w.state));
   }
 

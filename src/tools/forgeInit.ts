@@ -11,7 +11,7 @@ import type { Ctx } from "../runtime/context";
 const FORGE_BRIEF_SECTION_MAX = 1_500;
 
 export function registerForgeInitTool(ctx: Ctx) {
-  const { bb, planWavesFor, plans, store } = ctx;
+  const { bb, chainOwner, chainStarted, planWavesFor, store } = ctx;
   ctx.registerChiefTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
@@ -62,9 +62,9 @@ export function registerForgeInitTool(ctx: Ctx) {
         if (chain[0] !== wave) {
           throw new Error(`Wave ${wave} is not a chain head: it continues the chain of waves ${chain.join(", ")}, which has one branch and one pull request, opened by chief_forge_init on head wave ${chain[0]} only. Delegate wave ${wave} with chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: <the chain's latest worker>).`);
         }
-        const started = plans.chainLatest(planThreadId, rawWaves, wave);
+        const started = chainStarted(planThreadId, rawWaves, wave);
         if (started) {
-          throw new Error(`Wave ${wave}'s chain already has worker ${started.thread_id}${started.branch ? ` on branch ${started.branch}` : ""}${started.pr_url ? ` with pull request ${started.pr_url}` : ""}: a chain has one branch and one pull request. Continue it with chief_delegate (planThreadId: ${planThreadId}, wave: ${started.plan_wave ?? wave}, replaces: ${started.thread_id}).`);
+          throw new Error(`Wave ${wave}'s chain already has worker ${started.thread_id}${started.branch ? ` on branch ${started.branch}` : ""}${started.pr_url ? ` with pull request ${started.pr_url}` : ""}: a chain has one branch and one pull request. ${chainOwner(planThreadId, rawWaves, wave) ? `Continue it with chief_delegate (planThreadId: ${planThreadId}, wave: ${started.plan_wave ?? wave}, replaces: ${chainOwner(planThreadId, rawWaves, wave)!.thread_id}).` : `Delegate wave ${wave}'s worker onto it with chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}).`}`);
         }
         body = [
           params.body ?? `Tracking work for ${params.title}.`,

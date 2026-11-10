@@ -13,6 +13,7 @@ export function createRoster(ctx: Ctx) {
   /** A hand-off from a tester or a test-wave worker must name its kind (see explicitKind in startWorker). */
   function replacesCall(row: ManagedRow): string {
     if (row.kind === "spec-writer") {
+      if (ctx.sideLane(row)) return `chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
       return isTestWave(row)
         ? `chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test rerun or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`
         : `chief_delegate (replaces: ${row.thread_id}, kind: worker) once it reported ready, or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;

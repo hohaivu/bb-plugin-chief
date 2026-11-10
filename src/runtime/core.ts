@@ -156,11 +156,11 @@ export function createCore(ctx: Ctx) {
   });
   const ledger = createReviewLedger<ManagedRow>(db, store.get, store, { busy: (status) => BUSY_STATUSES.has(status) });
   const schedule = createWaveSchedule<ManagedRow>(store.rows);
-  const { planWavesFor, isDesignWave, isTestWave, waveWorkers, specWave, reviewTargetsFor } = schedule;
+  const { planWavesFor, isDesignWave, isTestWave, waveWorkers, specWave, reviewTargetsFor, sideLane, specWriters, writerPending, chainOwner, chainStarted } = schedule;
 
   const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
   const { onSpecChain } = progress;
   const plans = createPlanLifecycle<ManagedRow>(store, schedule, ledger, (planner: ManagedRow): string | null => ctx.planReviewRefusal(planner));
-  return { activeChiefForProject, anyCooldown, chiefCountForProject, closedTodosForProject, cooldownFor, db, insertTodo, isDesignWave, isTestWave, latestChiefForProject, ledger, onSpecChain, pendingAlerts, planWavesFor, plans, progress, researchModelRow, reviewTargetsFor, reviewerFails, roleModelRow, schedule, settings, specWave, store, todoById, todosForProject, updateTodo, upsertCooldown, waveWorkers };
+  return { activeChiefForProject, anyCooldown, chainOwner, chainStarted, chiefCountForProject, closedTodosForProject, cooldownFor, db, insertTodo, isDesignWave, isTestWave, latestChiefForProject, ledger, onSpecChain, pendingAlerts, planWavesFor, plans, progress, researchModelRow, reviewTargetsFor, reviewerFails, roleModelRow, schedule, settings, sideLane, specWave, specWriters, store, todoById, todosForProject, updateTodo, upsertCooldown, waveWorkers, writerPending };
 }
 

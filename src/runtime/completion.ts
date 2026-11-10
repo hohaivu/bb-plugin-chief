@@ -40,8 +40,8 @@ export function createCompletion(ctx: Ctx) {
     let approved = false;
     let reviewSkipped: string | null = null;
     let testsSkippedReason: string | null = null;
-    // A Spec Writer never counts as done work: its worker (or, on a test wave, the rerun tester) follows. Only a waived test wave ends on one.
-    if (row.role === "worker" && row.kind === "spec-writer") {
+    // An implementation-lane Spec Writer never counts as done work: its worker (or, on a test wave, the rerun tester) follows. Only a waived test wave ends on one. A side-lane writer completes like a worker.
+    if (row.role === "worker" && row.kind === "spec-writer" && !ctx.sideLane(row)) {
       const waves = planWavesFor(row.plan_thread_id);
       const testWave = row.plan_wave != null ? waves[row.plan_wave - 1] : undefined;
       if (!(testWave?.test && testWave.testsSkipped)) {
