@@ -147,7 +147,8 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
 - `admitDelegation` names `replaces: <chain owner>` when it rejects a non-head wave without a replacement target. Reason: callers must know the latest implementation thread to continue the chain.
 - `admitDelegation` rejects an implementation delegation without `replaces:` when any wave in the chain already has an implementation-lane row. Reason: started chains must not allocate duplicate workers or environments.
-- `admitDelegation` rejects `kind: tester` on a wave when the raw chain of that wave has no test wave. The text lists the test waves of that chain. Reason: a test wave of another chain must not admit a Tester here.
+- `admitDelegation` rejects `kind: tester` on a non-test wave only when the raw chain of that wave has a test wave. This includes an absent waived test wave. The text lists the test waves of that chain. Reason: a Tester of that chain runs on its test wave, and the test wave of another chain does not change this.
+- `admitDelegation` admits `kind: tester` on a non-test wave when the raw chain has no test wave. The call needs `replaces:` of the worker whose branch it tests, or a new branch once that worker is complete. Reason: the retest route of a chain with no test wave must be a legal call.
 - A later implementation wave is admitted while a Spec Writer is pending. Reason: Spec Writers never gate implementation waves.
 - `admitDelegation` rejects a replacement target from another chain of the same plan. Reason: independent chains must not inherit foreign branches or environments.
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
