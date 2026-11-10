@@ -1,7 +1,7 @@
 import { forgeInitScript } from "../forge/forge";
 import { sanitizeForge } from "../forge/forgeComments";
-import { clip } from "../../text";
-import { chainOf, type PlanWave } from "../../waveSchedule";
+import { clip } from "../core/text";
+import { chainOf, type PlanWave } from "../plan/waveSchedule";
 import { z } from "zod";
 import { execFileAsync } from "../runtime/exec";
 import { FORGE_SCRIPT_TIMEOUT_MS, serverPath } from "../forge/forge";

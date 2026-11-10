@@ -1,5 +1,5 @@
 import { cleanupEligible, deleteSafeBranch, ownedBranch } from "../forge/cleanup";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { z } from "zod";
 import { bounded } from "./exec";
 import { BUSY_STATUSES } from "./constants";

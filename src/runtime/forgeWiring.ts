@@ -1,11 +1,11 @@
 import { cliAdapters, createForgeComments, sanitizeForge } from "../forge/forgeComments";
 import { findingLines } from "../report/reportIntake";
 import { type ManagedRow, type ReportFinding } from "../types";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { trackerProjects } from "../tracker/tracker";
 import { trackerSelector } from "../tracker/trackerBbTasks";
 import { createTrackerSync } from "../tracker/trackerSync";
-import { chainOf } from "../../waveSchedule";
+import { chainOf } from "../plan/waveSchedule";
 import { forgeEnv, prMerged, serverPath } from "../forge/forge";
 import { execFileAsync } from "./exec";
 import type { Ctx } from "./context";

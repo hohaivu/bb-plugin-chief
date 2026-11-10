@@ -5,12 +5,12 @@ import { verdictPreview } from "../research/delegationBrief";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
 import type { ManagedSpawn } from "../research/managedSpawn";
 import { helperPrompt, isPinned, PR_AGENT_DIR, prAgentScript, prAgentSection, type EngineTarget, type ReviewEngine } from "./prAgent";
-import type { createReviewLedger } from "../../reviewLedger";
-import { REVIEW_ONLY } from "../../roles";
-import { clip, clipMiddle, recordedLines, type RecordedCommand } from "../../text";
+import type { createReviewLedger } from "./reviewLedger";
+import { REVIEW_ONLY } from "../core/roles";
+import { clip, clipMiddle, recordedLines, type RecordedCommand } from "../core/text";
 import { terminal } from "../types";
 import type { ThreadStore } from "../db/threadStore";
-import { chainOf, type PlanWave } from "../../waveSchedule";
+import { chainOf, type PlanWave } from "../plan/waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 type LiveThread = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["get"]>>;

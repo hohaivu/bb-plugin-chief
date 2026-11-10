@@ -1,7 +1,7 @@
 import { researchLine, type ResearchMode, researchModeSchema } from "../research/research";
-import { managedSkills, type ModelRole, modelRoleSchema } from "../../roles";
+import { managedSkills, type ModelRole, modelRoleSchema } from "../core/roles";
 import { rpcContract } from "../rpcContract";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { spawnMetadataSchema } from "../tools/shapes";
 import { BUILT_IN_RULES } from "./prompts";
 import type { Ctx } from "./context";

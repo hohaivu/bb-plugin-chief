@@ -1,7 +1,7 @@
 import { modelSelectionSchema, type ResearchMode, type ResearchSettings } from "../research/research";
-import { MODEL_FALLBACK, type ModelRole } from "../../roles";
+import { MODEL_FALLBACK, type ModelRole } from "../core/roles";
 import { type ManagedRow, type ModelSelection } from "../types";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { BUILT_IN_RULES } from "./prompts";
 import type { Ctx } from "./context";
 

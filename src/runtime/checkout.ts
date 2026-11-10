@@ -1,6 +1,6 @@
 import { commitStamp, fastForward, stampLine } from "../forge/checkoutSync";
 import { type ManagedRow, terminal } from "../types";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { bounded } from "./exec";
 import { BUSY_STATUSES } from "./constants";
 import { forgeEnv } from "../forge/forge";

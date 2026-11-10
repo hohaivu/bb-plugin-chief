@@ -3,7 +3,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { ManagedSpawn } from "./managedSpawn";
 import { modelSelectionSchema, type ModelSelection } from "../types";
-import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from "../../roles";
+import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from "../core/roles";
 
 /** How long one chief_research call waits before handing back a runId to resume with. */
 export const RESEARCH_DEFAULT_TIMEOUT_MINUTES = 10;

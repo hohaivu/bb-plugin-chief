@@ -1,5 +1,5 @@
 import { type ManagedRow, terminal } from "../types";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { createHash } from "node:crypto";
 import { bounded } from "./exec";
 import type { Ctx } from "./context";

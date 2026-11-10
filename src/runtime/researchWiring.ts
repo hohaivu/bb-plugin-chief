@@ -1,6 +1,6 @@
 import { createResearch } from "../research/research";
 import { terminal } from "../types";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { serverPath } from "../forge/forge";
 import { execFileAsync } from "./exec";
 import { MAX_RESULT_LENGTH } from "./constants";

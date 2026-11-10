@@ -1,6 +1,6 @@
-import type { WorkerKind } from "../../roles";
-import { clip, clipMiddle } from "../../text";
-import { chainOf, parentOf, successorOf, type createWaveSchedule, type PlanWave } from "../../waveSchedule";
+import type { WorkerKind } from "../core/roles";
+import { clip, clipMiddle } from "../core/text";
+import { chainOf, parentOf, successorOf, type createWaveSchedule, type PlanWave } from "./waveSchedule";
 
 /** What admission reads of a managed_threads row; the server's ManagedRow satisfies it. The first block is the wave schedule's own row. */
 interface PlanRow {

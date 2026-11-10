@@ -1,9 +1,9 @@
 import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
 import { MAX_CARRIED_FAILS } from "../report/reportIntake";
 import { researchLine } from "../research/research";
-import { CONTINUE_REMINDERS } from "../../roles";
+import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { z } from "zod";
 import { consultParams, delegateParams, logParams, planParams } from "../tools/shapes";
 import { BUSY_STATUSES, MAX_NUDGE_LENGTH } from "./constants";
