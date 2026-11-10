@@ -514,7 +514,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         if (row.plan_thread_id) store.resolvePlanReview(row.plan_thread_id, params.state === "ready" && verdict === "approve" ? "approved" : "changes");
       }
       if (plannerReady && scheduledWaves) {
-        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.test).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
+        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.test && !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
         const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }

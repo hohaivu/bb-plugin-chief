@@ -113,7 +113,7 @@ describe("tester role", () => {
             const chief = await k.chief();
             const planner = (await plan(state, chief, waves)).threadId;
             names.set(planner, "P");
-            if (waves.filter((entry: any) => !entry.test).length > 1) await approvePlan(state, chief, planner);
+            if (waves.filter((entry: any) => !entry.test && !entry.design).length > 1) await approvePlan(state, chief, planner);
             for (const wave of waived) await tool(state, "chief_skip_tests", { planThreadId: planner, wave, reason: "oracle reason" }, chief);
             return { chief, planner };
           },

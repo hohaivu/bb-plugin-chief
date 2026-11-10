@@ -135,7 +135,7 @@ export const reportParams = z.object({
     "Ready only, reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
   ),
   complex: z.boolean().optional().describe(
-    "Planner ready report only: true when the plan is high-risk (see your brief). A multi-wave plan gets one advisor review either way.",
+    "Planner ready report only: true when the plan is high-risk (see your brief). A plan with more than one implementation wave gets one advisor review either way; design and test waves do not count.",
   ),
   plan: z.union([
     z.string().trim(),

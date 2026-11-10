@@ -49,7 +49,7 @@ describe("tester role", () => {
           mk: async (waves: object[], waived: number[] = []) => {
             const chief = (await start(state)).threadId;
             const planner = (await plan(state, chief, waves)).threadId;
-            if (waves.filter((entry: any) => !entry.test).length > 1) await approvePlan(state, chief, planner);
+            if (waves.filter((entry: any) => !entry.test && !entry.design).length > 1) await approvePlan(state, chief, planner);
             for (const wave of waived) await tool(state, "chief_skip_tests", { planThreadId: planner, wave, reason: "oracle reason" }, chief);
             return { chief, planner };
           },
@@ -402,6 +402,7 @@ describe("tester role", () => {
     };
     // <review-decisions-oracle-end>
 
+    // The "a design wave" block has one implementation wave, so it spawns no advisor thread: its thread ids are one lower than on base 4b5ad00 (1 line of the fixture); nothing else changed.
     test("review decisions oracle", async () => {
       const head = await reviewDecisionsFixture();
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "review-decisions-4b5ad00.txt"), "utf8");

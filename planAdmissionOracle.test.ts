@@ -35,7 +35,7 @@ describe("tester role", () => {
         const k = {
           state,
           /** Chief plus a planner holding `waves`; approved unless it has at most one implementation wave. */
-          mk: async (waves: object[], approve = waves.filter((entry: any) => !entry.test).length > 1) => {
+          mk: async (waves: object[], approve = waves.filter((entry: any) => !entry.test && !entry.design).length > 1) => {
             const chief = (await start(state)).threadId;
             const planner = (await plan(state, chief, waves)).threadId;
             if (approve) await approvePlan(state, chief, planner);
@@ -577,6 +577,8 @@ describe("tester role", () => {
     };
     // <plan-admission-oracle-end>
 
+    // Design plans with one implementation wave need no advisor review (design and test waves do not count), so the design blocks
+    // no longer spawn an advisor thread: their worker thread ids are one lower than on base c8a0d76 (9 lines of the fixture); nothing else changed.
     test("plan admission oracle", async () => {
       const head = await admissionFixture();
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "plan-admission-c8a0d76.txt"), "utf8");

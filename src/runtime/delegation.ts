@@ -106,7 +106,7 @@ export function createDelegation(ctx: Ctx) {
       throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
     }
     if (planner.plan_review !== "required") {
-      if (!planner.plan_review) throw new Error(`Only a multi-wave or complex plan gets an advisor review; ${plannerId} does not (a revision never does): delegate it.`);
+      if (!planner.plan_review) throw new Error(`Only a plan with more than one implementation wave (design and test waves do not count), or a complex plan, gets an advisor review; ${plannerId} does not (a revision never does): delegate it.`);
       const { decider } = ctx.planAdvisors(plannerId);
       throw new Error(`Plan ${plannerId} already had its one review (${decider?.thread_id ?? "?"}): ${ctx.planReviewRefusal(planner) ?? ctx.nextAction(planner) ?? "delegate its waves."}`);
     }

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
-import { PLANNER_ANCHOR, PLANNER_RESHAPE_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, approvePlan, delegate, disposeAll, planFile, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
+import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_NEW_DESIGN_BULLET, PLANNER_OLD_COMPLEX_TAIL, PLANNER_OLD_DESIGN_BULLET, PLANNER_RESHAPE_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -243,10 +243,13 @@ describe("tester role", () => {
       await approvePlan(state, chief.threadId, planner.threadId);
       const advisorPrompt = state.spawned.at(-1).prompt as string;
       expect(advisorPrompt).toContain("A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.");
-      // Contract (advisor plan-review checklist): the reshape line follows the test-wave line, and only a plan review has it.
-      expect(advisorPrompt).toContain(`- A chain without a final test wave, or test work inside an implementation wave.\n${RESHAPE_CHECKLIST_LINE}\n`);
+      // Contract (advisor plan-review checklist): the design-wave line follows the test-wave line once, the reshape line follows it,
+      // and only a plan review has either.
+      expect(advisorPrompt).toContain(`${TEST_WAVE_CHECKLIST_LINE}\n${DESIGN_CHECKLIST_LINE}\n${RESHAPE_CHECKLIST_LINE}\n`);
+      expect(advisorPrompt.split(DESIGN_CHECKLIST_LINE)).toHaveLength(2);
       await tool(state, "chief_consult", { title: "Totals", mission: "Why do totals go negative?" }, chief.threadId);
       expect(state.spawned.at(-1).prompt).not.toContain(RESHAPE_CHECKLIST_LINE);
+      expect(state.spawned.at(-1).prompt).not.toContain(DESIGN_CHECKLIST_LINE);
     });
 
     const hop = async (state: State, chiefThreadId: string, planThreadId: string, waveNo: number, extra: object = {}) => {
@@ -334,10 +337,16 @@ describe("tester role", () => {
     // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief.
     // Regression: the baseline rule lands in the planner brief instead of the read-only skill.
     // Plan chains changed one bullet of both prompts (the `dependsOn: []` sentence now says an independent wave runs as its own chain); the rest is base's bytes.
+    // The design-wave plan replaces the design bullet in both briefs and the last sentence of the `complex` bullet, which only the plain brief has.
     test("the planner prompt equals base 6d288a2's for a plain and a revision brief", async () => {
       const state = await setup();
-      // Plain and revision briefs each gain the reshape rule right after the test-wave line (2 anchors); nothing else moves.
-      expect(await plannerFixture(state)).toBe(spliceAfter(await oracleFile("planner-6d288a2.txt"), PLANNER_ANCHOR, PLANNER_RESHAPE_LINE, 2));
+      // Plain and revision briefs each gain the reshape rule right after the test-wave line (2 anchors) and get the new design bullet (2);
+      // the plain brief alone gets the new `complex` sentence (1; a revision has no `complex` bullet); nothing else moves.
+      const base = await oracleFile("planner-6d288a2.txt");
+      const expected = replaceText(
+        replaceText(spliceAfter(base, PLANNER_ANCHOR, PLANNER_RESHAPE_LINE, 2), PLANNER_OLD_DESIGN_BULLET, PLANNER_NEW_DESIGN_BULLET, 2),
+        PLANNER_OLD_COMPLEX_TAIL, PLANNER_NEW_COMPLEX_TAIL, 1);
+      expect(await plannerFixture(state)).toBe(expected);
     });
 
     // Contract (mixed chain, existing-only first): wave 1's Spec Writer and worker prompts are base 6d288a2's bytes although wave 2 has

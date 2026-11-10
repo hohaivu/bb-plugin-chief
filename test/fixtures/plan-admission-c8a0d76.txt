@@ -2056,9 +2056,9 @@ Keep every item above. Your ready result confirms each one, with its evidence (t
 - In your report prose, name design nodes by layer name, never by raw node ID.
 - Design-only wave: use Design tool mode. Draw or edit the artboards only; write no app code and change no repo files. In your ready result, list each artboard by layer name with its screenshot path so the owner can approve it.
 --- wave 2 before the owner approves
-refused: Wave 1 is design-only and wave 2 implements it: the owner must approve its artboards first. Show the user the artboards from thr_4's report, then record their decision with chief_owner_approval (workerThreadId: thr_4) and repeat this call.
+refused: Wave 1 is design-only and wave 2 implements it: the owner must approve its artboards first. Show the user the artboards from thr_3's report, then record their decision with chief_owner_approval (workerThreadId: thr_3) and repeat this call.
 --- wave 2 with no replaces before the owner approves
-refused: Wave 2's chain (waves 1, 2, 3) already has worker thr_4 on wave 1; a chain has one branch, PR and worktree. Continue it with replaces: thr_4 — chief_delegate (planThreadId: thr_2, wave: 2, replaces: thr_4).
+refused: Wave 2's chain (waves 1, 2, 3) already has worker thr_3 on wave 1; a chain has one branch, PR and worktree. Continue it with replaces: thr_3 — chief_delegate (planThreadId: thr_2, wave: 2, replaces: thr_3).
 --- kind spec-writer on a design wave
 refused: Wave 1 is design-only: no Spec Writer runs on it.
 --- kind tester on a design wave
@@ -2094,7 +2094,7 @@ Done.
 ## Deviations from plan
 None
 Artboards: Checkout
-Full report: <storage>/chief/proj_1/thr_4/report-1.md
+Full report: <storage>/chief/proj_1/thr_3/report-1.md
 
 ## Working contract
 - Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file or verdict file, read that file in full too before starting.
@@ -2132,7 +2132,7 @@ Chief starts the one review of the whole plan after every wave is ready. Never s
 Read each in full, with the docs they name. Derive every test case from these, never from the implementation.
 Wave 1 of 3: <storage>/chief/proj_1/thr_2/plan-1.md
 - Totals stay non-negative
-Approved design: wave 1's artboards, owner's approval “Looks right, ship it”, designer report <storage>/chief/proj_1/thr_4/report-1.md
+Approved design: wave 1's artboards, owner's approval “Looks right, ship it”, designer report <storage>/chief/proj_1/thr_3/report-1.md
 Wave 2 of 3: <storage>/chief/proj_1/thr_2/plan-2.md
 - Wave 2 keeps its invariant
 Wave 3 of 3: <storage>/chief/proj_1/thr_2/plan-3.md
@@ -2207,13 +2207,13 @@ Keep every item above. Your ready result confirms each one, with its evidence (t
 - When the change touches code, run the project's lint/analyze and build after your last commit (and the Verify command when given) and list each with its exit status under Automated Verification. Reviewers read code only and never run them, and Chief may complete without a review, so your recorded runs are the only build/lint evidence.
 - Do not ask the user directly from this thread. Chief decides whether a question needs escalation.
 --- wave 1, kind designer
-refused: Wave 1's chain (waves 1, 2, 3) already has worker thr_4 on wave 1; a chain has one branch, PR and worktree. Continue it with replaces: thr_4 — chief_delegate (planThreadId: thr_2, wave: 1, replaces: thr_4).
+refused: Wave 1's chain (waves 1, 2, 3) already has worker thr_3 on wave 1; a chain has one branch, PR and worktree. Continue it with replaces: thr_3 — chief_delegate (planThreadId: thr_2, wave: 1, replaces: thr_3).
 
 === design wave: wave 2 with no approval after a repeat designer ===
 --- wave 2 replaces the unapproved repeat designer
-refused: Wave 1 is design-only and wave 2 implements it: the owner must approve its artboards first. Show the user the artboards from thr_5's report, then record their decision with chief_owner_approval (workerThreadId: thr_5) and repeat this call.
+refused: Wave 1 is design-only and wave 2 implements it: the owner must approve its artboards first. Show the user the artboards from thr_4's report, then record their decision with chief_owner_approval (workerThreadId: thr_4) and repeat this call.
 --- wave 2 with no replaces, the latest designer unapproved
-refused: Wave 2's chain (waves 1, 2, 3) already has worker thr_5 on wave 1; a chain has one branch, PR and worktree. Continue it with replaces: thr_5 — chief_delegate (planThreadId: thr_2, wave: 2, replaces: thr_5).
+refused: Wave 2's chain (waves 1, 2, 3) already has worker thr_4 on wave 1; a chain has one branch, PR and worktree. Continue it with replaces: thr_4 — chief_delegate (planThreadId: thr_2, wave: 2, replaces: thr_4).
 
 === unplanned: Spec Writer hand-off ===
 --- first delegation: kind spec-writer

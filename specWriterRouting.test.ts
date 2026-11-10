@@ -417,7 +417,7 @@ describe("tester role", () => {
         "Specs on wave 1 were bypassed (docs are unchanged); no Spec Writer runs on it.");
 
       // A design-only wave.
-      const design = await specPlan(state, [planWave(1, { design: true }), specImpl(2), TEST_WAVE(3)], true);
+      const design = await specPlan(state, [planWave(1, { design: true }), specImpl(2), TEST_WAVE(3)]);
       await expect(delegateWave(state, design.chief.threadId, design.planner.threadId, 1, { kind: "spec-writer" })).rejects.toThrow("Wave 1 is design-only: no Spec Writer runs on it.");
       expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE kind='spec-writer'`).get()).toEqual({ n: 0 });
     });
