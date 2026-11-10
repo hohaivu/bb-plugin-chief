@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
-import { NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
+import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
 import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_NEW_DESIGN_BULLET, PLANNER_OLD_COMPLEX_TAIL, PLANNER_OLD_DESIGN_BULLET, PLANNER_RESHAPE_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -84,12 +84,14 @@ describe("tester role", () => {
       expect(prompt).not.toMatch(/marked spec: true|This task ran a Spec Writer|\(1\) code that contradicts the committed docs/);
     });
 
-    // Contract 14 (provenance): on a spec-bearing chain the reviewer's earlier-rows list keeps every Spec Writer and Tester row
-    // even past four earlier rows, plus the worker interval line; a no-spec chain keeps the four-row cap. Regression: the
-    // `.slice(0, 4)` cap drops the oldest Spec Writer (and the implementing worker's evidence) once the chain has a few fix rounds.
+    // Contract 14 (provenance): on a spec-bearing chain the reviewer's earlier-rows list keeps every implementation-lane Tester row
+    // and the implementing worker even past four earlier rows, plus the worker interval line; the side-lane Spec Writer is not an
+    // earlier row of the branch but has its own `## Side-lane Spec Writers` entry and its own fold-range line; a no-spec chain keeps
+    // the four-row cap. Regression: the `.slice(0, 4)` cap drops the oldest Tester (and the implementing worker's evidence) once the
+    // chain has a few fix rounds, or the side writer is listed as an earlier row (its docs/ commits would then read as drift).
     test("a spec-bearing chain keeps every Spec Writer and Tester row in the review's earlier rows, a no-spec chain keeps the cap", async () => {
       const state = await setup();
-      const { chief, planner, writer, tester } = await fullChain(state);
+      const { chief, planner, writer, worker, tester } = await fullChain(state);
       const f1 = await swap(state, chief, planner.threadId, 2, tester, "worker");
       await readyIdle(state, f1);
       const t2 = await swap(state, chief, planner.threadId, 2, f1, "tester");
@@ -101,9 +103,13 @@ describe("tester role", () => {
       const { prompt, context } = await reviewPrompt(state, chief.threadId, t3);
       const rows = context.split("\n").filter((line) => /^- (worker|tester|spec-writer|designer) thr_/.test(line));
       expect(rows.length).toBeGreaterThan(4);
-      for (const row of [`spec-writer ${writer}`, `tester ${tester}`, `tester ${t2}`]) expect(rows.some((line) => line.startsWith(`- ${row}:`))).toBe(true);
+      for (const row of [`worker ${worker}`, `tester ${tester}`, `tester ${t2}`]) expect(rows.some((line) => line.startsWith(`- ${row}:`))).toBe(true);
+      expect(rows.some((line) => line.includes(writer))).toBe(false);
+      expect(section(context, "Side-lane Spec Writers")).toContain(`- wave 1 Spec Writer ${writer}:`);
       expect(prompt).toContain("Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names");
-      expect(prompt).toMatch(new RegExp(`Earlier here: [^.]*spec-writer ${writer}[^.]*`));
+      expect(prompt).toMatch(new RegExp(`Earlier here: [^.]*tester ${tester}[^.]*`));
+      expect(prompt).not.toMatch(new RegExp(`Earlier here: [^.]*${writer}`));
+      expect(prompt).toContain(`check only its fold range, from the Fold base to the Fold head its report names`);
 
       const plainState = await setup();
       const chief2 = await start(plainState);
@@ -128,13 +134,14 @@ describe("tester role", () => {
       const state = await setup();
       const { chief, tester } = await fullChain(state);
       const { prompt } = await reviewPrompt(state, chief.threadId, tester);
-      const gate = prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!;
+      // A review with several targets (a side-lane writer is a target of its own) puts the report-reading line right under the gate.
+      const gate = prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!.split("\nRead each worker report")[0]!;
       const items = gate.split("\n");
       expect(items.slice(0, 5).map((line) => line.slice(0, 3))).toEqual(["(1)", "(2)", "(3)", "(4)", "(5)"]);
-      expect(items[0]).toBe("(1) code that contradicts the committed docs;");
+      expect(items[0]).toBe("(1) code that contradicts the plan's contracts or the committed docs (a conflict that stale pre-plan specs cause is a docs finding);");
       expect(items[1]).toBe("(2) a test that contradicts them;");
       expect(items[2]).toBe("(3) a named Spec delta item that is missing or wrong in the final docs;");
-      expect(items[3]).toBe("(4) a docs/ change in a worker's, designer's or tester's own commit range;");
+      expect(items[3]).toBe("(4) a docs/ change in a worker's, designer's or tester's own commit range, except the docs/ commits inside a side-lane Spec Writer's Fold base..Fold head range (each report under `## Side-lane Spec Writers` names its range);");
       expect(items[4]).toMatch(/^\(5\) in new or changed docs prose only: no lead sentence saying what the domain is for;/);
       expect(items).toHaveLength(6);
       expect(items[5]).toBe("Content already correct needs no new commit. Unchanged existing docs are out of scope. A bypass never excuses landed docs that contradict the code. ASD-STE100 sentence rules (Simplified Technical English) are nits, never blocking.");
@@ -228,7 +235,7 @@ describe("tester role", () => {
     });
 
     // Contract 17 (planner and advisor briefs): they change on purpose, so assert the changed lines only. The planner is told the
-    // spec flag, the `## Spec delta` heading and that the Spec Writer runs before the wave's worker; the advisor's plan review
+    // spec flag, the `## Spec delta` heading and that the Spec Writer commits docs in parallel with the wave's worker, which builds from the plan; the advisor's plan review
     // checks a docs-changing chain for a missing spec: true wave.
     test("the planner's and the advisor's briefs carry the spec-first lines", async () => {
       const state = await setup();
@@ -236,8 +243,9 @@ describe("tester role", () => {
       await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chief.threadId));
       const planPrompt = state.spawned.at(-1).prompt as string;
       expect(planPrompt).toContain("`{body, dependsOn, design?, test?, spec?}`");
-      expect(planPrompt).toContain("mark the implementation wave that makes the change `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs before the wave's worker runs. Test waves are never `spec: true`.");
+      expect(planPrompt).toContain("mark the implementation wave that makes the change `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full). Test waves are never `spec: true`.");
       expect(planPrompt).not.toContain("mark its test wave `spec: true`");
+      expect(planPrompt).not.toContain("before the wave's worker runs");
 
       const planner = await plan(state, chief.threadId, [specImpl(1), planWave(2), TEST_WAVE(3)]);
       await approvePlan(state, chief.threadId, planner.threadId);
@@ -256,7 +264,7 @@ describe("tester role", () => {
       await delegateWave(state, chiefThreadId, planThreadId, waveNo, extra);
       return { id: workerOn(state, planThreadId, waveNo).thread_id as string, prompt: state.spawned.at(-1).prompt as string };
     };
-    /** Spec chain of two spec waves then a test wave, run to the end: every row ready and idle. */
+    /** Two spec waves then a test wave, run to the end: each spec wave's worker and its side-lane Spec Writer, then the tester; every row ready and idle. */
     async function mixedChain(state: State, waves: object[]) {
       const { chief, planner } = await specPlan(state, waves, true);
       const go = async (waveNo: number, extra: object) => {
@@ -264,26 +272,26 @@ describe("tester role", () => {
         await readyIdle(state, row.id);
         return row;
       };
-      const w1Writer = await go(1, {});
-      const w1Worker = await go(1, { replaces: w1Writer.id, kind: "worker" });
-      const w2Writer = await go(2, { replaces: w1Worker.id });
-      const w2Worker = await go(2, { replaces: w2Writer.id, kind: "worker" });
+      const w1Worker = await go(1, { branch: CHAIN, prUrl: CHAIN_PR });
+      const w1Writer = await go(1, { kind: "spec-writer", branch: CHAIN, prUrl: CHAIN_PR });
+      const w2Worker = await go(2, { replaces: w1Worker.id });
+      const w2Writer = await go(2, { kind: "spec-writer" });
       const tester = await go(3, { replaces: w2Worker.id, kind: "tester" });
       return { chief, planner, w1Writer, w1Worker, w2Writer, w2Worker, tester };
     }
     const asOracle = (state: State, entries: Array<[string, string]>) =>
       entries.map(([name, text]) => `=== ${name} ===\n${text.replaceAll(state.storageRoot, "<storage>")}\n`).join("");
 
-    /** Spec Writer, worker, tester, a test-wave docs repair and the reviewer of a spec chain with no baseline, plus their alerts. */
+    /** Worker, its side-lane Spec Writer, tester, a test-wave docs repair and the reviewer of a spec chain with no baseline, plus their alerts. */
     const existingOnlyFixture = async (state: State) => {
       const out: Array<[string, string]> = [];
       const { chief, planner } = await specPlan(state);
-      const writer = await hop(state, chief.threadId, planner.threadId, 1);
+      const worker = await hop(state, chief.threadId, planner.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+      out.push(["worker prompt", worker.prompt]);
+      const writer = await hop(state, chief.threadId, planner.threadId, 1, { kind: "spec-writer", branch: CHAIN, prUrl: CHAIN_PR });
       out.push(["spec writer prompt", writer.prompt]);
       await readyIdle(state, writer.id);
       out.push(["spec writer ready alert", lastAlert(state)], ["roster after writer", await roster(state, chief.threadId)]);
-      const worker = await hop(state, chief.threadId, planner.threadId, 1, { replaces: writer.id, kind: "worker" });
-      out.push(["worker prompt", worker.prompt]);
       await readyIdle(state, worker.id);
       out.push(["worker ready alert", lastAlert(state)]);
       const tester = await hop(state, chief.threadId, planner.threadId, 2, { replaces: worker.id, kind: "tester" });
@@ -296,13 +304,7 @@ describe("tester role", () => {
       out.push(["test-wave spec writer ready alert", lastAlert(state)]);
       const review = await reviewPrompt(state, chief.threadId, docs.id);
       out.push(["reviewer prompt", review.prompt], ["reviewer context", review.context]);
-      return asOracle(state, out);
-    };
-
-    /** Wave 1's Spec Writer and worker prompts of a chain whose wave 2 (not wave 1) has a baseline. */
-    const mixedWaveOneFixture = async (state: State) => {
-      const chain = await mixedChain(state, [specImpl(1), baseImpl(2), TEST_WAVE(3)]);
-      return asOracle(state, [["wave 1 spec writer prompt", chain.w1Writer.prompt], ["wave 1 worker prompt", chain.w1Worker.prompt]]);
+      return out;
     };
 
     /** The planner prompt for a plain brief and for a revision of a plan whose one advisor review asked for changes. */
@@ -323,15 +325,20 @@ describe("tester role", () => {
     const oracleFile = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", name), "utf8");
     const WRITER_BASELINE = "- Baseline: this wave's plan has a `## Spec baseline` heading.";
     const TESTER_BASELINE = "- A new spec's baseline (the current behaviour a Spec Writer documented";
-    const gateOf = (prompt: string) => prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!.split("\n");
+    const gateOf = (prompt: string) => prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!.split("\nRead each worker report")[0]!.split("\n");
 
-    // Contract (existing-only equivalence, base oracle): a spec chain whose waves have no baseline spawns the Spec Writer, worker,
-    // tester, test-wave Spec Writer and reviewer, and sends the alerts, with the bytes base 6d288a2 produced. Regression: a baseline
-    // line, reworded line or extra gate item leaks into a chain that has no baseline.
-    test("a spec chain with no baseline produces the prompts and alerts base 6d288a2 produced", async () => {
+    // Contract (existing-only, no leak): a spec chain whose waves have no baseline spawns the side-lane Spec Writer, worker, tester,
+    // test-wave Spec Writer and reviewer, and sends the alerts, with no baseline line or item (6) anywhere. The parallel lane changed the
+    // writer, worker and review bytes on purpose (wave 2 contracts), so base 6d288a2's bytes are no longer the oracle for them; the
+    // property that survives is "no baseline text without a baseline heading". Regression: a baseline line, reworded line or extra
+    // gate item leaks into a chain that has no baseline.
+    test("a spec chain with no baseline renders no baseline line or item (6) in any prompt or alert", async () => {
       const state = await setup();
-      // Only the reviewer prompt changed: the make-native line follows its "Classify the change" line.
-      expect(await existingOnlyFixture(state)).toBe(withReviewerLine(await oracleFile("spec-chain-6d288a2.txt")));
+      const entries = await existingOnlyFixture(state);
+      expect(entries.map(([name]) => name)).toEqual(["worker prompt", "spec writer prompt", "spec writer ready alert", "roster after writer", "worker ready alert", "tester prompt",
+        "tester ready alert", "test-wave spec writer prompt", "test-wave spec writer ready alert", "reviewer prompt", "reviewer context"]);
+      for (const [name, text] of entries) expect(text, name).not.toMatch(/baseline/i);
+      expect(gateOf(entries.find(([name]) => name === "reviewer prompt")![1])).toHaveLength(6);
     });
 
     // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief.
@@ -346,7 +353,12 @@ describe("tester role", () => {
       const expected = replaceText(
         replaceText(spliceAfter(base, PLANNER_ANCHOR, PLANNER_RESHAPE_LINE, 2), PLANNER_OLD_DESIGN_BULLET, PLANNER_NEW_DESIGN_BULLET, 2),
         PLANNER_OLD_COMPLEX_TAIL, PLANNER_NEW_COMPLEX_TAIL, 1);
-      expect(await plannerFixture(state)).toBe(expected);
+      // Wave 2 of the parallel Spec Writer plan rewrote two sentences in both briefs (2 each): the spec-flag sentence and the `dependsOn` phases sentence; the rest is base's bytes.
+      const OLD_SPEC = "who commits the docs before the wave's worker runs. Test waves";
+      const NEW_SPEC = "who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full). Test waves";
+      const OLD_PHASES = "except that a `spec: true` implementation wave runs its Spec Writer before its worker.";
+      const NEW_PHASES = "except that a `spec: true` implementation wave has a Spec Writer that runs in parallel with its worker.";
+      expect(await plannerFixture(state)).toBe(replaceText(replaceText(expected, OLD_SPEC, NEW_SPEC, 2), OLD_PHASES, NEW_PHASES, 2));
     });
 
     // Contract (mixed chain, existing-only first): wave 1's Spec Writer and worker prompts are base 6d288a2's bytes although wave 2 has
@@ -364,11 +376,18 @@ describe("tester role", () => {
       expect(chain.tester.prompt).not.toContain(WRITER_BASELINE);
     });
 
-    // Contract (mixed chain, byte identity): wave 1's Spec Writer and worker prompts are the bytes base 6d288a2 produced although wave 2
-    // of the chain has a baseline. Regression: a Spec Writer or worker flag read from any wave of the chain.
-    test("wave 1's prompts of a chain whose wave 2 has a baseline equal base 6d288a2's", async () => {
-      const state = await setup();
-      expect(await mixedWaveOneFixture(state)).toBe(await oracleFile("spec-chain-mixed-wave-1-6d288a2.txt"));
+    // Contract (mixed chain, wave-1 isolation): wave 1's side-lane Spec Writer and worker prompts are byte for byte the prompts of the
+    // same chain with no baseline anywhere, although wave 2 has one. Regression: a Spec Writer or worker flag read from any wave of the
+    // chain (an earlier base-6d288a2 oracle held this for the writer-first order, which no longer exists).
+    test("wave 1's prompts of a chain whose wave 2 has a baseline equal those of a chain with no baseline", async () => {
+      const prompts = async (waves: object[]) => {
+        const state = await setup();
+        const chain = await mixedChain(state, waves);
+        return [chain.w1Writer.prompt, chain.w1Worker.prompt].map((prompt) => prompt.replaceAll(state.storageRoot, "<storage>"));
+      };
+      const withBaseline = await prompts([specImpl(1), baseImpl(2), TEST_WAVE(3)]);
+      expect(withBaseline).toEqual(await prompts([specImpl(1), specImpl(2), TEST_WAVE(3)]));
+      expect(withBaseline[0]).not.toMatch(/baseline/i);
     });
 
     // Contract (mixed chain, reversed order): wave 1 has the baseline, wave 2 does not: wave 2's Spec Writer gets no line, and the
@@ -394,10 +413,10 @@ describe("tester role", () => {
         await readyIdle(state, row.id);
         return row;
       };
-      const bWriter = await go(3, { branch: "feature/b" });
-      const aWriter = await go(1, { branch: "feature/a" });
-      const bWorker = await go(3, { replaces: bWriter.id, kind: "worker" });
-      const aWorker = await go(1, { replaces: aWriter.id, kind: "worker" });
+      const bWorker = await go(3, { branch: "feature/b", prUrl: "https://github.com/o/r/pull/8" });
+      const bWriter = await go(3, { kind: "spec-writer", branch: "feature/b", prUrl: "https://github.com/o/r/pull/8" });
+      const aWorker = await go(1, { branch: "feature/a", prUrl: CHAIN_PR });
+      const aWriter = await go(1, { kind: "spec-writer", branch: "feature/a", prUrl: CHAIN_PR });
       const bTester = await go(4, { replaces: bWorker.id, kind: "tester" });
       const aTester = await go(2, { replaces: aWorker.id, kind: "tester" });
       expect(bWriter.prompt).toContain(WRITER_BASELINE);
@@ -418,9 +437,9 @@ describe("tester role", () => {
         await readyIdle(state, row.id);
         return row;
       };
-      const w1 = await go(1, {});
-      const w2Writer = await go(2, { replaces: w1.id });
-      const w2Worker = await go(2, { replaces: w2Writer.id, kind: "worker" });
+      const w1 = await go(1, { branch: CHAIN, prUrl: CHAIN_PR });
+      const w2Worker = await go(2, { replaces: w1.id });
+      const w2Writer = await go(2, { kind: "spec-writer" });
       const tester = await go(3, { replaces: w2Worker.id, kind: "tester" });
       expect(rowOf(state, w1.id).kind).toBeNull();
       for (const row of [w1, w2Writer, w2Worker, tester]) expect(row.prompt).not.toMatch(/baseline/i);
@@ -509,9 +528,9 @@ describe("tester role", () => {
       state.db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id=?`).run(JSON.stringify(legacy), planner.threadId);
       await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, chief.threadId);
       expect(storedWave(state, planner.threadId)).not.toHaveProperty("baseline");
-      const writer = await hop(state, chief.threadId, planner.threadId, 1);
+      const worker = await hop(state, chief.threadId, planner.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+      const writer = await hop(state, chief.threadId, planner.threadId, 1, { kind: "spec-writer", branch: CHAIN, prUrl: CHAIN_PR });
       await readyIdle(state, writer.id);
-      const worker = await hop(state, chief.threadId, planner.threadId, 1, { replaces: writer.id, kind: "worker" });
       await readyIdle(state, worker.id);
       const tester = await hop(state, chief.threadId, planner.threadId, 2, { replaces: worker.id, kind: "tester" });
       for (const row of [writer, worker, tester]) expect(row.prompt).not.toMatch(/baseline/i);

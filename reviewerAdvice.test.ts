@@ -31,10 +31,15 @@ describe("tester role", () => {
     //   fixture block sha256 (between the markers), base and head: cddcc6046b3d7a41fb03cedebb6b2c66e16dd79885e02fa26b4fb23e292f6bd4; snapshot sha256: 49769900d73f6615d01a81303bf0368bd83ff07f3f95ec7e5a3fee9a72895069.
     //   Pending only, not alert: "no verdict" (no accepted report reaches a ready reviewer without a verdict) and "approve carrying streak 3" (an approve report resets the streak before its alert).
     // <reviewer-advice-oracle-begin>
+    // These three blocks build a planned spec chain the old way (the Spec Writer first, its worker replacing it); the Spec Writer now runs
+    // beside its worker as a side-lane target, so their recorded advice is no longer the contract. Their successors are the C3 repair-grouping
+    // tests in specWriterRouting.test.ts, which run through the same chief_review / chief_report / chief_delegate path. Every other block stays byte for byte.
+    const REPLACED_BY_PARALLEL_LANE = (name: string) => name.endsWith("a planned spec chain");
     const reviewerAdviceFixture = async () => {
       const blocks: string[] = [];
       const PR = "https://github.com/acme/shop/pull/8";
       const run = async (name: string, body: (k: any) => Promise<void>) => {
+        if (REPLACED_BY_PARALLEL_LANE(name)) return;
         const state = await setup();
         await state.harness.behavior.setSettings({ cleanupApproved: true });
         const lines: string[] = [];
@@ -344,7 +349,9 @@ describe("tester role", () => {
     test("reviewer advice oracle", async () => {
       const head = await reviewerAdviceFixture();
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "reviewer-advice-626c3cd.txt"), "utf8");
-      expect(head).toBe(oracle);
+      const kept = (text: string) => text.split(/^(?==== )/m).filter((block) => !REPLACED_BY_PARALLEL_LANE(block.slice(4, block.indexOf(" ===\n"))));
+      expect(kept(oracle).length).toBeGreaterThan(30);
+      expect(kept(head).join("")).toBe(kept(oracle).join(""));
     }, 180_000);
 
     // Advice is not permission: the consult advice is the reviewer's instruction, the consult gate on chief_delegate is a separate ledger decision.
