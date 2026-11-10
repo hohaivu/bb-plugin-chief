@@ -6,7 +6,7 @@ import { expect, test } from "vitest";
 import { type PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import plugin from "../server";
 import { MIGRATIONS } from "../src/db/migrations";
-import { managedSkills } from "../roles";
+import { managedSkills } from "../src/core/roles";
 import { sdk } from "./sdk";
 import { execFileMock } from "./execMock";
 export { execFileMock };
@@ -18,7 +18,7 @@ export const AGENT_SKILL_IDS = ["chief", "coordinator", "chief-worker", "chief-r
 export const HEAD_SHA = "a".repeat(40);
 export const ghHead = (branch: string) => JSON.stringify({ headRefName: branch, headRefOid: HEAD_SHA, baseRefName: "main" });
 
-// Base oracles in __snapshots__/ predate the make-native lines. Expected text = the base oracle with exactly one line spliced in
+// Base oracles in test/fixtures/ predate the make-native lines. Expected text = the base oracle with exactly one line spliced in
 // after each anchor line; every other byte stays the base's, so a changed, moved or doubled line fails the exact compare.
 // The inserted lines are copied from wave 1's plan, not from the implementation.
 export const REVIEWER_ANCHOR = "Classify the change, then check it by type:";
@@ -34,7 +34,7 @@ export const spliceAfter = (base: string, anchor: string, line: string, expected
   return out;
 };
 export const withReviewerLine = (base: string, count = 1) => spliceAfter(base, REVIEWER_ANCHOR, REVIEWER_NATIVE_LINE, count);
-export const snapshotText = (name: string) => readFile(join(join(dirname(fileURLToPath(import.meta.url)), ".."), "__snapshots__", name), "utf8");
+export const snapshotText = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "fixtures", name), "utf8");
 
 export const disposals: Array<() => Promise<void>> = [];
 export const disposeAll = async () => {

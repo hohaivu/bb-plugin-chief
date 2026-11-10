@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
-import { createReviewLedger } from "./reviewLedger";
+import { createReviewLedger } from "./src/review/reviewLedger";
 
 // Contract: reviewLedger answers three questions as data (the 2/3 ladder and what a replaces: needs, which open reviews
 // exist and which is in flight, whether the newest verdict approves what the worker would ship). The caller oracle

@@ -1,9 +1,9 @@
-import { cleanupEligible, deleteSafeBranch, ownedBranch } from "../../cleanup";
-import { clip } from "../../text";
+import { cleanupEligible, deleteSafeBranch, ownedBranch } from "../forge/cleanup";
+import { clip } from "../core/text";
 import { z } from "zod";
 import { bounded } from "./exec";
 import { BUSY_STATUSES } from "./constants";
-import { forgeEnv } from "../../forge";
+import { forgeEnv } from "../forge/forge";
 import type { Ctx } from "./context";
 
 export function createCleanup(ctx: Ctx) {

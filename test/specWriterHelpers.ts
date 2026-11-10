@@ -64,7 +64,7 @@ export async function putWriter(state: State, chiefThreadId: string, writer: str
 export const section = (prompt: string, heading: string) => (prompt.split(`\n## ${heading}\n`)[1] ?? "").split("\n## ")[0]!;
 // ---- First-touch baseline specs (wave 2 tests) ----
 // <baseline-oracle-begin>
-// The oracle fixtures below were run unchanged against base 6d288a2 to capture __snapshots__/*-6d288a2.txt; only the storage
+// The oracle fixtures below were run unchanged against base 6d288a2 to capture test/fixtures/*-6d288a2.txt; only the storage
 // root is normalized. On 6d288a2 the baseline heading is plain text, so `baseImpl` is a plain spec wave there.
 export const BASELINE = "## Spec baseline\n- docs/specs/totals.md (new): totals.ts `computeTotal`";
 /** A spec wave whose body names a new spec file's baseline. */

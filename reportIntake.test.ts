@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createReportIntake, type ReportIntakeAdapters } from "./reportIntake";
-import { createReviewLedger } from "./reviewLedger";
+import { createReportIntake, type ReportIntakeAdapters } from "./src/report/reportIntake";
+import { createReviewLedger } from "./src/review/reviewLedger";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow, ReportParams } from "./src/types";
-import { createThreadStore, type ThreadInsert } from "./threadStore";
+import { createThreadStore, type ThreadInsert } from "./src/db/threadStore";
 
 // Contract (docs/specs/report-intake.md, Target): createReportIntake(adapters).report is the one owner of chief_report
 // acceptance and publication. Required state commits in one store.batch before any optional step (Next line, recorded

@@ -1,4 +1,4 @@
-import { clip, type RecordedCommand } from "../../text";
+import { clip, type RecordedCommand } from "../core/text";
 import { transientFailure } from "./util";
 import type { Ctx } from "./context";
 

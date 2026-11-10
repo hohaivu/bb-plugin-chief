@@ -1,6 +1,6 @@
 import { chainOf, heads, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
 import type { createWaveSchedule } from "./waveSchedule";
-import type { createReviewLedger, ReviewTarget } from "./reviewLedger";
+import type { createReviewLedger, ReviewTarget } from "../review/reviewLedger";
 
 /** What plan progress reads of a managed_threads row; the server's ManagedRow satisfies it. */
 export interface ProgressRow {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { trackerProjects } from "./tracker";
+import { trackerProjects } from "./src/tracker/tracker";
 
 // Contract (docs/specs/tracker.md, Settings): "proj_x=KEY" entries split on newlines or commas, trimmed, malformed entries
 // ignored, the last entry of a repeated project wins. The map decides which Chief projects mirror to a tracker, so a wrong

@@ -2,8 +2,8 @@ import type { ExecFileOptions } from "node:child_process";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { ManagedSpawn } from "./managedSpawn";
-import { modelSelectionSchema, type ModelSelection } from "./src/types";
-import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from "./roles";
+import { modelSelectionSchema, type ModelSelection } from "../types";
+import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from "../core/roles";
 
 /** How long one chief_research call waits before handing back a runId to resume with. */
 export const RESEARCH_DEFAULT_TIMEOUT_MINUTES = 10;
@@ -31,7 +31,7 @@ const reasoningSchema = z.enum([
   "ultra",
   "ultracode",
 ]);
-export { modelSelectionSchema, type ModelSelection } from "./src/types";
+export { modelSelectionSchema, type ModelSelection } from "../types";
 
 const stageSchema = z.enum(["scan", "verify", "combine"]);
 export const researchModeSchema = z.enum(["survey", "investigate"]);

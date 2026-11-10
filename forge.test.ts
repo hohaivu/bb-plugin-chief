@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, test } from "vitest";
-import { forgeInitScript } from "./forge";
+import { forgeInitScript } from "./src/forge/forge";
 
 describe("forgeInitScript", () => {
   test("slugs a title into a task branch", () => {

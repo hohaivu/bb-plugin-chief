@@ -1,10 +1,10 @@
-import { forgeInitScript } from "../../forge";
-import { sanitizeForge } from "../../forgeComments";
-import { clip } from "../../text";
-import { chainOf, type PlanWave } from "../../waveSchedule";
+import { forgeInitScript } from "../forge/forge";
+import { sanitizeForge } from "../forge/forgeComments";
+import { clip } from "../core/text";
+import { chainOf, type PlanWave } from "../plan/waveSchedule";
 import { z } from "zod";
 import { execFileAsync } from "../runtime/exec";
-import { FORGE_SCRIPT_TIMEOUT_MS, serverPath } from "../../forge";
+import { FORGE_SCRIPT_TIMEOUT_MS, serverPath } from "../forge/forge";
 import type { Ctx } from "../runtime/context";
 
 /** Longest mission, success criteria or constraints text chief_forge_init puts in a pull request body. */

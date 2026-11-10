@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
-import { checkPlan } from "./reportIntake";
+import { checkPlan } from "./src/report/reportIntake";
 import { NOT_DOING, SPEC_DELTA, type WriterState, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { READY, type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, workerOn } from "./test/testerHelpers";
 import { TEST_WAVE, approvePlan, delegate, disposals, disposeAll, legacyWave, planFile, setup, start, status, wave } from "./test/harness";

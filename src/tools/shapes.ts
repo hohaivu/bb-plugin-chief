@@ -1,8 +1,8 @@
-import { MAX_WAVES } from "../../reportIntake";
-import { STOP_AFTER_REJECTIONS } from "../../reviewLedger";
-import { roleSchema, workerKindSchema } from "../../roles";
+import { MAX_WAVES } from "../report/reportIntake";
+import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
+import { roleSchema, workerKindSchema } from "../core/roles";
 import { failEntry } from "../types";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { z } from "zod";
 
 /** What a spawn seeds into a thread's pluginMetadata, read back in bb.agents.configure.

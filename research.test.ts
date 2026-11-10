@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { modelSelectionSchema, researchParams } from "./research";
+import { modelSelectionSchema, researchParams } from "./src/research/research";
 
 describe("reasoningLevel validation", () => {
   const pick = { providerId: "codex", model: "gpt-6-astra" };

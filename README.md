@@ -169,7 +169,7 @@ tells a clean "No confirmed findings" apart from a verify that threw everything 
 
 Chief, planners and researchers get survey and investigate. Reviewers, workers and advisors never get it; the server refuses a call from any of them. Settings has one **Researcher** switch, on by default;
 while it is off, no role gets the tool or the line about it. Chief is told the tool is optional
-and that it reads no project code itself: `researchChiefInstructions` in server.ts owns when it uses research and what it does after a failed or partial run (it does not rerun).
+and that it reads no project code itself: `researchChiefInstructions` in src/runtime/host.ts owns when it uses research and what it does after a failed or partial run (it does not rerun).
 
 The researcher thread reuses Chief's own environment and permission mode, so it reads Chief's
 checkout. If that checkout cannot be shared, the call fails with a clear error; it never falls back

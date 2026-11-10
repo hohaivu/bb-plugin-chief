@@ -1,13 +1,13 @@
-import { type RepairTarget } from "../../planProgress";
-import { reviewEngine } from "../../prAgent";
-import { STOP_AFTER_REJECTIONS } from "../../reviewLedger";
-import { createReviewStart } from "../../reviewStart";
+import { type RepairTarget } from "../plan/planProgress";
+import { reviewEngine } from "../review/prAgent";
+import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
+import { createReviewStart } from "../review/reviewStart";
 import { type ManagedRow } from "../types";
-import { clip } from "../../text";
-import { type PlanWave } from "../../waveSchedule";
+import { clip } from "../core/text";
+import { type PlanWave } from "../plan/waveSchedule";
 import { BUSY_STATUSES } from "./constants";
 import { bounded } from "./exec";
-import { forgeEnv, prHead } from "../../forge";
+import { forgeEnv, prHead } from "../forge/forge";
 import type { Ctx } from "./context";
 
 const REVIEW_IDLE_WAIT_MS = 60_000;

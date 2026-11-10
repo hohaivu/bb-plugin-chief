@@ -1,5 +1,5 @@
-import { FORGE_COMMENTS_TABLE } from "../../forgeComments";
-import { TRACKER_TABLES } from "../../trackerSync";
+import { FORGE_COMMENTS_TABLE } from "../forge/forgeComments";
+import { TRACKER_TABLES } from "../tracker/trackerSync";
 
 /** Append-only: the host records each statement's hash by index and rejects a changed
  * or reordered one. Exported so the upgrade path can be tested on a real database. */

@@ -1,5 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { ResearchSettings } from "../../research";
+import type { ResearchSettings } from "../research/research";
 import type { createCore } from "./core";
 import type { createSweep } from "./sweep";
 import type { createSettingsRuntime } from "./settings";

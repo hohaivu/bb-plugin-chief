@@ -1,4 +1,4 @@
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { type PluginCliContext, type PluginCliResult } from "@get-bb/plugin-sdk";
 import { COORDINATOR_REFUSED, coordinatorRefusal } from "./prompts";
 import { consultParams, delegateParams, overrideSchema, planParams, stopParams, type TodoRow } from "../tools/shapes";

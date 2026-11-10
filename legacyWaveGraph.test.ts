@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { createPlanProgress } from "./planProgress";
-import { chainOf, createWaveSchedule, heads, successorOf, tips, type PlanWave } from "./waveSchedule";
+import { createPlanProgress } from "./src/plan/planProgress";
+import { chainOf, createWaveSchedule, heads, successorOf, tips, type PlanWave } from "./src/plan/waveSchedule";
 
 // Contract (equivalence): a plan with no `test` field — every plan persisted before test waves — keeps the exact
-// pre-tester graph and progress answers. legacyWaveGraph.oracle.json was captured by running snapshot() on the pre-feature code (bf73de5),
+// pre-tester graph and progress answers. test/fixtures/legacy-wave-graph-bf73de5.json was captured by running snapshot() on the pre-feature code (bf73de5),
 // not on this tree, so the same file passes on both. Regression: a missing `test` or an absent wave changes a tip,
 // a pending list, the ready step, the review block, the final-wave test, absorption or the progress count.
 // This is the one owner of that equivalence; the server tests only cover the new behaviour.
@@ -94,7 +94,7 @@ function snapshot() {
 
 describe("legacy wave graph", () => {
   test("a plan with no test field answers every graph and progress question as before test waves", () => {
-    expect(snapshot()).toEqual(JSON.parse(readFileSync(new URL("./legacyWaveGraph.oracle.json", import.meta.url), "utf8")));
+    expect(snapshot()).toEqual(JSON.parse(readFileSync(new URL("./test/fixtures/legacy-wave-graph-bf73de5.json", import.meta.url), "utf8")));
   });
 });
 

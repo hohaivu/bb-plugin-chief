@@ -1,6 +1,6 @@
-import { createReportIntake } from "../../reportIntake";
+import { createReportIntake } from "../report/reportIntake";
 import { type ManagedRow } from "../types";
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { spawnMetadataSchema } from "../tools/shapes";
 import { transientFailure } from "./util";
 import type { ThreadInput } from "./artifacts";

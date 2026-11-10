@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
-import { createPlanLifecycle } from "./planLifecycle";
-import { createWaveSchedule, type PlanWave } from "./waveSchedule";
+import { createPlanLifecycle } from "./src/plan/planLifecycle";
+import { createWaveSchedule, type PlanWave } from "./src/plan/waveSchedule";
 
 // Contract: the module is the long-term rule matrix for who may run which plan wave next (role, Spec Writer and tester
 // hand-off order, test and spec waivers). Cases are named after the wave 1 plan's case matrix. The caller oracle

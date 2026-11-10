@@ -14,7 +14,7 @@ describe("tester role", () => {
   describe("Spec Writer role", () => {
     // ---- Review attempt: characterization on cf92d9c (tests first, before the review attempt module is extracted) ----
     // Contract: for each case below, the real chief_review handler gives the outcome saved in
-    // __snapshots__/review-attempt-cf92d9c.txt: the reply or the refusal, the reviewer's spawn environment, prompt and
+    // test/fixtures/review-attempt-cf92d9c.txt: the reply or the refusal, the reviewer's spawn environment, prompt and
     // review-context.md, the reviewer's row identity, its review_targets rows, and any Chief alert. The real handlers run;
     // nothing is observed through a production seam. The forge is execFileMock (gh pr view); git passes through to the real
     // git only in the cases that read a temp repository on the primary host.

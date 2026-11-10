@@ -2,7 +2,7 @@
 
 This page shows how Chief turns one owner request into a merged pull request. The sequence chart shows who messages whom. The tables list the roles and the support tools.
 
-> **Keep this page current.** When a change alters a tool, a role kind, a gate, or the order of steps, update the charts and tables in the same pull request. The code and the skills win over this page: `server.ts`, `roles.ts`, `skills/chief/SKILL.md`, and the README "Workflow" and "Planning" sections.
+> **Keep this page current.** When a change alters a tool, a role kind, a gate, or the order of steps, update the charts and tables in the same pull request. The code and the skills win over this page: `server.ts`, `src/core/roles.ts`, `skills/chief/SKILL.md`, and the README "Workflow" and "Planning" sections.
 
 ## Chart
 
@@ -144,7 +144,7 @@ flowchart LR
 
 ## Roles inside a plan chain
 
-A plan chain has one branch, one pull request and one worker worktree. Worker kinds come from `workerKindSchema` in `roles.ts`. Planner, Advisor, Researcher and Reviewer are thread roles.
+A plan chain has one branch, one pull request and one worker worktree. Worker kinds come from `workerKindSchema` in `src/core/roles.ts`. Planner, Advisor, Researcher and Reviewer are thread roles.
 
 | Role | Kind or thread role | Job | Waived by |
 | --- | --- | --- | --- |

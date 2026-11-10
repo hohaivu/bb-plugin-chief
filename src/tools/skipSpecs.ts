@@ -1,4 +1,4 @@
-import { MAX_WAVES } from "../../reportIntake";
+import { MAX_WAVES } from "../report/reportIntake";
 import { z } from "zod";
 import { overrideSchema } from "./shapes";
 import type { Ctx } from "../runtime/context";

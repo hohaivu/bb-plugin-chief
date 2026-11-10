@@ -1,4 +1,4 @@
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { z } from "zod";
 import { MAX_RESULT_LENGTH } from "../runtime/constants";
 import { overrideSchema, type TodoRow } from "./shapes";

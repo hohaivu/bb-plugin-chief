@@ -1,4 +1,4 @@
-import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS } from "../../reviewLedger";
+import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
 import { delegateParams } from "./shapes";
 import type { Ctx } from "../runtime/context";
 

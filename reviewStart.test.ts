@@ -6,9 +6,9 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow } from "./src/types";
-import { createReviewLedger } from "./reviewLedger";
-import { createReviewStart, type PinnedHead } from "./reviewStart";
-import { createThreadStore } from "./threadStore";
+import { createReviewLedger } from "./src/review/reviewLedger";
+import { createReviewStart, type PinnedHead } from "./src/review/reviewStart";
+import { createThreadStore } from "./src/db/threadStore";
 
 // Contract: the Review attempt module (reviewStart.ts) at its own interface. Its faults, its frozen identity and its
 // whole-review budget are owned here; the broad reply/brief matrix stays in server.test.ts "review attempt oracle".
@@ -597,7 +597,7 @@ async function scenarios(engine?: () => unknown) {
   return result;
 }
 
-const ORACLE_FILE = join(import.meta.dirname, "reviewEngine.base9cf75e3.oracle.json");
+const ORACLE_FILE = join(import.meta.dirname, "test", "fixtures", "review-engine-9cf75e3.json");
 const READ_FAILURE = "Could not read the review engine setting, using reviewer:";
 
 describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
@@ -614,7 +614,7 @@ describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
   test.skipIf(process.env.ORACLE_OUT).each([
     ["a stored 'reviewer'", "reviewer"], ["an unknown name", "PR-AGENT"], ["an empty string", ""], ["a number", 3], ["nothing stored", undefined], ["null", null],
   ])("%s runs as the base did", async (_name, stored) => {
-    const { reviewEngine } = await import("./prAgent");
+    const { reviewEngine } = await import("./src/review/prAgent");
     const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
     expect(await scenarios(async () => reviewEngine({ reviewEngine: stored }))).toEqual(oracle);
   });

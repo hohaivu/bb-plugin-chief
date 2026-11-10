@@ -4,8 +4,8 @@
 
 import { createHash } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { ManagedRow } from "./src/types";
-import { clip } from "./text";
+import type { ManagedRow } from "../types";
+import { clip } from "../core/text";
 import type { Tracker, TrackerStatus } from "./tracker";
 
 /** Appended at the end of MIGRATIONS; never edit an earlier entry. */

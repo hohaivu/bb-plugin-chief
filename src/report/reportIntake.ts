@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { ReviewTarget, createReviewLedger } from "./reviewLedger";
-import type { Role } from "./roles";
-import { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "./src/reportLimits";
-import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "./src/types";
-import type { ThreadInsert, ThreadStore } from "./threadStore";
-import { COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, fitLines, recordedLines, type RecordedCommand } from "./text";
-import { waveTitle } from "./waveSchedule";
+import type { ReviewTarget, createReviewLedger } from "../review/reviewLedger";
+import type { Role } from "../core/roles";
+import { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
+import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../types";
+import type { ThreadInsert, ThreadStore } from "../db/threadStore";
+import { COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, fitLines, recordedLines, type RecordedCommand } from "../core/text";
+import { waveTitle } from "../plan/waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 
@@ -38,7 +38,7 @@ export interface ReportIntakeAdapters {
   warn(message: string): void;
 }
 
-export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "./src/reportLimits";
+export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 
 type WaveInput = { body: string; dependsOn?: number[]; design?: boolean; test?: boolean; spec?: boolean };
 

@@ -20,12 +20,12 @@ The checkout freshness domain keeps Chief's checkout current before a researcher
 
 | Entry point | File | Role |
 | --- | --- | --- |
-| `fastForward`, `commitStamp`, `stampLine` | `checkoutSync.ts` | Run git and build the stamp text. |
+| `fastForward`, `commitStamp`, `stampLine` | `src/forge/checkoutSync.ts` | Run git and build the stamp text. |
 | `freshenChiefCheckout`, `reportStamp`, `serverCheckout`, `stageRead` | `server.ts` | Decide whether to fast-forward and read the stamp. `reportStamp` is an adapter of the report intake. |
-| `startResearcher`, `researchRun` | `research.ts` | Start a researcher and build the tool reply. |
+| `startResearcher`, `researchRun` | `src/research/research.ts` | Start a researcher and build the tool reply. |
 | `startPlan`, `chief_plan`, CLI `plan` | `server.ts` | Start a planner and build the tool and CLI replies. |
-| `report` (`createReportIntake`) | `reportIntake.ts` | Save a report and deliver the alert. `report-intake.md` describes it. |
-| `reportAlert`, `reportFileBody` | `reportIntake.ts` | Lay out the alert and the report file. |
+| `report` (`createReportIntake`) | `src/report/reportIntake.ts` | Save a report and deliver the alert. `report-intake.md` describes it. |
+| `reportAlert`, `reportFileBody` | `src/report/reportIntake.ts` | Lay out the alert and the report file. |
 
 ## Baseline: Behaviour Before the Fast-Forward
 
@@ -33,7 +33,7 @@ This section describes the code before this change. The next sections describe t
 
 ### Researcher start
 
-- `chief_research` from Chief calls `startResearcher` in `research.ts`.
+- `chief_research` from Chief calls `startResearcher` in `src/research/research.ts`.
 - `researchPrepare` refuses on the call cap, the researcher model, the cooldown, and the quota. It returns `environmentId`, which can be null.
 - `startResearcher` then refuses when `environmentId` is null, because the thread has no reusable environment.
 - Every refusal happens before any thread exists.

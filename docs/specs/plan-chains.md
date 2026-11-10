@@ -25,12 +25,12 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 
 Six modules own the plan chains domain:
 
-1. `waveSchedule.ts` owns graph traversal, wave relationships, and wave absence.
-2. `planLifecycle.ts` owns delegation admission, role progression, and waivers.
+1. `src/plan/waveSchedule.ts` owns graph traversal, wave relationships, and wave absence.
+2. `src/plan/planLifecycle.ts` owns delegation admission, role progression, and waivers.
 3. `server.ts` owns worker execution, forge initialization, delegation tools, and cleanup steps.
-4. `planProgress.ts` owns progress checks, review readiness, legacy restack rules, and the repair decision after a reviewer verdict.
-5. `reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
-6. `reviewLedger.ts` owns reviewer tracking, coverage checks, and historical task chain queries.
+4. `src/plan/planProgress.ts` owns progress checks, review readiness, legacy restack rules, and the repair decision after a reviewer verdict.
+5. `src/review/reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
+6. `src/review/reviewLedger.ts` owns reviewer tracking, coverage checks, and historical task chain queries.
 
 Callers interact with these entry points:
 
@@ -153,7 +153,7 @@ Shared worktree cleanup coordinates action ownership:
 
 ### Legacy Restack Handling
 
-- `planProgress.ts` evaluates restack requirements only for legacy plans where waves have distinct branches. Reason: new chains share a single branch and never require branch restacking.
+- `src/plan/planProgress.ts` evaluates restack requirements only for legacy plans where waves have distinct branches. Reason: new chains share a single branch and never require branch restacking.
 - `server.ts` words restack instructions only for the legacy stacks that `reviewAdvice` returns. It never groups targets itself. Reason: historical plan graphs in SQLite require backward compatibility.
 - The server never instructs new chain workers to restack branches. Reason: all waves in a new chain commit directly to the shared branch.
 
@@ -172,7 +172,7 @@ Shared worktree cleanup coordinates action ownership:
 - A replacement worker marks its superseded worker as complete. Reason: superseded workers must release active claims on resources.
 - Exactly one cleanup job owns each action for a shared environment in `cleanup_environment_claims`. Reason: primary key constraints prevent duplicate claim owners.
 - A reviewer worktree never hosts review execution on the live environment of an active target worker. Reason: concurrent reviewer execution inside a worker workspace causes file collisions.
-- `legacyWaveGraph.oracle.json` decisions remain identical to base commit results. Reason: legacy plan verification contracts require strict regression avoidance.
+- `test/fixtures/legacy-wave-graph-bf73de5.json` decisions remain identical to base commit results. Reason: legacy plan verification contracts require strict regression avoidance.
 - Reviewer advice is not permission. Reason: advice is plan-wide wording, and permission is per task.
 - `reviewAdvice` takes its rung from the `reject_streak` that the reviewer carries, through `ledger.rung`. Reason: one carried streak gives one answer for the alert, Pending, and the action panel.
 - `ledger.replacement` keeps permission for a `replaces:`. It decides from task history, consult timing, and user approval. Reason: permission depends on the task, not on the plan.

@@ -1,4 +1,4 @@
-import { clip } from "../../text";
+import { clip } from "../core/text";
 import { z } from "zod";
 import { type TodoRow } from "./shapes";
 import type { Ctx } from "../runtime/context";

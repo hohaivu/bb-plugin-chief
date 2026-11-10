@@ -1,4 +1,4 @@
-import { createManagedSpawn } from "../../managedSpawn";
+import { createManagedSpawn } from "../research/managedSpawn";
 import { type ManagedRow } from "../types";
 import type { Ctx } from "./context";
 

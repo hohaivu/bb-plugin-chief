@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { clip, clipMiddle } from "./text";
+import { clip, clipMiddle } from "../core/text";
 
 const execFileAsync = promisify(execFile);
 

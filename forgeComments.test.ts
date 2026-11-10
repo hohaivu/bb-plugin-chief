@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { cliAdapters, createForgeComments, FORGE_COMMENTS_TABLE, type ForgeAdapter } from "./forgeComments";
+import { cliAdapters, createForgeComments, FORGE_COMMENTS_TABLE, type ForgeAdapter } from "./src/forge/forgeComments";
 
 // Stands in for gh/glab, as in server.test.ts: the real adapters keep calling the promisified execFile.
 const execFileMock = vi.hoisted(() => vi.fn());

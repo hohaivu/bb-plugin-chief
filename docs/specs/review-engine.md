@@ -20,11 +20,11 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 
 | Entry point | File | Role |
 | --- | --- | --- |
-| `reviewEngine(raw)` | `prAgent.ts` | Parses the two settings. It is the only validation point. |
-| `prAgentScript(dir)` | `prAgent.ts` | Returns the wrapper text, which includes the translation step. |
-| `prAgentSection(mode, targets, dir)` | `prAgent.ts` | Returns the prompt lines that name the engine rules. |
-| `helperPrompt(reviewerPrompt, context)` | `prAgent.ts` | Returns the helper prompt. |
-| `startReview` | `reviewStart.ts` | Reads the engine once at review start. It appends the section and writes the files. |
+| `reviewEngine(raw)` | `src/review/prAgent.ts` | Parses the two settings. It is the only validation point. |
+| `prAgentScript(dir)` | `src/review/prAgent.ts` | Returns the wrapper text, which includes the translation step. |
+| `prAgentSection(mode, targets, dir)` | `src/review/prAgent.ts` | Returns the prompt lines that name the engine rules. |
+| `helperPrompt(reviewerPrompt, context)` | `src/review/prAgent.ts` | Returns the helper prompt. |
+| `startReview` | `src/review/reviewStart.ts` | Reads the engine once at review start. It appends the section and writes the files. |
 | `bb.settings.define` | `server.ts` | Defines `reviewEngine` and `prAgentDir`. |
 
 `startBranchReview` never reads the engine. An unowned branch review always uses the direct review.
@@ -33,7 +33,7 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 
 This section describes the behaviour of the code at commit 6638ef5, before the engine. The `reviewer` engine keeps it unchanged.
 
-Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` in `reviewStart.ts`. `REVIEW_ONLY` in `roles.ts`. The `bb.settings.define` block and the `createReviewStart` call in `server.ts`. The reviewer rule in `skills/chief-role-reviewer/SKILL.md`. `checkReport` in `reportIntake.ts` and `reportFinding` in `server.ts`, for the finding limits only.
+Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` in `src/review/reviewStart.ts`. `REVIEW_ONLY` in `src/core/roles.ts`. The `bb.settings.define` block and the `createReviewStart` call in `server.ts`. The reviewer rule in `skills/chief-role-reviewer/SKILL.md`. `checkReport` in `src/report/reportIntake.ts` and `reportFinding` in `server.ts`, for the finding limits only.
 
 ### Reviewer prompt
 
