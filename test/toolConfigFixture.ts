@@ -2,16 +2,18 @@ import { configurationContext, setup, start } from "./harness";
 
 // The tool-config capture of toolCallStability.test.ts (lines 20-69, same cases, same normalization), reused to snapshot another commit.
 // test/fixtures/tool-config-9689364.txt was captured by running it unchanged on base 9689364; tool-config-7178582.txt stays frozen.
+const marker = "# Project rules marker";
+export const toolConfigCases = [
+  { label: "short rules", rules: `${marker}\n- Keep rules small.`, name: "Asha", chiefOnly: false },
+  { label: "worst case", rules: `${marker}\n${"- Project rule text.\n".repeat(1_600)}`.slice(0, 32_000), name: "N".repeat(5_000), chiefOnly: true },
+];
+// The plugin SDK caps dynamic instructions at PLUGIN_DYNAMIC_INSTRUCTIONS_MAX_CHARS (node_modules/@get-bb/plugin-sdk/dist/testing/index.js).
+export const INSTRUCTIONS_CAP = 32_768;
 export const toolConfigFixture = async () => {
   const entries: { key: string; tools: string[]; skills: string[]; instructions: string | null | undefined }[] = [];
   const catalog: Record<string, unknown> = {};
   const roots: string[] = [];
-  const marker = "# Project rules marker";
-  const cases = [
-    { label: "short rules", rules: `${marker}\n- Keep rules small.`, name: "Asha", chiefOnly: false },
-    { label: "worst case", rules: `${marker}\n${"- Project rule text.\n".repeat(1_600)}`.slice(0, 32_000), name: "N".repeat(5_000), chiefOnly: true },
-  ];
-  for (const { label, rules, name, chiefOnly } of cases) {
+  for (const { label, rules, name, chiefOnly } of toolConfigCases) {
     const state = await setup({ rules });
     roots.push(state.storageRoot);
     const chief = await start(state);
@@ -63,7 +65,7 @@ export const TESTS_DOCS_LINE = "- Tests, docs: only a tester writes or runs test
 const SKIPS_OLD_PHRASE = "Guidance, not a rule: small";
 
 /** Throws unless `head` equals `base` apart from: the chief_delegate `kind` clause, the chief_complete `skipReview` clause, and in Chief's core rules the Tests line (now Tests, docs)
- * and the Skips line (the phrase swap only). Everything else, down to every other core-rule byte and every other tool text and schema, must be identical. */
+ * and the Skips line (the phrase swap only). Chief instructions must EXACTLY equal the base text rebuilt uncapped, edited, then capped at the SDK limit; everything else must be identical. */
 export function compareToolConfig(base: ToolConfig, head: ToolConfig) {
   const fail = (what: string): never => { throw new Error(`tool config differs from base outside the allowed edits: ${what}`); };
   const names = Object.keys(base.catalog);
@@ -86,17 +88,19 @@ export function compareToolConfig(base: ToolConfig, head: ToolConfig) {
     if (entry.key !== old.key || JSON.stringify(entry.tools) !== JSON.stringify(old.tools) || JSON.stringify(entry.skills) !== JSON.stringify(old.skills)) fail(`${old.key}: key, tools or skills`);
     if (entry.instructions === old.instructions) return;
     if (!entry.key.includes("| chief |") || !entry.instructions || !old.instructions) fail(`${old.key}: instructions`);
-    const was = old.instructions!.split("\n");
-    const restored = entry.instructions!.split("\n").map((line) => {
-      if (line.startsWith("- Tests, docs:")) return line === TESTS_DOCS_LINE ? was.find((other) => other.startsWith("- Tests:"))! : fail(`${old.key}: the Tests, docs line`);
-      if (line.startsWith("- Skips:")) {
-        const base = was.find((other) => other.startsWith("- Skips:"))!;
-        return line === base.replace(SKIPS_OLD_PHRASE, "Small") && base.includes(SKIPS_OLD_PHRASE) ? base : fail(`${old.key}: the Skips line`);
-      }
-      return line;
-    }).join("\n");
-    // A text the plugin caps keeps its length, so the head shows a few more tail characters than base once its two lines are shorter: only that tail may differ.
-    const capped = entry.instructions!.length === old.instructions!.length;
-    if (!(restored === old.instructions || (capped && restored.startsWith(old.instructions!)))) fail(`${old.key}: instructions`);
+    // Chief's project rules are the last instruction component, so the uncapped base is the frozen text up to the marker plus the generator's own full rule input.
+    // Anchor that reconstruction to the frozen base, apply only the authorized edits BEFORE the cap, cap at the SDK limit, and require exact equality: no tail byte is taken from head.
+    const rules = toolConfigCases.find((candidate) => old.key.startsWith(`${candidate.label} |`))!.rules;
+    const cut = old.instructions!.indexOf(marker);
+    if (cut < 0) fail(`${old.key}: rules marker missing in base`);
+    const prefix = old.instructions!.slice(0, cut);
+    if (`${prefix}${rules}`.slice(0, INSTRUCTIONS_CAP) !== old.instructions) fail(`${old.key}: base is not prefix + rules capped`);
+    const once = (text: string, start: string) => { const lines = text.split("\n"); const at = lines.findIndex((line) => line.startsWith(start)); if (at < 0 || lines.some((line, index) => index > at && line.startsWith(start))) fail(`${old.key}: base has not exactly one ${start} line`); return { lines, at }; };
+    const tests = once(prefix, "- Tests:");
+    tests.lines[tests.at] = TESTS_DOCS_LINE;
+    const skips = once(tests.lines.join("\n"), "- Skips:");
+    if (!skips.lines[skips.at]!.includes(SKIPS_OLD_PHRASE)) fail(`${old.key}: base Skips line lacks the old phrase`);
+    skips.lines[skips.at] = skips.lines[skips.at]!.replace(SKIPS_OLD_PHRASE, "Small");
+    if (entry.instructions !== `${skips.lines.join("\n")}${rules}`.slice(0, INSTRUCTIONS_CAP)) fail(`${old.key}: instructions`);
   });
 }

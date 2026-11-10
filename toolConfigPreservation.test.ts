@@ -51,15 +51,15 @@ describe("tool config: base 9689364 to head", () => {
   describe("negative controls: any other difference fails the comparison", () => {
     test("the lint/build/verify sentence dropped from the Skips line", async () => {
       const run = await mutated((head) => editLine(head, "- Skips:", (line) => line.replace(" Before a review skip, check its ready report shows lint/build and verify exit 0.", "")));
-      expect(run).toThrow("the Skips line");
+      expect(run).toThrow(": instructions");
     });
     test("the Skips line reworded beyond the authorized phrase", async () => {
       const run = await mutated((head) => editLine(head, "- Skips:", (line) => line.replace("your call per task", "your call")));
-      expect(run).toThrow("the Skips line");
+      expect(run).toThrow(": instructions");
     });
     test("the Tests, docs line reworded", async () => {
       const run = await mutated((head) => editLine(head, "- Tests, docs:", (line) => line.replace("only a Spec Writer changes docs/", "a Spec Writer changes docs/")));
-      expect(run).toThrow("the Tests, docs line");
+      expect(run).toThrow(": instructions");
     });
     test("another core rule changed", async () => {
       const run = await mutated((head) => editLine(head, "- Evidence:", (line) => line.replace("never edits code", "edits code")));
@@ -80,6 +80,35 @@ describe("tool config: base 9689364 to head", () => {
     test("a tool schema field added", async () => {
       const run = await mutated((head) => { head.catalog["chief_complete"]!.inputSchema.properties["extra"] = { description: "x" }; });
       expect(run).toThrow("chief_complete");
+    });
+    // The cap boundary: the two authorized core-rule edits shorten the text by one character, so head exposes one more tail character of the 32768-capped worst case than base.
+    const WORST = "worst case | chief | codex | planner true | research true";
+    const worst = (head: ToolConfig) => head.entries.find((entry) => entry.key === WORST)!;
+    test("the worst case is capped at exactly 32768 characters and ends where the base tail was shifted by one", async () => {
+      const { base, head } = await load();
+      const was = base.entries.find((entry) => entry.key === WORST)!.instructions!;
+      expect([was.length, worst(head).instructions!.length]).toEqual([32768, 32768]);
+      expect([was.slice(-10), worst(head).instructions!.slice(-10)]).toEqual(["- Project ", " Project r"]);
+    });
+    test("the final newly exposed byte changed (r to X)", async () => {
+      const run = await mutated((head) => { const entry = worst(head); entry.instructions = `${entry.instructions!.slice(0, -1)}X`; });
+      expect(run).toThrow(`${WORST}: instructions`);
+    });
+    test("the final newly exposed byte deleted (cap length 32767)", async () => {
+      const run = await mutated((head) => { const entry = worst(head); entry.instructions = entry.instructions!.slice(0, -1); });
+      expect(run).toThrow(`${WORST}: instructions`);
+    });
+    test("a byte appended past the cap (32769)", async () => {
+      const run = await mutated((head) => { const entry = worst(head); entry.instructions += "r"; });
+      expect(run).toThrow(`${WORST}: instructions`);
+    });
+    test("a middle byte of the capped project rules changed", async () => {
+      const run = await mutated((head) => { const entry = worst(head); entry.instructions = entry.instructions!.replace("- Project rule text.\n- Project rule text.", "- Project rule text.\n- Project rule tXxt."); });
+      expect(run).toThrow(`${WORST}: instructions`);
+    });
+    test("the uncapped short-rules Chief text with one byte appended", async () => {
+      const run = await mutated((head) => { const entry = head.entries.find((candidate) => candidate.key.startsWith("short rules | chief |"))!; entry.instructions += "!"; });
+      expect(run).toThrow("instructions");
     });
     test("a non-Chief role's instructions changed", async () => {
       const run = await mutated((head) => { const entry = head.entries.find((candidate) => candidate.key.includes("| worker |"))!; entry.instructions += "\n- extra"; });
