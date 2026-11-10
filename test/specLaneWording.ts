@@ -38,6 +38,21 @@ export function acceptPlanningLine(nowText: string, wasText: string) {
   });
   return lines.join("\n");
 }
+/** Chief's core rules (host.ts) were trimmed so a linked Chief's rules end inside the 4096-char cut. Each trimmed line must show the new words and none of the old, then base wins. */
+const TRIMMED_RULES: [string, RegExp, RegExp][] = [
+  ["- Fresh worker:", /\(same worktree, branch, PR; so is a plan chain's next wave\)/, /a plan chain has exactly one of each/],
+  ["- Review:", /when a ready alert says to/, /when a worker's ready alert says to/],
+  ["- Tests:", /a tester does, as a plan's test wave/, /a tester \(kind: tester\) does/],
+];
+export function acceptCoreRuleTrim(nowText: string, wasText: string) {
+  const old = wasText.split("\n");
+  return nowText.split("\n").map((line, index) => {
+    const rule = TRIMMED_RULES.find(([prefix]) => line.startsWith(prefix));
+    if (!rule || line === old[index]) return line;
+    if (!rule[1].test(line) || rule[2].test(line)) throw new Error(`${rule[0]} trimmed wording must match ${rule[1]} and not ${rule[2]}`);
+    return old[index]!;
+  }).join("\n");
+}
 /** Asserts the final catalog says each reworded thing and none of the old, with no preservation baseline needed. */
 export function assertSpecLaneWording(catalog: Record<string, any>) {
   for (const [tool, path, has, lacks] of REWORDED) {

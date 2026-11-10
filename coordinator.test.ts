@@ -7,7 +7,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { MIGRATIONS } from "./src/db/migrations";
 import { loadBaseBuild } from "./scripts/loadBaseBuild";
-import { acceptPlanningLine, acceptSpecLaneWording } from "./test/specLaneWording";
+import { acceptCoreRuleTrim, acceptPlanningLine, acceptSpecLaneWording } from "./test/specLaneWording";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -997,7 +997,7 @@ describe("Coordinator", () => {
       for (const tool of now.tools) acceptSpecLaneWording(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       expect(now.tools).toEqual(was.tools);
       // Instructions: only the preload line's max_results moves by one (claude-code); codex is byte-identical.
-      now.instructions = acceptPlanningLine(now.instructions, was.instructions);
+      now.instructions = acceptCoreRuleTrim(acceptPlanningLine(now.instructions, was.instructions), was.instructions);
       const preload = (config: Config) => config.instructions.split("\n").filter((line) => line.includes("ToolSearch"));
       if (provider === "codex") expect(preload(was)).toEqual([]);
       else expect(preload(was)).toHaveLength(1);
@@ -1013,7 +1013,7 @@ describe("Coordinator", () => {
       const lines = child.instructions.split("\n");
       const added = lines.filter((line) => /^Coordinator thr_\w+ supervises you: call chief_escalate before every Need you/.test(line));
       expect(added).toHaveLength(1);
-      expect(acceptPlanningLine(lines.filter((line) => line !== added[0]).join("\n"), was.instructions).split("\n")).toEqual(was.instructions.split("\n"));
+      expect(acceptCoreRuleTrim(acceptPlanningLine(lines.filter((line) => line !== added[0]).join("\n"), was.instructions), was.instructions).split("\n")).toEqual(was.instructions.split("\n"));
     });
   });
 
