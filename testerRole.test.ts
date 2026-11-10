@@ -988,4 +988,84 @@ describe("tester role", () => {
     await review(state, chief, t3b.thread);
     expect(await reviewerCount(state)).toBe(2);
   });
+
+  // Contract (refusal order, case 10): retest is the last refusal. While a chain owes a rerun, the superseded, betweenWaves and pending refusals
+  // each still win for the tip they name and mention no waiver; the fix's own review stays the retest refusal (the control). Regression: the
+  // retest check runs before the other refusals, so Chief is sent to rerun tests on a row that cannot be reviewed at all.
+  test("while a rerun is owed the superseded, betweenWaves and pending refusals still win over retest", async () => {
+    const state = await setup();
+    const { chief, planner, fixA, fixB } = await twoRejectedChains(state);
+    const owed = await refusal(review(state, chief, fixA));
+    expect(owed).toContain(`${fixA} changed code after the review's rejection`);
+    const rows = state.db.prepare(`SELECT thread_id, plan_wave FROM managed_threads WHERE plan_thread_id=? AND role='worker' ORDER BY rowid`).all(planner.threadId) as { thread_id: string; plan_wave: number }[];
+    const oldOf = (waveNo: number) => rows.find((row) => row.plan_wave === waveNo)!.thread_id;
+    // The rejected tester of chain A is superseded by its fix.
+    const superseded = await refusal(review(state, chief, oldOf(2)));
+    expect(superseded).toBe(`${oldOf(2)} is superseded by ${fixA}. The plan's one review starts from the latest workers: chief_review (workerThreadId: ${fixA}) once every wave is ready.`);
+    // Wave 1's implementation row has the test wave still stacked on it.
+    const between = await refusal(review(state, chief, oldOf(1)));
+    expect(between).toMatch(/^Wave 1 of 4: no review runs between waves\. Delegate test wave 2: /);
+    // A chain row that is not ready blocks the plan's one review before any retest.
+    setLive(state, fixB, "active");
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(fixB)! });
+    const pending = await refusal(review(state, chief, fixA));
+    expect(pending).toMatch(/^One review covers the whole plan once every wave is ready; wave\(s\) 4 of 4 are not ready yet\./);
+    for (const text of [superseded, between, pending]) expect(text).not.toContain("retestSkipped");
+    expect(await reviewerCount(state)).toBe(1);
+  });
+
+  // Contract (design waves, cases 7 and 10): a design wave's own review is refused as design before any retest, and a design-wave row created after
+  // a rejection is never a fix. Regression: a designer row counts as a code row, so a rejection followed by a designer round owes a tester rerun.
+  // The seeded designer stands for a design round the public calls cannot start after the plan's chain moved on.
+  test("a design wave's review is refused as design while a rerun is owed, and a later designer row owes nothing", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE, design: true }, { body: wave(2) }, TEST_WAVE(3)]);
+    await delegateWave(state, chief.threadId, planner.threadId, 1);
+    const designer = workerOn(state, planner.threadId, 1).thread_id as string;
+    await readyIdle(state, designer, `${READY}\nArtboards: Checkout`);
+    await tool(state, "chief_owner_approval", { workerThreadId: designer, approval: "Looks right" }, chief.threadId);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: designer });
+    const impl = workerOn(state, planner.threadId, 2).thread_id as string;
+    await readyIdle(state, impl);
+    await delegateWave(state, chief.threadId, planner.threadId, 3, { replaces: impl, kind: "tester" });
+    const tester = workerOn(state, planner.threadId, 3).thread_id as string;
+    await readyIdle(state, tester);
+    await reviewed(state, chief.threadId, tester, "request_changes");
+    await tick();
+    // A designer row created after the rejection is no fix: the tip's review starts without a rerun.
+    const { threadId: later } = await legacyWave(state, chief.threadId, planner.threadId, 1, "feature/design-seed");
+    state.db.prepare(`UPDATE managed_threads SET kind='designer', replaces_thread_id=? WHERE thread_id=?`).run(designer, later);
+    await readyIdle(state, later, `${READY}\nArtboards: Checkout`);
+    await tick();
+    await review(state, chief, tester);
+    expect(await reviewerCount(state)).toBe(2);
+    expect(rowOf(state, later).retest_skipped).toBeNull();
+  });
+
+  test("a design wave's own review is refused as design even when a code fix owes a rerun", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE, design: true }, { body: wave(2) }, TEST_WAVE(3)]);
+    await delegateWave(state, chief.threadId, planner.threadId, 1);
+    const designer = workerOn(state, planner.threadId, 1).thread_id as string;
+    await readyIdle(state, designer, `${READY}\nArtboards: Checkout`);
+    await tool(state, "chief_owner_approval", { workerThreadId: designer, approval: "Looks right" }, chief.threadId);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: designer });
+    const impl = workerOn(state, planner.threadId, 2).thread_id as string;
+    await readyIdle(state, impl);
+    await delegateWave(state, chief.threadId, planner.threadId, 3, { replaces: impl, kind: "tester" });
+    const tester = workerOn(state, planner.threadId, 3).thread_id as string;
+    await readyIdle(state, tester);
+    await reviewed(state, chief.threadId, tester, "request_changes");
+    await tick();
+    await delegateWave(state, chief.threadId, planner.threadId, 3, { replaces: tester, kind: "worker" });
+    const fix = workerOn(state, planner.threadId, 3).thread_id as string;
+    await readyIdle(state, fix);
+    await tick();
+    // Control: the fix owes a rerun, and the design wave's row is refused as design, not as retest.
+    expect(await refusal(review(state, chief, fix))).toContain(`${fix} changed code after the review's rejection`);
+    const design = await refusal(review(state, chief, designer));
+    expect(design).toBe("Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.");
+  });
 });
