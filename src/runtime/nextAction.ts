@@ -2,7 +2,7 @@ import { type RepairTarget } from "../plan/planProgress";
 import { reviewEngine } from "../review/prAgent";
 import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
 import { createReviewStart } from "../review/reviewStart";
-import { type ManagedRow } from "../types";
+import { terminal, type ManagedRow } from "../types";
 import { clip } from "../core/text";
 import { chainOf, isWriter, type PlanWave } from "../plan/waveSchedule";
 import { BUSY_STATUSES } from "./constants";
@@ -240,10 +240,13 @@ export function createNextAction(ctx: Ctx) {
       return `The reviewer approves. ${complete}. Nits listed with an approve are optional: start no worker round for them alone.`;
     }
     // A tester's branch: a product fix goes to a worker, a test fix to a tester; replacing it needs the kind.
-    // Docs findings go to the side-lane Spec Writers of the target's whole chain (a test wave has none of its own); a side-lane target is only ever fixed by one. A chain without one (legacy, unplanned) falls back to the target itself.
+    // Docs findings go to the side-lane Spec Writers of the target's whole chain (a test wave has none of its own); a side-lane target is only ever fixed by one. A chain without a live one (legacy, whose completed head writer handed its checkout on; unplanned) falls back to the target itself.
     const docsHandoff = (target: RepairTarget) => {
       const plan = store.get(target.threadId)?.plan_thread_id;
-      const writers = plan && target.wave != null ? chainOf(planWavesFor(plan), target.wave).flatMap((wave) => latestSideWriter(plan, wave) ?? []) : [];
+      const writers = plan && target.wave != null ? chainOf(planWavesFor(plan), target.wave).flatMap((wave) => {
+        const writer = latestSideWriter(plan, wave);
+        return writer && !terminal(writer.state) ? [writer] : [];
+      }) : [];
       if (writers.length < 2) return `chief_delegate (replaces: ${writers[0]?.thread_id ?? target.threadId}, kind: spec-writer) for docs findings`;
       return writers.map((writer) => `chief_delegate (replaces: ${writer.thread_id}, kind: spec-writer) for wave ${writer.plan_wave} docs findings`).join(" or ");
     };
