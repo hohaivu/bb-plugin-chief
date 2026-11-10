@@ -42,7 +42,7 @@ export function acceptPlanningLine(nowText: string, wasText: string) {
 const TRIMMED_RULES: [string, RegExp, RegExp][] = [
   ["- Fresh worker:", /\(same worktree, branch, PR; so is a plan chain's next wave\)/, /a plan chain has exactly one of each/],
   ["- Review:", /when a ready alert says to/, /when a worker's ready alert says to/],
-  ["- Tests:", /a tester does, as a plan's test wave.*Retest: after a rejection, a code fix owes a tester/, /a tester \(kind: tester\) does/],
+  ["- Tests:", /a tester does, as a plan's test wave.*Retest: after a rejection, a fix owes a later ready tester before chief_review/, /a tester \(kind: tester\) does/],
 ];
 export function acceptCoreRuleTrim(nowText: string, wasText: string) {
   const old = wasText.split("\n");
