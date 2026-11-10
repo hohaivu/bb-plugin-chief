@@ -25,6 +25,12 @@ describe("tester role", () => {
       const blocks: string[] = [];
       const PR = "https://github.com/acme/shop/pull/8";
       const NO_TESTER = { testsSkipped: "oracle: no tester" };
+      /** A review after a fix owes a tester rerun; the oracle waives it so every scenario still reaches the decision it pins. */
+      const reviewedOrWaived = (state: any, chief: string, id: string, verdict: "approve" | "request_changes") =>
+        reviewed(state, chief, id, verdict).catch((error: Error) => {
+          if (!error.message.includes("rerun the tests")) throw error;
+          return reviewed(state, chief, id, verdict, { retestSkipped: "oracle: no tester" });
+        });
       const run = async (name: string, body: (k: any) => Promise<void>) => {
         const state = await setup();
         await state.harness.behavior.setSettings({ cleanupApproved: true });
@@ -95,7 +101,7 @@ describe("tester role", () => {
             let id = first ?? await k.worker(chief);
             let alert = "";
             for (let round = 1; round <= n; round++) {
-              alert = await reviewed(state, chief, id, "request_changes");
+              alert = await reviewedOrWaived(state, chief, id, "request_changes");
               if (round === n) break;
               if (round >= 2) await k.consult(chief, id);
               id = await k.worker(chief, { replaces: id, ...next });
@@ -106,7 +112,7 @@ describe("tester role", () => {
           rounds: async (label: string, chief: string, ids: string[], n: number, fix: (ids: string[]) => Promise<string[]>) => {
             let current = ids;
             for (let round = 1; round <= n; round++) {
-              emit(`${label}: streak ${round}`, await reviewed(state, chief, current[0]!, "request_changes"));
+              emit(`${label}: streak ${round}`, await reviewedOrWaived(state, chief, current[0]!, "request_changes"));
               if (round === n) break;
               if (round >= 2) await k.consult(chief, current[0]!);
               current = await fix(current);
@@ -158,7 +164,7 @@ describe("tester role", () => {
       await run("replacement at streak 2: consult before the latest rejection", async (k) => {
         const chief = await k.chief();
         const first = await k.worker(chief);
-        await reviewed(k.state, chief, first, "request_changes");
+        await reviewedOrWaived(k.state, chief, first, "request_changes");
         const advisor = await k.consult(chief, first);
         const { id } = await k.rejected(chief, 1, await k.worker(chief, { replaces: first }));
         k.stamp(id, { verdicts: 1_000, advisor: [advisor, 500] });
@@ -201,9 +207,9 @@ describe("tester role", () => {
       await run("replacement: an approve between rejections resets the streak", async (k) => {
         const chief = await k.chief();
         const first = await k.worker(chief);
-        await reviewed(k.state, chief, first, "request_changes");
+        await reviewedOrWaived(k.state, chief, first, "request_changes");
         const second = await k.worker(chief, { replaces: first });
-        await reviewed(k.state, chief, second, "approve");
+        await reviewedOrWaived(k.state, chief, second, "approve");
         const { id } = await k.rejected(chief, 2, await k.worker(chief, { replaces: second }));
         await k.attempt("replace after reject, approve, reject, reject", () => k.replace(chief, id));
       });
@@ -268,46 +274,46 @@ describe("tester role", () => {
       await run("complete: request_changes", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief, { prUrl: PR });
-        await reviewed(k.state, chief, id, "request_changes");
+        await reviewedOrWaived(k.state, chief, id, "request_changes");
         await k.completing("newest review is request_changes", chief, id, NO_TESTER);
       });
       await run("complete: an approve whose head matches the PR head", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief, { prUrl: PR });
-        await reviewed(k.state, chief, id, "approve");
+        await reviewedOrWaived(k.state, chief, id, "approve");
         await k.completing("approve at the PR head", chief, id, NO_TESTER);
       });
       await run("complete: an approve whose head does not match", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief, { prUrl: PR });
-        await reviewed(k.state, chief, id, "approve");
+        await reviewedOrWaived(k.state, chief, id, "approve");
         k.forge.sha = "b".repeat(40);
         await k.completing("approve, the PR moved on", chief, id, NO_TESTER);
       });
       await run("complete: an uppercase recorded head_sha", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief, { prUrl: PR });
-        await reviewed(k.state, chief, id, "approve");
+        await reviewedOrWaived(k.state, chief, id, "approve");
         k.state.db.prepare(`UPDATE reviewer_verdicts SET head_sha=upper(head_sha)`).run();
         await k.completing("approve recorded in uppercase", chief, id, NO_TESTER);
       });
       await run("complete: an unreadable PR head", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief, { prUrl: PR });
-        await reviewed(k.state, chief, id, "approve");
+        await reviewedOrWaived(k.state, chief, id, "approve");
         k.forge.unreadable = true;
         await k.completing("approve, gh fails", chief, id, NO_TESTER);
       });
       await run("complete: an approve with no PR", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief);
-        await reviewed(k.state, chief, id, "approve");
+        await reviewedOrWaived(k.state, chief, id, "approve");
         await k.completing("approve, report unchanged", chief, id, NO_TESTER);
       });
       await run("complete: an approve with no PR, the report moved on", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief);
-        await reviewed(k.state, chief, id, "approve");
+        await reviewedOrWaived(k.state, chief, id, "approve");
         await readyIdle(k.state, id, "Done again");
         await k.completing("approve, newer report", chief, id, NO_TESTER);
       });
@@ -315,7 +321,7 @@ describe("tester role", () => {
         await run(`complete: the newest approve was recorded on an older chain member, ${label}`, async (k) => {
           const chief = await k.chief();
           const first = await k.worker(chief, extra);
-          await reviewed(k.state, chief, first, "approve");
+          await reviewedOrWaived(k.state, chief, first, "approve");
           const second = await k.worker(chief, { replaces: first });
           await k.completing(`the replacement, never reviewed (${label})`, chief, second, NO_TESTER);
         });
@@ -335,7 +341,7 @@ describe("tester role", () => {
       await run("complete: cleanup line, queued", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief);
-        await reviewed(k.state, chief, id, "approve");
+        await reviewedOrWaived(k.state, chief, id, "approve");
         await k.completing("approved, cleanup on", chief, id, NO_TESTER);
       });
       await run("complete: cleanup line, unapproved", async (k) => {
@@ -346,7 +352,7 @@ describe("tester role", () => {
       await run("complete: cleanup line, off", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief);
-        await reviewed(k.state, chief, id, "approve");
+        await reviewedOrWaived(k.state, chief, id, "approve");
         await k.state.harness.behavior.setSettings({ cleanupApproved: false });
         await k.completing("approved, cleanup off", chief, id, NO_TESTER);
       });
@@ -368,7 +374,7 @@ describe("tester role", () => {
       await run("skipReview: an idle open review", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief);
-        await reviewed(k.state, chief, id, "request_changes");
+        await reviewedOrWaived(k.state, chief, id, "request_changes");
         await k.completing("skipReview after the reviewer reported", chief, id, { ...NO_TESTER, skipReview: "oracle skip" });
       });
 
@@ -395,7 +401,7 @@ describe("tester role", () => {
       await run("chief_review: an idle open review is superseded", async (k) => {
         const chief = await k.chief();
         const id = await k.worker(chief);
-        await reviewed(k.state, chief, id, "request_changes");
+        await reviewedOrWaived(k.state, chief, id, "request_changes");
         await reviewing(k, "call after the reviewer reported", chief, id);
       });
       return blocks.join("\n");

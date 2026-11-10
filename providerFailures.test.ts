@@ -219,9 +219,9 @@ describe("Chief backend", () => {
       expect(result.exitCode).toBe(0);
       return JSON.parse(result.stdout!);
     };
-    const reviewThenVerdict = async (state: State, chiefId: string, workerId: string, verdict: "approve" | "request_changes") => {
+    const reviewThenVerdict = async (state: State, chiefId: string, workerId: string, verdict: "approve" | "request_changes", extra: object = {}) => {
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Ready${NO_DEVIATIONS}` }, { threadId: workerId, projectId: "proj_1" });
-      const review = await chiefReview(state, chiefId, { workerThreadId: workerId });
+      const review = await chiefReview(state, chiefId, { workerThreadId: workerId, ...extra });
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Reviewed", ...(verdict === "approve" ? APPROVE : REQUEST_CHANGES) }, { threadId: review.threadId, projectId: "proj_1" });
     };
 
@@ -231,7 +231,7 @@ describe("Chief backend", () => {
       const first = await delegate(state, chief.threadId, "Fix checkout totals", { branch: "feature/x" });
       await reviewThenVerdict(state, chief.threadId, first.threadId, "request_changes");
       const fix = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: first.threadId });
-      await reviewThenVerdict(state, chief.threadId, fix.threadId, "approve");
+      await reviewThenVerdict(state, chief.threadId, fix.threadId, "approve", { retestSkipped: "the stats test pins the chain count, not the rerun" });
       await completeWorker(state, chief.threadId, fix.threadId, { skipReview: undefined });
       await delegate(state, chief.threadId, "Open task", { branch: "feature/open" });
       const archived = await delegate(state, chief.threadId, "Archived task", { branch: "feature/gone" });
@@ -475,11 +475,11 @@ describe("Chief backend", () => {
         // The fixture's own failure and stats cutoffs are stamped by SQLite's real clock at setup: pin them.
         state.db.prepare("UPDATE plugin_meta SET value=? WHERE key IN ('stats_since','failure_events_since')").run(String(Date.UTC(2026, 0, 1)));
 
-        // The Coordinator migration appends two columns to managed_threads; the oracle hash predates them, so they are checked NULL and dropped.
+        // The Coordinator migration appends two columns and the retest-debt migration one (retest_skipped) to managed_threads; the oracle hash predates them, so they are checked NULL and dropped.
         const table = (name: string) => (state.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all() as Record<string, unknown>[]).map((row) => {
           if (name !== "managed_threads") return row;
-          const { coordinator, coordinator_thread_id: coordinatorThreadId, ...legacy } = row;
-          expect([coordinator ?? null, coordinatorThreadId ?? null]).toEqual([null, null]);
+          const { coordinator, coordinator_thread_id: coordinatorThreadId, retest_skipped: retestSkipped, ...legacy } = row;
+          expect([coordinator ?? null, coordinatorThreadId ?? null, retestSkipped ?? null]).toEqual([null, null, null]);
           return legacy;
         });
         // Only the random temp storage root (in report_path and verdict_path) is normalized.

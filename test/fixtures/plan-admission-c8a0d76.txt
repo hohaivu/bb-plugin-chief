@@ -1794,9 +1794,9 @@ Do not create, merge, or mark ready any pull request — Chief owns the forge. C
 
 === test wave: a tester on a non-test wave ===
 --- wave 2 tester replaces wave 1's worker
-refused: Wave 2 is not a test wave: a tester runs only this plan's test waves (3).
+refused: Wave 2 is not a test wave: a tester runs only its chain's test waves (3).
 --- wave 1 tester with no replaces
-refused: Wave 1 is not a test wave: a tester runs only this plan's test waves (3).
+refused: Wave 1 is not a test wave: a tester runs only its chain's test waves (3).
 
 === test wave: a tester on a plan with no test wave ===
 --- no replaces
@@ -2062,7 +2062,7 @@ refused: Wave 2's chain (waves 1, 2, 3) already has worker thr_3 on wave 1; a ch
 --- kind spec-writer on a design wave
 refused: Wave 1 is design-only: no Spec Writer runs on it.
 --- kind tester on a design wave
-refused: Wave 1 is not a test wave: a tester runs only this plan's test waves (3).
+refused: Wave 1 is not a test wave: a tester runs only its chain's test waves (3).
 --- wave 2 after approval, replaces the designer
 accepted worker, launched 1
 You are the managed worker for “Wave 2”. Report to Chief thread thr_1.

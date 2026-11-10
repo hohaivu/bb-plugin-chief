@@ -36,8 +36,8 @@ export const planWaves = (state: State, planThreadId: string) =>
 // Existing checkPlan cases only cover plans without test waves, so none exercises these rules.
 export const planWave = (n: number, extra: object = {}) => ({ body: n === 1 ? PLAN_FIXTURE : wave(n), ...extra });
 /** Chief reviews `targetId`; its reviewer reports `verdict`. Returns the alert Chief received. */
-export async function reviewed(state: State, chiefThreadId: string, targetId: string, verdict: "approve" | "request_changes") {
-  await tool(state, "chief_review", { workerThreadId: targetId }, chiefThreadId);
+export async function reviewed(state: State, chiefThreadId: string, targetId: string, verdict: "approve" | "request_changes", extra: object = {}) {
+  await tool(state, "chief_review", { workerThreadId: targetId, ...extra }, chiefThreadId);
   const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer" && row.workerThreadId === targetId && row.state !== "complete").at(-1)!;
   await report(state, reviewer.threadId, {
     state: "ready", result: "The discount is still applied twice", verdict,

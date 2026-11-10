@@ -208,7 +208,7 @@ describe("tester role", () => {
     ["a designer on a test wave", (impl) => ({ replaces: impl, kind: "designer" }), /Wave 2 is a test wave: a designer cannot run it/],
     ["a worker as the first hand-off of a test wave", (impl) => ({ replaces: impl, kind: "worker" }), /Wave 2 is a test wave: its first hand-off is kind: tester/],
     ["a test wave with no replaces", () => ({}), /Wave 2 is a test wave: it runs on wave 1's branch\. Delegate it as chief_delegate \(planThreadId: thr_\d+, wave: 2, replaces: thr_\d+, kind: tester\)/],
-    ["a tester on an implementation wave of a new plan", (impl) => ({ replaces: impl, kind: "tester", wave: 1 }), /Wave 1 is not a test wave: a tester runs only this plan's test waves \(2\)/],
+    ["a tester on an implementation wave of a new plan", (impl) => ({ replaces: impl, kind: "tester", wave: 1 }), /Wave 1 is not a test wave: a tester runs only its chain's test waves \(2\)/],
   ])("kind rules refuse %s", async (_label, extra, refusal) => {
     const state = await setup();
     const { chief, planner, impl } = await readyImpl(state);
@@ -434,9 +434,13 @@ describe("tester role", () => {
     await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "worker" });
     const fix = workerOn(state, planner.threadId, 2).thread_id;
     await readyIdle(state, fix);
-    const alert = await reviewed(state, chief.threadId, fix, "request_changes");
+    // The fix owes a tester rerun before its review: the rerun is the row the second rejection lands on.
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: fix, kind: "tester" });
+    const rerun = workerOn(state, planner.threadId, 2).thread_id;
+    await readyIdle(state, rerun);
+    const alert = await reviewed(state, chief.threadId, rerun, "request_changes");
     expect(alert).toContain("chief_consult");
-    expect(alert).toContain(`chief_delegate (replaces: ${fix}, kind: worker) for product-code findings or chief_delegate (replaces: ${fix}, kind: tester) for test-only fin`);
+    expect(alert).toContain(`chief_delegate (replaces: ${rerun}, kind: worker) for product-code findings or chief_delegate (replaces: ${rerun}, kind: tester) for test-only fin`);
   });
 
   // Contract (blocked tester): a tester that reports blocked is a test failure: the next call is a fresh worker for the

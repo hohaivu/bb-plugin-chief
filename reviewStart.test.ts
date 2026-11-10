@@ -98,6 +98,7 @@ function world({ projectPath = null, heads = {}, engine }: Options = {}) {
     db, store, ledger, managedSpawn: managedSpawn as any,
     plan: {
       reviewRefusal: () => null,
+      retestDebts: () => ({ owed: [], waived: [] }),
       reviewTargetsFor: (worker) => covers ? [worker, ...covers.filter((id) => id !== worker.thread_id).map((id) => store.get(id)!)] : [worker],
       planWavesFor: () => [],
     },

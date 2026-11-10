@@ -362,7 +362,7 @@ describe("admitDelegation: test waves", () => {
 
   test("a tester on a non-test wave of a plan that has a test wave is refused, naming the test waves", () => {
     const { admit } = world({ [P]: [{ path: "w1" }, { path: "w2" }, { path: "w3", test: true }] }, [{ id: "w", plan: P, wave: 1 }]);
-    expect(() => admit({ ...planned, wave: 2, prior: "w", ...tester })).toThrow("Wave 2 is not a test wave: a tester runs only this plan's test waves (3).");
+    expect(() => admit({ ...planned, wave: 2, prior: "w", ...tester })).toThrow("Wave 2 is not a test wave: a tester runs only its chain's test waves (3).");
   });
 
   test("a tester on a plan with no test wave needs a prior or, once the worker is complete, a new branch", () => {

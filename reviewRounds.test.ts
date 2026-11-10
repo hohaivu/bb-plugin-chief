@@ -304,12 +304,12 @@ describe("Chief backend", () => {
     const state = await setup();
     const chief = await start(state);
     let worker = await delegate(state, chief.threadId);
-    const ready = async () => {
+    const ready = async (extra: object = {}) => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Ready for review",
       }, { threadId: worker.threadId, projectId: "proj_1" });
       await state.harness.behavior.callAgentTool(
-        "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+        "chief_review", { workerThreadId: worker.threadId, ...extra }, { threadId: chief.threadId, projectId: "proj_1" },
       );
     };
     await ready();
@@ -319,7 +319,7 @@ describe("Chief backend", () => {
     }, { threadId: firstReviewer.threadId, projectId: "proj_1" });
     worker = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
 
-    await ready();
+    await ready({ retestSkipped: "unplanned chain, no tester" });
 
     // A fresh reviewer, not the finished one asked to re-check — but its verdict
     // and pointer travel forward so the fresh reviewer can pick up where it left off.
@@ -337,8 +337,8 @@ describe("Chief backend", () => {
     expect(reviewSpawns[1].prompt).toContain("Check each finding of the previous review");
     expect(state.sent.filter((entry) => entry.threadId === firstReviewer.threadId)
       .some((entry) => entry.input[0].text.includes("Re-check"))).toBe(false);
-    // The worker's own ready report names the exact next call; chief_review itself sends no alert.
-    expect(state.sent.at(-1).input[0].text).toContain(`chief_review (workerThreadId: ${worker.threadId})`);
+    // The fix owes a tester rerun, so the worker's ready report names the rerun and the waiver, not the plain review; chief_review itself sends no alert.
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_review (workerThreadId: ${worker.threadId}, retestSkipped: "<reason>")`);
   });
 
   test("dedups the worker's pending review even when the report and reviewer turnaround share a millisecond", async () => {
@@ -373,7 +373,7 @@ describe("Chief backend", () => {
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const worker = await delegate(state, chief.threadId, "Fix checkout totals");
     const workerOpts = { threadId: worker.threadId, projectId: "proj_1" };
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
     try {
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, workerOpts);
       await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
@@ -417,12 +417,12 @@ describe("Chief backend", () => {
     const state = await setup();
     const chief = await start(state);
     let worker = await delegate(state, chief.threadId);
-    const ready = async () => {
+    const ready = async (extra: object = {}) => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Ready for review",
       }, { threadId: worker.threadId, projectId: "proj_1" });
       await state.harness.behavior.callAgentTool(
-        "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+        "chief_review", { workerThreadId: worker.threadId, ...extra }, { threadId: chief.threadId, projectId: "proj_1" },
       );
     };
     await ready();
@@ -450,7 +450,7 @@ describe("Chief backend", () => {
     // which carries the reject_streak forward — Chief is told to escalate, not to
     // fund a third round.
     worker = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
-    await ready();
+    await ready({ retestSkipped: "unplanned chain, no tester" });
     const secondReviewer = (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
     expect(secondReviewer.threadId).not.toBe(reviewer.threadId);
     await reject(secondReviewer.threadId);
@@ -757,7 +757,7 @@ describe("Chief backend", () => {
       state: "ready", result: longResult,
     }, { threadId: worker.threadId, projectId: "proj_1" });
     await state.harness.behavior.callAgentTool(
-      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+      "chief_review", { workerThreadId: worker.threadId, retestSkipped: "unplanned chain, no tester" }, { threadId: chief.threadId, projectId: "proj_1" },
     );
     const freshContext = await latestReviewContext(state);
     const freshResultLine = freshContext.split("## What the worker reported")[1]!.split("\n")[1]!;

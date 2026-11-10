@@ -158,12 +158,12 @@ describe("Chief backend", () => {
       branch: "feature/fix-checkout-totals",
       prUrl: "https://github.com/acme/shop/pull/8",
     });
-    const ready = async (threadId: string, result: string) => {
+    const ready = async (threadId: string, result: string, extra: object = {}) => {
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result,
       }, { threadId, projectId: "proj_1" });
       await state.harness.behavior.callAgentTool(
-        "chief_review", { workerThreadId: threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+        "chief_review", { workerThreadId: threadId, ...extra }, { threadId: chief.threadId, projectId: "proj_1" },
       );
     };
     await ready(worker.threadId, "Totals fixed");
@@ -194,7 +194,7 @@ describe("Chief backend", () => {
     expect(freshWorkerRow.pr_url).toBe("https://github.com/acme/shop/pull/8");
 
     // A fresh reviewer for the fresh worker, carrying reviewer1's verdict forward.
-    await ready(freshWorker.threadId, "Discount fixed");
+    await ready(freshWorker.threadId, "Discount fixed", { retestSkipped: "unplanned chain, no tester" });
     const reviewer2 = (await status(state)).threads.find((row) => row.role === "reviewer" && row.state !== "complete")!;
     expect(reviewer2.threadId).not.toBe(reviewer1.threadId);
     expect(state.spawned.at(-1).prompt).toContain("Check each finding of the previous review");
