@@ -629,6 +629,15 @@ const ROSTER_CHIEF_INSTRUCTIONS =
 const WAIT_CHIEF_INSTRUCTIONS =
   "Lifecycle alerts wake you when a managed thread reports, fails transiently, or stalls. After you act, end your turn and wait: never poll managed threads with `bb thread wait`, `bb thread show`, or sleep loops.";
 
+/** What a Coordinator is given: it supervises child Chiefs and runs no managed thread. */
+const COORDINATOR_TOOLS = ["chief_roster", "chief_spawn", "chief_attach"];
+/** The Chief tools and their CLI twins (`chief_<command>`) that refuse a Coordinator at execution time. */
+const COORDINATOR_REFUSED = new Set([
+  "chief_plan", "chief_consult", "chief_delegate", "chief_forge_init", "chief_review", "chief_inspect", "chief_continue", "chief_stop",
+  "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research",
+]);
+const coordinatorRefusal = (what: string) => `${what} is not available to a Coordinator: it runs no planner, worker, reviewer, tester, advisor or researcher. Ask the child Chief that owns the work.`;
+
 /** A Coordinator's whole rule set, in place of the Chief rules: those tell a Chief to continue and complete managed work. */
 const COORDINATOR_INSTRUCTIONS = [
   "You never edit code or run anything in a worktree, and you never plan, delegate, review, complete or implement: child Chiefs do the work.",
@@ -1291,7 +1300,7 @@ export default async function plugin(bb: BbPluginApi) {
       do {
         sweepAgain = false;
         await completeAbsorbed();
-        alertDoneChildren();
+        for (const row of store.all()) alertCoordinator(row, { kind: "done" });
       } while (sweepAgain);
     })().catch((error) => bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`)).finally(() => { sweeping = null; });
     return sweeping;
@@ -2849,24 +2858,27 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** The outbox write itself, in no transaction of its own: the report intake calls it inside its store.batch. The row needs a Chief. */
-  function writeAlert(row: ManagedRow, key: string, message: string, supersede = true) {
+  function writeAlert(row: ManagedRow, key: string, message: string) {
     const dedupeKey = `${row.thread_id}:${key}`;
     // Only an alert of the same kind (the segment before the first ":") is stale
     // once this one lands — a newer report supersedes an older undelivered report,
     // but generic lifecycle noise (idle, active, stall, ...) must never evict a
     // pending report/verdict alert Chief has not received yet.
     const kind = key.slice(0, key.indexOf(":"));
-    if (supersede) {
-      db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>? AND dedupe_key LIKE ?`)
-        .run(row.thread_id, dedupeKey, `${row.thread_id}:${kind}:%`);
-    }
-    db.prepare(`INSERT OR IGNORE INTO alert_outbox
+    db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>? AND dedupe_key LIKE ?`)
+      .run(row.thread_id, dedupeKey, `${row.thread_id}:${kind}:%`);
+    insertAlert(row.thread_id, row.chief_thread_id, dedupeKey, message);
+    return dedupeKey;
+  }
+
+  /** One outbox row, once: a repeated key adds nothing and returns false. */
+  function insertAlert(sourceId: string, targetId: string | null, dedupeKey: string, message: string) {
+    return db.prepare(`INSERT OR IGNORE INTO alert_outbox
       (dedupe_key, target_thread_id, source_thread_id, message, created_at)
       VALUES (?, ?, ?, ?, ?)`).run(
-      dedupeKey, row.chief_thread_id, row.thread_id,
+      dedupeKey, targetId, sourceId,
       clip(`[Chief lifecycle alert]\n${message}`), Date.now(),
-    );
-    return dedupeKey;
+    ).changes > 0;
   }
 
   /** Records a failure or stall once per (thread, cycle, kind), independent of its alert. Never throws:
@@ -2944,32 +2956,42 @@ export default async function plugin(bb: BbPluginApi) {
     return deliverAlert(outboxKey);
   }
 
-  /** Alerts a child Chief's Coordinator once per key: one outbox row, never a deletion of another pending row. A key already
-   * written adds nothing, and a failure is logged, never thrown: retryAlerts redelivers the row. */
-  function alertCoordinator(child: ManagedRow | undefined, key: string, message: string) {
-    try {
-      const coordinator = child?.coordinator_thread_id ? store.get(child.coordinator_thread_id) : undefined;
-      if (!child || !isActiveChief(coordinator) || !isCoordinator(coordinator)) return;
-      if (db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key=?`).get(`${child.thread_id}:${key}`)) return;
-      void deliverAlert(writeAlert({ ...child, chief_thread_id: coordinator.thread_id }, key, message, false));
-    } catch (error) {
-      bb.log.warn(`Could not alert Coordinator of ${child?.thread_id}: ${String(error)}`);
-    }
+  /** A linked child Chief is done when it is idle, owns no open row or todo and owns a completed row. Returns the newest completed row: it keys the alert, so a later round alerts again and a repeat adds nothing. */
+  function childDone(child: ManagedRow) {
+    if (child.state !== "idle") return undefined;
+    const owned = store.all().filter((row) => row.chief_thread_id === child.thread_id);
+    if (owned.some((row) => !terminal(row.state))) return undefined;
+    const latest = owned.filter((row) => row.state === "complete").reduce<ManagedRow | undefined>((best, row) => (!best || row.updated_at >= best.updated_at ? row : best), undefined);
+    return latest && !db.prepare(`SELECT 1 FROM chief_todos WHERE chief_thread_id=? AND state='open'`).get(child.thread_id) ? latest : undefined;
   }
 
-  /** The line that names a child Chief in a Coordinator alert. */
-  const childLabel = (child: ManagedRow) => `Child Chief “${clip(child.title, 120)}” (${child.thread_id}, project ${child.project_id})`;
-
-  /** A linked child Chief is done when it is idle, owns no open row or todo and owns a completed row. The alert key holds the newest completed row, so a later round alerts again and a repeat adds nothing. */
-  function alertDoneChildren() {
-    for (const child of store.all()) {
-      if (child.role !== "chief" || child.state !== "idle" || !child.coordinator_thread_id) continue;
-      const owned = store.all().filter((row) => row.chief_thread_id === child.thread_id);
-      if (owned.some((row) => !terminal(row.state))) continue;
-      const latest = owned.filter((row) => row.state === "complete").reduce<ManagedRow | undefined>((best, row) => (!best || row.updated_at >= best.updated_at ? row : best), undefined);
-      if (!latest || db.prepare(`SELECT 1 FROM chief_todos WHERE chief_thread_id=? AND state='open'`).get(child.thread_id)) continue;
-      alertCoordinator(child, `coordinator-done:${latest.thread_id}`,
-        `${childLabel(child)} finished its work: every thread it owns is complete and it has no open todo. Check chief_roster, then tell the owner how work stands across your children.`);
+  /** The one door to a Coordinator's alerts. A child Chief's Need you (chief_escalate) or done state (the sweep, the idle event) alerts its
+   * active Coordinator once per receipt key: one outbox row, never a deletion of another pending row. Any other row is ignored; a failure
+   * is logged, never thrown: retryAlerts redelivers the row. */
+  function alertCoordinator(child: ManagedRow, alert: { kind: "done" } | { kind: "need-you"; request: string; concerned?: ManagedRow }) {
+    try {
+      const coordinator = store.get(child.coordinator_thread_id ?? "");
+      if (!isLinkedChild(child) || !isActiveChief(coordinator) || !isCoordinator(coordinator)) return;
+      const label = `Child Chief “${clip(child.title, 120)}” (${child.thread_id}, project ${child.project_id})`;
+      let receipt: string;
+      let message: string;
+      if (alert.kind === "need-you") {
+        receipt = `coordinator-need-you:${createHash("sha1").update(alert.request).digest("hex").slice(0, 12)}`;
+        message = [
+          `${label} is blocked on a Need you${alert.concerned ? ` about ${alert.concerned.role} “${clip(alert.concerned.title, 120)}” (${alert.concerned.thread_id})` : ""}:`,
+          clip(alert.request, 600),
+          `The owner answers it in ${child.thread_id}; do not answer or relay it.`,
+        ].join("\n");
+      } else {
+        const latest = childDone(child);
+        if (!latest) return;
+        receipt = `coordinator-done:${latest.thread_id}`;
+        message = `${label} finished its work: every thread it owns is complete and it has no open todo. Check chief_roster, then tell the owner how work stands across your children.`;
+      }
+      const dedupeKey = `${child.thread_id}:${receipt}`;
+      if (insertAlert(child.thread_id, coordinator.thread_id, dedupeKey, message)) void deliverAlert(dedupeKey);
+    } catch (error) {
+      bb.log.warn(`Could not alert Coordinator of ${child.thread_id}: ${String(error)}`);
     }
   }
 
@@ -3289,7 +3311,7 @@ export default async function plugin(bb: BbPluginApi) {
           : kind === "failed" ? "failed"
             : kind === "archived" ? "archived" : "deleted";
       store.recordState(thread.id, state, thread.status ?? state, now);
-      if (state === "idle") alertDoneChildren();
+      if (state === "idle") alertCoordinator(store.get(thread.id)!, { kind: "done" });
       return;
     }
     if (kind === "active") {
@@ -3492,6 +3514,11 @@ export default async function plugin(bb: BbPluginApi) {
   /** A Coordinator is a Chief row with coordinator=1 (COORD-1). Nothing clears the flag. */
   function isCoordinator(row: ManagedRow | undefined): boolean {
     return !!row && row.role === "chief" && row.coordinator === 1;
+  }
+
+  /** A child Chief is a Chief row linked to its Coordinator. */
+  function isLinkedChild(row: ManagedRow | undefined): boolean {
+    return !!row && row.role === "chief" && !!row.coordinator_thread_id;
   }
 
   /** The one guard in front of every way to start a reviewer: only the active Chief may. */
@@ -3954,20 +3981,15 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   let forgeRuns: Promise<unknown> = Promise.resolve();
-  /** COORD-2: a Coordinator runs no planner, worker, reviewer, tester, advisor or researcher, so these tools refuse it before they read any input. */
-  const COORDINATOR_REFUSED = new Set([
-    "chief_plan", "chief_consult", "chief_delegate", "chief_forge_init", "chief_review", "chief_inspect", "chief_continue", "chief_stop",
-    "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research",
-  ]);
-  const coordinatorRefusal = (what: string) => `${what} is not available to a Coordinator: it runs no planner, worker, reviewer, tester, advisor or researcher. Ask the child Chief that owns the work.`;
-  const registerChiefTool = ((tool: { name: string; execute: (params: never, context: never) => unknown }) =>
-    bb.agents.registerTool((COORDINATOR_REFUSED.has(tool.name) ? {
+  /** bb.agents.registerTool, except that a tool in COORDINATOR_REFUSED refuses a Coordinator caller before it reads any input. */
+  const registerChiefTool = <Schema extends z.ZodType>(tool: Parameters<typeof bb.agents.registerTool<Schema>>[0]) =>
+    bb.agents.registerTool(COORDINATOR_REFUSED.has(tool.name) ? {
       ...tool,
-      execute: (params: never, context: { threadId?: string | null }) => {
+      execute: (params, context) => {
         if (isCoordinator(context.threadId ? store.get(context.threadId) : undefined)) throw new Error(coordinatorRefusal(tool.name));
-        return tool.execute(params, context as never);
+        return tool.execute(params, context);
       },
-    } : tool) as never)) as unknown as typeof bb.agents.registerTool;
+    } : tool);
 
   registerChiefTool({
     name: "chief_forge_init",
@@ -4155,7 +4177,7 @@ export default async function plugin(bb: BbPluginApi) {
         title: params.title,
         request: params.request,
         context: todo ? `${params.context}\n\nTodo #${todo.id}: ${todo.text}` : params.context,
-        ...(coordinator ? { coordinatorThreadId: caller.thread_id } : {}),
+        coordinatorThreadId: coordinator ? caller.thread_id : undefined,
       };
       const { threadId } = await createChief(target, handoff);
       const lines = [coordinator
@@ -4191,7 +4213,7 @@ export default async function plugin(bb: BbPluginApi) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isActiveChief(caller)) throw new Error("chief_coordinate requires an active registered Chief thread.");
       if (isCoordinator(caller)) return "Already a Coordinator.";
-      if (caller.coordinator_thread_id) throw new Error(`This Chief is a child of Coordinator ${caller.coordinator_thread_id}: a child cannot become a Coordinator.`);
+      if (isLinkedChild(caller)) throw new Error(`This Chief is a child of Coordinator ${caller.coordinator_thread_id}: a child cannot become a Coordinator.`);
       if (!store.setCoordinator(caller.thread_id, Date.now())) {
         const open = store.all().filter((row) => row.chief_thread_id === caller.thread_id && !terminal(row.state)).map((row) => row.thread_id);
         throw new Error(open.length
@@ -4209,25 +4231,23 @@ export default async function plugin(bb: BbPluginApi) {
     async execute({ threadIds }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!isCoordinator(caller) || !isActiveChief(caller)) throw new Error("chief_attach is for a Coordinator only: a Chief becomes one with chief_coordinate.");
+      const own = "is already your child";
       const lines = [...new Set(threadIds)].map((id) => {
-        const refuse = (row: ManagedRow | undefined): string | null => {
+        const refusal = () => {
+          const row = store.get(id);
           if (id === caller.thread_id) return "is you";
           if (!row || row.role !== "chief") return `is not a Chief row: run \`bb chief adopt --thread ${id}\` first`;
           if (INACTIVE_CHIEF_STATES.includes(row.state)) return `is ${row.state}`;
           if (isCoordinator(row)) return "is a Coordinator";
-          if (row.coordinator_thread_id === caller.thread_id) return "is already your child";
+          if (row.coordinator_thread_id === caller.thread_id) return own;
           if (row.coordinator_thread_id) return `already belongs to Coordinator ${row.coordinator_thread_id}`;
           return null;
         };
-        const before = refuse(store.get(id));
-        if (before) return `${id}: ${before === "is already your child" ? "already attached (no change)" : `not attached: ${before}`}.`;
-        if (!store.linkToCoordinator(id, caller.thread_id, Date.now())) {
-          const after = refuse(store.get(id));
-          return `${id}: ${after === "is already your child" ? "already attached (no change)" : `not attached: ${after ?? "its state changed; try again"}`}.`;
-        }
-        return `${id}: attached.`;
+        // The conditional link write settles a race: when it changes no row, the row is read again for the reason.
+        const why = refusal() ?? (store.linkToCoordinator(id, caller.thread_id, Date.now()) ? null : refusal() ?? "its state changed; try again");
+        // A Chief that is already idle and done alerts through the sweep the link write starts.
+        return why === null ? `${id}: attached.` : why === own ? `${id}: already attached (no change).` : `${id}: not attached: ${why}.`;
       });
-      alertDoneChildren();
       return lines.join("\n");
     },
   });
@@ -4479,12 +4499,8 @@ export default async function plugin(bb: BbPluginApi) {
       const concerned = threadId === undefined ? undefined : await controlledTarget(threadId, caller);
       touchCallerChief(caller);
       const chatOnly = "No pull request or issue to post on; write the request in chat only.";
-      alertCoordinator(caller, `coordinator-need-you:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`, [
-        `${childLabel(caller)} is blocked on a Need you${concerned ? ` about ${concerned.role} “${clip(concerned.title, 120)}” (${concerned.thread_id})` : ""}:`,
-        clip(request, 600),
-        `The owner answers it in ${caller.thread_id}; do not answer or relay it.`,
-      ].join("\n"));
-      if (!concerned || threadId === undefined) return chatOnly;
+      alertCoordinator(caller, { kind: "need-you", request, concerned });
+      if (!concerned) return chatOnly;
       const url = concerned.pr_url ?? concerned.issue_url
         ?? (concerned.role === "reviewer" ? ledger.targets(concerned.thread_id).map((target) => target.pr_url ?? store.get(target.worker_thread_id)?.pr_url).find(Boolean) : undefined)
         ?? (concerned.role === "planner" ? concerned.plan_issue_url : undefined);
@@ -4577,47 +4593,38 @@ export default async function plugin(bb: BbPluginApi) {
     // A researcher's brief says how to use chief_research, so it has no line but still needs the tool while research is on.
     const researchTool = !!research || (role === "researcher" && !!researchActive?.enabled);
     const claudeCode = context.provider.id === "claude-code";
-    if (role === "chief" && isCoordinator(row)) {
-      const tools = ["chief_roster", "chief_spawn", "chief_attach"];
-      return {
-        tools,
-        skills: [],
-        instructions: [
-          `You are the registered Coordinator for ${clip(context.project.name, 100)}: you supervise child Chiefs in any project, not managed threads.`,
-          ...(claudeCode ? [toolSchemaLine(tools, true)] : []),
-          "",
-          COORDINATOR_INSTRUCTIONS,
-          // Last: the SDK cuts instructions at 4096 chars. The built-in rules tell a Chief to continue and complete managed work, so only a project chief.md follows.
-          ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
-        ].join("\n"),
-      };
-    }
     if (role === "chief") {
-      const tools = [
+      const coordinator = isCoordinator(row);
+      const child = isLinkedChild(row);
+      const tools = coordinator ? COORDINATOR_TOOLS : [
         ...(plannerActive ? ["chief_plan"] : []),
         "chief_consult", "chief_spawn",
         "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync",
         ...(researchTool ? ["chief_research"] : []),
         // A child Chief is already supervised: it may not upgrade itself.
-        ...(row?.coordinator_thread_id ? [] : ["chief_coordinate"]),
+        ...(child ? [] : ["chief_coordinate"]),
       ];
       return {
         tools,
-        skills: row?.coordinator_thread_id ? ["chief"] : ["chief", "coordinator"],
+        skills: coordinator ? [] : child ? ["chief"] : ["chief", "coordinator"],
         instructions: [
-          `You are the registered Chief supervisor for ${clip(context.project.name, 100)}. Use ordinary visible BB threads and drive managed work through completion.`,
+          coordinator
+            ? `You are the registered Coordinator for ${clip(context.project.name, 100)}: you supervise child Chiefs in any project, not managed threads.`
+            : `You are the registered Chief supervisor for ${clip(context.project.name, 100)}. Use ordinary visible BB threads and drive managed work through completion.`,
           ...(claudeCode ? [toolSchemaLine(tools, true)] : []),
-          ...(row?.coordinator_thread_id ? [`Coordinator ${row.coordinator_thread_id} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`] : []),
+          ...(child ? [`Coordinator ${row!.coordinator_thread_id} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`] : []),
           "",
-          ROSTER_CHIEF_INSTRUCTIONS,
-          WAIT_CHIEF_INSTRUCTIONS,
-          ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
-          ...(research ? ["", research, researchChiefInstructions(plannerActive)] : []),
-          "",
-          chiefCoreRules(`${plannerActive ? "chief_plan, " : ""}chief_review${research ? ", chief_research" : ""}`),
-          // Last: the SDK cuts instructions at 4096 chars, so only the variable project rules may fall past it.
-          "",
-          rules,
+          // The SDK cuts instructions at 4096 chars, so the variable project rules come last. The built-in rules tell a Chief to continue and complete managed work, so a Coordinator gets only a project chief.md.
+          ...(coordinator ? [COORDINATOR_INSTRUCTIONS, ...(rules === BUILT_IN_RULES ? [] : ["", rules])] : [
+            ROSTER_CHIEF_INSTRUCTIONS,
+            WAIT_CHIEF_INSTRUCTIONS,
+            ...(plannerActive ? ["", PLANNER_CHIEF_INSTRUCTIONS] : []),
+            ...(research ? ["", research, researchChiefInstructions(plannerActive)] : []),
+            "",
+            chiefCoreRules(`${plannerActive ? "chief_plan, " : ""}chief_review${research ? ", chief_research" : ""}`),
+            "",
+            rules,
+          ]),
         ].join("\n"),
       };
     }
@@ -4793,7 +4800,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (caller && !isActiveChief(caller) && command !== "status" && command !== "inspect") {
           return fail(`bb chief ${command} is for the active Chief only${callerRole === "chief" ? "" : `; a managed ${callerRole} reports with chief_report`}.`);
         }
-        if (isCoordinator(caller) && ["plan", "consult", "delegate", "inspect", "continue", "stop", "complete"].includes(command)) return fail(coordinatorRefusal(`bb chief ${command}`));
+        if (isCoordinator(caller) && COORDINATOR_REFUSED.has(`chief_${command}`)) return fail(coordinatorRefusal(`bb chief ${command}`));
         // A managed Chief reads only its own roster; an operator shell keeps the project-wide view.
         const readScope = isActiveChief(caller) ? caller.thread_id : undefined;
         const readProject = caller?.project_id ?? context.projectId;
