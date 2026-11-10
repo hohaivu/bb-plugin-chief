@@ -578,7 +578,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const head = mine.head;
       if (!head && !live.environmentId) throw new Error(`Worker ${workerThreadId} has no reusable environment.`);
       for (const target of covered) {
-        if (target.row !== worker && !target.head && !target.row.branch) {
+        if (target.row.thread_id !== worker.thread_id && !target.head && !target.row.branch) {
           throw new Error(`Worker ${target.row.thread_id} has no readable pull request head and no branch, so the plan's one review cannot reach it. Retry once the forge answers.`);
         }
       }
