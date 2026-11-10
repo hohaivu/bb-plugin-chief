@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import type { ManagedRow } from "./server";
+import type { ManagedRow } from "./src/types";
 import type { Tracker, TrackerComment } from "./tracker";
 import { TRACKER_TABLES, createTrackerSync } from "./trackerSync";
 

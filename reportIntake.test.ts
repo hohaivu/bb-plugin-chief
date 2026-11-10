@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { createReportIntake, type ReportIntakeAdapters } from "./reportIntake";
 import { createReviewLedger } from "./reviewLedger";
-import { MIGRATIONS, type ManagedRow, type ReportParams } from "./server";
+import { MIGRATIONS } from "./src/db/migrations";
+import type { ManagedRow, ReportParams } from "./src/types";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 
 // Contract (docs/specs/report-intake.md, Target): createReportIntake(adapters).report is the one owner of chief_report

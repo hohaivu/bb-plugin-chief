@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { act, fireEvent, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import { rpcContract } from "./server";
+import { rpcContract } from "./src/rpcContract";
 
 const hostPicker = vi.hoisted(() => ({ normalizes: false, emits: 0 }));
 vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {

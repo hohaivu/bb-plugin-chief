@@ -4,7 +4,7 @@
 
 import { createHash } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { ManagedRow } from "./server";
+import type { ManagedRow } from "./src/types";
 import { clip } from "./text";
 import type { Tracker, TrackerStatus } from "./tracker";
 

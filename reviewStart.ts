@@ -8,6 +8,7 @@ import { helperPrompt, isPinned, PR_AGENT_DIR, prAgentScript, prAgentSection, ty
 import type { createReviewLedger } from "./reviewLedger";
 import { REVIEW_ONLY } from "./roles";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
+import { terminal } from "./src/types";
 import type { ThreadStore } from "./threadStore";
 import { chainOf, type PlanWave } from "./waveSchedule";
 
@@ -383,8 +384,6 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
 
 /** One target a review covers, frozen for the attempt: its row as captured before any await and the forge head read for it. */
 interface CoveredTarget<Row> { row: Row; head: PinnedHead | null; since?: string }
-
-const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
 
 /** The Review attempt module: one reviewer launch over frozen Reports and heads, with its scope, context, brief and ledger identity.
  * It owns the owner and duplicate checks, the in-flight dedupe, the pinned heads, the re-review scope, the impact slices

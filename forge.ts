@@ -4,6 +4,8 @@
 // once, instead of being re-derived by a model on every delegation.
 
 import { createHash } from "node:crypto";
+import { clip } from "./text";
+import { execFileAsync } from "./src/runtime/exec";
 
 /** POSIX single-quoting: the only interpolation this script does. */
 export function quote(value: string) {
@@ -126,4 +128,130 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     "printf 'CHIEF_FORGE branch=%s base=%s issue_url=%s pr_url=%s forge=%s\\n' \"$BRANCH\" \"$BASE\" \"$ISSUE_URL\" \"$PR_URL\" \"$FORGE\"",
   ].join("\n");
   return { branch, script };
+}
+
+export const FORGE_CLI_TIMEOUT_MS = 10_000;
+
+/** Homebrew bins appended to the server's PATH.
+ * ponytail: heuristic for GUI-launched servers whose PATH lacks Homebrew; upgrade path is a configured PATH. */
+export function serverPath() {
+  return `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`;
+}
+
+/** The environment every forge CLI call runs with: the server's PATH plus Homebrew, so a GUI-launched server still finds gh and glab. */
+export const forgeEnv = () => ({ ...process.env, PATH: serverPath() });
+
+export const FORGE_SCRIPT_TIMEOUT_MS = 120_000;
+
+export type Forge = "github" | "gitlab";
+
+/** Pulls the forge target (and, when the reference names its own repo, the repo
+ * to pass alongside it) out of a PR number, an owner/repo#123 reference, or a
+ * PR/MR URL. An explicit URL also names its forge, so callers don't need to
+ * re-derive it from a repo checkout that may not even be the right one. */
+export function parsePullRequestRef(input: string): { target: string; repo: string | null; forge: Forge | null } {
+  const githubUrl = input.match(/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/);
+  if (githubUrl) return { target: githubUrl[3], repo: `${githubUrl[1]}/${githubUrl[2]}`, forge: "github" };
+  const gitlabUrl = input.match(/\/([^/\s]+)\/([^/\s]+)\/-\/merge_requests\/(\d+)/);
+  if (gitlabUrl) return { target: gitlabUrl[3], repo: `${gitlabUrl[1]}/${gitlabUrl[2]}`, forge: "gitlab" };
+  const shortRef = input.match(/^([\w.-]+\/[\w.-]+)#(\d+)$/);
+  if (shortRef) return { target: shortRef[2], repo: shortRef[1], forge: null };
+  return { target: input.replace(/^#/, ""), repo: null, forge: null };
+}
+
+/** The forge targets a pull request reference could live on, with its number and repo. */
+export async function pullRequestForges(pullRequest: string, cwd: string | null) {
+  const { target, repo, forge } = parsePullRequestRef(pullRequest);
+  let forges: Forge[] = forge ? [forge] : [];
+  if (!forges.length) {
+    const remote = cwd
+      ? await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() })
+          .then((result) => result.stdout.trim())
+          .catch(() => "")
+      : "";
+    // A self-hosted forge under another name could be either; ask gh, then glab.
+    forges = remote.includes("github") ? ["github"] : remote.includes("gitlab") ? ["gitlab"] : ["github", "gitlab"];
+  }
+  return { target, repo, forges };
+}
+
+/** Best-effort live head of a pull request: its branch, the commit the forge says
+ * the branch is at right now, and the branch it targets. Any failure returns null
+ * (callers either fall back or fail closed, as their contract says). */
+export async function prHead(pullRequest: string, cwd: string | null): Promise<{ branch: string; sha: string; base: string } | null> {
+  try {
+    const { target, repo, forges } = await pullRequestForges(pullRequest, cwd);
+    for (const candidate of forges) {
+      const head = await (candidate === "github" ? githubHead : gitlabHead)(target, repo, cwd).catch(() => null);
+      if (head) return head;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export const SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
+
+export async function githubHead(target: string, repo: string | null, cwd: string | null) {
+  const args = ["pr", "view", target, "--json", "headRefName,headRefOid,baseRefName", ...(repo ? ["--repo", repo] : [])];
+  const { stdout } = await execFileAsync("gh", args, { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
+  const parsed = JSON.parse(stdout) as { headRefName?: string; headRefOid?: string; baseRefName?: string };
+  return headOf(parsed.headRefName, parsed.headRefOid, parsed.baseRefName);
+}
+
+export async function gitlabHead(target: string, repo: string | null, cwd: string | null) {
+  const args = ["mr", "view", target, "-F", "json", ...(repo ? ["--repo", repo] : [])];
+  const { stdout } = await execFileAsync("glab", args, { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
+  const parsed = JSON.parse(stdout) as { source_branch?: string; sha?: string; diff_refs?: { head_sha?: string }; target_branch?: string };
+  return headOf(parsed.source_branch, parsed.sha ?? parsed.diff_refs?.head_sha, parsed.target_branch);
+}
+
+export function headOf(branch?: string, sha?: string, base?: string) {
+  const head = { branch: branch?.trim() ?? "", sha: sha?.trim().toLowerCase() ?? "", base: base?.trim() ?? "" };
+  return head.branch && head.base && SHA_PATTERN.test(head.sha) ? head : null;
+}
+
+/** Best-effort: flips a draft pull request to ready for review with whichever forge
+ * CLI hosts it. Never throws: the result says whether it worked, with the error text when not. */
+export async function markPrReady(pullRequest: string, cwd: string | null): Promise<{ ready: boolean; error?: string }> {
+  let error = "no forge CLI could mark it ready";
+  try {
+    const { target, repo, forges } = await pullRequestForges(pullRequest, cwd);
+    for (const candidate of forges) {
+      const [cli, args] = candidate === "github"
+        ? ["gh", ["pr", "ready", target, ...(repo ? ["--repo", repo] : [])]]
+        : ["glab", ["mr", "update", target, "--ready", "--yes", ...(repo ? ["--repo", repo] : [])]];
+      try {
+        await execFileAsync(cli as string, args as string[], { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
+        return { ready: true };
+      } catch (failure) {
+        error = clip(String((failure as { stderr?: unknown }).stderr || failure).trim(), 200);
+      }
+    }
+  } catch (failure) {
+    error = clip(String(failure), 200);
+  }
+  return { ready: false, error };
+}
+
+/** Whether a pull request is merged, with whichever forge CLI hosts it. Null when no forge CLI could say. */
+export async function prMerged(pullRequest: string, cwd: string | null): Promise<boolean | null> {
+  try {
+    const { target, repo, forges } = await pullRequestForges(pullRequest, cwd);
+    for (const candidate of forges) {
+      const [cli, args] = candidate === "github"
+        ? ["gh", ["pr", "view", target, "--json", "state", ...(repo ? ["--repo", repo] : [])]]
+        : ["glab", ["mr", "view", target, "-F", "json", ...(repo ? ["--repo", repo] : [])]];
+      try {
+        const { stdout } = await execFileAsync(cli as string, args as string[], { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
+        return String((JSON.parse(stdout) as { state?: unknown }).state).toLowerCase() === "merged";
+      } catch {
+        // Try the next forge.
+      }
+    }
+  } catch {
+    // Unknown: the caller changes nothing.
+  }
+  return null;
 }

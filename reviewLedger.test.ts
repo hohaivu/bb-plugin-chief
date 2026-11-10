@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { MIGRATIONS } from "./server";
+import { MIGRATIONS } from "./src/db/migrations";
 import { createReviewLedger } from "./reviewLedger";
 
 // Contract: reviewLedger answers three questions as data (the 2/3 ladder and what a replaces: needs, which open reviews

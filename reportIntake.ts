@@ -3,7 +3,8 @@ import { basename } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ReviewTarget, createReviewLedger } from "./reviewLedger";
 import type { Role } from "./roles";
-import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "./server";
+import { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "./src/reportLimits";
+import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "./src/types";
 import type { ThreadInsert, ThreadStore } from "./threadStore";
 import { COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, fitLines, recordedLines, type RecordedCommand } from "./text";
 import { waveTitle } from "./waveSchedule";
@@ -37,16 +38,7 @@ export interface ReportIntakeAdapters {
   warn(message: string): void;
 }
 
-/** A report whose result fits is short: no file, and no summary needed. */
-export const SUMMARY_MAX = 800;
-export const MAX_PLAN_LENGTH = 64_000;
-// ponytail: arbitrary cap so a runaway plan can't schedule an unbounded worker chain.
-export const MAX_WAVES = 8;
-export const MAX_REPORT_FAILS = 5;
-export const MAX_FINDINGS = 40;
-export const REPORT_TEXT_MAX = 4_000;
-export const LESSON_MAX = 400;
-export const MAX_CARRIED_FAILS = 12;
+export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "./src/reportLimits";
 
 type WaveInput = { body: string; dependsOn?: number[]; design?: boolean; test?: boolean; spec?: boolean };
 
