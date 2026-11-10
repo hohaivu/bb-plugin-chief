@@ -933,4 +933,59 @@ describe("tester role", () => {
     expect(await reviewerCount(state)).toBe(1);
     expect(rowOf(state, fix).retest_skipped).toBeNull();
   });
+
+  // Contract (legacy stacked chain, case 4): a fix on an earlier wave while the stacked later waves (each on its own branch) are still live is not owed a direct tester
+  // (the owner is not on the test wave or its parent): the review of the chain tip says to restack first, and the restack refusal of the fix
+  // still wins over retest. Following the restack routes through the real startWorker ends in a tester created after the fix; when it reports
+  // ready the debt is paid and the review starts. Regression: the route names the earlier-wave fix as a direct tester, or the restacked tester
+  // does not pay the debt. Seeded rows stand for the legacy shape (real hand-offs complete the replaced row and share one branch, so only seeds keep W2 live, each wave on its own branch).
+  test("a legacy fix on an earlier wave is restacked first; the restacked tester pays the debt", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await plan(state, chief.threadId, [planWave(1), planWave(2), TEST_WAVE(3)]);
+    await approvePlan(state, chief.threadId, planner.threadId);
+    await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: "feature/legacy-a" });
+    const w1 = workerOn(state, planner.threadId, 1).thread_id as string;
+    await readyIdle(state, w1);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: w1 });
+    const w2 = workerOn(state, planner.threadId, 2).thread_id as string;
+    state.db.prepare(`UPDATE managed_threads SET branch='feature/legacy-b' WHERE thread_id=?`).run(w2);
+    await readyIdle(state, w2);
+    await delegateWave(state, chief.threadId, planner.threadId, 3, { replaces: w2, kind: "tester" });
+    const t3 = workerOn(state, planner.threadId, 3).thread_id as string;
+    state.db.prepare(`UPDATE managed_threads SET branch='feature/legacy-c' WHERE thread_id=?`).run(t3);
+    await readyIdle(state, t3);
+    await reviewed(state, chief.threadId, t3, "request_changes");
+    await tick();
+    // The legacy fix F1 on wave 1 replaces W1 while W2 and T3 stay live on top of it.
+    const { threadId: f1 } = await legacyWave(state, chief.threadId, planner.threadId, 1, "feature/legacy-a2");
+    state.db.prepare(`UPDATE managed_threads SET kind=NULL, replaces_thread_id=? WHERE thread_id=?`).run(w1, f1);
+    state.db.prepare(`UPDATE managed_threads SET state='ready' WHERE thread_id=?`).run(w2);
+    await readyIdle(state, f1);
+
+    // The restack refusal of the fix's own wave wins over the retest debt.
+    const restack = await refusal(review(state, chief, f1));
+    expect(restack).toContain(`Wave 1 of 3: no review runs between waves. Wave 2 is stacked on it and still builds on the old head: restack it first — chief_delegate (replaces: ${w2}).`);
+    expect(restack).not.toContain("retestSkipped");
+    // The tip's refusal is the retest debt with no direct tester route: nothing is named that admission would refuse.
+    const tip = await refusal(review(state, chief, t3));
+    expect(tip).toBe(`Review refused: Restack the chain first; its restacked tester reruns the tests. To review without the rerun, record why: chief_review (workerThreadId: ${t3}, retestSkipped: "<reason>") — it waives every rerun listed here.`);
+    expect(tip).not.toContain("chief_delegate");
+    expect(await reviewerCount(state)).toBe(1);
+
+    // Restack wave 2, then the test wave: each advertised route runs through the real startWorker.
+    const w2b = await followRoute(state, chief.threadId, restack);
+    expect(w2b.params).toEqual({ replaces: w2 });
+    await readyIdle(state, w2b.thread);
+    const next = await refusal(review(state, chief, w2b.thread));
+    expect(next).toContain(`restack it first — chief_delegate (replaces: ${t3}, kind: tester).`);
+    const t3b = await followRoute(state, chief.threadId, next);
+    expect(t3b.params).toEqual({ replaces: t3, kind: "tester" });
+    expect(rowOf(state, t3b.thread)).toMatchObject({ kind: "tester", plan_wave: 3 });
+    // A busy restacked tester has not paid yet.
+    expect(await refusal(review(state, chief, t3b.thread))).toMatch(/^One review covers the whole plan once every wave is ready; wave\(s\) 3 of 3 are not ready yet\./);
+    await readyIdle(state, t3b.thread);
+    await review(state, chief, t3b.thread);
+    expect(await reviewerCount(state)).toBe(2);
+  });
 });
