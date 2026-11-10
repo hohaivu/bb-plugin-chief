@@ -110,6 +110,10 @@ describe("tester role", () => {
       expect(prompt).toMatch(new RegExp(`Earlier here: [^.]*tester ${tester}[^.]*`));
       expect(prompt).not.toMatch(new RegExp(`Earlier here: [^.]*${writer}`));
       expect(prompt).toContain(`check only its fold range, from the Fold base to the Fold head its report names`);
+      // Wave 2 contract 5: `Fold: none` (equal endpoints) is an empty scope that never falls back to the writer's Base commit, and the
+      // spec paragraph no longer says the docs were written before the worker implemented against them.
+      expect(prompt).toContain("`Fold: none` with equal Fold base and Fold head is an empty scope: there is nothing to check, and you never fall back to its Base commit");
+      expect(prompt).not.toMatch(/before the worker implemented against them|before its worker/);
 
       const plainState = await setup();
       const chief2 = await start(plainState);

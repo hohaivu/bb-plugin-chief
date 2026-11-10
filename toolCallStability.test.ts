@@ -7,7 +7,7 @@ import plugin from "./server";
 import { completeWorker, configurationContext, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { acceptPlanningLine, acceptSpecLaneWording } from "./test/specLaneWording";
+import { acceptPlanningLine, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -176,6 +176,24 @@ describe("tool-call stability", () => {
 
   // Contract: no drift. The expected line is rebuilt from each entry's own configured tool names.
   // Regression: a hard-coded or stale tool list in the line, or a line built before the tools were chosen.
+  // Plan 2 contract 6 (Chief-facing tool texts): the Spec Writer runs beside its worker in a side worktree and a side writer completes.
+  // The tool-config oracle also checks this, but only after its other comparisons pass; this test stands alone.
+  // Regression: a tool text again says the Spec Writer runs first, shares one worktree, or is never completed.
+  test("Chief's tool descriptions describe the parallel Spec Writer side lane", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const base = configurationContext(chief.threadId, "proj_1", "Asha");
+    // Chief's tools, plus chief_report, which only a managed planner holds.
+    const tools = [
+      ...(await state.harness.behavior.resolveAgentConfiguration({ ...base, provider: { ...base.provider, id: "codex" } })).tools as any[],
+      ...(await state.harness.behavior.resolveAgentConfiguration({ ...configurationContext("thr_seed_planner", "proj_1", "Asha"), provider: { ...base.provider, id: "codex" }, pluginMetadata: { role: "planner", chiefThreadId: chief.threadId } })).tools as any[],
+    ];
+    const catalog = Object.fromEntries(tools.map((tool) => [tool.name, { description: tool.description, inputSchema: tool.inputSchema }]));
+    assertSpecLaneWording(catalog);
+    expect(JSON.stringify(catalog)).not.toMatch(/Spec Writer runs first|runs its Spec Writer before|its worker runs first|before its worker|never completed|is never completed/);
+    expect(catalog["chief_skip_specs"]!.description).toContain("once a Spec Writer was delegated on it");
+  });
+
   test("the claude-code preload line follows configured.tools for every role, planner and research toggle", async () => {
     const entries = claudeEntries(await head()).filter((entry) => entry.tools.length);
     expect(entries.length).toBeGreaterThan(40);

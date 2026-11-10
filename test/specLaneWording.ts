@@ -38,3 +38,10 @@ export function acceptPlanningLine(nowText: string, wasText: string) {
   });
   return lines.join("\n");
 }
+/** Asserts the final catalog says each reworded thing and none of the old, with no preservation baseline needed. */
+export function assertSpecLaneWording(catalog: Record<string, any>) {
+  for (const [tool, path, has, lacks] of REWORDED) {
+    const text = at(catalog[tool], path);
+    if (typeof text !== "string" || !has.test(text) || lacks.test(text)) throw new Error(`${tool}.${path}: must match ${has} and not ${lacks}`);
+  }
+}

@@ -722,6 +722,58 @@ describe("tester role", () => {
       expect(lastAlert(plainState)).not.toContain("spec-writer");
     });
 
+    // Wave 1 contract 11 (fixRound): a side writer never builds on an implementation row, so it is loose beside a same-branch tester
+    // and the alert asks for one fix per branch, never a stack. A real legacy stack (waves on branches of their own) stays a stack and
+    // the side writer stays loose beside it. Regression: the side writer joins its chain's stack, or the stack stops being one.
+    test("a side writer and a same-branch tester are repaired per branch, not stacked; a legacy stack stays a stack beside a side writer", async () => {
+      const state = await setup();
+      const { chief, writer, tester } = await fullChain(state);
+      await reviewed(state, chief.threadId, tester, "request_changes");
+      const alert = lastAlert(state);
+      expect(alert).toContain("Hand the fixes to fresh workers in this turn, one per branch the findings name:");
+      expect(alert).toContain(`replaces: ${tester}, kind: worker`);
+      expect(alert).toContain(`replaces: ${writer}, kind: spec-writer`);
+      expect(alert).not.toMatch(/are stacked|never in parallel/);
+
+      const legacy = await setup();
+      const { chief: lc, planner: lp } = await specPlan(legacy, [specImpl(1), planWave(2), TEST_WAVE(3)]);
+      await delegateWave(legacy, lc.threadId, lp.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+      const w1 = ownerOn(legacy, lp.threadId, 1).thread_id as string;
+      const side = await delegateWriter(legacy, lc, lp.threadId, 1);
+      await readyIdle(legacy, w1);
+      await readyIdle(legacy, side);
+      await tool(legacy, "chief_skip_tests", { planThreadId: lp.threadId, wave: 3, reason: "docs only" }, lc.threadId);
+      const w2 = (await legacyWave(legacy, lc.threadId, lp.threadId, 2, "feature/b")).threadId;
+      await readyIdle(legacy, w2);
+      await reviewed(legacy, lc.threadId, w2, "request_changes");
+      const stacked = lastAlert(legacy);
+      expect(stacked).toContain(`Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel.`);
+      expect(stacked).toContain(`wave 1: ${w1}, wave 2: ${w2}`);
+      expect(stacked).not.toContain(`wave 1: ${side}`);
+      // The alert clips its tail; the roster's Pending line carries the whole advice.
+      const pending = (await roster(legacy, lc.threadId)).split("\n").find((line) => line.includes("The reviewer requires changes"))!;
+      expect(pending).toContain("Hand the fixes on the other branches the findings name to fresh workers in this turn:");
+      expect(pending).toContain(`replaces: ${side}, kind: spec-writer`);
+    });
+
+    // Wave 1 contract 11 (rejection counts and consult routing are per target): a carried streak applies to the side writer's own
+    // chain and to the tester's, each named by its own id. Regression: the side writer's chain escapes the ladder or is named as the tester.
+    test.each([[2, "consult"], [3, "stop"]] as const)("a streak of %i puts the side writer and the tester each on the %s rung", async (streak, rung) => {
+      const state = await setup();
+      const { chief, writer, tester } = await fullChain(state);
+      await tool(state, "chief_review", { workerThreadId: tester }, chief.threadId);
+      const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer" && row.state !== "complete").at(-1)!.threadId;
+      state.db.prepare(`UPDATE managed_threads SET reject_streak=? WHERE thread_id=?`).run(streak - 1, reviewer);
+      await report(state, reviewer, { state: "ready", result: "again", verdict: "request_changes", findings: [{ file: "totals.ts", line: 3, severity: "blocking", message: "m", fix: "f" }] });
+      const alert = lastAlert(state);
+      if (rung === "consult") expect(alert).toContain(`Call chief_consult (workerThreadId: ${tester}) now, before any further delegation, with every branch of the review (${tester}, ${writer}) in its context`);
+      else expect(alert).toContain("Stop: start no new worker. Escalate to the user");
+      for (const [prior, kind] of [[writer, "spec-writer"], [tester, "worker"]] as const) {
+        await expect(tool(state, "chief_delegate", { title: "Fix", mission: "Fix it", replaces: prior, kind }, chief.threadId)).rejects.toThrow(
+          rung === "consult" ? `Call chief_consult (workerThreadId: ${prior})` : `escalate to the user with both positions`);
+      }
+    });
+
     const BASE_HEAD = "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.";
     const localSync = (branch: string) => `Before you read any file, sync this checkout with ${branch}: require a clean tree (\`git status --porcelain\` prints nothing), run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`, and record \`Local sync: <sha>\` (\`git rev-parse HEAD\`). If the tree is not clean or the fast-forward fails, report blocked. Never use autostash, never force, never touch another worktree.`;
     const rejectedPush = (branch: string) => `If that push is rejected because ${branch} moved, run \`git fetch origin ${branch}\` then \`git rebase --no-autostash origin/${branch}\` on a clean tree and push again; never force-push.`;
@@ -751,6 +803,54 @@ describe("tester role", () => {
       expect(section(prompt, "Git workflow")).toContain(localSync(CHAIN));
       expect(section(prompt, "Git workflow")).toContain(rejectedPush(CHAIN));
       expect(prompt).not.toMatch(/implement to match them|kind: spec-writer|you run before its worker/);
+    });
+
+    // Wave 2 contracts 1 and 5 (side-lane writer prompt): the rendered prompt carries the whole fold protocol as numbered steps and
+    // the docs-only diff against the fetched U, a plain push to the chain branch, and the Fold base/head/none record; none of the
+    // run-first wording, the pre-fold docs-only check against <base> or the "commit and push after each step" rule survives.
+    // Regression: the writer folds without the clean-tree check, rebases with autostash, pushes the side branch or forces.
+    test("a side-lane Spec Writer's prompt carries the fold protocol and none of the run-first wording", async () => {
+      const state = await setup();
+      const { writer } = await withWriter(state);
+      const prompt = state.spawned.at(-1).prompt as string;
+      expect(section(prompt, "Wave")).toContain("Wave 1 of 2: you run in parallel with its worker, in your own worktree on a side branch cut from feature/chain.");
+      expect(section(prompt, "Fold")).toBe([
+        `Commit only docs/ on your worktree branch. Before you report ready, fold the commits onto ${CHAIN}:`,
+        "1. Require a clean tree: `git status --porcelain` prints nothing.",
+        `2. \`git fetch origin ${CHAIN}\`, then note \`U=$(git rev-parse origin/${CHAIN})\`.`,
+        `3. \`git rebase --no-autostash origin/${CHAIN}\`. On a conflict, run \`git rebase --abort\` and report blocked, recommending \`chief_delegate (replaces: <your thread id>, kind: spec-writer)\`.`,
+        "4. `git diff --name-only $U..HEAD` lists only docs/ paths. Any other path: report blocked.",
+        `5. \`git push origin HEAD:${CHAIN}\`. Never pass --force. If the push is rejected, repeat from step 1.`,
+        "Record `Fold base: <U of the successful attempt>` and `Fold head: <the pushed sha>` in your report. When no docs change was needed, record `Fold: none` with Fold base and Fold head both equal to U.",
+        "Never use autostash, never force, never touch another worktree.",
+      ].join("\n") + "\n");
+      expect(section(prompt, "Git workflow")).toContain("The only push you make is the fold into feature/chain");
+      expect(prompt).toContain("Push only through the `## Fold` steps");
+      expect(prompt).toContain("A delta item the docs already reflect needs no commit: say so, and record `Fold: none`.");
+      expect(prompt).not.toMatch(/you run before its worker|git diff --name-only <base>\.\.HEAD|Commit and push after each meaningful step|Commit and push your work/);
+      expect(rowOf(state, writer).kind).toBe("spec-writer");
+    });
+
+    // Wave 2 contract 6 (planner brief): the planner is told the Spec Writer commits docs in parallel with the wave's worker, which builds from
+    // the plan, and is never told the writer runs first. Regression: the planner brief again describes a writer-first chain.
+    test("the planner's brief says the Spec Writer commits in parallel and the worker builds from the plan", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      await plan(state, chief.threadId, [specImpl(), TEST_WAVE(2)]);
+      const prompt = state.spawned.find((entry: any) => entry.prompt.startsWith("You are the managed planner"))!.prompt as string;
+      expect(prompt).toContain("give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full).");
+      expect(prompt).not.toMatch(/runs its Spec Writer before its worker|Spec Writer runs first|before its worker/);
+    });
+
+    // Wave 2 contract 3 (tester): the tester checks each listed side writer's Fold head is an ancestor of its HEAD before deriving tests.
+    // Regression: the tester derives tests from a checkout that lacks a writer's folded docs.
+    test("a tester's prompt checks each listed side writer's Fold head is in its HEAD", async () => {
+      const state = await setup();
+      const { writer } = await fullChain(state);
+      const prompt = state.spawned.at(-1).prompt as string;
+      expect(section(prompt, "Spec")).toContain(`Wave 1 Spec Writer ${writer}:`);
+      expect(section(prompt, "Spec")).toContain("- Before you derive tests, for each Spec Writer listed above run `git merge-base --is-ancestor <Fold head> HEAD`, using the Fold head from that writer's report. If it fails, report blocked: that writer's docs are not in your HEAD. A report with no Fold head (an implementation-lane writer) needs no check.");
+      expect(section(prompt, "Git workflow")).toContain(localSync(CHAIN));
     });
 
     // Wave 2 contract 2/4 (fix worker): a test-wave product-fix worker keeps the docs-matching block with the chain's writer report
