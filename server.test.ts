@@ -13678,4 +13678,54 @@ describe("Coordinator", () => {
       expect(kinds(state).map((alert) => [alert.key.split(":")[1], alert.delivered]).sort()).toEqual([["coordinator-done", 0], ["coordinator-need-you", 0], ["coordinator-need-you", 0]]);
     });
   });
+
+  describe("roster (COORD-8)", () => {
+    test("the Children block lists each child across projects with its own Pending lines and todos; unlinked Chiefs are absent", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const near = (await spawnChild(state, coord, { title: "Near child" })).id;
+      const far = (await spawnChild(state, coord, { title: "Far child", projectId: "proj_2" }, "proj_1")).id;
+      const stranger = await make(state);
+      const worker = await delegate(state, near, "Near worker");
+      await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker.threadId);
+      await call(state, "chief_roster", { todo: { text: "Far todo" } }, far, "proj_2");
+      await call(state, "chief_roster", { todo: { text: "Own todo" } }, coord);
+      const text = await call(state, "chief_roster", {}, coord);
+      expect(text.startsWith("## Children\n")).toBe(true);
+      expect(text).toMatch(new RegExp(`^- “[^”]*Near child” \\(${near}\\) · project proj_1 · \\w+$`, "m"));
+      expect(text).toMatch(new RegExp(`^- “[^”]*Far child” \\(${far}\\) · project proj_2 · \\w+$`, "m"));
+      expect(text).not.toContain(stranger);
+      const [nearBlock, farBlock] = [text.indexOf(`(${near})`), text.indexOf(`(${far})`)];
+      const nearLines = text.slice(nearBlock, farBlock);
+      const farLines = text.slice(farBlock);
+      expect(nearLines).toContain("Near worker");
+      expect(nearLines).not.toContain("Far todo");
+      expect(farLines).toContain("Far todo");
+      expect(farLines).not.toContain("Near worker");
+      // Each child's lines are indented under its header; the Coordinator's own Pending block follows the Children block.
+      expect(nearLines).toMatch(/\n {2}\S/);
+      // The Coordinator's todo is another Chief's todo to its same-project child, and not listed under the other project's child.
+      expect(nearLines).toContain("Own todo");
+      expect(farLines.slice(0, farLines.indexOf("\nPending:\n- todo"))).not.toContain("Own todo");
+      expect(text.endsWith(`Pending:\n- todo #2: Own todo`)).toBe(true);
+    });
+
+    test("a Coordinator with no children says how to get some", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      expect(await call(state, "chief_roster", {}, coord)).toContain("No child Chiefs. Attach ones the owner names with chief_attach, or start one with chief_spawn.");
+    });
+
+    test("many children and long Pending lists stay within 6000 characters", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      for (let index = 0; index < 20; index += 1) {
+        const child = (await spawnChild(state, coord, { title: `Child ${index}` })).id;
+        for (let item = 0; item < 3; item += 1) await call(state, "chief_roster", { todo: { text: `Todo ${index}.${item} ${"x".repeat(300)}` } }, child);
+      }
+      const text = await call(state, "chief_roster", {}, coord);
+      expect(text.length).toBeLessThanOrEqual(6_000);
+      expect(text.startsWith("## Children\n")).toBe(true);
+    });
+  });
 });
