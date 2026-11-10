@@ -23,6 +23,8 @@ bb plugin install git:https://github.com/divyesh-puri/bb-plugin-chief.git@semver
 
 The plugin never treats a generic SDK error as proof that a thread was deleted. Reconciliation uses live `deletedAt`/`archivedAt`, restores visible Chief-section filing, repairs missed status transitions, and retries transient reads, updates, and alerts.
 
+The pipeline as a sequence chart, with its roles and support tools, is in [docs/software-factory.md](docs/software-factory.md).
+
 ## Project rules
 
 Put `chief.md` at the project root. Chief reads it through BB's project file API and periodically refreshes its cache. Missing, empty, or unreadable files use conservative built-in rules. Chief's core rules (`CHIEF_CORE_RULES` in server.ts) are always appended to Chief's rules, so `chief.md` cannot drop them.
