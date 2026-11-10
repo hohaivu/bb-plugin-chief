@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import type { PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import {
   createFakePluginHost,
@@ -89,7 +89,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { /** projects.get rejects these ids, as the host does for a project that does not exist. */ missingProjects?: string[]; rules?: string; hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
+async function setup(options: { /** projects.get rejects these ids, as the host does for a project that does not exist. */ missingProjects?: string[]; rules?: string; hostStatus?: string; providerAvailable?: boolean; /** The plugin build under test; defaults to this checkout (the base-preservation tests pass the 95aa7df build). */ module?: typeof plugin; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
   /** tabs.update fails this many times from the start, so a plugin start can meet it. */
   failTabsUpdates?: number;
   /** Runs on the migrated database right before the plugin starts: seeds state a restart would find. */
@@ -289,7 +289,7 @@ async function setup(options: { /** projects.get rejects these ids, as the host 
     bb.storage.migrate(bb.storage.database(), MIGRATIONS);
     options.seed({ bb, db: bb.storage.database(), live, tabsStore });
   }
-  await plugin(bb);
+  await (options.module ?? plugin)(bb);
   disposals.push(() => harness.lifecycle.dispose());
 
   async function supervisorCycle() {
@@ -13749,6 +13749,149 @@ describe("Coordinator", () => {
         "",
         "Own this task through completion under your normal rules. Start with chief_roster. Plan it with your own chief_plan when planning applies; the handing-off Chief's planners, workers and reviewers stay with it, so their plan, report and verdict files are evidence only. Then forge, delegate, review and complete. The handoff is evidence, not proof. This handoff is saved at $BB_THREAD_STORAGE/brief.md; re-read it after any context compaction.",
       ].join("\n"));
+    });
+  });
+
+  // Differential: ONE fixture function runs against the 95aa7df source (git archive of the base commit, own source root) and this checkout,
+  // and the plain-Chief outputs are compared. Expected head = base output with exactly the authorized deltas applied, each asserted exactly.
+  describe("plain Chief is preserved against base 95aa7df (differential)", () => {
+    const BASE_SHA = "95aa7dfd881578003751fff808c5843e5416dd49";
+    const HEAD_ROOT = dirname(fileURLToPath(import.meta.url));
+    const git = async (...args: string[]) => {
+      const real = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      return real.execFileSync("git", ["-C", HEAD_ROOT, ...args], { encoding: "utf8", maxBuffer: 1 << 28 }).trim();
+    };
+    let baseAvailable = false;
+    type Tool = { name: string; description: string; inputSchema: { properties: Record<string, any>; required?: string[] } };
+    type Config = { tools: Tool[]; skills: string[]; instructions: string };
+    type Captured = {
+      meta: { sourceRoot: string; sha: string; cwd: string; fixtureHash: string; migrations: number };
+      migrations: string[]; roster: string; spawn: { text: string; brief: string }; escalate: string;
+      configure: Record<"codex" | "claude-code", Config>; linkedChild?: Record<"codex" | "claude-code", Config>;
+    };
+
+    const configureFor = (state: S, id: string, provider: "codex" | "claude-code") => {
+      const context = configurationContext(id);
+      return (state.harness.behavior.resolveAgentConfiguration({ ...context, provider: { ...context.provider, id: provider } }) as Promise<Config>)
+        .then((config) => JSON.parse(JSON.stringify(config)) as Config); // drops the tools' executable parts; the schemas remain
+    };
+    // The fixture: a plain Chief with a ready worker, a blocked worker, a todo and a pending alert. Written once; it runs unchanged on both builds.
+    async function fixture(module: typeof plugin, minted: Pick<Captured["meta"], "sourceRoot" | "sha">, linked: boolean): Promise<Omit<Captured, "meta" | "migrations"> & { ids: string[] }> {
+      const state = await setup({ module, rules: "# Project rules marker\n- Keep rules small." });
+      const chief = await make(state);
+      const ready = await delegate(state, chief, "Ready work");
+      await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, ready.threadId);
+      const blocked = await delegate(state, chief, "Blocked work");
+      await call(state, "chief_report", { state: "blocked", blocker: "Missing staging credentials", recommendation: "Ask the user" }, blocked.threadId);
+      await call(state, "chief_roster", { todo: { text: "Follow up with the owner" } }, chief);
+      const escalate = await call(state, "chief_escalate", { threadId: blocked.threadId, request: "Which staging account do we use?" }, chief);
+      const roster = await call(state, "chief_roster", {}, chief);
+      const spawned = await call(state, "chief_spawn", { title: "Side task", request: "Do the task", context: "Goal: done" }, chief);
+      const spawnedId = /in thread (thr_\w+)/.exec(spawned)![1]!;
+      const brief = await readFile(join(state.storageRoot, spawnedId, "brief.md"), "utf8");
+      const configure = { codex: await configureFor(state, chief, "codex"), "claude-code": await configureFor(state, chief, "claude-code") };
+      let linkedChild: Captured["linkedChild"];
+      if (linked) {
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        linkedChild = { codex: await configureFor(state, child, "codex"), "claude-code": await configureFor(state, child, "claude-code") };
+      }
+      void minted;
+      // Each build's temp storage root is the only run-specific text; the rest must match byte for byte.
+      const stable = (text: string) => text.replaceAll(state.storageRoot, "<storage>");
+      return { roster: stable(roster), spawn: { text: spawned, brief: stable(brief) }, escalate: stable(escalate), configure, linkedChild, ids: [chief, ready.threadId, blocked.threadId, spawnedId] };
+    }
+    const capture = async (module: { default: typeof plugin; MIGRATIONS: string[] }, sourceRoot: string, sha: string, linked: boolean): Promise<Captured> => ({
+      meta: { sourceRoot, sha, cwd: process.cwd(), fixtureHash: createHash("sha256").update(fixture.toString()).digest("hex"), migrations: module.MIGRATIONS.length },
+      migrations: module.MIGRATIONS,
+      ...(await fixture(module.default, { sourceRoot, sha }, linked)),
+    });
+
+    let base: Captured;
+    let head: Captured;
+    beforeAll(async () => {
+      baseAvailable = await git("cat-file", "-t", BASE_SHA).then((type) => type === "commit", () => false);
+      if (!baseAvailable) return;
+      const baseRoot = await mkdtemp(join(tmpdir(), "coord-base-"));
+      const real = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      real.execFileSync("sh", ["-c", `git -C "${HEAD_ROOT}" archive ${BASE_SHA} | tar -x -C "${baseRoot}"`]);
+      await symlink(join(HEAD_ROOT, "node_modules"), join(baseRoot, "node_modules"));
+      const baseModule = await import(/* @vite-ignore */ pathToFileURL(join(baseRoot, "server.ts")).href);
+      base = await capture(baseModule, baseRoot, BASE_SHA, false);
+      head = await capture({ default: plugin, MIGRATIONS }, HEAD_ROOT, await git("rev-parse", "HEAD"), true);
+      console.info(`preservation-evidence ${JSON.stringify({ base: base.meta, head: head.meta, scope: "plain Chief is preserved against base 95aa7df (differential)", runnerRoot: process.cwd() })}`);
+    }, 120_000);
+    const requireBase = () => { if (!baseAvailable) throw new Error(`base commit ${BASE_SHA} is not in this clone: fetch it (git fetch origin ${BASE_SHA}) to run the preservation comparison`); };
+
+    test("both builds ran the same fixture from their own source roots", () => {
+      requireBase();
+      expect(base.meta.sha).toBe(BASE_SHA);
+      expect(base.meta.sourceRoot).not.toBe(head.meta.sourceRoot);
+      expect(base.meta.fixtureHash).toBe(head.meta.fixtureHash);
+      expect(head.meta.sha).toMatch(/^[0-9a-f]{40}$/);
+    });
+
+    test("MIGRATIONS: the base array is an unchanged prefix of head, followed by exactly the two Coordinator ALTERs", () => {
+      requireBase();
+      expect(head.migrations.slice(0, base.migrations.length)).toEqual(base.migrations);
+      const added = head.migrations.slice(base.migrations.length);
+      expect(added).toHaveLength(2);
+      for (const statement of added) expect(statement).toMatch(/^ALTER TABLE \w+ ADD COLUMN .*(coordinator)/is);
+    });
+
+    test("roster: a plain Chief's roster is byte-identical to base", () => {
+      requireBase();
+      expect(head.roster).toBe(base.roster);
+      expect(base.roster).toContain("Blocked work");
+      expect(base.roster).toContain("Follow up with the owner");
+    });
+
+    test("chief_spawn result and brief.md, and chief_escalate with a threadId, are byte-identical to base", () => {
+      requireBase();
+      expect(head.spawn).toEqual(base.spawn);
+      expect(head.escalate).toBe(base.escalate);
+    });
+
+    test.each(["codex", "claude-code"] as const)("%s configure: a plain unlinked Chief = base plus exactly the authorized deltas", (provider) => {
+      requireBase();
+      const [was, now] = [base.configure[provider], structuredClone(head.configure[provider])];
+      // chief_coordinate sits right after chief_spawn; the coordinator skill is added; both asserted, then dropped.
+      const names = now.tools.map((tool) => tool.name);
+      expect(names[names.indexOf("chief_spawn") + 1]).toBe("chief_coordinate");
+      now.tools = now.tools.filter((tool) => tool.name !== "chief_coordinate");
+      expect(now.skills).toEqual([...was.skills, "coordinator"]);
+      now.skills = was.skills;
+      // chief_spawn gains the optional projectId; chief_escalate's threadId becomes optional with one more sentence.
+      const spawn = now.tools.find((tool) => tool.name === "chief_spawn")!;
+      expect(spawn.inputSchema.properties.projectId.description).toBe("Coordinator only: the project the new Chief works in. Defaults to your own project.");
+      expect(spawn.inputSchema.required ?? []).not.toContain("projectId");
+      delete spawn.inputSchema.properties.projectId;
+      const escalate = now.tools.find((tool) => tool.name === "chief_escalate")!;
+      const oldEscalate = was.tools.find((tool) => tool.name === "chief_escalate")!;
+      const SENTENCE = " Omit threadId only when no managed thread concerns the request yet.";
+      expect(oldEscalate.inputSchema.required).toContain("threadId");
+      expect(escalate.inputSchema.required).toEqual(oldEscalate.inputSchema.required!.filter((field) => field !== "threadId"));
+      expect(escalate.description).toBe(oldEscalate.description + SENTENCE);
+      escalate.inputSchema.required = oldEscalate.inputSchema.required;
+      escalate.description = oldEscalate.description;
+      expect(now.tools).toEqual(was.tools);
+      // Instructions: only the preload line's max_results moves by one (claude-code); codex is byte-identical.
+      const preload = (config: Config) => config.instructions.split("\n").filter((line) => line.includes("ToolSearch"));
+      if (provider === "codex") expect(preload(was)).toEqual([]);
+      else expect(preload(was)).toHaveLength(1);
+      expect(now.instructions.replace(`max_results ${was.tools.length + 1}`, `max_results ${was.tools.length}`)).toBe(was.instructions);
+      expect(now.skills).toEqual(was.skills);
+    });
+
+    test.each(["codex", "claude-code"] as const)("%s configure: a linked child = base plus exactly one Coordinator line (no chief_coordinate, no coordinator skill)", (provider) => {
+      requireBase();
+      const [was, child] = [base.configure[provider], head.linkedChild![provider]];
+      expect(child.skills).toEqual(was.skills);
+      expect(child.tools.map((tool) => tool.name)).toEqual(was.tools.map((tool) => tool.name));
+      const lines = child.instructions.split("\n");
+      const added = lines.filter((line) => /^Coordinator thr_\w+ supervises you: call chief_escalate before every Need you/.test(line));
+      expect(added).toHaveLength(1);
+      expect(lines.filter((line) => line !== added[0])).toEqual(was.instructions.split("\n"));
     });
   });
 
