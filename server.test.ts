@@ -89,7 +89,7 @@ function catalogModel(model: string, reasoningEfforts = ["medium", "high"], isDe
   };
 }
 
-async function setup(options: { rules?: string; hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
+async function setup(options: { /** projects.get rejects these ids, as the host does for a project that does not exist. */ missingProjects?: string[]; rules?: string; hostStatus?: string; providerAvailable?: boolean; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
   /** tabs.update fails this many times from the start, so a plugin start can meet it. */
   failTabsUpdates?: number;
   /** Runs on the migrated database right before the plugin starts: seeds state a restart would find. */
@@ -142,7 +142,7 @@ async function setup(options: { rules?: string; hostStatus?: string; providerAva
         create: async ({ name }: { name: string }) => section = { id: "sec_chief", name, createdAt: 1, updatedAt: 1 },
       },
       projects: {
-        get: async ({ projectId }: { projectId: string }) => ({
+        get: async ({ projectId }: { projectId: string }) => options.missingProjects?.includes(projectId) ? Promise.reject(new Error("not found")) : ({
           id: projectId,
           name: projectId === "proj_1" ? "Asha" : "Second",
           kind: "standard",
@@ -12941,5 +12941,142 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       expect({ ...withoutMerge(rest), tools: undefined }, name).toEqual({ ...golden.outputs, tools: undefined });
       expect(withoutMerge(rest).tools, `${name}: tool schemas`).toEqual(baseSchemas);
     }
+  });
+});
+
+// docs/specs/coordinator.md (COORD-1..COORD-10). Every case below comes from that spec and the plan contracts, not from server.ts.
+describe("Coordinator", () => {
+  type S = Awaited<ReturnType<typeof setup>>;
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+  const call = (state: S, tool: string, params: object, threadId: string, projectId = "proj_1") =>
+    state.harness.behavior.callAgentTool(tool, params, { threadId, projectId }) as Promise<string>;
+  const cli = (state: S, args: string[], threadId?: string, projectId = "proj_1") =>
+    state.harness.behavior.runCli(args, threadId ? { threadId, projectId } : { projectId });
+  /** A fresh Chief row with no handover: `bb chief create`. */
+  async function make(state: S, projectId = "proj_1") {
+    const result = await cli(state, ["create", "--project", projectId, "--json"], undefined, projectId);
+    expect(result.exitCode, result.stderr).toBe(0);
+    return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
+  }
+  async function coordinator(state: S, projectId = "proj_1") {
+    const id = await make(state, projectId);
+    await call(state, "chief_coordinate", {}, id, projectId);
+    return id;
+  }
+  async function spawnChild(state: S, parent: string, params: Record<string, unknown> = {}, projectId = "proj_1") {
+    const text = await call(state, "chief_spawn", { request: "Do the task", context: "Goal: done", ...params }, parent, projectId);
+    return { text, id: /in thread (thr_\w+)/.exec(text)![1]! };
+  }
+  const row = (state: S, id: string) => rowOf(state, id) as any;
+  const kinds = (state: S) => state.db.prepare(`SELECT dedupe_key AS key, source_thread_id AS source, target_thread_id AS target, delivered_at IS NOT NULL AS delivered FROM alert_outbox WHERE dedupe_key LIKE '%:coordinator-%' ORDER BY rowid`).all() as
+    { key: string; source: string; target: string; delivered: number }[];
+  const doneKeys = (state: S) => kinds(state).filter((alert) => alert.key.includes(":coordinator-done:"));
+  const needYouKeys = (state: S) => kinds(state).filter((alert) => alert.key.includes(":coordinator-need-you:"));
+  const idle = async (state: S, id: string) => {
+    state.live.set(id, { ...state.live.get(id)!, status: "idle" });
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(id)!, lastAssistantText: "done" });
+    await settle();
+  };
+  const sentToCoordinator = (state: S, id: string) => state.sent.filter((message) => message.threadId === id);
+
+  describe("migrations (COORD-10)", () => {
+    // Fingerprint of the 134 statements at base 95aa7df (JSON.stringify sha256), taken from an untouched base checkout.
+    const BASE_MIGRATIONS = { length: 134, sha256: "c5053c8e7deaa962bd2bf6a221c05b8f5918c6bcd22dd1e7f653b67f319c0795" };
+
+    test("the base statements are unchanged and the two Coordinator columns are appended", () => {
+      const prefix = MIGRATIONS.slice(0, BASE_MIGRATIONS.length);
+      expect(createHash("sha256").update(JSON.stringify(prefix)).digest("hex")).toBe(BASE_MIGRATIONS.sha256);
+      expect(MIGRATIONS.slice(BASE_MIGRATIONS.length)).toEqual([
+        "ALTER TABLE managed_threads ADD COLUMN coordinator INTEGER",
+        "ALTER TABLE managed_threads ADD COLUMN coordinator_thread_id TEXT",
+      ]);
+    });
+
+    test("a fresh database has both columns; a database at the base migrations keeps its rows with NULL columns", async () => {
+      const fresh = await setup();
+      const columns = (db: any) => (db.prepare("PRAGMA table_info(managed_threads)").all() as { name: string }[]).map((c) => c.name);
+      expect(columns(fresh.db)).toEqual(expect.arrayContaining(["coordinator", "coordinator_thread_id"]));
+
+      const { bb } = createFakePluginHost({ pluginId: "chief-upgrade-coord" });
+      const db = bb.storage.database();
+      bb.storage.migrate(db, MIGRATIONS.slice(0, BASE_MIGRATIONS.length));
+      expect(columns(db)).not.toContain("coordinator");
+      const insert = db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, created_at, updated_at) VALUES (?, ?, 'proj_1', ?, ?, 1, 1)");
+      insert.run("thr_old_chief", "chief", "Chief", "idle");
+      insert.run("thr_old_worker", "worker", "Worker", "active");
+      bb.storage.migrate(db, MIGRATIONS);
+      expect(db.prepare("SELECT thread_id, role, state, coordinator, coordinator_thread_id FROM managed_threads ORDER BY thread_id").all()).toEqual([
+        { thread_id: "thr_old_chief", role: "chief", state: "idle", coordinator: null, coordinator_thread_id: null },
+        { thread_id: "thr_old_worker", role: "worker", state: "active", coordinator: null, coordinator_thread_id: null },
+      ]);
+      expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
+    });
+  });
+
+  describe("upgrade (COORD-1)", () => {
+    test("an idle Chief becomes a Coordinator once; a repeat changes nothing", async () => {
+      const state = await setup();
+      const chief = await make(state);
+      const text = await call(state, "chief_coordinate", {}, chief);
+      expect(text).toContain("one-way");
+      expect(text).toContain("chief_attach");
+      expect(row(state, chief)).toMatchObject({ role: "chief", coordinator: 1, coordinator_thread_id: null });
+      const before = state.db.prepare("SELECT * FROM managed_threads ORDER BY thread_id").all();
+      expect(await call(state, "chief_coordinate", {}, chief)).toBe("Already a Coordinator.");
+      expect(state.db.prepare("SELECT * FROM managed_threads ORDER BY thread_id").all()).toEqual(before);
+    });
+
+    test("an open todo does not block the upgrade and stays", async () => {
+      const state = await setup();
+      const chief = await make(state);
+      await call(state, "chief_roster", { todo: { text: "Remember the milk" } }, chief);
+      await call(state, "chief_coordinate", {}, chief);
+      expect(row(state, chief).coordinator).toBe(1);
+      expect(state.db.prepare("SELECT chief_thread_id, state FROM chief_todos").all()).toEqual([{ chief_thread_id: chief, state: "open" }]);
+    });
+
+    test("open managed work blocks the upgrade, ready and blocked count, and the message lists the row ids", async () => {
+      const state = await setup();
+      const chief = await make(state);
+      const first = await delegate(state, chief, "First");
+      const second = await delegate(state, chief, "Second");
+      await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, first.threadId);
+      await call(state, "chief_report", { state: "blocked", blocker: "Need a key", recommendation: "Ask the owner" }, second.threadId);
+      expect(row(state, first.threadId).last_report_state).toBe("ready");
+      await expect(call(state, "chief_coordinate", {}, chief)).rejects.toThrow(new RegExp(`${first.threadId}.*${second.threadId}|${second.threadId}.*${first.threadId}`));
+      expect(row(state, chief).coordinator).toBeNull();
+      await completeWorker(state, chief, first.threadId);
+      await completeWorker(state, chief, second.threadId);
+      await call(state, "chief_coordinate", {}, chief);
+      expect(row(state, chief).coordinator).toBe(1);
+    });
+
+    test("a child Chief, an inactive Chief and a non-Chief caller are refused and nothing changes", async () => {
+      const state = await setup();
+      const parent = await coordinator(state);
+      const child = (await spawnChild(state, parent)).id;
+      await expect(call(state, "chief_coordinate", {}, child)).rejects.toThrow(parent);
+      expect(row(state, child)).toMatchObject({ coordinator: null, coordinator_thread_id: parent });
+
+      const archived = await make(state);
+      state.db.prepare("UPDATE managed_threads SET state='archived' WHERE thread_id=?").run(archived);
+      const worker = await delegate(state, await make(state), "Work");
+      for (const caller of [archived, worker.threadId, "thr_unknown"]) {
+        await expect(call(state, "chief_coordinate", {}, caller)).rejects.toThrow("requires an active registered Chief");
+      }
+      expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads WHERE coordinator=1").get()).toEqual({ n: 1 });
+    });
+
+    test("nothing clears the Coordinator flag: lifecycle events, the supervisor and bb chief start", async () => {
+      const state = await setup();
+      const chief = await coordinator(state);
+      await idle(state, chief);
+      state.live.set(chief, { ...state.live.get(chief)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(chief)! });
+      await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(chief)!, lastAssistantText: "boom" });
+      await state.supervisorCycle();
+      await start(state);
+      expect(row(state, chief).coordinator).toBe(1);
+    });
   });
 });
