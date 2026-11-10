@@ -190,6 +190,7 @@ export function createRoster(ctx: Ctx) {
       ...(row.unplanned_reason ? [`unplanned: ${clip(row.unplanned_reason, 200)}`] : []),
       ...(row.review_skipped ? [`review skipped: ${clip(row.review_skipped, 200)}`] : []),
       ...(row.tests_skipped ? [`tests skipped: ${clip(row.tests_skipped, 200)}`] : []),
+      ...(row.retest_skipped ? [`retest skipped: ${clip(row.retest_skipped, 200)}`] : []),
       ...(row.summary || row.result ? [`result: ${row.summary ?? clip(row.result!, 300)}`] : []),
       ...(row.report_path ? [`report: ${row.report_path}`] : []),
       ...(row.blocker ? [`blocker: ${clip(row.blocker, 200)}`] : []),

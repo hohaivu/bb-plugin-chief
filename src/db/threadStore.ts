@@ -231,6 +231,12 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       wrote();
     },
 
+    /** chief_review retestSkipped: Chief's reason for reviewing this fix without the tester rerun it owed. */
+    setRetestSkipped(threadId: string, reason: string, now: number) {
+      db.prepare(`UPDATE managed_threads SET retest_skipped=?, updated_at=? WHERE thread_id=?`).run(reason, now, threadId);
+      wrote();
+    },
+
     /** chief_owner_approval: writes nothing else. */
     recordOwnerApproval(threadId: string, approval: string) {
       db.prepare(`UPDATE managed_threads SET owner_approval=?, owner_approved_at=? WHERE thread_id=?`).run(approval, Date.now(), threadId);

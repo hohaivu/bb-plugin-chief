@@ -1,4 +1,4 @@
-import { type RepairTarget } from "../plan/planProgress";
+import { type RepairTarget, type RetestDebt } from "../plan/planProgress";
 import { reviewEngine } from "../review/prAgent";
 import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
 import { createReviewStart } from "../review/reviewStart";
@@ -36,9 +36,28 @@ export function createNextAction(ctx: Ctx) {
     return `If the spec is wrong: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) with the fix. If the Spec delta cannot be built: start a fresh chief_plan with ${plans ? `the plan files (${plans}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}.`;
   }
 
-  /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready. */
-  function reviewRefusal(worker: ManagedRow): string | null {
-    const block = progress.reviewBlock(worker);
+  /** One sentence per owed tester rerun, then the waiver. The one renderer of retest debt: the review refusal and the ready alert read it. */
+  function retestLines(row: ManagedRow, debts: RetestDebt<ManagedRow>[]): string {
+    const lines = debts.map(({ fix, tester, route }) => {
+      switch (route.kind) {
+        case "tester": {
+          const call = `chief_delegate (${route.wave === undefined ? "" : `planThreadId: ${fix.plan_thread_id}, wave: ${route.wave}, `}replaces: ${route.replaces.thread_id}, kind: tester)`;
+          const productFirst = tester && tester.thread_id === route.replaces.thread_id && ["blocked", "failed"].includes(tester.state)
+            ? ` Or, if ${tester.thread_id}'s blocked report shows a product bug, fix it first — chief_delegate (replaces: ${tester.thread_id}, kind: worker).` : "";
+          return `${fix.thread_id} changed code after the review's rejection and no tester started after it has reported ready: rerun the tests — ${call}.${productFirst}`;
+        }
+        case "wait": return `Tester ${route.tester.thread_id} (${route.tester.state}) is rerunning the tests after ${fix.thread_id}: wait for its ready report.`;
+        case "workerFirst": return `Spec Writer ${route.replaces.thread_id} owns the branch: hand off to a worker first — chief_delegate (replaces: ${route.replaces.thread_id}, kind: worker) — then rerun the tests with kind: tester.`;
+        case "none": return "Restack the chain first; its restacked tester reruns the tests.";
+      }
+    });
+    return `${lines.join(" ")} To review without the rerun, record why: chief_review (workerThreadId: ${row.thread_id}, retestSkipped: "<reason>") — it waives every rerun listed here.`;
+  }
+
+  /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready.
+   * retestWaived: Chief recorded why it reviews without the owed tester reruns. */
+  function reviewRefusal(worker: ManagedRow, retestWaived = false): string | null {
+    const block = progress.reviewBlock(worker, retestWaived);
     if (!block) return null;
     switch (block.kind) {
       case "design": return DESIGN_REVIEW_REFUSAL;
@@ -58,6 +77,7 @@ export function createNextAction(ctx: Ctx) {
         return `One review covers the whole plan once every Spec Writer is ready; ${block.writers.map(({ wave, writer }) => writer ? `wave ${wave}'s ${writer.thread_id} (${writer.state})` : `wave ${wave}'s Spec Writer is not delegated yet — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${wave}, kind: spec-writer), or record why not with chief_skip_specs`).join(", ")} ${block.writers.length > 1 ? "are" : "is"} not ready. Wait for their ready reports, then start the review.`;
       case "pending":
         return `One review covers the whole plan once every wave is ready; wave(s) ${block.pending.join(", ")} of ${block.waves.length} are not ready yet. Wait for their ready reports (delegate any wave not delegated yet), then start the review.`;
+      case "retest": return `Review refused: ${retestLines(worker, block.debts)}`;
     }
   }
 
@@ -100,6 +120,7 @@ export function createNextAction(ctx: Ctx) {
       case "retest":
         if (isWriter(row.kind)) return `A Spec Writer changed docs on test wave ${row.plan_wave}: rerun the tests against them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review. If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
         return `A worker changed code on test wave ${row.plan_wave} after the tests ran: rerun them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review. If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
+      case "retestOwed": return `A code fix after the review's rejection owes a tester rerun before the next review. ${retestLines(row, step.debts)}`;
       case "unplanned":
         return `${row.kind === "tester" ? "" : `Workers never test: delegate a tester on this branch first — chief_delegate (replaces: ${row.thread_id}, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. `}Start its review now: chief_review (workerThreadId: ${row.thread_id}), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: ${row.thread_id}, skipReview: your reason).`;
       case "review": {
@@ -304,7 +325,7 @@ export function createNextAction(ctx: Ctx) {
 
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn: ctx.managedSpawn, controlsThread: (...a) => ctx.controlsThread(...a),
-    plan: { reviewRefusal, reviewTargetsFor, planWavesFor, specWriters },
+    plan: { reviewRefusal, retestDebts: progress.retestDebts, reviewTargetsFor, planWavesFor, specWriters },
     host: {
       settledLive: async (worker) => {
         const live = await waitIdleAfterReport(worker);

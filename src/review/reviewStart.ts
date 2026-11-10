@@ -99,6 +99,8 @@ export interface ReviewBriefInput {
   contractLines: string[];
   /** Chief's waived test waves this review covers, one line each with the reason, already cut to fit. Optional: older callers omit it. */
   waiverLines?: string[];
+  /** The fixes whose tester rerun Chief waived (chief_review retestSkipped), one line each with the reason, already cut to fit. Optional: older callers omit it. */
+  retestWaiverLines?: string[];
   /** Chief's bypassed Spec Writer steps (chief_skip_specs), one line each with the reason, already cut to fit. Optional: older callers omit it. */
   specWaiverLines?: string[];
   /** The chain's spec: true implementation waves Chief did not bypass: a Spec Writer committed docs/ from each one's Spec delta in parallel with its worker. Optional: older callers omit it. */
@@ -122,7 +124,7 @@ export interface ReviewBriefInput {
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
  * Pure: it renders what startReview gathered and reads nothing else. */
 export function reviewBrief(input: ReviewBriefInput): { prompt: string; context: string } {
-  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], specWaiverLines = [], specWaves = [], sideWriters = [], specUnplanned = false, specBaseline = false } = input;
+  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], retestWaiverLines = [], specWaiverLines = [], specWaves = [], sideWriters = [], specUnplanned = false, specBaseline = false } = input;
   const specGate = specWaves.length > 0 || specUnplanned;
   const head = worker.head;
   const many = targets.length > 1;
@@ -189,7 +191,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ]),
     ]),
   ] : [];
-  const waiverSection = waiverLines.length ? ["## Waived test waves", ...waiverLines] : [];
+  const waiverSection = waiverLines.length || retestWaiverLines.length ? ["## Waived test waves", ...waiverLines, ...retestWaiverLines] : [];
   const specWaiverSection = specWaiverLines.length ? ["## Bypassed Spec Writer steps", ...specWaiverLines] : [];
   const testerTargets = (many ? targets : [worker]).filter((target) => target.kind === "tester");
   const specWriterTargets = (many ? targets : [worker]).filter((target) => isWriter(target.kind) && target.lane !== "side");
@@ -294,6 +296,9 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ...(waiverLines.length ? [
         "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them.",
       ] : []),
+      ...(retestWaiverLines.length ? [
+        "Chief waived the tester rerun after the fixes listed under `## Waived test waves` in review-context.md (chief_review retestSkipped), each with its reason. Judge those fixes without a rerun and say so in your report.",
+      ] : []),
       ...(specWaiverLines.length ? [
         "Chief bypassed the Spec Writer on the waves listed under `## Bypassed Spec Writer steps` in review-context.md (chief_skip_specs), each with its reason. Review those waves against their plan: missing docs/ for them is not a finding, and they get no spec gate. The bypass never covers tests, and it never excuses landed docs/ that contradict the code.",
       ] : []),
@@ -383,7 +388,9 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   ledger: ReturnType<typeof createReviewLedger<Row>>;
   managedSpawn: ManagedSpawn<ReviewInsert>;
   plan: {
-    reviewRefusal: (worker: Row) => string | null;
+    reviewRefusal: (worker: Row, retestWaived?: boolean) => string | null;
+    /** The tester reruns this review still owes after a rejection, and the fixes whose rerun Chief waived. */
+    retestDebts: (worker: Row) => { owed: { fix: Row }[]; waived: { fix: Row; reason: string }[] };
     reviewTargetsFor: (worker: Row) => Row[];
     planWavesFor: (planThreadId: string | null) => PlanWave[];
     /** A planner's side-lane Spec Writer rows (optionally one wave), oldest first. Optional: older callers omit it, and no writer is side-lane. */
@@ -528,11 +535,18 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
    * by a fresh one rather than resumed; its reject_streak carries over onto the new
    * row, so deadlock detection still sees consecutive rejections across the fresh
    * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
-  async function startReview(caller: Row, workerThreadId: string, focus?: string): Promise<ReviewStarted> {
+  async function startReview(caller: Row, workerThreadId: string, focus?: string, retestSkipped?: string): Promise<ReviewStarted> {
     const worker = store.get(workerThreadId);
     if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
-    const refusal = plan.reviewRefusal(worker);
+    const refusal = plan.reviewRefusal(worker, !!retestSkipped);
     if (refusal) throw new Error(refusal);
+    if (retestSkipped) {
+      // The waiver covers every rerun the refusal would have listed; it is stored before the review launches.
+      const { owed } = plan.retestDebts(worker);
+      if (!owed.length) throw new Error("No tester rerun is owed on this review; drop retestSkipped.");
+      const now = Date.now();
+      store.batch(() => { for (const debt of owed) store.setRetestSkipped(debt.fix.thread_id, retestSkipped, now); });
+    }
     // One review of a plan covers the latest worker of every branch; any other worker covers itself.
     const targets = plan.reviewTargetsFor(worker);
     for (const target of targets) {
@@ -654,6 +668,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         contractLines,
         waiverLines: chain.filter((n) => waves[n - 1]!.testsSkipped)
           .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: tests skipped by Chief: ${clip(waves[n - 1]!.testsSkipped!, 500)}`),
+        retestWaiverLines: plan.retestDebts(worker).waived.map(({ fix, reason }) => `Retest after fix ${fix.thread_id} waived by Chief: ${clip(reason, 500)}`),
         specWaiverLines: chain.filter((n) => waves[n - 1]!.specsSkipped)
           .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: specs skipped by Chief: ${clip(waves[n - 1]!.specsSkipped!, 500)}`),
         specWaves,

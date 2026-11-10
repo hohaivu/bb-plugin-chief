@@ -98,6 +98,7 @@ export function createInspect(ctx: Ctx) {
       ...(row.unplanned_reason ? [`Unplanned: ${clip(row.unplanned_reason, 300)}`] : []),
       ...(row.review_skipped ? [`Review skipped: ${clip(row.review_skipped, 300)}`] : []),
       ...(row.tests_skipped ? [`Tests skipped: ${clip(row.tests_skipped, 300)}`] : []),
+      ...(row.retest_skipped ? [`Retest skipped: ${clip(row.retest_skipped, 300)}`] : []),
       ...(row.role === "planner" ? planWavesFor(threadId).flatMap((wave, index) => wave.testsSkipped ? [`wave ${index + 1}: tests skipped: ${clip(wave.testsSkipped, 300)}`] : []) : []),
       ...(row.role === "planner" ? planWavesFor(threadId).flatMap((wave, index) => wave.specsSkipped ? [`wave ${index + 1}: specs skipped: ${clip(wave.specsSkipped, 300)}`] : []) : []),
       `Persisted state: ${row.state}`,

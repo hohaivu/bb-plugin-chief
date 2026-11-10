@@ -225,6 +225,8 @@ export interface ManagedRow {
   review_skipped: string | null;
   /** Worker row only: Chief's reason for completing unplanned work with no tester (chief_complete testsSkipped); null otherwise. */
   tests_skipped: string | null;
+  /** Worker row only: Chief's reason for reviewing this fix without the tester rerun it owed (chief_review retestSkipped); null otherwise. */
+  retest_skipped: string | null;
   /** Worker row only: the command the worker's brief makes it run; nothing reruns it. */
   verify_command: string | null;
   /** Chief row only: 1 for a Coordinator. */

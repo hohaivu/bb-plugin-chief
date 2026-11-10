@@ -411,4 +411,6 @@ export const MIGRATIONS = [
     // A Coordinator is a Chief row with coordinator=1; a child Chief names its Coordinator here. chief_thread_id keeps meaning "managed work".
     `ALTER TABLE managed_threads ADD COLUMN coordinator INTEGER`,
     `ALTER TABLE managed_threads ADD COLUMN coordinator_thread_id TEXT`,
+    // Worker row only: Chief's reason for reviewing a fix without the tester rerun it owed (chief_review retestSkipped); NULL otherwise.
+    `ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT`,
 ];

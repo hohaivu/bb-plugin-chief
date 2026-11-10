@@ -78,6 +78,18 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as PlanWave[]) : [];
   }
 
+  /** The test waves on wave n's raw chain (an absent waived wave counts), head to tip. */
+  function chainTests(planThreadId: string | null, n: number): number[] {
+    const waves = rawWaves(planThreadId);
+    return chainOf(waves, n).filter((m) => waves[m - 1]?.test);
+  }
+
+  /** The testsSkipped reason of the first test wave on wave n's raw chain that has one. */
+  function chainWaiver(planThreadId: string | null, n: number): string | undefined {
+    const waves = rawWaves(planThreadId);
+    return chainTests(planThreadId, n).map((m) => waves[m - 1]!.testsSkipped).find(Boolean);
+  }
+
   /** True for a worker delegated on a plan wave marked test: true. */
   function isTestWave(row: Row): boolean {
     return row.role === "worker" && !!row.plan_thread_id && row.plan_wave != null && !!planWavesFor(row.plan_thread_id)[row.plan_wave - 1]?.test;
@@ -238,5 +250,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(latestWorker(worker.plan_thread_id!, tip)?.state ?? ""));
   }
 
-  return { planWavesFor, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }
