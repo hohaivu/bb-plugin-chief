@@ -13027,6 +13027,58 @@ describe("Coordinator", () => {
       expect(state.db.prepare("SELECT * FROM managed_threads ORDER BY thread_id").all()).toEqual(before);
     });
 
+    describe("title rename", () => {
+      const titleOf = (state: S, id: string) => ({ row: row(state, id).title as string, thread: state.live.get(id)!.title as string });
+
+      test("the title's leading Chief becomes Coordinator in the row and the thread, and the rest stays", async () => {
+        const state = await setup();
+        const chief = await make(state);
+        const plain = await make(state);
+        const before = titleOf(state, chief);
+        expect(before.row).toMatch(/^Chief · .+/);
+        expect(before.thread).toBe(before.row);
+        await call(state, "chief_coordinate", {}, chief);
+        const rest = before.row.slice("Chief".length);
+        expect(titleOf(state, chief)).toEqual({ row: `Coordinator${rest}`, thread: `Coordinator${rest}` });
+        // A Chief that does not upgrade keeps its title.
+        expect(titleOf(state, plain).row).toMatch(/^Chief · /);
+        expect(titleOf(state, plain).thread).toBe(titleOf(state, plain).row);
+      });
+
+      test("a repeated chief_coordinate does not rename again or double the prefix", async () => {
+        const state = await setup();
+        const chief = await make(state);
+        await call(state, "chief_coordinate", {}, chief);
+        const renamed = titleOf(state, chief);
+        // The owner renames the thread by hand; a repeat call must not touch it, nor the row.
+        state.live.set(chief, { ...state.live.get(chief)!, title: "Renamed by owner" });
+        await call(state, "chief_coordinate", {}, chief);
+        expect(titleOf(state, chief)).toEqual({ row: renamed.row, thread: "Renamed by owner" });
+        expect(renamed.row.match(/Coordinator/g)).toHaveLength(1);
+      });
+
+      test("a failed thread rename only warns: the upgrade stands and the row has the new title", async () => {
+        const state = await setup();
+        const chief = await make(state);
+        const old = titleOf(state, chief);
+        state.failNextUpdate(chief);
+        await expect(call(state, "chief_coordinate", {}, chief)).resolves.toContain("one-way");
+        expect(row(state, chief)).toMatchObject({ coordinator: 1, title: `Coordinator${old.row.slice("Chief".length)}` });
+        expect(state.live.get(chief)!.title).toBe(old.thread);
+        expect(state.harness.logEntries.some((entry) => entry.level === "warn" && entry.message.includes(chief))).toBe(true);
+        expect(await call(state, "chief_coordinate", {}, chief)).toBe("Already a Coordinator.");
+      });
+
+      test("a refused upgrade (open managed work) leaves the title alone", async () => {
+        const state = await setup();
+        const chief = await make(state);
+        await delegate(state, chief, "Busy");
+        const before = titleOf(state, chief);
+        await expect(call(state, "chief_coordinate", {}, chief)).rejects.toThrow("still owns open managed threads");
+        expect(titleOf(state, chief)).toEqual(before);
+      });
+    });
+
     test("an open todo does not block the upgrade and stays", async () => {
       const state = await setup();
       const chief = await make(state);
