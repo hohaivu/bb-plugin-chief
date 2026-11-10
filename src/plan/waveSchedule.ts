@@ -183,12 +183,14 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
   }
 
   /** The Spec Writers of one task, the one provenance rule for docs/ commits: the writers in the task's replaces: chain (chainIds, from the
-   * review ledger), plus the side-lane writers on the waves of the row's plan chain, in any state. Never a writer of another plan, chain or task. */
+   * review ledger) that belong to the row's own plan and chain waves (or, unplanned, to no plan), plus the side-lane writers on the waves of the
+   * row's plan chain, in any state. Never a writer of another plan, chain or task: a fresh plan's recovery replaces: chain reaches the old plan's writer, which stays excluded. */
   function taskWriters(row: Row, chainIds: string[]): Row[] {
     const planThreadId = row.plan_thread_id;
     const chainWaves = planThreadId && row.plan_wave != null ? chainOf(rawWaves(planThreadId), row.plan_wave) : [];
     const found = [
-      ...chainIds.flatMap((id) => rows().get(id) ?? []).filter((other) => isWriter(other.kind)),
+      ...chainIds.flatMap((id) => rows().get(id) ?? []).filter((other) => isWriter(other.kind)
+        && other.plan_thread_id === planThreadId && (!planThreadId || (other.plan_wave != null && chainWaves.includes(other.plan_wave)))),
       ...(planThreadId ? specWriters(planThreadId).filter((other) => other.plan_wave != null && chainWaves.includes(other.plan_wave)) : []),
     ];
     return [...new Map(found.map((other) => [other.thread_id, other])).values()];

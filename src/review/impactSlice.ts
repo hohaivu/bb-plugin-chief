@@ -78,8 +78,8 @@ export async function docsCommits(opts: {
     else {
       baseRef = await read(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
       if (!baseRef) return { skipped: "origin/HEAD not set" };
-      // A stale default branch would pull its newer commits into the range; best effort, the branch fetch above already worked.
-      await ok(["fetch", "origin", baseRef.replace(/^origin\//, "")]);
+      // A stale default branch would pull its newer commits into the range: a failed fetch skips the check.
+      if (!await ok(["fetch", "origin", baseRef.replace(/^origin\//, "")])) return { skipped: `could not fetch ${baseRef}` };
     }
     const mergeBase = await read(["merge-base", baseRef, headSha]);
     if (!mergeBase) return { skipped: `no merge-base between ${baseRef} and ${headSha.slice(0, 12)}` };
