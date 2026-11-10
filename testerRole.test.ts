@@ -445,6 +445,25 @@ describe("tester role", () => {
     expect(rowOf(state, followed.thread)).toMatchObject({ kind: "tester", replaces_thread_id: fix });
   });
 
+  // Retest debt contract (ladder, negative control): at the consult and stop rungs a tester replacing a live rejected task that owes
+  // no rerun there (not the exact hand-off the review refusal renders) still meets that rung's ladder guard and starts nothing,
+  // while the owed hand-off of another chain is admitted. Regression: the exemption keyed on kind: tester alone.
+  test.each([[2, "Call chief_consult"], [3, "escalate to the user with both positions"]] as const)("at a streak of %i a tester replacing a rejected task that owes no rerun still meets the ladder", async (streak, ladder) => {
+    const state = await setup();
+    const { chief, fix } = await unplannedFix(state);
+    const other = await delegate(state, chief.threadId, "Other task");
+    await readyIdle(state, other.threadId, "Done");
+    await reviewed(state, chief.threadId, other.threadId, "request_changes");
+    const reviewerOf = (workerThreadId: string) => (state.db.prepare(`SELECT t.reviewer_thread_id AS id FROM review_targets t WHERE t.worker_thread_id=? ORDER BY t.rowid DESC`).get(workerThreadId) as { id: string }).id;
+    state.db.prepare(`UPDATE managed_threads SET reject_streak=? WHERE thread_id IN (?, ?)`).run(streak, reviewerOf(fix), reviewerOf(other.threadId));
+    await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, chief.threadId);
+    const rows = (await status(state)).threads.length;
+    await expect(tool(state, "chief_delegate", { title: "Tests", mission: "Rerun", replaces: other.threadId, kind: "tester" }, chief.threadId)).rejects.toThrow(ladder);
+    expect((await status(state)).threads.length).toBe(rows);
+    const followed = await followRoute(state, chief.threadId, await refusal(review(state, chief, fix)));
+    expect(rowOf(state, followed.thread)).toMatchObject({ kind: "tester", replaces_thread_id: fix });
+  });
+
   // Retest debt contract (migration, storage): retest_skipped is the last appended migration entry; a database one entry behind gains
   // a NULL column and keeps its rows, and a fresh one has it. Regression: the column is added out of order or not at all, so the
   // waiver write throws on an upgraded database.
@@ -475,9 +494,18 @@ describe("tester role", () => {
     await readyIdle(state, followUp, "More");
     expect(await review(state, chief, followUp)).toMatch(/^Started “Review/);
 
+    // A waived review covers the fix; the waiver itself is then erased, so only the covering review can discharge the debt.
     const rejected = await unplannedFix(state);
     await review(state, rejected.chief, rejected.fix, { retestSkipped: "docs only" });
+    state.db.prepare(`UPDATE managed_threads SET retest_skipped=NULL WHERE thread_id=?`).run(rejected.fix);
+    await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, rejected.chief.threadId);
+    expect(rowOf(state, rejected.fix).retest_skipped).toBeNull();
+    expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE kind='tester'`).get()).toEqual({ n: 0 });
     expect(await review(state, rejected.chief, rejected.fix)).toMatch(/^Using existing “Review/);
+
+    // Control: the fix reports again, so the review no longer covers its newest report and a rerun is owed.
+    await readyIdle(state, rejected.fix, "Fixed once more");
+    expect(await refusal(review(state, rejected.chief, rejected.fix))).toContain(`rerun the tests — ${unplannedRoute(rejected.fix)}`);
   });
 
   // Retest debt contract (waiver, public chief_review): the waiver writes the fix's retest_skipped and refreshes the row cache, and the
