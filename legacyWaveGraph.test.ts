@@ -65,7 +65,7 @@ function snapshot() {
             if (fix && wave === 1) rows.set("fix1", { ...worker, thread_id: "fix1", state: "ready", last_report_state: "ready", replaces_thread_id: "w1", created_at: clock++ });
           });
           const covering = (threadId: string) => reviewed && rows.get(threadId)?.role === "worker" ? { thread_id: "reviewer", state: "ready", verdict: "approve", target_seq: 1 } : undefined;
-          const ledger = { covering, isCurrent: (worker: { thread_id: string; report_seq: number }) => covering(worker.thread_id)?.target_seq === worker.report_seq, targets: () => [] } as any;
+          const ledger = { covering, isCurrent: (worker: { thread_id: string; report_seq: number }) => covering(worker.thread_id)?.target_seq === worker.report_seq, targets: () => [], newestVerdictAt: () => null } as any;
           const schedule = createWaveSchedule<Row>(() => rows);
           const progress = createPlanProgress<Row>(() => rows, schedule, ledger, { terminal: (s) => s === "complete", busy: (s) => s === "active" || s === "starting" });
           const graphWaves: PlanWave[] = schedule.planWavesFor("planner");

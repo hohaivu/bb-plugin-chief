@@ -371,7 +371,7 @@ describe("tester role", () => {
       const first = await worker();
       await reviewed(state, chief, first, "request_changes");
       const second = await worker({ replaces: first });
-      await reviewed(state, chief, second, "request_changes");
+      await reviewed(state, chief, second, "request_changes", { retestSkipped: "the rerun is not what this test pins" });
       const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId;
       const advice = await pendingLine(reviewer);
       expect(advice).toContain(`The reviewer still requires changes after 2 consecutive rounds. Call chief_consult (workerThreadId: ${second}) now, before any further delegation`);

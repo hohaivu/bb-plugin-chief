@@ -15,7 +15,7 @@ const MAX_STALL_RESETS = 2;
 const MAX_LOG_READ = 30;
 
 export function createDelegation(ctx: Ctx) {
-  const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, reviewerFails, store } = ctx;
+  const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, progress, reviewerFails, store } = ctx;
   /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
     if (!(await ctx.plannerEnabled())) {
@@ -167,7 +167,9 @@ export function createDelegation(ctx: Ctx) {
       // The escalation ladder: round 2 needs a consult that gave its advice on this task, round 3 needs the user.
       // Read from the task's verdict history, not the open reviewer: a fresh or completed reviewer,
       // a re-pointed snapshot, or a second replaces: before the next review must not reset it.
-      const needs = ledger.replacement(prior, !!params.userApprovedRound);
+      // Only the exact retest tester hand-off the review refusal renders skips the consult and user rungs.
+      const retestHandoff = params.kind === "tester" && progress.retestDebts(prior).owed.some((debt) => debt.route.kind === "tester" && debt.route.replaces.thread_id === prior.thread_id);
+      const needs = retestHandoff ? null : ledger.replacement(prior, !!params.userApprovedRound);
       if (needs?.needs === "user") {
         throw new Error(`The reviewer has requested changes ${needs.streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
       }

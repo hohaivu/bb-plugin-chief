@@ -7,7 +7,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { MIGRATIONS } from "./src/db/migrations";
 import { loadBaseBuild } from "./scripts/loadBaseBuild";
-import { acceptCoreRuleTrim, acceptPlanningLine, acceptSpecLaneWording } from "./test/specLaneWording";
+import { acceptCoreRuleTrim, acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -54,12 +54,13 @@ describe("Coordinator", () => {
     // Fingerprint of the 134 statements at base 95aa7df (JSON.stringify sha256), taken from an untouched base checkout.
     const BASE_MIGRATIONS = { length: 134, sha256: "c5053c8e7deaa962bd2bf6a221c05b8f5918c6bcd22dd1e7f653b67f319c0795" };
 
-    test("the base statements are unchanged and the two Coordinator columns are appended", () => {
+    test("the base statements are unchanged; the two Coordinator columns, then the retest_skipped column, are appended", () => {
       const prefix = MIGRATIONS.slice(0, BASE_MIGRATIONS.length);
       expect(createHash("sha256").update(JSON.stringify(prefix)).digest("hex")).toBe(BASE_MIGRATIONS.sha256);
       expect(MIGRATIONS.slice(BASE_MIGRATIONS.length)).toEqual([
         "ALTER TABLE managed_threads ADD COLUMN coordinator INTEGER",
         "ALTER TABLE managed_threads ADD COLUMN coordinator_thread_id TEXT",
+        "ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT",
       ]);
     });
 
@@ -950,12 +951,13 @@ describe("Coordinator", () => {
       expect(head.meta.sha).toMatch(/^[0-9a-f]{40}$/);
     });
 
-    test("MIGRATIONS: the base array is an unchanged prefix of head, followed by exactly the two Coordinator ALTERs", () => {
+    test("MIGRATIONS: the base array is an unchanged prefix of head, followed by the two Coordinator ALTERs and the retest_skipped ALTER", () => {
       requireBase();
       expect(head.migrations.slice(0, base.migrations.length)).toEqual(base.migrations);
       const added = head.migrations.slice(base.migrations.length);
-      expect(added).toHaveLength(2);
-      for (const statement of added) expect(statement).toMatch(/^ALTER TABLE \w+ ADD COLUMN .*(coordinator)/is);
+      expect(added).toHaveLength(3);
+      for (const statement of added.slice(0, 2)) expect(statement).toMatch(/^ALTER TABLE \w+ ADD COLUMN .*(coordinator)/is);
+      expect(added[2]).toBe("ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT");
     });
 
     test("roster: a plain Chief's roster is byte-identical to base", () => {
@@ -995,6 +997,8 @@ describe("Coordinator", () => {
       escalate.description = oldEscalate.description;
       // Plan 2 contract 6: the Spec Writer wording of chief_delegate, chief_complete and chief_skip_specs moved; asserted, then restored to base.
       for (const tool of now.tools) acceptSpecLaneWording(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
+      // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
+      for (const tool of now.tools) acceptRetestDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       expect(now.tools).toEqual(was.tools);
       // Instructions: only the preload line's max_results moves by one (claude-code); codex is byte-identical.
       now.instructions = acceptCoreRuleTrim(acceptPlanningLine(now.instructions, was.instructions), was.instructions);

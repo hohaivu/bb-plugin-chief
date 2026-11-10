@@ -3,7 +3,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import { checkPlan } from "./src/report/reportIntake";
 import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, type WriterState, delegateWriter, fullChain, lastAlert, ownerOn, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withBoth, withWorker, withWriter, writerOn } from "./test/specWriterHelpers";
-import { READY, type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, workerOn } from "./test/testerHelpers";
+import { READY, type State, ctxOf, delegateWave, followRoute, plan, planWave, planWaves, readyIdle, refusal, report, reviewerCount, rerunRoute, review, reviewed, rowOf, setLive, tick, tool, workerOn } from "./test/testerHelpers";
 import { TEST_WAVE, approvePlan, delegate, disposals, disposeAll, latestReviewContext, legacyWave, planFile, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -1014,6 +1014,84 @@ describe("tester role", () => {
       await expect(tool(state, "chief_delegate", { title: "Tests", mission: "Test it", replaces: writer, kind: "tester" }, chief.threadId)).rejects.toThrow(
         `Spec Writer ${writer} hands off to its worker: chief_delegate (replaces: ${writer}, kind: worker).`);
       expect(rowOf(state, writer).state).toBe("ready");
+    });
+
+    // Retest debt contract (docs/specs/plan-chains.md "Retest Debt", live owner): the rerun route replaces the chain's live owner, and
+    // following it through the real chief_delegate is admitted in the owner's environment. Regression: a route naming the fix instead of
+    // the writer owner is refused by the holder rule; one that is not executable strands the debt.
+    test("a test-wave Spec Writer repair owns the branch: the retest route replaces it and is admitted in its environment", async () => {
+      const state = await setup();
+      const { chief, planner, tester } = await fullChain(state);
+      await reviewed(state, chief.threadId, tester, "request_changes");
+      await tick();
+      const fix = await swap(state, chief, planner.threadId, 2, tester, "worker");
+      await readyIdle(state, fix);
+      await tick();
+      const writer = await swap(state, chief, planner.threadId, 2, fix, "spec-writer");
+      await readyIdle(state, writer);
+      const message = await refusal(review(state, chief, writer));
+      expect(message).toContain(`rerun the tests — ${rerunRoute(planner, 2, writer)}.`);
+      const followed = await followRoute(state, chief.threadId, message);
+      expect(rowOf(state, followed.thread)).toMatchObject({ kind: "tester", replaces_thread_id: writer, plan_wave: 2 });
+      expect(state.live.get(followed.thread)!.environmentId).toBe(state.live.get(writer)!.environmentId);
+      expect(state.spawned.at(-1).environment).toEqual({ type: "reuse", environmentId: state.live.get(writer)!.environmentId });
+    });
+
+    test("an unplanned Spec Writer owner routes the rerun through a worker first, and that call is admitted", async () => {
+      const state = await setup();
+      const chief = await start(state);
+      const first = await delegate(state, chief.threadId, "Fix totals");
+      await readyIdle(state, first.threadId, "Done");
+      await reviewed(state, chief.threadId, first.threadId, "request_changes");
+      await tick();
+      const fix = (await delegate(state, chief.threadId, "Fix", { replaces: first.threadId })).threadId;
+      await readyIdle(state, fix, "Fixed");
+      await tick();
+      await tool(state, "chief_delegate", { title: "Docs", mission: "Update docs", replaces: fix, kind: "spec-writer", unplannedReason: "Bounded" }, chief.threadId);
+      const writer = (await status(state)).threads.filter((row) => row.role === "worker").at(-1)!.threadId;
+      await readyIdle(state, writer, "Docs done");
+      const message = await refusal(review(state, chief, writer));
+      expect(message).toContain(`Spec Writer ${writer} owns the branch: hand off to a worker first — chief_delegate (replaces: ${writer}, kind: worker) — then rerun the tests with kind: tester.`);
+      const followed = await followRoute(state, chief.threadId, message, 0, "Hand off");
+      expect(rowOf(state, followed.thread)).toMatchObject({ kind: null, role: "worker", replaces_thread_id: writer });
+    });
+
+    // Retest debt contract (exemptions): only a worker row created after a rejection is a fix. A Spec Writer's docs repair (side-lane or
+    // implementation-lane) is no code change and owes no rerun by itself. Regression: any row after a rejection counts as a fix, so a
+    // docs-only repair is refused with a tester-rerun route it cannot satisfy.
+    test.each([["a side-lane docs repair", "side"], ["an implementation-lane docs repair", "implementation"]] as const)("%s after a rejection owes no tester rerun", async (_label, lane) => {
+      const state = await setup();
+      const { chief, planner, writer, tester } = await fullChain(state);
+      await reviewed(state, chief.threadId, tester, "request_changes");
+      await tick();
+      const repair = await swap(state, chief, planner.threadId, lane === "side" ? 1 : 2, lane === "side" ? writer : tester, "spec-writer");
+      await readyIdle(state, repair);
+      await tick();
+      const before = await reviewerCount(state);
+      // The side writer never starts a review itself (its chain tip does): the debt question is the tip's, so review the tip.
+      expect(await review(state, chief, lane === "side" ? tester : repair)).toMatch(/^Started “Review · Wave 2”/);
+      expect(await reviewerCount(state)).toBe(before + 1);
+    });
+
+    // Retest debt contract (refusal order, case 10): a side writer that is not ready is refused as writers before any retest, and the refusal
+    // carries no waiver. Regression: the retest check runs first, so Chief reruns tests on a chain whose docs are still being written.
+    test("a busy side-lane writer is refused as writers before the owed retest, with no waiver offered", async () => {
+      const state = await setup();
+      const { chief, planner, writer, tester } = await fullChain(state);
+      await reviewed(state, chief.threadId, tester, "request_changes");
+      await tick();
+      const fix = await swap(state, chief, planner.threadId, 2, tester, "worker");
+      await readyIdle(state, fix);
+      await tick();
+      // Control: with the writer ready the same review is the retest refusal.
+      expect(await refusal(review(state, chief, fix))).toContain(`${fix} changed code after the review's rejection`);
+      const repair = await swap(state, chief, planner.threadId, 1, writer, "spec-writer");
+      const message = await refusal(review(state, chief, fix));
+      expect(message).toBe(`One review covers the whole plan once every Spec Writer is ready; wave 1's ${repair} (starting) is not ready. Wait for their ready reports, then start the review.`);
+      expect(message).not.toContain("changed code after");
+      expect(message).not.toContain("retestSkipped");
+      expect(rowOf(state, repair).state).not.toBe("ready");
+      expect(await reviewerCount(state)).toBe(1);
     });
   });
 });

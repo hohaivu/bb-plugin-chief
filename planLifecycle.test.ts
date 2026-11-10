@@ -362,7 +362,19 @@ describe("admitDelegation: test waves", () => {
 
   test("a tester on a non-test wave of a plan that has a test wave is refused, naming the test waves", () => {
     const { admit } = world({ [P]: [{ path: "w1" }, { path: "w2" }, { path: "w3", test: true }] }, [{ id: "w", plan: P, wave: 1 }]);
-    expect(() => admit({ ...planned, wave: 2, prior: "w", ...tester })).toThrow("Wave 2 is not a test wave: a tester runs only this plan's test waves (3).");
+    expect(() => admit({ ...planned, wave: 2, prior: "w", ...tester })).toThrow("Wave 2 is not a test wave: a tester runs only its chain's test waves (3).");
+  });
+
+  // Contract (chain-scoped tester admission, retest debt): a tester is admitted on any wave of a chain whose raw chain has no test wave, even when
+  // another chain of the plan has one (the rerun after a fix on a no-test chain); a chain that has a test wave, delegated or waived absent, still
+  // refuses it on its non-test waves. Regression: the plan-wide check refuses the rerun on the no-test chain, or the absent waiver drops the chain's test wave.
+  test("a tester is admitted on a chain with no test wave and refused on a chain that has one, waived or not", () => {
+    const chains: PlanWave[] = [{ path: "w1" }, { path: "w2", test: true }, { path: "w3", dependsOn: [] }];
+    const { admit } = world({ [P]: chains }, [{ id: "a", plan: P, wave: 1 }, { id: "b", plan: P, wave: 3 }]);
+    expect(admit({ ...planned, wave: 3, prior: "b", ...tester }).kind).toBe("tester");
+    expect(() => admit({ ...planned, wave: 1, prior: "a", ...tester })).toThrow("Wave 1 is not a test wave: a tester runs only its chain's test waves (2).");
+    const absent = world({ [P]: [{ path: "w1" }, { path: "w2", test: true, testsSkipped: "docs only" }] }, [{ id: "a", plan: P, wave: 1 }]);
+    expect(() => absent.admit({ ...planned, wave: 1, prior: "a", ...tester })).toThrow("Wave 1 is not a test wave: a tester runs only its chain's test waves (2).");
   });
 
   test("a tester on a plan with no test wave needs a prior or, once the worker is complete, a new branch", () => {

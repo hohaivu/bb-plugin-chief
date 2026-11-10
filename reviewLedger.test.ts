@@ -554,3 +554,25 @@ describe("eventCounts: review events per reviewer", () => {
     expect(counts.get("r3")).toEqual(noCounts);
   });
 });
+
+// Contract (retest debt, wave 1): newestVerdictAt is the one owner of "what was the newest verdict over these rows and when": by recording order
+// (insertion id), not by the `at` time, over only the ids given; empty input and no verdict give null. The debt rule reads it as the rejection
+// a later fix is measured against. Regression: the newest is chosen by `at` (a clock step back makes an old rejection newest), or it reads
+// another chain's verdicts, so a fix is measured against a rejection that is not its chain's.
+describe("newestVerdictAt: the newest verdict over some rows", () => {
+  test("the latest recorded verdict wins whatever its time, other rows are ignored, no input or no verdict is null", () => {
+    const { ledger, worker, reviewer, verdict } = world();
+    worker("w1");
+    worker("w2");
+    worker("other");
+    const r = reviewer("r1", ["w1", "w2", "other"]);
+    verdict(r, ["w1"], "request_changes", 500);
+    verdict(r, ["w2"], "approve", 100);
+    verdict(r, ["other"], "request_changes", 900);
+    expect(ledger.newestVerdictAt(["w1"])).toEqual({ verdict: "request_changes", at: 500 });
+    expect(ledger.newestVerdictAt(["w1", "w2"])).toEqual({ verdict: "approve", at: 100 });
+    expect(ledger.newestVerdictAt(["other", "w2"])).toEqual({ verdict: "request_changes", at: 900 });
+    expect(ledger.newestVerdictAt([])).toBeNull();
+    expect(ledger.newestVerdictAt(["unknown"])).toBeNull();
+  });
+});

@@ -20,7 +20,14 @@ export interface ProgressRow {
   worker_thread_id: string | null;
   reject_streak: number;
   regression: number | null;
+  retest_skipped: string | null;
 }
+
+/** Where Chief hands a chain's tester rerun: a tester on the chain's live owner (wave: the plan wave it runs on), the tester already
+ * running, a worker hand-off first (a Spec Writer owns an unplanned branch), or nothing yet (restack the chain first). */
+export type RetestRoute<Row> = { kind: "tester"; wave?: number; replaces: Row } | { kind: "wait"; tester: Row } | { kind: "workerFirst"; replaces: Row } | { kind: "none" };
+/** A fix that changed code after a reviewer's rejection and still owes a tester rerun; tester is the newest tester started after it. */
+export type RetestDebt<Row> = { fix: Row; tester?: Row; route: RetestRoute<Row> };
 
 /** One worker a reviewer covers: its lane (a side-lane Spec Writer or an implementation row), its wave, whether it is a tester branch (a tester row or a worker on a test wave),
  * and whether it sits on a spec-bearing chain. */
@@ -55,7 +62,7 @@ export function createPlanProgress<Row extends ProgressRow>(
   ledger: ReturnType<typeof createReviewLedger<Row>>,
   states: ProgressStates,
 ) {
-  const { planWavesFor, isDesignWave, isTestWave, specChain, laneOf, sideLane, waveWorkers, specWriters, latestWorker, latestSideWriter, latestWriter, writerPending, chainOwner, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
+  const { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, specChain, laneOf, sideLane, waveWorkers, specWriters, latestWorker, latestSideWriter, latestWriter, writerPending, chainOwner, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
 
   /** Spec waves of a plan (or of the given waves) whose Spec Writer is owed, with their newest writer if any. */
   function pendingWriters(planThreadId: string, waves: PlanWave[], among: number[] = waves.map((_, index) => index + 1)) {
@@ -75,8 +82,50 @@ export function createPlanProgress<Row extends ProgressRow>(
     return { next, successor, restacked: successor.created_at >= worker.created_at };
   }
 
-  /** Why a worker may not start a review now, or null (a plan's one review runs once, after every wave is ready). */
-  function reviewBlock(worker: Row):
+  /** The tester reruns a plan's (or an unplanned task's) review still owes after a rejection: one debt per chain, and the fixes
+   * whose rerun Chief waived. Debt is read from the rows, never from a tester: a fix is a code row created after the chain's newest
+   * verdict, when that verdict is request_changes. It is paid by a tester started after the fix that reported ready, a waived test wave
+   * on the raw chain, retest_skipped on the fix, or a review that covers the fix's report. */
+  function retestDebts(row: Row): { owed: RetestDebt<Row>[]; waived: { fix: Row; reason: string }[] } {
+    const owed: RetestDebt<Row>[] = [];
+    const waived: { fix: Row; reason: string }[] = [];
+    const byAge = (a: Row, b: Row) => a.created_at - b.created_at;
+    // One chain of rows. owner: the live row a tester hand-off replaces. waiver: a waived test wave on the chain. handoff: the route
+    // when no tester of the chain is running; a running tester on the owner is always waited for.
+    const evaluate = (chainRows: Row[], owner: Row | undefined, waiver: string | undefined, handoff: () => RetestRoute<Row>) => {
+      const rejection = ledger.newestVerdictAt(chainRows.map((r) => r.thread_id));
+      if (rejection?.verdict !== "request_changes") return;
+      const fix = chainRows.filter((r) => r.role === "worker" && (r.kind ?? "worker") === "worker" && !sideLane(r) && !isDesignWave(r) && r.created_at > rejection.at).at(-1);
+      if (!fix) return;
+      const tester = chainRows.filter((r) => r.kind === "tester" && r.created_at > fix.created_at).at(-1);
+      if ((tester && (isReady(tester) || (tester.state === "complete" && tester.last_report_state === "ready"))) || waiver || ledger.isCurrent(fix)) return;
+      if (fix.retest_skipped) waived.push({ fix, reason: fix.retest_skipped });
+      else owed.push({ fix, tester, route: tester && tester.thread_id === owner?.thread_id && tester.state === "active" ? { kind: "wait", tester } : handoff() });
+    };
+    const planThreadId = row.plan_thread_id;
+    if (planThreadId && row.plan_wave != null && planWavesFor(planThreadId).length) {
+      // The raw graph keeps an absent waived test wave on its chain.
+      const waves = rawWaves(planThreadId);
+      for (const head of heads(waves)) {
+        const owner = chainOwner(planThreadId, waves, head);
+        const test = chainTests(planThreadId, head).at(-1);
+        evaluate(chainOf(waves, head).flatMap((n) => waveWorkers(planThreadId, n)).sort(byAge), owner, chainWaiver(planThreadId, head), () => {
+          if (!owner) return { kind: "none" };
+          if (test === undefined) return { kind: "tester", wave: owner.plan_wave!, replaces: owner };
+          return owner.plan_wave === test || owner.plan_wave === parentOf(waves, test) ? { kind: "tester", wave: test, replaces: owner } : { kind: "none" };
+        });
+      }
+    } else {
+      const owner = [...rows().values()].filter((r) => r.role === "worker" && !states.terminal(r.state) && ledger.taskChain(r.thread_id).includes(row.thread_id)).sort(byAge).at(-1) ?? row;
+      const chainRows = ledger.taskChain(owner.thread_id).flatMap((id) => rows().get(id) ?? []).sort(byAge);
+      evaluate(chainRows, owner, undefined, () => isWriter(owner.kind) ? { kind: "workerFirst", replaces: owner } : { kind: "tester", replaces: owner });
+    }
+    return { owed, waived };
+  }
+
+  /** Why a worker may not start a review now, or null (a plan's one review runs once, after every wave is ready).
+   * retestWaived: Chief records why it reviews without the owed tester reruns, so the retest check is skipped. */
+  function reviewBlock(worker: Row, retestWaived = false):
     | null
     | { kind: "design" }
     | { kind: "superseded"; latest: Row }
@@ -84,10 +133,15 @@ export function createPlanProgress<Row extends ProgressRow>(
     | { kind: "betweenWaves"; waves: PlanWave[]; next: number }
     | { kind: "sideWriter" }
     | { kind: "pending"; waves: PlanWave[]; pending: number[] }
-    | { kind: "writers"; waves: PlanWave[]; writers: { wave: number; writer: Row | undefined }[] } {
+    | { kind: "writers"; waves: PlanWave[]; writers: { wave: number; writer: Row | undefined }[] }
+    | { kind: "retest"; debts: RetestDebt<Row>[] } {
     if (isDesignWave(worker)) return { kind: "design" };
     const waves = planWavesFor(worker.plan_thread_id);
-    if (!waves.length || worker.plan_wave == null) return null;
+    const retest = () => {
+      const owed = retestWaived ? [] : retestDebts(worker).owed;
+      return owed.length ? { kind: "retest" as const, debts: owed } : null;
+    };
+    if (!waves.length || worker.plan_wave == null) return retest();
     const planThreadId = worker.plan_thread_id!;
     // A side-lane Spec Writer is one of the plan's review targets; the one review starts from an implementation chain tip.
     if (sideLane(worker)) {
@@ -103,7 +157,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     const pending = pendingWaves(planThreadId, waves);
     if (pending.length) return { kind: "pending", waves, pending };
     const writers = pendingWriters(planThreadId, waves);
-    return writers.length ? { kind: "writers", waves, writers } : null;
+    return writers.length ? { kind: "writers", waves, writers } : retest();
   }
 
   /** The waves a ready chain-tip worker waits on, or null. */
@@ -128,6 +182,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     | { kind: "waitWriters"; waves: PlanWave[]; pending: { wave: number; writer: Row | undefined }[] }
     | { kind: "tester"; waves: PlanWave[]; test: number; replaces: Row }
     | { kind: "retest"; waves: PlanWave[] }
+    | { kind: "retestOwed"; waves: PlanWave[]; debts: RetestDebt<Row>[] }
     | { kind: "review"; waves: PlanWave[]; namer: Row; targets: Row[] } {
     const waves = planWavesFor(row.plan_thread_id);
     const planThreadId = row.plan_thread_id;
@@ -146,6 +201,11 @@ export function createPlanProgress<Row extends ProgressRow>(
       if (!namer || (!forAlert && namer.thread_id !== row.thread_id)) return null;
       return { kind: "review" as const, waves, namer, targets };
     };
+    // Owed tester reruns of the row's chain, read once and only when a step would otherwise send Chief to review. Enforced, unlike the advisory "retest".
+    let debts: RetestDebt<Row>[] | undefined;
+    const owed = () => (debts ??= retestDebts(row).owed);
+    const retestOwed = () => ({ kind: "retestOwed" as const, waves, debts: owed() });
+    const gated = <Step>(step: Step) => step && owed().length ? retestOwed() : step;
     if (planThreadId && row.plan_wave != null && sideLane(row)) {
       const chain = chainOf(waves, row.plan_wave);
       if (pendingWriters(planThreadId, waves, chain).length) return null;
@@ -157,7 +217,7 @@ export function createPlanProgress<Row extends ProgressRow>(
           return { kind: "tester", waves, test, replaces: chainOwner(planThreadId, waves, parent!)! };
         }
       }
-      return pendingWaves(planThreadId, waves).length || pendingWriters(planThreadId, waves).length ? null : reviewStep();
+      return gated(pendingWaves(planThreadId, waves).length || pendingWriters(planThreadId, waves).length ? null : reviewStep());
     }
     const next = planThreadId && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
     const design = !!waves[row.plan_wave! - 1]?.design;
@@ -172,14 +232,16 @@ export function createPlanProgress<Row extends ProgressRow>(
       const waiting = waves[next - 1]!.test ? pendingWriters(planThreadId!, waves, chainOf(waves, row.plan_wave!)) : [];
       return waiting.length ? { kind: "waitWriters", waves, pending: waiting } : { kind: "nextWave", waves, next };
     }
-    if (!planThreadId || row.plan_wave == null || !waves.length) return { kind: "unplanned" };
+    if (!planThreadId || row.plan_wave == null || !waves.length) return gated({ kind: "unplanned" as const });
+    // A fix after a rejection owes a tester rerun before any review; this is the rows' debt, not advice.
+    if (owed().some((debt) => debt.fix.thread_id === row.thread_id)) return retestOwed();
     // A worker changed code on a test wave after the tests ran: offer a rerun until a review covers that report.
     const wave = waves[row.plan_wave - 1];
     if (wave?.test && !wave.testsSkipped && row.kind !== "tester" && !ledger.isCurrent(row)) return { kind: "retest", waves };
     if (waitingOn(row)) return null;
     const writers = pendingWriters(planThreadId, waves);
     if (writers.length) return { kind: "waitWriters", waves, pending: writers };
-    return reviewStep();
+    return gated(reviewStep());
   }
 
   /** A reviewer verdict's open branches: the covered targets, those whose worker is not complete yet, and whether
@@ -287,5 +349,5 @@ export function createPlanProgress<Row extends ProgressRow>(
     return { waves, next: successorOf(waves, row.plan_wave!) };
   }
 
-  return { reviewBlock, waitingOn, readyStep, reviewAdvice, onSpecChain, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
+  return { reviewBlock, retestDebts, waitingOn, readyStep, reviewAdvice, onSpecChain, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
 }

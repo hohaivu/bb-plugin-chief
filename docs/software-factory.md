@@ -93,9 +93,12 @@ sequenceDiagram
       end
     end
     Worker-->>Chief: report (ready)
+    Chief->>Tester: chief_delegate replaces: kind tester, rerun after the fix
+    Tester-->>Chief: report (ready)
     Chief->>Reviewer: chief_review again
     Reviewer-->>Chief: report with verdict
   end
+  Note over Chief,Tester: after a rejection, chief_review is refused until a Tester that started after the fix reports ready on every covered chain. retestSkipped with a reason waives every listed rerun
   Note over Chief,Owner: if the owner does not authorize a round at the stop, the work ends there. An approve resets the count
 
   opt any other decision only the owner can make
@@ -140,7 +143,7 @@ flowchart LR
 | Plan | With planning on, `chief_delegate` refuses a call without `planThreadId` and `wave`, unless it carries `unplannedReason`. A plan has 2 to 8 waves. Each chain ends with a test wave. |
 | Plan review | `chief_forge_init` and `chief_delegate` refuse a qualifying plan until its one advisor review resolves. There is no skip. |
 | Forge | Chief owns the forge. `chief_forge_init` runs on a chain head with no worker yet. A worker never touches the pull request. |
-| Review | `chief_review` is refused for an intermediate wave, a design wave, and while any wave is not ready. `skipReview` on `chief_complete` needs a reason. |
+| Review | `chief_review` is refused for an intermediate wave, a design wave, and while any wave is not ready. It is also refused when a covered chain has an unpaid retest after a rejection. `retestSkipped` with a reason waives it. `skipReview` on `chief_complete` needs a reason. |
 | Complete | `chief_complete` needs the newest review to approve the PR's current head. `skipReview` or `override` with a reason bypass it. A design wave needs the owner's approval. A Spec Writer completes like a worker, on a covering approve, `skipReview` or `override`. |
 | Merge | Only the owner merges. Chief never merges. |
 
@@ -153,7 +156,7 @@ A plan chain has one branch, one pull request and one implementation worktree. E
 | Designer | `kind: "designer"` | Decides or implements how the UI looks. In a plan it draws artboards in its own design-only wave, before the wave that builds the UI. | n/a |
 | Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs in parallel with the worker of a `spec: true` wave, in its own worktree. Folds `docs/` onto the chain branch. | `chief_skip_specs` |
 | Worker | `kind: "worker"` | Implements one wave. It never writes tests. A reshape wave is also a worker. | n/a |
-| Tester | `kind: "tester"` | Writes and runs the tests for the waves it builds on. | `chief_skip_tests`, or `testsSkipped` on `chief_complete` |
+| Tester | `kind: "tester"` | Writes and runs the tests for the waves it builds on. | `chief_skip_tests`, or `testsSkipped` on `chief_complete`. After a fix round, `retestSkipped` on `chief_review` waives the rerun. |
 | Reviewer | thread role `reviewer` | Reports a `verdict` of `approve` or `request_changes`. It never edits. | `skipReview` |
 | Planner | thread role `planner` | Read-only. Splits the work into waves. | `unplannedReason` |
 | Advisor | thread role `advisor` | Read-only. Reviews a plan or helps a stuck review. | n/a |

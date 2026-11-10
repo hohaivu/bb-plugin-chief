@@ -7,7 +7,7 @@ import plugin from "./server";
 import { completeWorker, configurationContext, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { acceptPlanningLine, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
+import { acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -139,6 +139,8 @@ describe("tool-call stability", () => {
     for (const [name, definition] of Object.entries(now.catalog)) {
       // Plan 2 contract 6: the Spec Writer wording moved; asserted, then restored to base so the rest still compares.
       acceptSpecLaneWording(definition, base.catalog[name], name);
+      // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
+      acceptRetestDelta(definition, base.catalog[name], name);
       if (!titleTools.includes(name)) { expect(definition, name).toEqual(base.catalog[name]); continue; }
       const old = structuredClone(base.catalog[name]!);
       const next = structuredClone(definition);

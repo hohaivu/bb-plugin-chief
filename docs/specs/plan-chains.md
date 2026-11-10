@@ -29,6 +29,11 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Loose target**: an open target that is not in a legacy stack.
 - **Reject streak**: the rejection count that a reviewer row carries as `reject_streak`.
 - **Rung**: the advice level (fix, consult, or stop) that `ledger.rung` returns for a reject streak.
+- **Raw chain**: the chain that `chainOf` finds in the wave list with absent waived test waves included.
+- **Code row**: a worker row in the implementation lane, not on a design wave, with kind `worker` or no kind. A Spec Writer, a Tester, and a Designer are never code rows.
+- **Rejection**: the newest `request_changes` verdict of a chain, when no later verdict exists. Its time is the verdict time.
+- **Fix**: the newest code row of a chain that Chief created after the rejection.
+- **Retest debt**: the duty to rerun the tests after a fix. A chain owes it when a fix exists and nothing discharges it.
 
 ## Ownership and Entry Points
 
@@ -63,6 +68,9 @@ Callers interact with these entry points:
   - The advice lists the open targets, the legacy stack groups in wave order, and the loose targets.
   - For each target, the advice states whether it is a tester branch and whether it sits on a spec-bearing chain.
   - A tester branch is a tester row or a worker on a test wave.
+- `retestDebts(row)`: returns the owed retest debts of every chain that the review of `row` covers, and the debts that Chief waived. Each owed debt names the fix, the outstanding Tester if any, and one route.
+- `chainTests(planThreadId, n)`: returns the test waves of the raw chain of wave `n`, head to tip. `chainWaiver(planThreadId, n)` returns the first waiver reason on those test waves.
+- `newestVerdictAt(threadIds)`: returns the newest reviewer verdict and its time for a set of worker threads.
 - `onSpecChain(row)`: returns true for a plan chain with a Spec Writer on an unbypassed spec wave. It also returns true for an unplanned task chain that holds a Spec Writer.
 - `reusableEnvironment(threadId)`: returns the environment of an earlier reviewer if it is available for reuse.
 - `cleanupStep(job, eligible)`: executes lifecycle cleanup transitions and records environment claims.
@@ -139,6 +147,8 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
 - `admitDelegation` names `replaces: <chain owner>` when it rejects a non-head wave without a replacement target. Reason: callers must know the latest implementation thread to continue the chain.
 - `admitDelegation` rejects an implementation delegation without `replaces:` when any wave in the chain already has an implementation-lane row. Reason: started chains must not allocate duplicate workers or environments.
+- `admitDelegation` rejects `kind: tester` on a non-test wave only when the raw chain of that wave has a test wave. This includes an absent waived test wave. The text lists the test waves of that chain. Reason: a Tester of that chain runs on its test wave, and the test wave of another chain does not change this.
+- `admitDelegation` admits `kind: tester` on a non-test wave when the raw chain has no test wave. The call needs `replaces:` of the worker whose branch it tests, or a new branch once that worker is complete. Reason: the retest route of a chain with no test wave must be a legal call.
 - A later implementation wave is admitted while a Spec Writer is pending. Reason: Spec Writers never gate implementation waves.
 - `admitDelegation` rejects a replacement target from another chain of the same plan. Reason: independent chains must not inherit foreign branches or environments.
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
@@ -172,6 +182,37 @@ Shared worktree cleanup coordinates action ownership:
 - A Tester checks that the Fold head of each listed Spec Writer is an ancestor of its HEAD. Reason: the Tester must test against the folded docs.
 - The Reviewer scopes a side-lane writer by Fold base to Fold head. `Fold: none` means an empty scope. A docs commit inside a fold range is not drift in the range of a worker. Reason: the fold commits land in the task branch while the worker runs.
 - A worker or designer on a spec wave treats the plan as its source of truth, and pre-plan specs can be stale. Reason: the Spec Writer records the change in parallel.
+
+### Retest Debt
+
+A fix after a rejection is the riskiest change, and one review covers the whole plan. For this reason `chief_review` refuses to start while a covered chain owes a tester rerun.
+
+- A chain owes retest debt only when its newest verdict is `request_changes` and a code row exists that Chief created after that verdict. Reason: an approve closes the rejection.
+- Writers, Testers, Designers, side-lane rows, and rows on a design wave never create debt. Reason: only a code change invalidates the earlier test result.
+- `planProgress` finds the debt from the rows of the chain. It never reads Testers to find it. Reason: a Tester row proves no result.
+- A Tester that Chief created after the fix discharges the debt only when it has a ready report. Reason: row creation proves nothing about the tests.
+  - A busy, blocked, failed, stopped, or idle Tester without a ready report keeps the debt.
+  - A Tester older than the fix never discharges it.
+- Three more events discharge the debt:
+  - The raw chain has a waived test wave. A waived wave that no worker ran counts too.
+  - Chief passed `retestSkipped`, which is stored on the fix.
+  - A current review covers the latest report of the fix.
+- `retestDebts` adds up every chain of the plan review. `chief_review` on any chain tip is refused while one chain owes. The text names the route of the chain that owes. Reason: one review covers all chains.
+- `reviewBlock` checks retest debt last. The order of the other refusals is unchanged. An unplanned worker gets only this check. Reason: the new gate must not hide an older refusal.
+- `chief_review` with `retestSkipped` stores the reason on every owed fix in one batch, then starts the review.
+  - It stores nothing when another refusal applies.
+  - It is refused when no debt is owed, or when `pullRequest` or `branch` is present.
+  - The reviewer brief lists each waived retest and says that the reviewer judges those fixes without a rerun.
+  - Reason: Chief must record why a rerun was skipped, and one reason covers the whole list.
+- Each route names the live owner of the chain. It never names a completed row. Reason: `admitDelegation` and the branch-holder check of `startWorker` must accept the call.
+  - A working Tester that owns the chain gives `wait`.
+  - A chain with a test wave gives `chief_delegate (wave: <test wave>, replaces: <owner>, kind: tester)`. This includes an implementation-lane writer on the test wave.
+  - A chain with no test wave gives a Tester on the wave of the owner.
+  - An owner on an earlier wave of a legacy stack gives `restack`. The restacked Tester discharges the debt.
+  - An unplanned owner that is a Spec Writer gives a worker hand-off first, because the lane rules forbid a writer-to-Tester hand-off.
+- The Tester of the retest hand-off skips the consult and user rungs of `ledger.replacement`. Every other replacement keeps them. Reason: the rerun adds no new rejection and needs no new advice.
+- The pre-review advisory stays. After a Tester failure and a code fix, and with no verdict, the ready alert still asks for a Tester. Reason: before a review the rerun is advice, not a gate.
+- The migration adds `retest_skipped` to `managed_threads`. Display shows it in the roster, in the thread inspection, and in the Completed comment. `chief_complete` and `tests_skipped` are unchanged.
 
 ### Pull Request Pinning
 
@@ -247,3 +288,4 @@ Shared worktree cleanup coordinates action ownership:
 ## Related Decisions
 
 - [Spec Writer runs in parallel on a side worktree](../decisions/2026-11-10-spec-writer-parallel-side-worktree.md)
+- [Retest after a fix round gates the review](../decisions/2026-11-10-retest-after-fix-round.md)

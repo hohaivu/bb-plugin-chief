@@ -42,7 +42,7 @@ export function acceptPlanningLine(nowText: string, wasText: string) {
 const TRIMMED_RULES: [string, RegExp, RegExp][] = [
   ["- Fresh worker:", /\(same worktree, branch, PR; so is a plan chain's next wave\)/, /a plan chain has exactly one of each/],
   ["- Review:", /when a ready alert says to/, /when a worker's ready alert says to/],
-  ["- Tests:", /a tester does, as a plan's test wave/, /a tester \(kind: tester\) does/],
+  ["- Tests:", /a tester does, as a plan's test wave or via chief_delegate \(replaces: the worker, kind: tester\)\. Spec waves: see the chief skill\.$/, /a tester \(kind: tester\) does|Retest/],
 ];
 export function acceptCoreRuleTrim(nowText: string, wasText: string) {
   const old = wasText.split("\n");
@@ -59,4 +59,13 @@ export function assertSpecLaneWording(catalog: Record<string, any>) {
     const text = at(catalog[tool], path);
     if (typeof text !== "string" || !has.test(text) || lacks.test(text)) throw new Error(`${tool}.${path}: must match ${has} and not ${lacks}`);
   }
+}
+/** The retest-debt feature adds chief_review's optional retestSkipped and a sentence of its description. Asserted on the head tool, then base text and schema win. */
+export function acceptRetestDelta(now: any, was: any, name: string) {
+  if (name !== "chief_review") return;
+  const property = now.inputSchema.properties.retestSkipped;
+  if (!property || !/waives every rerun/.test(property.description) || (now.inputSchema.required ?? []).includes("retestSkipped")) throw new Error("chief_review.retestSkipped: must be an optional field that waives every rerun");
+  if (!/retestSkipped \(reason\) waives every listed rerun/.test(now.description) || /retestSkipped/.test(was.description)) throw new Error("chief_review.description: must name retestSkipped, and the base must not");
+  delete now.inputSchema.properties.retestSkipped;
+  now.description = was.description;
 }
