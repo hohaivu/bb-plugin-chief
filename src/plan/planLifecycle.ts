@@ -35,6 +35,8 @@ export interface Admission {
   specSources: string[];
   specDocs: string[];
   baseline: boolean;
+  /** A worker or designer on a spec wave: it builds from the plan alone while the wave's Spec Writer records the docs in parallel. */
+  specWave: boolean;
   /** side: a Spec Writer in its own side worktree beside the chain's implementation row. */
   lane: "side" | "implementation";
   /** A first side-lane writer's chain branch and pull request, from the chain's implementation row. */
@@ -74,6 +76,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
     // Baseline is read only for the wave this role works on (tester: plus its ancestors), never the whole chain.
     let baseline = false;
     let lane: Admission["lane"] = "implementation";
+    let planFirst = false;
     let sideChain: Admission["sideChain"];
     // Replacing a tester or Spec Writer needs an explicit kind, so a product fix never lands on one by default.
     const explicitKind = "Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.";
@@ -215,6 +218,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
         }
       }
       lane = side ? "side" : "implementation";
+      planFirst = specWave(waves, wave) && (kind === "worker" || kind === "designer");
       if (kind === "tester" || kind === "spec-writer") {
         for (const n of chainOf(waves, wave)) {
           const entry = waves[n - 1]!;
@@ -244,7 +248,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
       for (const writer of chain.filter((row) => row?.kind === "spec-writer").reverse()) specDocs.push(`Spec Writer ${writer!.thread_id}: report ${writer!.report_path ?? "none"}`);
     }
     // A Spec Writer's brief never lists the Spec Writer reports.
-    return { kind, planPath, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, specSources, specDocs: kind === "spec-writer" ? [] : specDocs, baseline, lane, sideChain };
+    return { kind, planPath, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, specSources, specDocs: kind === "spec-writer" ? [] : specDocs, baseline, specWave: planFirst, lane, sideChain };
   }
 
   /** chief_skip_tests's plan-side admission: refuses a wave that is not a test wave and a complete latest worker; the caller
