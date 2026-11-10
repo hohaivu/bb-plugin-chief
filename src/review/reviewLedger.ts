@@ -115,10 +115,8 @@ export function createReviewLedger<Row extends LedgerRow>(
     return { streak, rung: rung(streak) };
   };
 
-  /** Permission: what replaces: of `prior` still needs, or null when it may go ahead. The consult check runs only on the consult rung.
-   * retest: the replacement is the retest tester hand-off, which skips the consult and user rungs. */
-  function replacement(prior: { thread_id: string; created_at: number }, userApprovedRound: boolean, retest = false): null | { needs: "user" | "consult"; streak: number } {
-    if (retest) return null;
+  /** Permission: what replaces: of `prior` still needs, or null when it may go ahead. The consult check runs only on the consult rung. */
+  function replacement(prior: { thread_id: string; created_at: number }, userApprovedRound: boolean): null | { needs: "user" | "consult"; streak: number } {
     const { streak, rung: at } = ladder(prior.thread_id);
     if (at === "stop" && !userApprovedRound) return { needs: "user", streak };
     if (at === "consult" && !consultGate(prior)) return { needs: "consult", streak };
