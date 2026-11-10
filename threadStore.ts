@@ -26,6 +26,8 @@ export interface ThreadInsert<Role extends string = string, State extends string
   kind?: string | null;
   plannerOn?: boolean | null;
   verifyCommand?: string | null;
+  /** The Coordinator a new child Chief reports to; written only on a new row, a later insert keeps the stored link. */
+  coordinatorThreadId?: string | null;
 }
 
 /** The columns a report writes to its row; reserveReport maps them onto the UPDATE's parameters. */
@@ -107,8 +109,8 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -119,6 +121,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
       kind=excluded.kind, verify_command=excluded.verify_command,
       planner_on=COALESCE(excluded.planner_on, managed_threads.planner_on),
+      coordinator_thread_id=COALESCE(managed_threads.coordinator_thread_id, excluded.coordinator_thread_id),
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
       input.workerThreadId ?? null, input.parentThreadId ?? null, input.title, input.state ?? "starting",
@@ -127,7 +130,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       input.reviewedReportSeq ?? null, input.reviewedHeadSha ?? null, input.unplannedReason ?? null, input.replacesThreadId ?? null,
       input.kind ?? null, input.plannerOn == null ? null : input.plannerOn ? 1 : 0, input.verifyCommand ?? null,
       input.state === "active" ? now : null,
-      input.state === "active" ? 1 : 0, now, now,
+      input.state === "active" ? 1 : 0, now, now, input.coordinatorThreadId ?? null,
     );
     wrote();
   }
@@ -160,6 +163,22 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
         nextChiefId, now, projectId, previousChiefId,
       );
       wrote();
+    },
+    /** chief_coordinate: upgrades a Chief with no managed work to a Coordinator, once. Returns whether the row changed. */
+    setCoordinator(threadId: string, now: number) {
+      const { changes } = db.prepare(`UPDATE managed_threads SET coordinator=1, updated_at=?
+        WHERE thread_id=? AND role='chief' AND COALESCE(coordinator,0)=0 AND coordinator_thread_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM managed_threads w WHERE w.chief_thread_id=? AND w.state NOT IN ('complete','archived','deleted'))`).run(now, threadId, threadId);
+      if (changes) wrote();
+      return changes > 0;
+    },
+    /** chief_attach: links a live plain Chief to a Coordinator, once. Returns whether the row changed. */
+    linkToCoordinator(childId: string, coordinatorId: string, now: number) {
+      const { changes } = db.prepare(`UPDATE managed_threads SET coordinator_thread_id=?, updated_at=?
+        WHERE thread_id=? AND role='chief' AND coordinator_thread_id IS NULL AND COALESCE(coordinator,0)=0
+        AND state NOT IN ('complete','archived','deleted')`).run(coordinatorId, now, childId);
+      if (changes) wrote();
+      return changes > 0;
     },
     /** The plan's shared tracking issue; the first one recorded stays. */
     setPlanIssueUrl(threadId: string, url: string) {

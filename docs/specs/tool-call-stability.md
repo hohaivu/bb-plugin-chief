@@ -69,6 +69,8 @@ The domain exposes four entry points in `server.ts`:
 - For managed roles, the preload line lists tools in exact array order with the `mcp__bb-bridge__` prefix. Reason: Claude Code selects MCP tools by their fully qualified names.
 - For managed roles, `bb.agents.configure` places the preload line third in instructions, before research, project rules, and lessons. Reason: lessons can push later lines past the 4096-character instruction limit.
 - For the Chief role, the preload line requests `query "+chief"` with `max_results` equal to the tool count. Reason: full tool names exceed Chief's instruction character budget.
+- The Chief tool list depends on the row. A plain, unlinked Chief gets the base list plus `chief_coordinate`. A child Chief gets the base list. A Coordinator gets `chief_roster`, `chief_spawn` and `chief_attach`. See `coordinator.md`.
+- The Chief `max_results` follows the tool count of the row. A plain, unlinked Chief has one more than base. A Coordinator has 3. Reason: the preload line must match the registered tools.
 - For the Chief role, `bb.agents.configure` places the preload line immediately after the lead greeting line. Reason: Chief must load tool schemas before roster execution.
 - `bb.agents.configure` omits the preload line for non-Claude providers. Reason: other providers do not defer tool schemas.
 - `bb.agents.configure` omits the preload line for complete, archived, or deleted threads. Reason: finished threads receive no tools.
@@ -96,6 +98,8 @@ The domain exposes four entry points in `server.ts`:
 - The schema refuses an explicit empty string, whitespace-only string, or string over 160 characters. Reason: invalid explicit titles indicate caller errors.
 - The schema requires non-empty `mission` for `chief_delegate`, `chief_plan`, and `chief_consult`. Reason: workers and planners require task instructions.
 - The schema requires non-empty `request` for `chief_spawn`. Reason: child Chief instances require explicit owner requests.
+- `chief_spawn` has an optional `projectId`. Only a Coordinator may pass it. Reason: a Coordinator starts child Chiefs in any project.
+- `chief_escalate` has an optional `threadId`. Reason: a child Chief can escalate before any managed thread exists.
 - `delegateParams` refuses input that combines `unplannedReason` and `planThreadId`. Reason: planned tasks do not use unplanned justification reasons.
 - `chief_forge_init` retains a required `title` parameter without default logic. Reason: pull requests and tracking issues require explicit forge titles.
 
@@ -103,7 +107,7 @@ The domain exposes four entry points in `server.ts`:
 
 - For non-Claude providers, `bb.agents.configure` returns byte-identical instructions and skills relative to the base implementation. Reason: stability changes target Claude Code deferral issues exclusively.
 - For non-Claude providers, tool selection, names, and ordering remain identical to base behavior. Reason: provider changes must not alter tool catalogs.
-- Parameter schemas alter input schemas only by removing `title` from required properties and updating its description. Reason: validation rules must stay strict for all other fields.
+- Parameter schemas alter input schemas only by removing `title` from required properties and updating its description. Reason: validation rules must stay strict for all other fields. The two optional parameters above, `projectId` and `threadId`, are the only other schema changes.
 - Only threads with verified plugin origin metadata receive seeded roles during initial configuration. Reason: untrusted metadata must not grant elevated capabilities.
 - Chief instructions place the preload line and core rules before the 4096-character truncation boundary. Reason: truncation must never discard critical operational rules.
 
@@ -114,4 +118,4 @@ The domain exposes four entry points in `server.ts`:
 
 ## Related Decisions
 
-None.
+- [Coordinator stays a Chief row with two nullable columns](../decisions/2026-11-10-coordinator-stays-chief-row.md)

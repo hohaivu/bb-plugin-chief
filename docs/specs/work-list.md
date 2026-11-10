@@ -90,6 +90,9 @@ The work list is the one place where a Chief reads what is pending: the Pending 
 | The Pending block, the `todo #N` lines, the `after:` collapse line and the "Other Chiefs' todos" section of `chief_roster` equal base for the same state. | The roster is now the only work list. |
 | The text and JSON of `bb chief status` equal base for the same state. | The CLI reads the same state. |
 | `handOver` moves `chief_todos` and undelivered alerts as at base. | A successor must keep the open work. |
+| A Coordinator's roster renders a Children block. Each child entry holds that child's own Pending block. See `coordinator.md`. | A Coordinator owns no managed thread. It reads the work of its children. |
+| The Pending block of a plain Chief equals base for the same state. | The Coordinator change must not alter a plain Chief's work list. |
+| `handOver` refuses to run when the previous or the next Chief is a Coordinator, and writes nothing. | A Coordinator never owns open work, todos or alerts of a superseded Chief. |
 | The sweep still runs on a store reload once `pendingReady` is set, and on `idle` and `failed` events. | The sweep completes absorbed rows. It does not depend on the panel. |
 | `pendingReady` stays, and gates the sweep only. | The sweep must not run before the plugin initialises its state. |
 
