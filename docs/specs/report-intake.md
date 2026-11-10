@@ -17,6 +17,7 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 - **Verdict file**: `verdict-<seq>.md`. It holds the full report of a reviewer verdict.
 - **Report file**: `report-<seq>.md`. It holds the full text of a long or clipped report.
 - **Stamp**: the `Read at <sha>` text of a researcher or planner report. `checkout-freshness.md` defines it.
+- **Implementation wave**: a plan wave that is neither `design: true` nor `test: true`.
 
 ## Ownership and Entry Points
 
@@ -79,7 +80,7 @@ The transaction runs these steps in order:
 
 1. `reserveReport` stores the report columns, adds 1 to `report_seq`, and clears `report_path`.
 2. An advisor ready or blocked report marks the row advised. When the advisor has a plan thread, the first advice resolves the plan review. `approved` means a ready report with verdict `approve`. Any other advice means `changes`.
-3. A planner ready report with a plan sets the plan review. The review is `required` when the row has no `replaces_thread_id`, and either the plan has more than one non-test wave or `complex` is true. Otherwise the review is null. When the planner replaces a planner with review `changes`, the replaced planner completes.
+3. A planner ready report with a plan sets the plan review. The review is `required` when the row has no `replaces_thread_id`, and either the plan has more than one implementation wave or `complex` is true. Otherwise the review is null. A design wave and a test wave never count, because each is a fixed companion wave (a Designer's artboards, a Tester's tests) and not extra implementation scope. When the planner replaces a planner with review `changes`, the replaced planner completes.
 4. An advisor or reviewer ready report with a `lesson` inserts one `chief_lessons` row. The row holds the project, the text, the reporting thread, the reviewed worker, the time, and the role.
 5. `ledger.recordVerdict` adds 1 to `reject_streak` for `request_changes` and sets it to 0 for `approve`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head.
 6. A reviewer ready report with a verdict enqueues forge comments (one for each covered pull request). A worker blocked report enqueues one blocked comment. `forge-comments.md` describes them.
@@ -175,6 +176,7 @@ Each contract carries its reason.
 - A missing verdict file never erases the stored verdict. Reason: the verdict rows commit first.
 - Review ledger writes run only inside the `store.batch` of the intake. Reason: the ledger refuses a write outside a batch.
 - The intake is the only writer of `chief_lessons` in a report. Reason: the thread store keeps only `managed_threads`.
+- The count in the `has N implementation waves` text of `planReviewRefusal` uses the same predicate as the plan review trigger. Reason: a required review never shows a count of 1.
 - A failed optional step changes only the alert text and the attached paths. It never removes a committed row. Reason: the required rows are already committed before optional work begins, so an optional failure cannot roll them back.
 
 ### Trade-offs
