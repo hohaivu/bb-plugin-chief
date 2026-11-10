@@ -14,9 +14,9 @@ The forge comments domain publishes task events on GitHub pull requests and issu
 
 ## Ownership and Entry Points
 
-The module `forgeComments.ts` owns the comment outbox and the forge adapters. It owns the table text, database queries, attempt counters, marker scans, retry timers, give-up rules, and background drains.
+The module `src/forge/forgeComments.ts` owns the comment outbox and the forge adapters. It owns the table text, database queries, attempt counters, marker scans, retry timers, give-up rules, and background drains.
 
-Callers in `server.ts` use two entry points from `forgeComments.ts`:
+Callers in `server.ts` use two entry points from `src/forge/forgeComments.ts`:
 
 1. `createForgeComments(deps).enqueue(input)` queues a comment for delivery.
 2. `forgeComments.drain()` triggers a background processing pass from the supervisor cycle without awaiting completion.
@@ -120,8 +120,8 @@ A comment moves through this lifecycle:
 
 ## Invariants
 
-- Only `forgeComments.ts` reads from and writes to the `forge_comments` table. Reason: centralized database access prevents state inconsistencies.
-- Only `forgeComments.ts` derives comment markers from dedupe keys. Reason: a single derivation prevents mismatched marker algorithms.
+- Only `src/forge/forgeComments.ts` reads from and writes to the `forge_comments` table. Reason: centralized database access prevents state inconsistencies.
+- Only `src/forge/forgeComments.ts` derives comment markers from dedupe keys. Reason: a single derivation prevents mismatched marker algorithms.
 - An adapter searches for markers using verbatim string matching. Reason: hashing an incoming marker string breaks deduplication.
 - The body of each stored comment ends with its marker comment line. Reason: adapter scans search for this marker in comment bodies.
 - Enqueue operations never perform network requests before returning. Reason: callers must not wait on remote forge infrastructure.

@@ -7,7 +7,7 @@ The tracker domain mirrors Chief work to tasks in an external task tracker. bb T
 ## Domain Terms
 
 - **Tracker**: the external system that holds tasks. The setting `tracker` selects it.
-- **Adapter**: the one file that knows the commands and words of one tracker. `trackerBbTasks.ts` is the only adapter.
+- **Adapter**: the one file that knows the commands and words of one tracker. `src/tracker/trackerBbTasks.ts` is the only adapter.
 - **Task**: the tracker record that mirrors one unit.
 - **Unit**: one piece of Chief work that has one task. A row in `tracker_units` stores it.
 - **Root**: the thread that names a unit. For a plan, the root is the oldest planner of its `replaces_thread_id` chain. For unplanned work, the root is the oldest worker of that chain. When that worker shares a `pr_url` or `branch` with an earlier worker of the same project, the root is the root of the oldest such worker.
@@ -24,13 +24,13 @@ The tracker domain mirrors Chief work to tasks in an external task tracker. bb T
 
 | Entry point | File | Role |
 | --- | --- | --- |
-| `Tracker` interface, `trackerProjects(raw)` | `tracker.ts` | Pure types and the parser of the project map. It does no I/O. It names no tracker. |
-| `trackerSelector(deps)(raw)` | `trackerBbTasks.ts` | Maps the setting value to an adapter or `null`. It is the only place that holds the literal `bb-tasks`. |
-| `bbTasksTracker(deps)` | `trackerBbTasks.ts` | The adapter. It runs `bb tasks` commands. |
-| `createTrackerSync(deps)` with `start`, `attachFiles`, `decide`, `sync` | `trackerSync.ts` | Owns the tables, the unit resolution, the receipts, the status, the flag, and the answer poll. |
-| `TRACKER_TABLES` | `trackerSync.ts` | The two table statements. `server.ts` spreads them at the end of `MIGRATIONS`. |
+| `Tracker` interface, `trackerProjects(raw)` | `src/tracker/tracker.ts` | Pure types and the parser of the project map. It does no I/O. It names no tracker. |
+| `trackerSelector(deps)(raw)` | `src/tracker/trackerBbTasks.ts` | Maps the setting value to an adapter or `null`. It is the only place that holds the literal `bb-tasks`. |
+| `bbTasksTracker(deps)` | `src/tracker/trackerBbTasks.ts` | The adapter. It runs `bb tasks` commands. |
+| `createTrackerSync(deps)` with `start`, `attachFiles`, `decide`, `sync` | `src/tracker/trackerSync.ts` | Owns the tables, the unit resolution, the receipts, the status, the flag, and the answer poll. |
+| `TRACKER_TABLES` | `src/tracker/trackerSync.ts` | The two table statements. `server.ts` spreads them at the end of `MIGRATIONS`. |
 | Settings, hooks, `prMerged`, `answerAlert` | `server.ts` | Compose the parts. They hold no unit rule and no status rule. |
-| `trackFiles` adapter | `reportIntake.ts` | Hands accepted plan files and verdict files to the sync. |
+| `trackFiles` adapter | `src/report/reportIntake.ts` | Hands accepted plan files and verdict files to the sync. |
 
 The Chief model never runs tracker commands. Plugin code makes every tracker call.
 
@@ -42,7 +42,7 @@ Code paths:
 
 - `bb.settings.define` in `server.ts`.
 - `startPlan` and `startWorker` in `server.ts`.
-- `report()` in `reportIntake.ts`.
+- `report()` in `src/report/reportIntake.ts`.
 - The `chief_escalate` tool in `server.ts`.
 - The supervisor service in `server.ts`.
 - `writeAlert`, `deliverAlert`, `alertChief`, `retryAlerts`, and `handOver` in `server.ts`.
@@ -59,7 +59,7 @@ Code paths:
 
 ### Report files
 
-`report()` in `reportIntake.ts` accepts a `chief_report` call. Two steps write files.
+`report()` in `src/report/reportIntake.ts` accepts a `chief_report` call. Two steps write files.
 
 - A planner ready report with a plan calls `writePlan`. It writes `plan-<n>.md` for each wave to the artifact folder of Chief.
 - A reviewer report with a verdict calls `writeArtifact` with the verdict file `verdict-<seq>.md`. The write is best-effort.
@@ -112,7 +112,7 @@ A thrown error in the cycle logs a warning. The loop continues.
 
 ### Protocol
 
-`Tracker` in `tracker.ts` is the only interface that the sync knows. All task ids are opaque strings. Only the adapter knows the vocabulary of a tracker.
+`Tracker` in `src/tracker/tracker.ts` is the only interface that the sync knows. All task ids are opaque strings. Only the adapter knows the vocabulary of a tracker.
 
 | Method | Purpose |
 | --- | --- |
@@ -220,7 +220,7 @@ Each hook first reads the settings. When the setting selects no adapter, the hoo
 | Hook | Caller | Effect |
 | --- | --- | --- |
 | `start(row, description)` | `startPlan` (when `revises` is absent), `startWorker` (no `replaces`, no plan) | Finds the root. If the project is unmapped, returns. Otherwise `INSERT OR IGNORE` the unit. Title: the row title without the `Plan · ` prefix. Description: the mission, clipped to 4,000 characters, then a blank line and the unit marker. When the unit of the root already exists and the root is not the row, the `thread` receipt carries the request comment. When the unit does not exist, the hook creates it under the earlier root and posts no comment. |
-| `attachFiles(row, files)` | `trackFiles` in `reportIntake.ts` | If the unit does not exist or its create failed, returns. Otherwise inserts one `file` receipt for each file, with ref `<source thread id>:<name>` and the content as payload. |
+| `attachFiles(row, files)` | `trackFiles` in `src/report/reportIntake.ts` | If the unit does not exist or its create failed, returns. Otherwise inserts one `file` receipt for each file, with ref `<source thread id>:<name>` and the content as payload. |
 | `decide(row, request)` | `chief_escalate` | See Decisions. |
 | `sync()` | The supervisor, after `forgeComments.drain()` | The reconcile pass. |
 
@@ -359,7 +359,7 @@ The only change of a tool schema is the optional `merge` parameter of `chief_esc
 | The Chief model never runs tracker commands. | Plugin code owns every tracker call, so the sync can retry and deduplicate them. |
 | Chief posts no tracker comment except decision comments and follow-up request comments. | Not stated in the plan. |
 | A merge-only request posts no decision. | Merge permission is not a decision. The review status of the task is the signal. |
-| `tracker.ts` and `trackerSync.ts` name no tracker. | One adapter file holds all tracker words, so the adapter is replaceable. |
+| `src/tracker/tracker.ts` and `src/tracker/trackerSync.ts` name no tracker. | One adapter file holds all tracker words, so the adapter is replaceable. |
 | Off, unmapped, and unavailable states are no-ops for every tool. | The feature changes no behaviour without opt-in. |
 | No tool and no report awaits an adapter call. | An unreachable tracker must not block Chief. |
 | A `failed` receipt never counts as done. | A dependent write must not follow a write that did not happen. |

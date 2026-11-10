@@ -19,7 +19,7 @@ A Coordinator is a Chief that supervises other Chiefs, in any project, instead o
 
 ## Ownership and entry points
 
-`server.ts` owns the tools, the lifecycle, the sweep and the configuration. `threadStore.ts` owns the writes to `managed_threads`.
+`server.ts` owns the tools, the lifecycle, the sweep and the configuration. `src/db/threadStore.ts` owns the writes to `managed_threads`.
 
 | Entry point | File | Role in this domain |
 | --- | --- | --- |
@@ -31,13 +31,13 @@ A Coordinator is a Chief that supervises other Chiefs, in any project, instead o
 | `handOver`, `bb chief adopt` | `server.ts` | Refuse to move work to or from a Coordinator. |
 | `sweep`, `lifecycle` | `server.ts` | Trigger the Done alert. |
 | `bb.agents.configure` | `server.ts` | Gives each kind of Chief its tools and instructions. |
-| `setCoordinator`, `linkToCoordinator`, `insert` | `threadStore.ts` | Write the two columns. |
+| `setCoordinator`, `linkToCoordinator`, `insert` | `src/db/threadStore.ts` | Write the two columns. |
 
 ## Baseline (behaviour at base 95aa7df)
 
 At base, no Coordinator exists. Every Chief is independent. This section describes the code paths that the Coordinator changes.
 
-### Store writes (`threadStore.ts`: `insert`, `moveOpenWork`, `completeChief`)
+### Store writes (`src/db/threadStore.ts`: `insert`, `moveOpenWork`, `completeChief`)
 
 - `insert` writes one row. When the `thread_id` exists, it updates the row in place (`ON CONFLICT`).
 - The update keeps `parent_thread_id`, `replaces_thread_id` and `planner_on` when the new value is null. It replaces the other listed columns.

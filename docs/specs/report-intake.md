@@ -22,8 +22,8 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 
 | Entry point | File | Role |
 | --- | --- | --- |
-| `createReportIntake(adapters).report(threadId, params, callerProjectId)` | `reportIntake.ts` | Owns the order of acceptance and publication. Resolves to whether Chief received the alert now. `false` means the alert waits in the outbox. |
-| `checkReport`, `reportAlert`, `verdictFileBody`, `reportFileBody` | `reportIntake.ts` | Pure helpers. They validate a report and lay out the alert and the files. |
+| `createReportIntake(adapters).report(threadId, params, callerProjectId)` | `src/report/reportIntake.ts` | Owns the order of acceptance and publication. Resolves to whether Chief received the alert now. `false` means the alert waits in the outbox. |
+| `checkReport`, `reportAlert`, `verdictFileBody`, `reportFileBody` | `src/report/reportIntake.ts` | Pure helpers. They validate a report and lay out the alert and the files. |
 | `chief_report` handler and adapters | `server.ts` | Calls the intake one time. Provides the adapters. |
 
 The adapters are:
@@ -47,7 +47,7 @@ Code paths:
 - `report()` in `server.ts` (lines 3123 to 3300).
 - `writeAlert` in `server.ts` (lines 2825 to 2842).
 - `enqueueVerdictComments` and `enqueueBlockedComment` in `server.ts` (lines 2938 to 2978).
-- `checkReport`, `reportAlert`, `verdictFileBody`, and `reportFileBody` in `reportIntake.ts`.
+- `checkReport`, `reportAlert`, `verdictFileBody`, and `reportFileBody` in `src/report/reportIntake.ts`.
 
 This section covers acceptance and publication. It does not cover the alert layout budgets. `checkout-freshness.md` covers the stamp line.
 
