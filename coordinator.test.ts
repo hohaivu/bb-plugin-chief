@@ -1074,6 +1074,35 @@ describe("Coordinator", () => {
       if (provider === "claude-code") expect(preload(childConfig)).toContain(`max_results ${childConfig.tools.length}`);
     });
 
+    // The SDK cuts instructions at 4096 chars: the core rules (the last, mandatory one is the Need-you escalation) go before the project rules, so they must end inside the cut even for the longest supported inputs.
+    test("claude-code, planning and research on, linked child, 14-char Coordinator id, 40-char project name: the core rules, Need-you rule included, end inside the 4096 cut", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      const idPadding = 14 - coord.length; // the harness ids are short; the real ones are 14 chars (thr_ + 10), and the Coordinator line carries the id once
+      const name = "P".repeat(40);
+      const resolve = async (id: string) => {
+        const context = configurationContext(id, "proj_1", name);
+        return (await state.harness.behavior.resolveAgentConfiguration({ ...context, provider: { ...context.provider, id: "claude-code" } })) as { tools: { name: string }[]; instructions: string };
+      };
+      const [linked, plain] = [await resolve(child), await resolve(await make(state))];
+      for (const config of [linked, plain]) {
+        const names = config.tools.map((tool) => tool.name);
+        expect(names).toContain("chief_plan");
+        expect(names).toContain("chief_research");
+        expect(config.instructions).toContain(`registered Chief supervisor for ${name}.`);
+      }
+      expect(linked.instructions).toContain(`Coordinator ${coord} supervises you: call chief_escalate before every Need you`);
+      const NEED_YOU_END = "call chief_escalate with the thread and the full request.";
+      const coreEnd = (text: string) => text.indexOf(NEED_YOU_END) + NEED_YOU_END.length;
+      expect(linked.instructions.indexOf("# Chief core rules")).toBeGreaterThan(0);
+      expect(linked.instructions.indexOf(NEED_YOU_END)).toBeGreaterThan(0);
+      expect(idPadding).toBeGreaterThanOrEqual(0);
+      expect(coreEnd(linked.instructions) + idPadding).toBeLessThanOrEqual(4096);
+      expect(coreEnd(plain.instructions)).toBeLessThanOrEqual(coreEnd(linked.instructions));
+      expect(coreEnd(plain.instructions)).toBeLessThan(4000);
+    });
+
     test("the coordinator skill declares the name the plain Chief's configure lists", async () => {
       const skill = await readFile(join(dirname(fileURLToPath(import.meta.url)), "skills", "coordinator", "SKILL.md"), "utf8");
       expect(skill.startsWith("---\nname: coordinator\n")).toBe(true);
