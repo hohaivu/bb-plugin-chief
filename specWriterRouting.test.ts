@@ -1072,5 +1072,26 @@ describe("tester role", () => {
       expect(await review(state, chief, lane === "side" ? tester : repair)).toMatch(/^Started “Review · Wave 2”/);
       expect(await reviewerCount(state)).toBe(before + 1);
     });
+
+    // Retest debt contract (refusal order, case 10): a side writer that is not ready is refused as writers before any retest, and the refusal
+    // carries no waiver. Regression: the retest check runs first, so Chief reruns tests on a chain whose docs are still being written.
+    test("a busy side-lane writer is refused as writers before the owed retest, with no waiver offered", async () => {
+      const state = await setup();
+      const { chief, planner, writer, tester } = await fullChain(state);
+      await reviewed(state, chief.threadId, tester, "request_changes");
+      await tick();
+      const fix = await swap(state, chief, planner.threadId, 2, tester, "worker");
+      await readyIdle(state, fix);
+      await tick();
+      // Control: with the writer ready the same review is the retest refusal.
+      expect(await refusal(review(state, chief, fix))).toContain(`${fix} changed code after the review's rejection`);
+      const repair = await swap(state, chief, planner.threadId, 1, writer, "spec-writer");
+      const message = await refusal(review(state, chief, fix));
+      expect(message).toBe(`One review covers the whole plan once every Spec Writer is ready; wave 1's ${repair} (starting) is not ready. Wait for their ready reports, then start the review.`);
+      expect(message).not.toContain("changed code after");
+      expect(message).not.toContain("retestSkipped");
+      expect(rowOf(state, repair).state).not.toBe("ready");
+      expect(await reviewerCount(state)).toBe(1);
+    });
   });
 });

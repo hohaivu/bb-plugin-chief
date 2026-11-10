@@ -684,6 +684,7 @@ describe("tester role", () => {
   test.each<[string, (state: State, tester: string) => Promise<void>, RegExp, boolean]>([
     ["busy", async () => {}, /^One review covers the whole plan once every wave is ready; wave\(s\) 2 of 2 are not ready yet\./, false],
     ["blocked", async (state, tester) => { await report(state, tester, { state: "blocked", result: "Two tests fail", blocker: "Totals test fails", recommendation: "Fix the product" }); setLive(state, tester, "idle"); }, /^One review covers the whole plan once every wave is ready; wave\(s\) 2 of 2 are not ready yet\./, false],
+    ["failed", async (state, tester) => { await report(state, tester, { state: "failed", result: "Harness crashed" }); setLive(state, tester, "idle"); }, /^One review covers the whole plan once every wave is ready; wave\(s\) 2 of 2 are not ready yet\./, false],
     ["idle without a report", async (state, tester) => { setLive(state, tester, "idle"); await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(tester)!, lastAssistantText: "Stopped without a report" }); }, /^One review covers the whole plan once every wave is ready; wave\(s\) 2 of 2 are not ready yet\./, false],
     ["ready on a busy host", async (state, tester) => { await report(state, tester, { state: "ready", result: READY }); }, /^$/, true],
     ["ready and idle", async (state, tester) => { await readyIdle(state, tester); }, /^$/, true],
