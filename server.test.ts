@@ -13387,4 +13387,120 @@ describe("Coordinator", () => {
       expect(row(state, child.id)).toMatchObject({ coordinator: null, coordinator_thread_id: coord });
     });
   });
+
+  describe("Need-you alert (COORD-6)", () => {
+    const PR = "https://github.com/acme/shop/pull/8";
+    const key = (child: string, request: string) => `${child}:coordinator-need-you:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;
+    /** A Coordinator with one linked child Chief. */
+    async function linked(state: S) {
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      return { coord, child };
+    }
+
+    test("an escalation about a worker with a pull request alerts the Coordinator once, and the forge post still queues", async () => {
+      const state = await setup();
+      const { coord, child } = await linked(state);
+      const worker = await delegate(state, child, "Fix totals", { prUrl: PR });
+      const request = "Pick a currency rounding rule.";
+      const text = await call(state, "chief_escalate", { threadId: worker.threadId, request }, child);
+      expect(text).toBe(`Queued for ${PR}. Now write the same request in chat under **Need you**.`);
+      await settle();
+      expect(needYouKeys(state)).toEqual([{ key: key(child, request), source: child, target: coord, delivered: 1 }]);
+      const [message] = sentToCoordinator(state, coord).filter((sent) => String(sent.input[0].text).includes(request));
+      expect(message.senderThreadId).toBe(child);
+      expect(message.input[0].text).toContain(`about worker “Fix totals” (${worker.threadId})`);
+      expect(message.input[0].text).toContain(`The owner answers it in ${child}`);
+    });
+
+    test("a chat-only escalation (planner with no tracking issue) and one without a threadId each alert once", async () => {
+      const state = await setup();
+      await state.harness.behavior.setSettings({ plannerEnabled: true });
+      const { coord, child } = await linked(state);
+      const planned = await cli(state, ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], child);
+      expect(planned.exitCode, planned.stderr).toBe(0);
+      const planner = (await state.harness.behavior.callRpc("status", null) as any).threads.find((thread: any) => thread.role === "planner" && thread.chiefThreadId === child).threadId as string;
+      const chatOnly = "No pull request or issue to post on; write the request in chat only.";
+
+      expect(await call(state, "chief_escalate", { threadId: planner, request: "Which scope for the plan?" }, child)).toBe(chatOnly);
+      expect(await call(state, "chief_escalate", { threadId: undefined, request: "Which team owns this?" }, child)).toBe(chatOnly);
+      await settle();
+      expect(needYouKeys(state).map((alert) => alert.key).sort()).toEqual([key(child, "Which scope for the plan?"), key(child, "Which team owns this?")].sort());
+      const texts = sentToCoordinator(state, coord).map((sent) => String(sent.input[0].text));
+      expect(texts.find((text) => text.includes("Which scope for the plan?"))).toMatch(new RegExp(`about planner “[^”]*Rework checkout” \\(${planner}\\)`));
+      expect(texts.find((text) => text.includes("Which team owns this?"))).not.toContain(" about ");
+    });
+
+    test("an identical repeat adds no row and no message; a different request adds one", async () => {
+      const state = await setup();
+      const { coord, child } = await linked(state);
+      for (const request of ["Which team owns this?", "Which team owns this?"]) await call(state, "chief_escalate", { request }, child);
+      await settle();
+      expect(needYouKeys(state)).toHaveLength(1);
+      expect(sentToCoordinator(state, coord).filter((sent) => String(sent.input[0].text).includes("Which team owns this?"))).toHaveLength(1);
+      await call(state, "chief_escalate", { request: "Which branch?" }, child);
+      await settle();
+      expect(needYouKeys(state)).toHaveLength(2);
+    });
+
+    test("a Chief with no Coordinator writes no alert; a Coordinator cannot escalate", async () => {
+      const state = await setup();
+      const plain = await make(state);
+      await call(state, "chief_escalate", { request: "Which team owns this?" }, plain);
+      const coord = await coordinator(state, "proj_2");
+      await expect(call(state, "chief_escalate", { request: "Mine" }, coord, "proj_2")).rejects.toThrow("not available to a Coordinator");
+      await settle();
+      expect(kinds(state)).toEqual([]);
+    });
+
+    test("an alert that cannot be written does not fail the escalation", async () => {
+      const state = await setup();
+      const { child } = await linked(state);
+      state.db.exec("ALTER TABLE alert_outbox RENAME TO alert_outbox_hidden");
+      try {
+        expect(await call(state, "chief_escalate", { request: "Which team owns this?" }, child)).toBe("No pull request or issue to post on; write the request in chat only.");
+      } finally {
+        state.db.exec("ALTER TABLE alert_outbox_hidden RENAME TO alert_outbox");
+      }
+      expect(kinds(state)).toEqual([]);
+    });
+
+    test("a failed send leaves the row pending with an attempt; a repeat of that request neither deletes nor duplicates it", async () => {
+      const state = await setup();
+      const { child } = await linked(state);
+      state.failNextSend();
+      await call(state, "chief_escalate", { request: "Which team owns this?" }, child);
+      await settle();
+      const pending = () => state.db.prepare("SELECT dedupe_key, attempts, delivered_at FROM alert_outbox WHERE dedupe_key LIKE '%:coordinator-%'").all();
+      expect(pending()).toEqual([{ dedupe_key: key(child, "Which team owns this?"), attempts: 1, delivered_at: null }]);
+      await call(state, "chief_escalate", { request: "Which team owns this?" }, child);
+      await settle();
+      expect(pending()).toEqual([{ dedupe_key: key(child, "Which team owns this?"), attempts: 1, delivered_at: null }]);
+    });
+
+    test("a duplicate of a delivered alert never deletes a different pending one (A delivered, B pending, A again)", async () => {
+      const state = await setup();
+      const { child } = await linked(state);
+      await call(state, "chief_escalate", { request: "A" }, child);
+      await settle();
+      state.failNextSend();
+      await call(state, "chief_escalate", { request: "B" }, child);
+      await settle();
+      await call(state, "chief_escalate", { request: "A" }, child);
+      await settle();
+      expect(needYouKeys(state).map((alert) => [alert.key, alert.delivered])).toEqual(expect.arrayContaining([[key(child, "A"), 1], [key(child, "B"), 0]]));
+      expect(needYouKeys(state)).toHaveLength(2);
+    });
+
+    test("a duplicate of a pending alert leaves exactly the two pending ones (A pending, B pending, A again)", async () => {
+      const state = await setup();
+      const { child } = await linked(state);
+      for (const request of ["A", "B", "A"]) {
+        state.failNextSend();
+        await call(state, "chief_escalate", { request }, child);
+        await settle();
+      }
+      expect(needYouKeys(state).map((alert) => [alert.key, alert.delivered]).sort()).toEqual([[key(child, "A"), 0], [key(child, "B"), 0]].sort());
+    });
+  });
 });
