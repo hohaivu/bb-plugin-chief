@@ -13728,4 +13728,90 @@ describe("Coordinator", () => {
       expect(text.startsWith("## Children\n")).toBe(true);
     });
   });
+
+  describe("plain Chief chief_spawn is unchanged from base 95aa7df", () => {
+    // Literals copied from base server.ts (spawn result, handoffSection): runnable on the base checkout too.
+    test("the result and brief.md are byte-identical", async () => {
+      const state = await setup();
+      const plain = await make(state);
+      const text = await call(state, "chief_spawn", { title: "Side task", request: "Do the task", context: "Goal: done" }, plain);
+      const id = /in thread (thr_\w+)/.exec(text)![1]!;
+      expect(text).toBe(`Started Chief “Side task” in thread ${id}. It owns this task now and is not your managed work: it is not in your roster, sends you no alerts, and you cannot inspect or steer it.`);
+      expect(await readFile(join(state.storageRoot, id, "brief.md"), "utf8")).toBe([
+        "## Handed-off task",
+        `Handed off by Chief ${plain}. It keeps no link to you: it will not see your roster or alerts, and you do not report to it.`,
+        "",
+        "### Owner's request (verbatim)",
+        "Do the task",
+        "",
+        "### Context",
+        "Goal: done",
+        "",
+        "Own this task through completion under your normal rules. Start with chief_roster. Plan it with your own chief_plan when planning applies; the handing-off Chief's planners, workers and reviewers stay with it, so their plan, report and verdict files are evidence only. Then forge, delegate, review and complete. The handoff is evidence, not proof. This handoff is saved at $BB_THREAD_STORAGE/brief.md; re-read it after any context compaction.",
+      ].join("\n"));
+    });
+  });
+
+  describe("configure (COORD-9)", () => {
+    const configure = (state: S, id: string, provider: "codex" | "claude-code" = "codex") => {
+      const context = configurationContext(id);
+      return state.harness.behavior.resolveAgentConfiguration({ ...context, provider: { ...context.provider, id: provider } }) as Promise<{ tools: { name: string }[]; skills: string[]; instructions: string }>;
+    };
+    const MARKER = "# Project rules marker";
+    const GREETING = "You are the registered Coordinator for Asha: you supervise child Chiefs in any project, not managed threads.";
+
+    test.each([["short chief.md", `${MARKER}\n- Keep rules small.`], ["32,000-char chief.md", `${MARKER}\n${"- Project rule text.\n".repeat(1_600)}`.slice(0, 32_000)]])(
+      "a Coordinator gets the Coordinator rules with a %s last, within the 4096-char cut, and no Chief rules", async (_label, rules) => {
+        const state = await setup({ rules });
+        const coord = await coordinator(state);
+        const { tools, skills, instructions } = await configure(state, coord);
+        expect(tools.map((tool) => tool.name).sort()).toEqual(["chief_attach", "chief_roster", "chief_spawn"]);
+        expect(skills).toEqual([]);
+        expect(instructions.length).toBeLessThanOrEqual(4096);
+        expect(instructions.startsWith(`${GREETING}\n`)).toBe(true);
+        expect(instructions).toContain("Call chief_roster at the start of every turn: its Children block is your work list.");
+        expect(instructions).not.toContain("# Chief core rules");
+        expect(instructions).not.toContain("# Chief operating rules");
+        expect(instructions.indexOf(MARKER)).toBeGreaterThan(instructions.indexOf("never poll children."));
+      });
+
+    test("a Coordinator with no chief.md gets neither project rules nor the built-in Chief rules", async () => {
+      const state = await setup();
+      const { instructions } = await configure(state, await coordinator(state));
+      expect(instructions).not.toContain("# Chief operating rules");
+      expect(instructions.endsWith("never poll children.")).toBe(true);
+    });
+
+    test("claude-code: a Coordinator's preload line asks for exactly its three tools", async () => {
+      const state = await setup();
+      const { tools, instructions } = await configure(state, await coordinator(state), "claude-code");
+      const line = instructions.split("\n").find((text) => text.includes("ToolSearch"))!;
+      expect(tools).toHaveLength(3);
+      expect(line.endsWith(`query "+chief", max_results 3`)).toBe(true);
+    });
+
+    test.each(["codex", "claude-code"] as const)("%s: a linked child is a plain Chief minus chief_coordinate, plus exactly one escalate line", async (provider) => {
+      const state = await setup({ rules: `${MARKER}\n- Keep rules small.` });
+      const plain = await make(state);
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      const [plainConfig, childConfig] = [await configure(state, plain, provider), await configure(state, child, provider)];
+      expect(plainConfig.instructions.length).toBeLessThan(4000);
+      expect(plainConfig.skills).toEqual(["chief", "coordinator"]);
+      expect(childConfig.skills).toEqual(["chief"]);
+      expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate"));
+      const lines = childConfig.instructions.split("\n");
+      const added = lines.filter((line) => line.startsWith("Coordinator "));
+      expect(added).toEqual([`Coordinator ${coord} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`]);
+      const preload = (config: typeof plainConfig) => config.instructions.split("\n").find((line) => line.includes("ToolSearch"));
+      const expected = plainConfig.instructions.replace(`max_results ${plainConfig.tools.length}`, `max_results ${childConfig.tools.length}`).split("\n");
+      expect(lines.filter((line) => !line.startsWith("Coordinator "))).toEqual(expected);
+      if (provider === "claude-code") expect(preload(childConfig)).toContain(`max_results ${childConfig.tools.length}`);
+    });
+
+    test("the coordinator skill declares the name the plain Chief's configure lists", async () => {
+      const skill = await readFile(join(dirname(fileURLToPath(import.meta.url)), "skills", "coordinator", "SKILL.md"), "utf8");
+      expect(skill.startsWith("---\nname: coordinator\n")).toBe(true);
+    });
+  });
 });
