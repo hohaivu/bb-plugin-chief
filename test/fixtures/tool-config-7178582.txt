@@ -752,7 +752,7 @@
       "type": "boolean"
      },
      "complex": {
-      "description": "Planner ready report only: true when the plan is high-risk (see your brief). A multi-wave plan gets one advisor review either way.",
+      "description": "Planner ready report only: true when the plan is high-risk (see your brief). A plan with more than one implementation wave gets one advisor review either way; design and test waves do not count.",
       "type": "boolean"
      },
      "plan": {

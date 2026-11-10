@@ -292,7 +292,7 @@ gh pr view calls: 0
 
 === complete: a design wave ===
 --- design wave, no owner approval
-refused: Refusing to complete thr_4: thr_4 is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: thr_4), or pass override with a reason to complete anyway.
+refused: Refusing to complete thr_3: thr_3 is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: thr_3), or pass override with a reason to complete anyway.
 state: ready
 gh pr view calls: 0
 --- design wave, owner approved

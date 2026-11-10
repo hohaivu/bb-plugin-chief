@@ -295,23 +295,53 @@ describe("tester role", () => {
     expect(rowOf(state, planner.threadId).state).toBe("complete");
   });
 
-  // Contract (plan-review trigger): only implementation waves count toward the advisor review — an implementation wave
-  // plus its test wave is two waves but not reviewed, two implementation waves or a `complex` plan are. Regression:
-  // the test wave counts, so every plan is reviewed (or, with the filter dropped, a plan is never reviewed).
-  // The existing review-trigger tests use plans with no test wave.
-  test.each<[string, object[], boolean, boolean]>([
-    ["one implementation wave and its test wave", [planWave(1), TEST_WAVE(2)], false, false],
-    ["two implementation waves and a test wave", [planWave(1), planWave(2), TEST_WAVE(3)], false, true],
-    ["one implementation wave and its test wave, marked complex", [planWave(1), TEST_WAVE(2)], true, true],
-  ])("plan review is required for %s", async (_label, waves, complex, required) => {
+  // Contract (plan-review trigger): only implementation waves (neither design nor test) count toward the advisor review — an
+  // implementation wave plus a design wave and/or its test wave is not reviewed; two implementation waves or a `complex` plan are.
+  // A refusal names the same implementation-wave count: never "has 1 implementation waves". Regression: a test wave or a
+  // design wave counts, so every plan is reviewed (or, with the filter dropped, a plan is never reviewed), or the refusal
+  // count and the trigger use different predicates. The existing review-trigger tests use plans with no test wave.
+  test.each<[string, object[], boolean, string | null]>([
+    ["one implementation wave and its test wave", [planWave(1), TEST_WAVE(2)], false, null],
+    ["a design wave, one implementation wave and its test wave", [planWave(1, { design: true }), planWave(2), TEST_WAVE(3)], false, null],
+    ["two implementation waves and a test wave", [planWave(1), planWave(2), TEST_WAVE(3)], false, "has 2 implementation waves"],
+    ["a design wave, two implementation waves and a test wave", [planWave(1, { design: true }), planWave(2), planWave(3), TEST_WAVE(4)], false, "has 2 implementation waves"],
+    ["one implementation wave and its test wave, marked complex", [planWave(1), TEST_WAVE(2)], true, "is marked complex"],
+    ["a design wave, one implementation wave and its test wave, marked complex", [planWave(1, { design: true }), planWave(2), TEST_WAVE(3)], true, "is marked complex"],
+  ])("plan review is required for %s", async (_label, waves, complex, refusal) => {
     const state = await setup();
     const chief = await start(state);
     await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chief.threadId));
     const planner = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!;
     await report(state, planner.threadId, { state: "ready", result: "Waves written.", plan: waves, ...(complex ? { complex } : {}) });
     const attempt = delegateWave(state, chief.threadId, planner.threadId, 1);
-    if (required) await expect(attempt).rejects.toThrow("get its one advisor review first");
-    else await attempt;
+    if (refusal) {
+      await expect(attempt).rejects.toThrow(`Plan ${planner.threadId} ${refusal}: get its one advisor review first`);
+      expect(rowOf(state, planner.threadId).plan_review).toBe("required");
+    } else {
+      await attempt;
+      expect(rowOf(state, planner.threadId).plan_review).toBeNull();
+      await expect(tool(state, "chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan" }, chief.threadId)).rejects.toThrow(
+        "Only a plan with more than one implementation wave (design and test waves do not count), or a complex plan, gets an advisor review");
+    }
+  });
+
+  // Contract (plan-review trigger, revision): a revision of a plan is never reviewed, even with two implementation waves
+  // and `complex`. Regression: the `replaces_thread_id` term is dropped from the trigger.
+  test("a revision of a plan is never reviewed, with two implementation waves and complex", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const original = await plan(state, chief.threadId, [planWave(1), planWave(2), TEST_WAVE(3)]);
+    expect(rowOf(state, original.threadId).plan_review).toBe("required");
+    await tool(state, "chief_consult", { planThreadId: original.threadId, title: "Plan", mission: "Review this plan before delegation" }, chief.threadId);
+    const advisor = (await status(state)).threads.filter((row) => row.role === "advisor").at(-1)!;
+    await report(state, advisor.threadId, { state: "ready", result: "Split the waves differently.", verdict: "request_changes" });
+    expect(rowOf(state, original.threadId).plan_review).toBe("changes");
+    await tool(state, "chief_plan", { title: "Revise", mission: "Propose again", revises: original.threadId }, chief.threadId);
+    const revision = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!;
+    expect(revision.threadId).not.toBe(original.threadId);
+    await report(state, revision.threadId, { state: "ready", result: "Waves rewritten.", plan: [planWave(1), planWave(2), TEST_WAVE(3)], complex: true });
+    expect(rowOf(state, revision.threadId).plan_review).toBeNull();
+    await delegateWave(state, chief.threadId, revision.threadId, 1);
   });
 
   test("kind tester on unplanned work needs replaces:", async () => {
@@ -482,7 +512,6 @@ describe("tester role", () => {
     const state = await setup();
     const chief = await start(state);
     const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE, design: true }, { body: wave(2) }, TEST_WAVE(3)]);
-    await approvePlan(state, chief.threadId, planner.threadId);
     await delegateWave(state, chief.threadId, planner.threadId, 1);
     const designer = workerOn(state, planner.threadId, 1);
     expect(designer.kind).toBe("designer");
