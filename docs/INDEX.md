@@ -18,3 +18,4 @@
 - [Plugin polling owns tracker answers](decisions/2026-11-09-tracker-answers-plugin-poll.md)
 - [Coordinator stays a Chief row with two nullable columns](decisions/2026-11-10-coordinator-stays-chief-row.md)
 - [Spec Writer runs in parallel on a side worktree](decisions/2026-11-10-spec-writer-parallel-side-worktree.md)
+- [Retest after a fix round gates the review](decisions/2026-11-10-retest-after-fix-round.md)
