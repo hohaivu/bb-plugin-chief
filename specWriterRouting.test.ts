@@ -766,6 +766,55 @@ describe("tester role", () => {
       for (const done of [lw1, l2]) expect(legacyAdvice).not.toContain(`replaces: ${done}`);
     });
 
+    // Wave 1 contracts 12/13 (legacy S1→W1→S2→W2→T, built from real handoffs, no seeded rows): the sequential handoffs pass one environment E down the
+    // chain and complete S1, so S1 no longer owns a private side worktree. Docs findings on T therefore route to the implementation tip (T), never the
+    // retired S1/W1/S2/W2; following that route reuses E as an implementation-lane repair, and its ready report asks for the tester rerun.
+    // Regression: the docs route resurrects completed legacy head S1, whose replacement is admitted as a side writer yet launches inside T's checkout.
+    test("legacy S1→W1→S2→W2→T: docs findings route to the tip T, reuse its environment and hand back to a tester rerun, never to retired S1", async () => {
+      const state = await setup();
+      const { chief, planner } = await specPlan(state, [specImpl(1), TEST_WAVE(2)]);
+      const P = planner.threadId;
+      const chain: string[] = [];
+      for (const [kind, replaces] of [["spec-writer", undefined], ["worker", "s"], ["spec-writer", "s"], ["worker", "s"]] as const) {
+        const prev = chain.at(-1);
+        await delegateWave(state, chief.threadId, P, 1, { kind, ...(replaces && { replaces: prev }), ...(!prev && { branch: "feature/legacy" }) });
+        chain.push(workerOn(state, P, 1).thread_id as string);
+        await readyIdle(state, chain.at(-1)!);
+      }
+      const [s1, w1, s2, w2] = chain;
+      await delegateWave(state, chief.threadId, P, 2, { replaces: w2, kind: "tester" });
+      const T = workerOn(state, P, 2).thread_id as string;
+      await readyIdle(state, T);
+      const E = state.live.get(T)!.environmentId;
+      for (const id of [s1, w1, s2, w2]) {
+        expect(rowOf(state, id).state).toBe("complete");
+        expect(state.live.get(id)!.environmentId).toBe(E);
+      }
+
+      await reviewed(state, chief.threadId, T, "request_changes");
+      const advice = (await roster(state, chief.threadId)).split("\n").find((line) => line.includes("The reviewer requires changes"))!;
+      for (const text of [advice, lastAlert(state)]) {
+        expect(text).toContain(`replaces: ${T}, kind: spec-writer`);
+        for (const retired of [s1, w1, s2, w2]) expect(text).not.toContain(`replaces: ${retired}`);
+      }
+
+      const spawns = state.spawned.length;
+      await tool(state, "chief_delegate", { replaces: T, kind: "spec-writer", title: "Docs fix", mission: "Repair docs findings" }, chief.threadId);
+      expect(state.spawned.length).toBe(spawns + 1);
+      expect(state.spawned.at(-1).environment).toEqual({ type: "reuse", environmentId: E });
+      const docs = workerOn(state, P, 2);
+      expect(docs).toMatchObject({ kind: "spec-writer", replaces_thread_id: T, plan_wave: 2, branch: rowOf(state, T).branch, pr_url: rowOf(state, T).pr_url });
+      expect(docs.thread_id).not.toBe(T);
+      expect(rowOf(state, T).state).toBe("complete");
+
+      await report(state, docs.thread_id, { state: "ready", result: READY });
+      expect(lastAlert(state)).toContain(`chief_delegate (replaces: ${docs.thread_id}, kind: tester)`);
+      setLive(state, docs.thread_id, "idle");
+      await delegateWave(state, chief.threadId, P, 2, { replaces: docs.thread_id, kind: "tester" });
+      expect(state.spawned.at(-1).environment).toEqual({ type: "reuse", environmentId: E });
+      expect(workerOn(state, P, 2)).toMatchObject({ kind: "tester", replaces_thread_id: docs.thread_id });
+    });
+
     // Wave 1 contract 11 (fixRound): a side writer never builds on an implementation row, so it is loose beside a same-branch tester
     // and the alert asks for one fix per branch, never a stack. A real legacy stack (waves on branches of their own) stays a stack and
     // the side writer stays loose beside it. Regression: the side writer joins its chain's stack, or the stack stops being one.
