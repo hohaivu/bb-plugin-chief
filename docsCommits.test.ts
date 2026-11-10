@@ -77,6 +77,25 @@ describe("docsCommits", () => {
     expect(found.commits.map((entry) => entry.sha)).not.toContain(merge);
   });
 
+  test("a merge that resolves a docs/ conflict by hand is never listed", async () => {
+    const { work, commit } = repos();
+    git(work, "checkout", "-q", "-b", "task");
+    const ours = commit(work, "docs/specs/c.md", "docs: ours", "thr_writer");
+    git(work, "checkout", "-q", "-b", "other", "main");
+    const theirs = commit(work, "docs/specs/c.md", "docs: theirs", "thr_writer");
+    git(work, "checkout", "-q", "task");
+    try { git(work, "merge", "--no-ff", "-m", "merge other", "other"); } catch { /* the conflict is the point */ }
+    writeFileSync(join(work, "docs/specs/c.md"), "resolved by hand\n");
+    git(work, "add", "-A");
+    git(work, "commit", "-q", "-m", "merge other");
+    const merge = git(work, "rev-parse", "HEAD");
+    expect(git(work, "rev-list", "--parents", "-n1", "HEAD").split(" ")).toHaveLength(3);
+    git(work, "push", "-q", "origin", "task");
+    const shas = ok(await read(work, { branch: "task" })).commits.map((entry) => entry.sha);
+    expect(shas).not.toContain(merge);
+    expect(shas.sort()).toEqual([ours, theirs].sort());
+  });
+
   test("a stale local refs/heads/task never counts: the offending commit exists only on origin", async () => {
     const { work, peer, commit } = repos();
     git(work, "checkout", "-q", "-b", "task");

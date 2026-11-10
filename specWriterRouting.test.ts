@@ -491,7 +491,7 @@ describe("tester role", () => {
       await readyIdle(state, w1);
       const t2 = await swap(state, plain.chief, plain.planner.threadId, 2, w1, "tester");
       await readyIdle(state, t2);
-      // A no-spec chain admits a writer only as its owner's replacement (the admission itself is pinned in specWriterOwnership.test.ts).
+      // A no-spec chain admits a writer only as its owner's replacement (the admission itself is pinned in planLifecycle.test.ts).
       await expect(delegateWave(state, plain.chief.threadId, plain.planner.threadId, 1, { replaces: w1, kind: "spec-writer" })).rejects.toThrow(
         `A Spec Writer here replaces the chain's current implementation row: chief_delegate (planThreadId: ${plain.planner.threadId}, wave: 2, replaces: ${t2}, kind: spec-writer).`);
 
