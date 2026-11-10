@@ -13301,4 +13301,90 @@ describe("Coordinator", () => {
       expect((await call(state, "chief_attach", { threadIds: Array.from({ length: 20 }, (_, i) => `thr_none${i}`) }, parent)).split("\n")).toHaveLength(20);
     });
   });
+
+  describe("spawn link (COORD-5)", () => {
+    const counts = (state: S) => ({
+      rows: (state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads").get() as { n: number }).n,
+      spawned: state.spawned.length,
+    });
+
+    test("a Coordinator's spawn is linked at insert, in its own project or in another; the other project's Chief is untouched", async () => {
+      const state = await setup();
+      const other = await make(state, "proj_2");
+      const otherBefore = { ...row(state, other) };
+      const coord = await coordinator(state, "proj_1");
+
+      const own = await spawnChild(state, coord, {}, "proj_1");
+      expect(row(state, own.id)).toMatchObject({ role: "chief", project_id: "proj_1", coordinator: null, coordinator_thread_id: coord });
+      expect(own.text).toContain(`project proj_1`);
+
+      const far = await spawnChild(state, coord, { projectId: "proj_2" }, "proj_1");
+      expect(row(state, far.id)).toMatchObject({ role: "chief", project_id: "proj_2", coordinator: null, coordinator_thread_id: coord });
+      expect(far.text).toContain(`project proj_2`);
+      expect(row(state, other)).toEqual(otherBefore);
+      expect(state.spawned.at(-1).projectId).toBe("proj_2");
+    });
+
+    test("an unknown projectId leaves no thread and no row", async () => {
+      const state = await setup({ missingProjects: ["proj_missing"] });
+      const coord = await coordinator(state);
+      const before = counts(state);
+      await expect(call(state, "chief_spawn", { request: "x", context: "y", projectId: "proj_missing" }, coord)).rejects.toThrow("No project proj_missing.");
+      expect(counts(state)).toEqual(before);
+    });
+
+    test("a plain Chief may not pass projectId, and nothing is created", async () => {
+      const state = await setup();
+      const chief = await make(state);
+      const before = counts(state);
+      await expect(call(state, "chief_spawn", { request: "x", context: "y", projectId: "proj_2" }, chief)).rejects.toThrow("for a Coordinator only");
+      expect(counts(state)).toEqual(before);
+    });
+
+    test("todoId with another project is refused before anything is created; in its own project the todo moves", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      await call(state, "chief_roster", { todo: { text: "Remember the milk" } }, coord);
+      const todoId = (state.db.prepare("SELECT id FROM chief_todos").get() as { id: number }).id;
+      const before = counts(state);
+      await expect(call(state, "chief_spawn", { request: "x", context: "y", projectId: "proj_2", todoId }, coord)).rejects.toThrow("todos belong to one project");
+      expect(counts(state)).toEqual(before);
+      expect(state.db.prepare("SELECT chief_thread_id FROM chief_todos").get()).toEqual({ chief_thread_id: coord });
+
+      const child = await spawnChild(state, coord, { todoId });
+      expect(child.text).toContain(`Todo #${todoId} moved to it.`);
+      expect(state.db.prepare("SELECT chief_thread_id FROM chief_todos").get()).toEqual({ chief_thread_id: child.id });
+    });
+
+    test("the linked wording reaches the result and brief.md; a plain Chief's text and brief carry none of it", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = await spawnChild(state, coord, { projectId: "proj_2" });
+      expect(child.text).toContain("linked as your child");
+      const brief = await readFile(join(state.storageRoot, child.id, "brief.md"), "utf8");
+      expect(brief).toContain(`Handed off by Coordinator ${coord}`);
+      expect(brief).toContain("supervises you");
+      expect(brief).toContain("chief_escalate");
+
+      const plain = await make(state);
+      const plainChild = await spawnChild(state, plain);
+      expect(plainChild.text).toContain("is not your managed work");
+      expect(plainChild.text).not.toMatch(/linked|Coordinator/);
+      const plainBrief = await readFile(join(state.storageRoot, plainChild.id, "brief.md"), "utf8");
+      expect(plainBrief).toContain(`Handed off by Chief ${plain}`);
+      expect(plainBrief).not.toMatch(/Coordinator/);
+      expect(row(state, plainChild.id)).toMatchObject({ coordinator: null, coordinator_thread_id: null });
+    });
+
+    test("a child's own spawn is a plain Chief: unlinked, and it cannot be nested", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = await spawnChild(state, coord);
+      const grandchild = await spawnChild(state, child.id);
+      expect(row(state, grandchild.id)).toMatchObject({ coordinator: null, coordinator_thread_id: null });
+      expect(grandchild.text).toContain("is not your managed work");
+      expect(await call(state, "chief_coordinate", {}, child.id).catch((error: Error) => error.message)).toContain(coord);
+      expect(row(state, child.id)).toMatchObject({ coordinator: null, coordinator_thread_id: coord });
+    });
+  });
 });
