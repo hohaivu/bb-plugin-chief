@@ -3,17 +3,18 @@ import { type ManagedRow } from "../types";
 import { clip } from "../core/text";
 import { spawnMetadataSchema, type TodoRow } from "../tools/shapes";
 import type { Ctx } from "./context";
+import { isWriter } from "../plan/waveSchedule";
 
 export function createRoster(ctx: Ctx) {
-  const { bb, db, isTestWave, ledger, onSpecChain, planWavesFor, progress, store, todosForProject } = ctx;
+  const { bb, db, isTestWave, ledger, onSpecChain, planWavesFor, progress, sideLane, store, todosForProject } = ctx;
   function rosterFor(projectId: string, includeComplete = false) {
     return store.all().filter((row) => row.project_id === projectId && (includeComplete || row.state !== "complete"));
   }
 
   /** A hand-off from a tester or a test-wave worker must name its kind (see explicitKind in startWorker). */
   function replacesCall(row: ManagedRow): string {
-    if (row.kind === "spec-writer") {
-      if (ctx.sideLane(row)) return `chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
+    if (isWriter(row.kind)) {
+      if (sideLane(row)) return `chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
       return isTestWave(row)
         ? `chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test rerun or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`
         : `chief_delegate (replaces: ${row.thread_id}, kind: worker) once it reported ready, or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;

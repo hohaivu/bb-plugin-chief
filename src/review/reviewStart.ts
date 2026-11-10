@@ -10,7 +10,7 @@ import { REVIEW_ONLY } from "../core/roles";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "../core/text";
 import { terminal } from "../types";
 import type { ThreadStore } from "../db/threadStore";
-import { chainOf, type PlanWave } from "../plan/waveSchedule";
+import { chainOf, isWriter, type PlanWave } from "../plan/waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 type LiveThread = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["get"]>>;
@@ -192,10 +192,10 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
   const waiverSection = waiverLines.length ? ["## Waived test waves", ...waiverLines] : [];
   const specWaiverSection = specWaiverLines.length ? ["## Bypassed Spec Writer steps", ...specWaiverLines] : [];
   const testerTargets = (many ? targets : [worker]).filter((target) => target.kind === "tester");
-  const specWriterTargets = (many ? targets : [worker]).filter((target) => target.kind === "spec-writer" && target.lane !== "side");
-  const sideWriterTargets = (many ? targets : [worker]).filter((target) => target.kind === "spec-writer" && target.lane === "side");
+  const specWriterTargets = (many ? targets : [worker]).filter((target) => isWriter(target.kind) && target.lane !== "side");
+  const sideWriterTargets = (many ? targets : [worker]).filter((target) => isWriter(target.kind) && target.lane === "side");
   // On a spec-bearing chain every earlier worker is checked on its own interval: a docs/ path outside a Spec Writer's is scope drift.
-  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.lane !== "side" && (specGate || earlier.kind === "tester" || earlier.kind === "spec-writer")));
+  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.lane !== "side" && (specGate || earlier.kind === "tester" || isWriter(earlier.kind))));
   const sideWriterSection = sideWriters.length ? [
     "## Side-lane Spec Writers",
     ...sideWriters.map((writer) => `- wave ${writer.wave} Spec Writer ${writer.threadId}: ${writer.reportPath ? `Full report: ${writer.reportPath}; ` : ""}bb chief inspect ${writer.threadId}`),
@@ -616,7 +616,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const recorded = targets.length > 1 ? null : await host.recordedCommands(workerThreadId);
       const specWaves = chain.filter((n) => !!waves[n - 1]!.spec && !waves[n - 1]!.test && !waves[n - 1]!.design && !waves[n - 1]!.specsSkipped);
       const specBaseline = specWaves.some((n) => !!waves[n - 1]!.baseline);
-      const specUnplanned = !waves.length && ledger.taskChain(worker.thread_id).some((id) => store.get(id)?.kind === "spec-writer");
+      const specUnplanned = !waves.length && ledger.taskChain(worker.thread_id).some((id) => isWriter(store.get(id)?.kind));
       const specChain = specWaves.length > 0 || specUnplanned;
       // Side-lane Spec Writers of the reviewed spec waves, any state: their fold ranges are exempt from the docs/ scope rule.
       const sideRows = (worker.plan_thread_id ? plan.specWriters?.(worker.plan_thread_id) ?? [] : []).filter((row) => specWaves.includes(row.plan_wave!));
@@ -628,7 +628,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         // A side-lane writer is a target of its own: an implementation row's earlier list never holds one.
         const reported = ledger.taskChain(target.thread_id).slice(1).flatMap((id) => { const row = store.get(id); return row?.result && (laneOf(target) === "side" || laneOf(row) !== "side") ? [row] : []; });
         // A spec-bearing chain keeps every Spec Writer and Tester report; the 4-row cap applies to the others.
-        const keep = (row: Row) => specChain && (row.kind === "spec-writer" || row.kind === "tester");
+        const keep = (row: Row) => specChain && (isWriter(row.kind) || row.kind === "tester");
         const others = new Set(reported.filter((row) => !keep(row)).slice(0, 4));
         const rows = reported.filter((row) => keep(row) || others.has(row));
         earlier.set(target.thread_id, await Promise.all(rows.map(async (row) => ({

@@ -69,8 +69,11 @@ export interface Ctx {
   insertTodo: ReturnType<typeof createCore>["insertTodo"];
   chainOwner: ReturnType<typeof createCore>["chainOwner"];
   chainStarted: ReturnType<typeof createCore>["chainStarted"];
+  coexists: ReturnType<typeof createCore>["coexists"];
   isDesignWave: ReturnType<typeof createCore>["isDesignWave"];
   isTestWave: ReturnType<typeof createCore>["isTestWave"];
+  latestSideWriter: ReturnType<typeof createCore>["latestSideWriter"];
+  latestWorker: ReturnType<typeof createCore>["latestWorker"];
   latestChiefForProject: ReturnType<typeof createCore>["latestChiefForProject"];
   ledger: ReturnType<typeof createCore>["ledger"];
   onSpecChain: ReturnType<typeof createCore>["onSpecChain"];
@@ -92,7 +95,6 @@ export interface Ctx {
   todosForProject: ReturnType<typeof createCore>["todosForProject"];
   updateTodo: ReturnType<typeof createCore>["updateTodo"];
   upsertCooldown: ReturnType<typeof createCore>["upsertCooldown"];
-  waveWorkers: ReturnType<typeof createCore>["waveWorkers"];
   writerPending: ReturnType<typeof createCore>["writerPending"];
   sweep: ReturnType<typeof createSweep>["sweep"];
   toManaged: ReturnType<typeof createSweep>["toManaged"];

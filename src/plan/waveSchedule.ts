@@ -56,6 +56,11 @@ interface WaveRow {
 const FINISHED = ["complete", "archived", "deleted"];
 /** Ready, or idle after a ready report: a later non-report turn moves a row off ready, not its report. */
 export const isReady = (row: { state: string; last_report_state: string | null }) => row.state === "ready" || (row.state === "idle" && row.last_report_state === "ready");
+/** Ready or complete: a row its successor may build on. */
+export const isSettled = (row: { state: string; last_report_state: string | null }) => isReady(row) || row.state === "complete";
+/** The one place the Spec Writer kind is named. */
+export const isWriter = (kind: string | null | undefined) => kind === "spec-writer";
+export type Lane = "side" | "implementation";
 
 /** One module owns the plan-wave graph and the state derived from it: which worker holds a wave, which waves are
  * still pending, which workers one review covers, and whether a worker ends its plan. It returns data and
@@ -93,17 +98,32 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
   function writerAncestry(row: Row): boolean {
     const seen = new Set<string>();
     for (let current: Row | undefined = row; current; current = current.replaces_thread_id ? rows().get(current.replaces_thread_id) : undefined) {
-      if (current.kind !== "spec-writer" || seen.has(current.thread_id)) return false;
+      if (!isWriter(current.kind) || seen.has(current.thread_id)) return false;
       seen.add(current.thread_id);
     }
     return true;
   }
 
-  /** The one lane predicate. A side-lane Spec Writer is a planned spec-writer on a spec wave whose whole replaces ancestry
-   * is spec-writers: it works in its own worktree and never takes over the chain's. Every other worker-role row is implementation lane. */
+  /** The one lane rule. A side-lane Spec Writer is a spec-writer on a spec wave whose whole replaces ancestry is spec-writers
+   * (prior: the row it replaces, if any): it works in its own worktree and never takes over the chain's. Every other worker-role row
+   * is implementation lane. Admission asks it for a delegation not yet a row; sideLane and laneOf ask it for a row. */
+  function laneFor(waves: PlanWave[], wave: number, kind: string | null, prior?: Row): Lane {
+    return isWriter(kind) && specWave(waves, wave) && (!prior || writerAncestry(prior)) ? "side" : "implementation";
+  }
+
+  function laneOf(row: Row): Lane {
+    if (row.role !== "worker" || !row.plan_thread_id || row.plan_wave == null) return "implementation";
+    return laneFor(rawWaves(row.plan_thread_id), row.plan_wave, row.kind, row.replaces_thread_id ? rows().get(row.replaces_thread_id) : undefined);
+  }
+
   function sideLane(row: Row): boolean {
-    return row.role === "worker" && !!row.plan_thread_id && row.plan_wave != null
-      && specWave(rawWaves(row.plan_thread_id), row.plan_wave) && writerAncestry(row);
+    return laneOf(row) === "side";
+  }
+
+  /** Whether a live row may sit on the branch of a new row of this lane on this plan wave: a side-lane Spec Writer has its own
+   * worktree beside the chain's implementation row, and implementation rows share one. */
+  function coexists(row: Row, planThreadId: string, wave: number | undefined, lane: Lane): boolean {
+    return row.plan_thread_id === planThreadId && (lane === "side" ? !sideLane(row) || row.plan_wave !== wave : sideLane(row));
   }
 
   /** Every worker-role row of a planner in any lane, optionally for one wave, oldest first. */
@@ -123,35 +143,54 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return laneRows(planThreadId, wave).filter(sideLane);
   }
 
+  /** Wave n's newest implementation-lane row. */
+  function latestWorker(planThreadId: string, n: number): Row | undefined {
+    return waveWorkers(planThreadId, n).at(-1);
+  }
+
+  /** Wave n's newest side-lane Spec Writer. */
+  function latestSideWriter(planThreadId: string, n: number): Row | undefined {
+    return specWriters(planThreadId, n).at(-1);
+  }
+
+  /** Wave n's Spec Writer rows of either lane: side-lane ones oldest first, then implementation-lane (legacy) ones. */
+  function writersAt(planThreadId: string, n: number): Row[] {
+    return [...specWriters(planThreadId, n), ...waveWorkers(planThreadId, n).filter((row) => isWriter(row.kind))];
+  }
+
   /** Wave n's newest Spec Writer row of either lane. */
   function latestWriter(planThreadId: string, n: number): Row | undefined {
-    return laneRows(planThreadId, n).filter((row) => row.kind === "spec-writer").at(-1);
+    return laneRows(planThreadId, n).filter((row) => isWriter(row.kind)).at(-1);
   }
 
   /** A writer is owed on wave n: a spec wave with no Spec Writer row in any lane, or whose latest one is not ready and not complete. */
   function writerPending(planThreadId: string, waves: PlanWave[], n: number): boolean {
     if (!specWave(waves, n)) return false;
     const latest = latestWriter(planThreadId, n);
-    return !latest || !(isReady(latest) || latest.state === "complete");
+    return !latest || !isSettled(latest);
   }
+
+  /** The newest of a chain's rows, a live one before a finished one. */
+  const newestLive = (chainRows: Row[]): Row | undefined => {
+    const sorted = [...chainRows].sort((a, b) => a.created_at - b.created_at);
+    return sorted.filter((row) => !FINISHED.includes(row.state)).at(-1) ?? sorted.at(-1);
+  };
 
   /** The newest implementation-lane row over every wave of wave n's chain, a live row before a finished one: the worker
    * the chain's next wave replaces. waves may be raw (absent cleared): an absent wave has no rows. */
   function chainOwner(planThreadId: string, waves: PlanWave[], n: number): Row | undefined {
-    const rowsOfChain = chainOf(waves, n).flatMap((m) => waveWorkers(planThreadId, m)).sort((a, b) => a.created_at - b.created_at);
-    return rowsOfChain.filter((row) => !FINISHED.includes(row.state)).at(-1) ?? rowsOfChain.at(-1);
+    return newestLive(chainOf(waves, n).flatMap((m) => waveWorkers(planThreadId, m)));
   }
 
   /** The newest row of any lane over wave n's chain: the chain has been started. */
   function chainStarted(planThreadId: string, waves: PlanWave[], n: number): Row | undefined {
-    const rowsOfChain = chainOf(waves, n).flatMap((m) => laneRows(planThreadId, m)).sort((a, b) => a.created_at - b.created_at);
-    return rowsOfChain.filter((row) => !FINISHED.includes(row.state)).at(-1) ?? rowsOfChain.at(-1);
+    return newestLive(chainOf(waves, n).flatMap((m) => laneRows(planThreadId, m)));
   }
 
   /** Wave n's chain is spec-bearing: some unbypassed spec wave on it has had a Spec Writer, in any lane. */
   function specChain(planThreadId: string, waves: PlanWave[], n: number): boolean {
     return chainOf(waves, n).some((m) => !!waves[m - 1]?.spec && !waves[m - 1]!.specsSkipped
-      && laneRows(planThreadId, m).some((row) => row.kind === "spec-writer"));
+      && laneRows(planThreadId, m).some((row) => isWriter(row.kind)));
   }
 
   /** The waves of a plan whose latest implementation row is not ready or complete (or does not exist yet). An idle worker
@@ -159,8 +198,8 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
   function pendingWaves(planThreadId: string, waves: PlanWave[]): number[] {
     return waves.flatMap((wave, index) => {
       if (wave.testsSkipped) return [];
-      const latest = waveWorkers(planThreadId, index + 1).at(-1);
-      return latest && (isReady(latest) || latest.state === "complete") ? [] : [index + 1];
+      const latest = latestWorker(planThreadId, index + 1);
+      return latest && isSettled(latest) ? [] : [index + 1];
     });
   }
 
@@ -184,8 +223,8 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     if (!waves.length || worker.plan_wave == null) return [worker];
     const keep = (latest: Row | undefined) => latest && !isDesignWave(latest) && (latest.thread_id === worker.thread_id || latest.state !== "complete") ? [latest] : [];
     return [
-      ...waves.flatMap((_, index) => keep(waveWorkers(worker.plan_thread_id!, index + 1).at(-1))),
-      ...waves.flatMap((_, index) => keep(specWriters(worker.plan_thread_id!, index + 1).at(-1))),
+      ...waves.flatMap((_, index) => keep(latestWorker(worker.plan_thread_id!, index + 1))),
+      ...waves.flatMap((_, index) => keep(latestSideWriter(worker.plan_thread_id!, index + 1))),
     ];
   }
 
@@ -196,8 +235,8 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     if (sideLane(worker)) return false;
     const waves = planWavesFor(worker.plan_thread_id);
     if (worker.plan_wave == null || !waves.length || successorOf(waves, worker.plan_wave) !== null) return false;
-    return tips(waves).every((tip) => ["ready", "complete"].includes(waveWorkers(worker.plan_thread_id!, tip).at(-1)?.state ?? ""));
+    return tips(waves).every((tip) => ["ready", "complete"].includes(latestWorker(worker.plan_thread_id!, tip)?.state ?? ""));
   }
 
-  return { planWavesFor, isDesignWave, isTestWave, sideLane, writerAncestry, waveWorkers, specWriters, specWave, latestWriter, writerPending, chainOwner, chainStarted, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }

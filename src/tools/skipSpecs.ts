@@ -4,7 +4,7 @@ import { overrideSchema } from "./shapes";
 import type { Ctx } from "../runtime/context";
 
 export function registerSkipSpecsTool(ctx: Ctx) {
-  const { plans, store, waveWorkers } = ctx;
+  const { latestWorker, plans, store } = ctx;
   ctx.registerChiefTool({
     name: "chief_skip_specs",
     presentation: { label: { pending: "Waiving specs…", completed: "Waived specs" } },
@@ -20,7 +20,7 @@ export function registerSkipSpecsTool(ctx: Ctx) {
       const refusal = ctx.planReviewRefusal(planner);
       if (refusal) throw new Error(refusal);
       const { outcome, parent } = plans.waiveSpecs(planThreadId, wave);
-      const nextStep = `Specs on wave ${wave} bypassed: delegate its worker — chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}${parent !== null ? `, replaces: ${waveWorkers(planThreadId, parent).at(-1)?.thread_id ?? `<wave ${parent}'s latest worker>`}` : ""})${parent !== null ? ` once wave ${parent} is ready` : ""}.`;
+      const nextStep = `Specs on wave ${wave} bypassed: delegate its worker — chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}${parent !== null ? `, replaces: ${latestWorker(planThreadId, parent)?.thread_id ?? `<wave ${parent}'s latest worker>`}` : ""})${parent !== null ? ` once wave ${parent} is ready` : ""}.`;
       if (outcome === "already-waived-delegated") return `Specs on wave ${wave} were already bypassed.`;
       if (outcome === "waive") store.skipWave(planThreadId, wave, { specsSkipped: reason });
       return nextStep;

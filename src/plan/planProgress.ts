@@ -1,4 +1,4 @@
-import { chainOf, heads, isReady, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
+import { chainOf, heads, isReady, isWriter, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
 import type { createWaveSchedule } from "./waveSchedule";
 import type { createReviewLedger, ReviewTarget } from "../review/reviewLedger";
 
@@ -55,7 +55,7 @@ export function createPlanProgress<Row extends ProgressRow>(
   ledger: ReturnType<typeof createReviewLedger<Row>>,
   states: ProgressStates,
 ) {
-  const { planWavesFor, isDesignWave, isTestWave, specChain, sideLane, waveWorkers, specWriters, latestWriter, writerPending, chainOwner, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
+  const { planWavesFor, isDesignWave, isTestWave, specChain, laneOf, sideLane, waveWorkers, specWriters, latestWorker, latestSideWriter, latestWriter, writerPending, chainOwner, pendingWaves, reviewTargetsFor, onFinalWave } = schedule;
 
   /** Spec waves of a plan (or of the given waves) whose Spec Writer is owed, with their newest writer if any. */
   function pendingWriters(planThreadId: string, waves: PlanWave[], among: number[] = waves.map((_, index) => index + 1)) {
@@ -70,7 +70,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     const next = successorOf(waves, worker.plan_wave);
     const prior = worker.replaces_thread_id ? rows().get(worker.replaces_thread_id) : undefined;
     if (next === null || !prior || prior.plan_thread_id !== worker.plan_thread_id || prior.plan_wave !== worker.plan_wave) return null;
-    const successor = waveWorkers(worker.plan_thread_id, next).at(-1);
+    const successor = latestWorker(worker.plan_thread_id, next);
     if (!successor || states.terminal(successor.state)) return null;
     return { next, successor, restacked: successor.created_at >= worker.created_at };
   }
@@ -91,10 +91,10 @@ export function createPlanProgress<Row extends ProgressRow>(
     const planThreadId = worker.plan_thread_id!;
     // A side-lane Spec Writer is one of the plan's review targets; the one review starts from an implementation chain tip.
     if (sideLane(worker)) {
-      const newest = specWriters(planThreadId, worker.plan_wave).at(-1);
+      const newest = latestSideWriter(planThreadId, worker.plan_wave);
       return newest && newest.thread_id !== worker.thread_id ? { kind: "superseded", latest: newest } : { kind: "sideWriter" };
     }
-    const latest = waveWorkers(planThreadId, worker.plan_wave).at(-1);
+    const latest = latestWorker(planThreadId, worker.plan_wave);
     if (latest && latest.thread_id !== worker.thread_id) return { kind: "superseded", latest };
     const stack = restackOf(worker, waves);
     if (stack) return { kind: stack.restacked ? "restacked" : "restack", waves, next: stack.next, successor: stack.successor };
@@ -152,7 +152,7 @@ export function createPlanProgress<Row extends ProgressRow>(
       // The last writer of the chain is ready: release the test wave that waited for it.
       for (const test of chain) {
         const parent = parentOf(waves, test);
-        const tested = parent === null ? undefined : waveWorkers(planThreadId, parent).at(-1);
+        const tested = parent === null ? undefined : latestWorker(planThreadId, parent);
         if (waves[test - 1]!.test && !waves[test - 1]!.testsSkipped && tested && isReady(tested) && !waveWorkers(planThreadId, test).length) {
           return { kind: "tester", waves, test, replaces: chainOwner(planThreadId, waves, parent!)! };
         }
@@ -164,7 +164,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     if (next !== null && design) return { kind: "designNext", waves, next };
     if (design) return { kind: "designDone", waves };
     // An unplanned Spec Writer hands off to its worker, after a ready report.
-    if (row.kind === "spec-writer" && (!planThreadId || row.plan_wave == null || !waves.length)) return { kind: "unplannedWriter" };
+    if (isWriter(row.kind) && (!planThreadId || row.plan_wave == null || !waves.length)) return { kind: "unplannedWriter" };
     const stack = restackOf(row, waves);
     if (stack) return stack.restacked ? null : { kind: "restack", waves, next: stack.next, successor: stack.successor };
     if (next !== null) {
@@ -208,7 +208,7 @@ export function createPlanProgress<Row extends ProgressRow>(
   /** The row sits on a spec-bearing chain: a plan chain with a Spec Writer on an unbypassed spec wave, or an unplanned task chain holding a Spec Writer. */
   function onSpecChain(row: Row): boolean {
     if (row.plan_thread_id && row.plan_wave != null) return specChain(row.plan_thread_id, planWavesFor(row.plan_thread_id), row.plan_wave);
-    return ledger.taskChain(row.thread_id).some((id) => rows().get(id)?.kind === "spec-writer");
+    return ledger.taskChain(row.thread_id).some((id) => isWriter(rows().get(id)?.kind));
   }
 
   /** The repair decision after a reviewer verdict, or null (no verdict, or nothing left to repair). Advice, not permission:
@@ -219,7 +219,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     if (!round) return null;
     const target = (threadId: string): RepairTarget => {
       const row = rows().get(threadId);
-      return { threadId, wave: row?.plan_wave ?? null, tested: !!row && (row.kind === "tester" || isTestWave(row)), spec: !!row && onSpecChain(row), lane: row && sideLane(row) ? "side" : "implementation" };
+      return { threadId, wave: row?.plan_wave ?? null, tested: !!row && (row.kind === "tester" || isTestWave(row)), spec: !!row && onSpecChain(row), lane: row ? laneOf(row) : "implementation" };
     };
     const ofTarget = (entry: ReviewTarget) => target(entry.worker_thread_id);
     const work: RepairWork = round.plan

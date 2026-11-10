@@ -1,5 +1,6 @@
 import { MAX_WAVES, findingLines } from "../report/reportIntake";
 import { ADVISE_ONLY, PLAN_ONLY, type WorkerKind } from "../core/roles";
+import { isWriter } from "../plan/waveSchedule";
 import type { FailEntry } from "../types";
 import { bullets, clip, clipMiddle } from "../core/text";
 
@@ -128,7 +129,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, planContextLine,
     kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation" } = input;
   const tester = kind === "tester";
-  const specWriter = kind === "spec-writer";
+  const specWriter = isWriter(kind);
   const side = specWriter && lane === "side" && branch !== undefined;
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
   const render = (mission: string, contextText?: string) => [
@@ -289,7 +290,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- Planned: the wave's `## Spec delta` is your work list. Unplanned: Chief's mission is your Spec delta; it names the docs and domains to change.",
       "- Inputs: the plan file, docs/INDEX.md first, then only the specs the delta names and the decisions they link. You may read the code entry points and guideline files those domains need, read-only.",
       ...(baseline ? ["- Baseline: this wave's plan has a `## Spec baseline` heading. It names each new docs/specs file and the code paths it covers. For each named file that does not exist at your Base commit, first document the current behaviour of that code as the `chief-role-spec-writer` skill's baseline section says, then apply the Spec delta. Behaviour that looks like a bug goes under `## Open questions` in your report, never into the docs as a contract."] : []),
-      ...(prior && prior.kind !== "spec-writer" ? [`- Repair: Chief's mission is the docs fix. Read the report of the ${prior.kind ?? "worker"} you replace: bb chief inspect ${prior.thread_id}.`] : []),
+      ...(prior && !isWriter(prior.kind) ? [`- Repair: Chief's mission is the docs fix. Read the report of the ${prior.kind ?? "worker"} you replace: bb chief inspect ${prior.thread_id}.`] : []),
       "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
       side
         ? "- Ready: docs committed and folded onto the branch. A delta item the docs already reflect needs no commit: say so, and record `Fold: none`. Automated Verification: the `git diff --name-only $U..HEAD` of Fold step 4 showing only `docs/` paths, with exit status; `wc -l`"

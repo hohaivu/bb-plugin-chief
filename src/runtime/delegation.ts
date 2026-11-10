@@ -15,7 +15,7 @@ const MAX_STALL_RESETS = 2;
 const MAX_LOG_READ = 30;
 
 export function createDelegation(ctx: Ctx) {
-  const { bb, db, ledger, planWavesFor, plans, reviewerFails, sideLane, store, waveWorkers } = ctx;
+  const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, reviewerFails, store } = ctx;
   /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
     if (!(await ctx.plannerEnabled())) {
@@ -201,7 +201,7 @@ export function createDelegation(ctx: Ctx) {
       // The design worker whose artboards this wave builds on: the one being replaced, else the wave's latest.
       const designer = prior && prior.plan_thread_id === planThreadId && prior.plan_wave === implementsDesign
         ? prior
-        : waveWorkers(planThreadId!, implementsDesign).at(-1);
+        : latestWorker(planThreadId!, implementsDesign);
       if (!designer?.owner_approval) {
         throw new Error(`Wave ${implementsDesign} is design-only and wave ${wave} implements it: the owner must approve its artboards first. ${designer ? `Show the user the artboards from ${designer.thread_id}'s report, then record their decision with chief_owner_approval (workerThreadId: ${designer.thread_id}) and repeat this call.` : `No worker has delegated wave ${implementsDesign} yet.`}`);
       }
@@ -211,8 +211,7 @@ export function createDelegation(ctx: Ctx) {
     const holder = branch
       ? store.all().find((row) => row.role === "worker" && !terminal(row.state)
         && row.project_id === projectId && row.branch === branch && row.thread_id !== params.replaces
-        && !(planThreadId !== undefined && row.plan_thread_id === planThreadId
-          && (lane === "side" ? !sideLane(row) || row.plan_wave !== wave : sideLane(row))))
+        && !(planThreadId !== undefined && coexists(row, planThreadId, wave, lane)))
       : undefined;
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
@@ -343,8 +342,8 @@ export function createDelegation(ctx: Ctx) {
           const last = (current.result ?? current.status ?? "").split("\n").find((entry) => entry.trim()) ?? "";
           return `${label}@thread:${current.thread_id} ${current.state}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
         };
-        const current = waveWorkers(planThreadId, index + 1).at(-1);
-        const writer = ctx.specWriters(planThreadId, index + 1).at(-1);
+        const current = latestWorker(planThreadId, index + 1);
+        const writer = latestSideWriter(planThreadId, index + 1);
         if (!current && !writer) return `- wave ${index + 1}: not delegated`;
         return `- wave ${index + 1}: ${[current ? line(current) : "no implementation row", ...(writer ? [line(writer, "Spec Writer ")] : [])].join("; ")}`;
       }),
