@@ -262,7 +262,7 @@ describe("tester role", () => {
       const design = await specPlan(state, [planWave(1, { design: true }), specImpl(2), TEST_WAVE(3)]);
       await delegateWave(state, design.chief.threadId, design.planner.threadId, 1);
       expect(ownerOn(state, design.planner.threadId, 1)).toMatchObject({ kind: "designer" });
-      await expect(delegateWave(state, design.chief.threadId, design.planner.threadId, 1, { kind: "spec-writer" })).rejects.toThrow("Wave 1 is design-only: no Spec Writer runs on it.");
+      await expect(delegateWave(state, design.chief.threadId, design.planner.threadId, 1, { kind: "spec-writer" })).rejects.toThrow("Wave 1 is design-only: it changes no repository files. Route its docs need to wave 2");
     });
 
     // Wave 1 contract 15: chief_skip_specs works while only the worker exists and is refused once any spec-writer row does; its reply
@@ -281,7 +281,8 @@ describe("tester role", () => {
       const stored = planWaves(state, P);
       expect(await skipSpecs(state, chief.threadId, P, "another reason")).toBe(text);
       expect(planWaves(state, P)).toBe(stored);
-      await expect(delegateWave(state, chief.threadId, P, 1, { kind: "spec-writer" })).rejects.toThrow("Specs on wave 1 were bypassed (docs already describe this); no Spec Writer runs on it.");
+      // A waived spec wave takes an implementation-lane writer only, replacing the chain owner: with no worker yet there is none to replace.
+      await expect(delegateWave(state, chief.threadId, P, 1, { kind: "spec-writer" })).rejects.toThrow("no worker has started wave 1's chain yet");
       await delegateWave(state, chief.threadId, P, 1);
       expect(await skipSpecs(state, chief.threadId, P)).toBe("Specs on wave 1 were already bypassed.");
       await expect(skipSpecs(state, chief.threadId, P, "r", 2)).rejects.toThrow(`Wave 2 of planner ${P} is not a spec: true implementation wave.`);
@@ -295,7 +296,7 @@ describe("tester role", () => {
       await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
       expect(storedWave(state, planner.threadId).specsSkipped).toBe("docs are unchanged");
       expect(rowOf(state, worker).state).not.toBe("complete");
-      await expect(delegateWriter(state, chief, planner.threadId)).rejects.toThrow("Specs on wave 1 were bypassed (docs are unchanged); no Spec Writer runs on it.");
+      await expect(delegateWriter(state, chief, planner.threadId)).rejects.toThrow(`A Spec Writer here replaces the chain's current implementation row: chief_delegate (planThreadId: ${planner.threadId}, wave: 1, replaces: ${worker}, kind: spec-writer).`);
     });
 
     test.each([["the writer alone", false], ["the writer beside its worker", true]])("chief_skip_specs is refused once the wave has a Spec Writer row: %s", async (_label, both) => {
@@ -478,11 +479,11 @@ describe("tester role", () => {
       const ctx = await fullChain(state);
       const rows = countRows(state);
       await expect(delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ctx.worker, kind: "spec-writer" })).rejects.toThrow(
-        `A Spec Writer on wave 2 replaces its latest worker: chief_delegate (planThreadId: ${ctx.planner.threadId}, wave: 2, replaces: ${ctx.tester}, kind: spec-writer).`);
+        `A Spec Writer here replaces the chain's current implementation row: chief_delegate (planThreadId: ${ctx.planner.threadId}, wave: 2, replaces: ${ctx.tester}, kind: spec-writer).`);
       expect(countRows(state)).toBe(rows);
     });
 
-    test("a Spec Writer is refused on a chain with no spec, on a bypassed wave and on a design wave", async () => {
+    test("a Spec Writer replacing a non-owner row on a no-spec chain is refused naming the owner, and a design wave refuses it", async () => {
       const state = await setup();
       const plain = await specPlan(state, [planWave(1), TEST_WAVE(2)]);
       await delegateWave(state, plain.chief.threadId, plain.planner.threadId, 1);
@@ -490,8 +491,9 @@ describe("tester role", () => {
       await readyIdle(state, w1);
       const t2 = await swap(state, plain.chief, plain.planner.threadId, 2, w1, "tester");
       await readyIdle(state, t2);
-      await expect(delegateWave(state, plain.chief.threadId, plain.planner.threadId, 2, { replaces: t2, kind: "spec-writer" })).rejects.toThrow("Wave 2: no spec on this chain, so no Spec Writer runs on it.");
-      await expect(delegateWave(state, plain.chief.threadId, plain.planner.threadId, 1, { replaces: w1, kind: "spec-writer" })).rejects.toThrow("Wave 1: no spec on this chain, so no Spec Writer runs on it.");
+      // A no-spec chain admits a writer only as its owner's replacement (the admission itself is pinned in planLifecycle.test.ts).
+      await expect(delegateWave(state, plain.chief.threadId, plain.planner.threadId, 1, { replaces: w1, kind: "spec-writer" })).rejects.toThrow(
+        `A Spec Writer here replaces the chain's current implementation row: chief_delegate (planThreadId: ${plain.planner.threadId}, wave: 2, replaces: ${t2}, kind: spec-writer).`);
 
       const bypassed = await specPlan(state);
       await skipSpecs(state, bypassed.chief.threadId, bypassed.planner.threadId, "docs are unchanged");
@@ -499,14 +501,12 @@ describe("tester role", () => {
       const b1 = workerOn(state, bypassed.planner.threadId, 1).thread_id as string;
       expect(rowOf(state, b1).kind).toBeNull();
       await readyIdle(state, b1);
-      await expect(delegateWave(state, bypassed.chief.threadId, bypassed.planner.threadId, 1, { replaces: b1, kind: "spec-writer" })).rejects.toThrow(
-        "Specs on wave 1 were bypassed (docs are unchanged); no Spec Writer runs on it.");
       // A bypassed wave is never pending: its tester starts with no writer row.
       const t = await swap(state, bypassed.chief, bypassed.planner.threadId, 2, b1, "tester");
       expect(rowOf(state, t).state).not.toBe("complete");
 
       const design = await specPlan(state, [planWave(1, { design: true }), specImpl(2), TEST_WAVE(3)]);
-      await expect(delegateWave(state, design.chief.threadId, design.planner.threadId, 1, { kind: "spec-writer" })).rejects.toThrow("Wave 1 is design-only: no Spec Writer runs on it.");
+      await expect(delegateWave(state, design.chief.threadId, design.planner.threadId, 1, { kind: "spec-writer" })).rejects.toThrow("Wave 1 is design-only: it changes no repository files. Route its docs need to wave 2");
       expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE kind='spec-writer'`).get()).toEqual({ n: 0 });
     });
 
@@ -584,7 +584,7 @@ describe("tester role", () => {
     test.each<[string, object[], number, string, (planId: string, writer: string) => string | RegExp]>([
       ["kind worker", [specImpl(1), TEST_WAVE(2)], 1, "worker", (planId, writer) => sideOnly(planId, writer) as any],
       ["kind designer", [specImpl(1), TEST_WAVE(2)], 1, "designer", (planId, writer) => sideOnly(planId, writer) as any],
-      ["a fresh wave 1 that is not spec: true", [planWave(1), TEST_WAVE(2)], 1, "spec-writer", () => "Wave 1: no spec on this chain, so no Spec Writer runs on it."],
+      ["a fresh wave 1 that is not spec: true", [planWave(1), TEST_WAVE(2)], 1, "spec-writer", () => "A Spec Writer here replaces the chain's current implementation row"],
     ])("a blocked side-lane writer of another plan is not replaced by %s", async (_label, waves, target, kind, message) => {
       const state = await setup();
       const { chief, writer, planner, fresh } = await crossPlan(state, "blocked", waves);
@@ -873,7 +873,6 @@ describe("tester role", () => {
     const BLOCKED_PLAN = "- If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.";
     const WORKER_SPEC_RULES = [
       "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
-      "- Never change docs/: only a Spec Writer does.",
       "- If the spec is wrong, report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`. If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.",
       BASE_HEAD,
     ];
@@ -889,7 +888,6 @@ describe("tester role", () => {
       const prompt = state.spawned.at(-1).prompt as string;
       expect(section(prompt, "Spec")).toBe([
         "The plan file is your source of truth. Pre-plan specs may be stale for the domains this wave touches: where they conflict with the plan, follow the plan and name the conflict in your report. A Spec Writer records this change in docs/ in parallel: do not wait for it and do not implement against its docs.",
-        "- Never change docs/: only a Spec Writer does.",
         BLOCKED_PLAN,
         BASE_HEAD,
       ].join("\n") + "\n");

@@ -49,6 +49,52 @@ export async function reviewedAncestry(opts: { cwd: string; env: NodeJS.ProcessE
   }
 }
 
+export type DocsCommit = { sha: string; subject: string; writer: string; paths: string[] };
+
+/** The non-merge commits that change docs/ on the task's pushed head, with the Chief-Spec-Writer trailer each carries (`""` when none).
+ * Reads only origin: `head.sha` (the pull request's head) against `origin/<head.base>`, else a freshly fetched `origin/<head.branch>` against origin/HEAD.
+ * Never reads refs/heads/*: a local task branch can lag the pushed one. Never throws: a failed fetch, a missing commit, an unset origin/HEAD or the deadline is `{ skipped }`. */
+export async function docsCommits(opts: {
+  cwd: string; env: NodeJS.ProcessEnv; deadlineMs: number;
+  head: { branch: string; sha?: string; base?: string };
+}): Promise<{ commits: DocsCommit[]; head: string; base: string } | { skipped: string }> {
+  const { branch, sha, base } = opts.head;
+  try {
+    const git = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs);
+    const ok = (args: string[]) => git(args).then(() => true, (error: Error) => { if (error.message === "deadline") throw error; return false; });
+    const read = (args: string[]) => git(args).then((out) => out.trim() || null, (error: Error) => { if (error.message === "deadline") throw error; return null; });
+    if (!await ok(["fetch", "origin", branch])) return { skipped: `could not fetch origin/${branch}` };
+    if (base && !await ok(["fetch", "origin", base])) return { skipped: `could not fetch origin/${base}` };
+    let headSha: string | null;
+    if (sha) {
+      if (!await ok(["cat-file", "-e", `${sha}^{commit}`])) return { skipped: `pull request head ${sha.slice(0, 12)} not found after fetching origin/${branch}` };
+      headSha = sha;
+    } else {
+      headSha = await read(["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`]);
+      if (!headSha) return { skipped: `origin/${branch} not found after fetching it` };
+    }
+    let baseRef: string | null;
+    if (base) baseRef = `origin/${base}`;
+    else {
+      baseRef = await read(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+      if (!baseRef) return { skipped: "origin/HEAD not set" };
+      // A stale default branch would pull its newer commits into the range: a failed fetch skips the check.
+      if (!await ok(["fetch", "origin", baseRef.replace(/^origin\//, "")])) return { skipped: `could not fetch ${baseRef}` };
+    }
+    const mergeBase = await read(["merge-base", baseRef, headSha]);
+    if (!mergeBase) return { skipped: `no merge-base between ${baseRef} and ${headSha.slice(0, 12)}` };
+    const log = await git(["log", "--no-merges", "--name-only", "--format=%x1e%H%x1f%(trailers:key=Chief-Spec-Writer,valueonly,separator=%x2C)%x1f%s", `${mergeBase}..${headSha}`, "--", "docs/"]);
+    const commits = log.split("\x1e").slice(1).map((record): DocsCommit => {
+      const [id = "", trailer = "", ...rest] = record.split("\x1f");
+      const [subject = "", ...paths] = rest.join("\x1f").split("\n");
+      return { sha: id.trim(), writer: trailer.trim(), subject: subject.trim(), paths: paths.map((path) => path.trim()).filter(Boolean) };
+    });
+    return { commits, head: headSha, base: baseRef };
+  } catch (error) {
+    return { skipped: String((error as Error)?.message ?? error).replace(/\s+/g, " ").trim().slice(0, 200) };
+  }
+}
+
 const MODS = "export|default|async|public|private|protected|internal|static|override|final|abstract|open";
 const KEYWORDS = "function\\*?|class|interface|type|enum|struct|protocol|extension|def|func|fn";
 const ID = "[A-Za-z_$][A-Za-z0-9_$]*";

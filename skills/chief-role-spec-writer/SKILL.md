@@ -12,6 +12,8 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 - You run in parallel with the worker of a `spec: true` implementation wave. When your brief has a `## Fold` section, you work in your own worktree on a side branch, and you fold your docs onto the task branch (section 10). The worker builds from the plan and does not wait for you. Without a `## Fold` section, your brief keeps the older rules: commit and push to the branch it names.
 - You change only files under `docs/`. Never change code, tests, config or root guideline files (CLAUDE.md, AGENTS.md, README.md).
 - Only the Tester writes tests. Never write, edit or run tests, builds or linters.
+- Every commit you make carries the trailer `Chief-Spec-Writer: <your thread id>`: `git commit --trailer "Chief-Spec-Writer: $BB_THREAD_ID"`. A rebase keeps it. Never squash or amend it away.
+- When your mission names docs/ commits that another role made, check each one. Correct the docs in your own commits (a revert is a correction). List each such commit's sha under `## Adopted docs commits` in your ready result.
 - Write lazily. Change only the domains that the Spec delta names. On unplanned work, Chief's mission is the Spec delta. The one exception is a baseline for a new spec file that your brief's Baseline line names (section 7).
 - Never create a `docs/active` folder or a plan file for one branch.
 
@@ -109,13 +111,14 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
   1. With a `## Fold` section: the `git diff --name-only $U..HEAD` of fold step 4 shows only `docs/` paths, with its exit status. Without one: `git diff --name-only <base>..HEAD` shows only `docs/` paths, with its exit status.
   2. `wc -l` of each new or changed decision file shows 20 lines or fewer.
   3. Each kept STE exception: file, sentence, reason.
+- Adopted docs commits: list each sha under `## Adopted docs commits`, or write `None`.
 - List any Verify command as "not run: docs-only change".
 - For each new spec file with a baseline, list its baseline sections and the code paths each one describes, so the reviewer can check them at your Base commit. List `## Open questions`, or `None`. Name the open-question count in `summary`.
 - Report blocked when the Spec delta contradicts the plan or cannot be written. Recommend a `kind: spec-writer` retry with the fix, or a fresh `chief_plan`. Never recommend `kind: worker`.
 
 ## 10. Fold (only with a `## Fold` section in your brief)
 
-Commit only `docs/` on your worktree branch. Before you report ready, fold the commits onto the task branch `<branch>`:
+Commit only `docs/` on your worktree branch, each commit with the `Chief-Spec-Writer` trailer. Before you report ready, fold the commits onto the task branch `<branch>`:
 
 1. Require a clean tree: `git status --porcelain` prints nothing.
 2. `git fetch origin <branch>`, then note `U=$(git rev-parse origin/<branch>)`.
@@ -125,5 +128,5 @@ Commit only `docs/` on your worktree branch. Before you report ready, fold the c
 
 - Record `Fold base: <U of the successful attempt>` and `Fold head: <the pushed sha>` in your report.
 - When no docs change was needed, record `Fold: none` with Fold base and Fold head both equal to U.
-- Never use autostash, never force, never touch another worktree.
+- Never use autostash, never force, never touch another worktree. The fold keeps the `Chief-Spec-Writer` trailer on every commit: never squash or amend it away.
 - A docs repair writer that replaces a side-lane writer reuses that worktree and folds the same way.

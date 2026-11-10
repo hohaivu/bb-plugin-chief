@@ -91,6 +91,7 @@ export interface Ctx {
   specWave: ReturnType<typeof createCore>["specWave"];
   specWriters: ReturnType<typeof createCore>["specWriters"];
   store: ReturnType<typeof createCore>["store"];
+  taskWriters: ReturnType<typeof createCore>["taskWriters"];
   todoById: ReturnType<typeof createCore>["todoById"];
   todosForProject: ReturnType<typeof createCore>["todosForProject"];
   updateTodo: ReturnType<typeof createCore>["updateTodo"];

@@ -6,6 +6,7 @@ import { MIGRATIONS } from "./src/db/migrations";
 import { APPROVE, NO_DEVIATIONS, chiefReview, completeWorker, delegate, disposals, disposeAll, execFileMock, ghHead, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { dropSkippedNote } from "./test/docsOwnership";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -141,7 +142,7 @@ describe("forge comments", () => {
       const rowOfKey = (key: string | undefined) => rows(state).find((row) => row.dedupe_key === key);
       const callerKey = () => rows(state).find((row) => row.dedupe_key.startsWith(scenario.prefix))?.dedupe_key;
       try {
-        expect(await scenario.act()).toBe(scenario.result);
+        expect(dropSkippedNote(await scenario.act())).toBe(scenario.result);
         expectRequiredWork(state, scenario, sentBefore, outboxBefore);
         // The stuck call was really reached, and nothing past it ran.
         await until(() => callsOf(op).length === 1);
@@ -176,7 +177,7 @@ describe("forge comments", () => {
       const seeded = seed ? SEED_ROW(state, scenario.chief, prOn(host), ...seed) : null;
       const sentBefore = state.sent.length;
       const outboxBefore = scenario.report ? reporterOutbox(state, scenario.report.from).length : 0;
-      expect(await scenario.act()).toBe(scenario.result);
+      expect(dropSkippedNote(await scenario.act())).toBe(scenario.result);
       expectRequiredWork(state, scenario, sentBefore, outboxBefore);
       await until(() => rows(state).length > (seed ? 1 : 0) && rows(state).every((row) => row.last_error));
       const caller = rows(state).find((row) => row.dedupe_key.startsWith(scenario.prefix));

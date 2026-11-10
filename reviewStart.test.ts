@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow } from "./src/types";
+import { acceptOwnershipDeep } from "./test/docsOwnership";
 import { createReviewLedger } from "./src/review/reviewLedger";
 import { createReviewStart, type PinnedHead } from "./src/review/reviewStart";
 import { createThreadStore } from "./src/db/threadStore";
@@ -609,7 +610,7 @@ describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
 
   test.skipIf(process.env.ORACLE_OUT)("the default engine value is the base behaviour", async () => {
     const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    expect(await scenarios()).toEqual(oracle);
+    expect(acceptOwnershipDeep(await scenarios())).toEqual(oracle);
   });
 
   test.skipIf(process.env.ORACLE_OUT).each([
@@ -617,12 +618,12 @@ describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
   ])("%s runs as the base did", async (_name, stored) => {
     const { reviewEngine } = await import("./src/review/prAgent");
     const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    expect(await scenarios(async () => reviewEngine({ reviewEngine: stored }))).toEqual(oracle);
+    expect(acceptOwnershipDeep(await scenarios(async () => reviewEngine({ reviewEngine: stored })))).toEqual(oracle);
   });
 
   test.skipIf(process.env.ORACLE_OUT)("a setting read that rejects runs as the base did, with one log line per worker review", async () => {
     const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    const got = await scenarios(() => Promise.reject(new Error("settings down")));
+    const got = acceptOwnershipDeep(await scenarios(() => Promise.reject(new Error("settings down"))));
     for (const [name, one] of Object.entries(got)) {
       const failures = one.logs.filter((message: string) => message.startsWith(READ_FAILURE));
       expect(failures, name).toHaveLength(name.startsWith("branch review") ? 0 : 1);
@@ -633,7 +634,7 @@ describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
 
   test.skipIf(process.env.ORACLE_OUT)("a setting read that throws synchronously runs as the base did", async () => {
     const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    const got = await scenarios(() => { throw new Error("settings sync"); });
+    const got = acceptOwnershipDeep(await scenarios(() => { throw new Error("settings sync"); }));
     expect(got["single pinned"]!.logs.filter((message: string) => message.startsWith(READ_FAILURE))).toHaveLength(1);
     expect(got["single pinned"]!.launches).toEqual(oracle["single pinned"].launches);
   });

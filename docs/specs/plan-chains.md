@@ -33,6 +33,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Code row**: a worker row in the implementation lane, not on a design wave, with kind `worker` or no kind. A Spec Writer, a Tester, and a Designer are never code rows.
 - **Rejection**: the newest `request_changes` verdict of a chain, when no later verdict exists. Its time is the verdict time.
 - **Fix**: the newest code row of a chain that Chief created after the rejection.
+- **Spec Writers of this task**: the Spec Writers in the `replaces:` chain of a task row, plus the side-lane writers on the waves of its chain. `taskWriters` returns them.
 - **Retest debt**: the duty to rerun the tests after a fix. A chain owes it when a fix exists and nothing discharges it.
 
 ## Ownership and Entry Points
@@ -58,6 +59,7 @@ Callers interact with these entry points:
 - `sideLane(row)`: returns true for a side-lane Spec Writer. It is the only lane predicate.
 - `chainOwner(planThreadId, chain)`: returns the latest implementation-lane row of a chain. It never returns a side-lane Spec Writer.
 - `chainStarted(planThreadId, chain)`: returns any row of a chain, in any lane.
+- `taskWriters(row, chainIds)`: returns the Spec Writers of this task. It never returns a writer of another plan, another chain, or another unplanned task.
 - `specWriters(planThreadId, wave?)`: returns the side-lane Spec Writers, oldest first. `waveWorkers` returns the implementation-lane rows only.
 - `writerPending(planThreadId, waves, n)`: returns true when wave `n` is a spec wave with a pending writer.
 - `chief_forge_init(params)`: initializes the forge repository branch, pull request, and issue.
@@ -168,7 +170,7 @@ Shared worktree cleanup coordinates action ownership:
 - `replaces:` a side-lane Spec Writer with `kind: spec-writer` is a docs repair. The new writer reuses the side worktree and completes the old writer. Reason: a repair keeps the fold history of the side branch.
 - `replaces:` a side-lane Spec Writer with another kind is rejected, and the text names the chain owner. Reason: a product repair belongs to the implementation lane.
 - A worker or designer may replace a ready writer only when the wave has no implementation-lane row. Reason: this legacy hand-off covers a head Spec Writer that ran before its worker.
-- A legacy `spec-writer` that replaced a worker, designer, or tester is in the implementation lane, and its hand-off stays normal. A `spec-writer` without a plan is never in the side lane. Reason: no data migration is needed.
+- A `spec-writer` that replaced a worker, designer, or tester is in the implementation lane, and its hand-off stays normal. A `spec-writer` without a plan is never in the side lane. Reason: no data migration is needed.
 - A test wave delegation is rejected while a spec wave of its chain has a pending writer. The text names each pending writer, or the wave that has no writer. Reason: the Tester derives tests from the committed docs.
 - The tester call has `replaces:` referencing the chain owner of the parent wave. Reason: the tester continues the implementation worktree.
 - `planProgress` returns a `waitWriters` step when the parent implementation row reports ready while a writer is pending. It returns the exact tester call when the last writer reports ready. Reason: Chief must not call a tester that admission rejects.
@@ -177,11 +179,36 @@ Shared worktree cleanup coordinates action ownership:
 - A side-lane Spec Writer is a separate review target. `fixRound` never puts it in a legacy stack. It always lists the writer as a loose target. Reason: the writer shares the task branch, so it is not a stacked branch.
 - A side-lane Spec Writer completes with a covering approve, `skipReview`, or `override`. An implementation-lane `spec-writer` keeps the rejection, except on a waived test wave. Reason: a side writer has its own report and fold head.
 - `chief_skip_specs` is rejected after the wave has any `spec-writer` row. It works while only the worker exists. Reason: it only bypasses a Spec Writer that Chief never delegated.
+- A spec waiver waives the planned Spec delta only. It does not block an incidental docs correction. Reason: a waiver and a docs repair are different decisions.
 - A side-lane Spec Writer folds with a plain fast-forward push and never force-pushes. Reason: a force-push can erase the commits of the worker.
 - An implementation-lane agent that reuses the chain worktree first requires a clean tree, fetches the task branch, and fast-forwards to it. It reports blocked when the fast-forward fails. Reason: the folded docs must be in the checkout before the agent reads files.
 - A Tester checks that the Fold head of each listed Spec Writer is an ancestor of its HEAD. Reason: the Tester must test against the folded docs.
 - The Reviewer scopes a side-lane writer by Fold base to Fold head. `Fold: none` means an empty scope. A docs commit inside a fold range is not drift in the range of a worker. Reason: the fold commits land in the task branch while the worker runs.
 - A worker or designer on a spec wave treats the plan as its source of truth, and pre-plan specs can be stale. Reason: the Spec Writer records the change in parallel.
+
+### Docs Ownership
+
+Only a Spec Writer changes `docs/`. The sections above define the lanes. This section defines who may change docs, how the plugin attributes a docs commit, and when `skipReview` refuses.
+
+- A worker, designer, or tester never changes `docs/`, on any plan wave or on unplanned work. Reason: the owner gives docs to the Spec Writer.
+- Every non-writer brief states the rule and its route. A needed docs change goes under `## Docs needed` in the ready result, and Chief delegates a Spec Writer. Reason: a needed change must reach the owner of docs.
+- `admitDelegation` admits an implementation-lane Spec Writer on any non-design wave. The writer replaces the chain owner. The wave can be a non-spec wave, a waived spec wave, a test wave, or a spec wave whose prior row is the worker. Reason: every non-design wave needs a legal docs route, and the chain owner holds the checkout.
+- `admitDelegation` rejects a Spec Writer that replaces a row other than the chain owner. The text names the call that replaces the owner. Reason: a second row on the checkout would break the single implementation owner.
+- `admitDelegation` rejects a Spec Writer on a design-only wave. The text names the successor wave and the call for it. Reason: a design wave changes no repository files, so its docs need goes to the successor wave.
+- Such a writer shares the chain worktree and never completes on its own. It is not a retest fix. Reason: its worker, or a tester rerun, follows it.
+- On unplanned work, a Spec Writer is opt-in, with or without `replaces:`. Without `replaces:` it is a separate docs task on its own branch. Reason: unplanned work has no wave graph to route by.
+- Every Spec Writer commit carries the trailer `Chief-Spec-Writer: <thread id>`. A rebase keeps it. Reason: on a shared task branch, a docs commit must be attributable.
+- `taskWriters` is the one definition of the Spec Writers of this task. The reviewer and the `skipReview` check both use it. Reason: one provenance rule, and no writer of another task counts.
+- Every review renders the docs-ownership rule and the writer ids. A docs commit is in scope when its trailer names a Spec Writer of this task, or when it lies inside a reported range (Base commit to Head commit, or Fold base to Fold head). Reason: legacy writers have ranges but no trailers.
+- Any other docs commit is blocking in review. The exception is a commit that a later Spec Writer of this task lists under `## Adopted docs commits`, when the final docs are correct. Reason: history is append-only, so only an accountable correction cures a violation.
+- A missing trailer means unknown ownership. It does not prove that a non-writer made the commit. Reason: legacy Spec Writer commits have no trailer.
+- Every review keeps every earlier Spec Writer report in its context, on spec and non-spec chains. Other earlier rows stay capped at four. Reason: the range of a legacy writer must reach the reviewer.
+- `chief_complete` with `skipReview` reads the pushed head of the task. With a pull request, it reads the PR head SHA against the PR base. Without one, it reads freshly fetched `origin/<branch>` against `origin/HEAD`. It never reads a local task ref. Reason: a stale local ref must never count as a clean check.
+- `skipReview` is refused when a non-merge docs commit has no trailer, or a trailer that names no Spec Writer of this task. The text lists the commits and three routes: `chief_review`, a Spec Writer correction first, or `override`. Reason: `skipReview` has no reviewer.
+- A writer correction after the offending commit leaves `skipReview` refused. Reason: history is append-only, and the cure is a review or an `override`.
+- When the check cannot run, `skipReview` proceeds and the `chief_complete` reply says `docs/ check skipped: <reason>`. The causes are no local checkout, a remote host, an unreadable pull request, no task branch, a failed fetch, or the 20 second deadline. Reason: Chief decided to fail open with an explicit note.
+- The check does not run on an approve or an `override`. Reason: an approve had the reviewer rule, and an override is Chief's stated decision.
+- `docsCommits` in `src/review/impactSlice.ts` reads the history and never throws. A failure returns a skip reason.
 
 ### Retest Debt
 
@@ -289,3 +316,4 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 
 - [Spec Writer runs in parallel on a side worktree](../decisions/2026-11-10-spec-writer-parallel-side-worktree.md)
 - [Retest after a fix round gates the review](../decisions/2026-11-10-retest-after-fix-round.md)
+- [Only a Spec Writer changes docs](../decisions/2026-11-10-docs-owned-by-spec-writer.md)

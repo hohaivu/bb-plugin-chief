@@ -107,6 +107,8 @@ export interface ReviewBriefInput {
   specWaves?: number[];
   /** Every side-lane Spec Writer of those waves in any state, newest last: each report names its Fold base..Fold head range. Optional: older callers omit it. */
   sideWriters?: { threadId: string; wave: number; reportPath: string | null }[];
+  /** The Spec Writers of this task (taskWriters, any lane, any state) across the covered targets, with where to read each report. Optional: older callers omit it. */
+  writers?: { threadId: string; reportPath: string | null }[];
   /** Unplanned work whose task chain holds a Spec Writer. Optional: older callers omit it. */
   specUnplanned?: boolean;
   /** A reviewed, unbypassed spec wave has a `## Spec baseline`. Optional: older callers omit it. */
@@ -124,7 +126,7 @@ export interface ReviewBriefInput {
 /** The prompt a worker's reviewer starts from, plus the long provenance it reads from review-context.md in its storage.
  * Pure: it renders what startReview gathered and reads nothing else. */
 export function reviewBrief(input: ReviewBriefInput): { prompt: string; context: string } {
-  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], retestWaiverLines = [], specWaiverLines = [], specWaves = [], sideWriters = [], specUnplanned = false, specBaseline = false } = input;
+  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], retestWaiverLines = [], specWaiverLines = [], specWaves = [], sideWriters = [], writers = [], specUnplanned = false, specBaseline = false } = input;
   const specGate = specWaves.length > 0 || specUnplanned;
   const head = worker.head;
   const many = targets.length > 1;
@@ -213,6 +215,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     ...(previousSection.length ? [`- The previous review (${previous!.threadId}) with its findings.`] : []),
     ...(planSection.length ? [`- The plan wave file${chain.length > 1 ? "s" : ""} this review covers.`] : []),
     ...(sideWriterSection.length ? ["- The side-lane Spec Writers and where to read their reports (each names its Fold base and Fold head)."] : []),
+    ...(writers.length ? ["- The Spec Writers of this task and where to read their reports."] : []),
     ...(waiverSection.length ? ["- The test waves Chief waived, with Chief's reason for each."] : []),
     ...(specWaiverSection.length ? ["- The Spec Writer steps Chief bypassed, with Chief's reason for each."] : []),
     ...(sliceSection.length ? ["- The impact slice: pointers to code outside the diff that the change calls or that calls it."] : []),
@@ -266,12 +269,14 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
           ? `Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, a Spec Writer's path outside docs/, or a docs/ path in a worker's, designer's or tester's own range is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind ?? "worker"} ${earlier.threadId}`))].join(", ")}.`
           : `Check each earlier tester and Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind} ${earlier.threadId}`))].join(", ")}.`,
       ] : []),
+      "", "## Docs ownership",
+      `Only a Spec Writer changes docs/. The Spec Writers of this task: ${writers.map((writer) => writer.threadId).join(", ") || "none"}. A docs/ commit is in scope only when its Chief-Spec-Writer trailer names one of them, or it lies inside one of their reported ranges (Base commit..Head commit, or Fold base..Fold head). Check with: git log --no-merges --format='%H %(trailers:key=Chief-Spec-Writer,valueonly)' <base>..<head> -- docs/. Any other docs/ commit is an ownership violation and is blocking. Exception: a later Spec Writer of this task lists that commit under "## Adopted docs commits" in its report, and the final docs/ content is correct. Then name it as a non-blocking note. A missing trailer means unknown ownership, not proof that a non-writer made the commit. The repair is never a worker change: it is a Spec Writer (kind: spec-writer).`,
       ...(specGate ? [
         "", `${specWaves.length ? `Wave${specWaves.length > 1 ? "s" : ""} ${specWaves.join(", ")} ${specWaves.length > 1 ? "are" : "is"} marked spec: true` : "This task ran a Spec Writer"}: ${specWaves.length ? "a Spec Writer committed docs/ from the \`## Spec delta\` in parallel with the worker, which built from the plan. Judge the code and the tests against the plan's contracts and those docs" : "a Spec Writer committed docs/ from the Spec delta first, and the worker then implemented against them. Judge the code and the tests against those docs"}. Block only on:`,
         "(1) code that contradicts the plan's contracts or the committed docs (a conflict that stale pre-plan specs cause is a docs finding);",
         "(2) a test that contradicts them;",
         "(3) a named Spec delta item that is missing or wrong in the final docs;",
-        `(4) a docs/ change in a worker's, designer's or tester's own commit range${sideWriters.length ? ", except the docs/ commits inside a side-lane Spec Writer's Fold base..Fold head range (each report under `## Side-lane Spec Writers` names its range)" : ""};`,
+        `(4) a docs/ ownership violation (see Docs ownership)${sideWriters.length ? ", except the docs/ commits inside a side-lane Spec Writer's Fold base..Fold head range (each report under `## Side-lane Spec Writers` names its range)" : ""};`,
         "(5) in new or changed docs prose only: no lead sentence saying what the domain is for; a domain term used before it is defined (common words need no definition); sprint history, a wishlist or a code dump; a contract with no reason next to it.",
         ...(specBaseline ? ["(6) a baseline statement (current behaviour a wave's first Spec Writer documented for a new spec file, named in its report) that the Spec delta does not change and that contradicts the code at that Spec Writer's Base commit. Baseline prose is new docs prose for (5); a baseline contract marked \"Reason: not stated in the code\" meets (5)'s reason rule. Behaviour that a Spec Writer listed under Open questions is not a contract."] : []),
         "Content already correct needs no new commit. Unchanged existing docs are out of scope. A bypass never excuses landed docs that contradict the code. ASD-STE100 sentence rules (Simplified Technical English) are nits, never blocking.",
@@ -395,6 +400,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
     planWavesFor: (planThreadId: string | null) => PlanWave[];
     /** A planner's side-lane Spec Writer rows (optionally one wave), oldest first. Optional: older callers omit it, and no writer is side-lane. */
     specWriters?: (planThreadId: string, wave?: number) => Row[];
+    /** The Spec Writers of one task: its replaces: chain's writers plus the side-lane writers of its plan chain (taskChain ids passed in). Optional: older callers omit it, and only the replaces: chain's writers count. */
+    taskWriters?: (row: Row, chainIds: string[]) => Row[];
   };
   controlsThread: (row: Row, callerChiefId: string) => boolean;
   host: ReviewHost<Row>;
@@ -641,14 +648,20 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       for (const target of new Set([worker, ...targets])) {
         // A side-lane writer is a target of its own: an implementation row's earlier list never holds one.
         const reported = ledger.taskChain(target.thread_id).slice(1).flatMap((id) => { const row = store.get(id); return row?.result && (laneOf(target) === "side" || laneOf(row) !== "side") ? [row] : []; });
-        // A spec-bearing chain keeps every Spec Writer and Tester report; the 4-row cap applies to the others.
-        const keep = (row: Row) => specChain && (isWriter(row.kind) || row.kind === "tester");
+        // Every review keeps every Spec Writer report (a legacy writer's range has no trailer); a spec-bearing chain also keeps every Tester's. The 4-row cap applies to the others.
+        const keep = (row: Row) => isWriter(row.kind) || (specChain && row.kind === "tester");
         const others = new Set(reported.filter((row) => !keep(row)).slice(0, 4));
         const rows = reported.filter((row) => keep(row) || others.has(row));
         earlier.set(target.thread_id, await Promise.all(rows.map(async (row) => ({
           threadId: row.thread_id, kind: row.kind, reportPath: row.report_path, lane: laneOf(row),
           ...(targets.length > 1 ? {} : { recorded: recordedLines(await host.recordedCommands(row.thread_id)) }),
         }))));
+      }
+      const writerRows = new Map<string, Row>();
+      for (const target of new Set([worker, ...targets])) {
+        const chainIds = ledger.taskChain(target.thread_id);
+        const found = plan.taskWriters?.(target, chainIds) ?? chainIds.flatMap((id) => store.get(id) ?? []).filter((row) => isWriter(row.kind));
+        for (const row of found) writerRows.set(row.thread_id, row);
       }
       const briefTarget = ({ row, head: pinned, since }: CoveredTarget<Row>): BriefTarget => ({
         threadId: row.thread_id, title: row.title, prUrl: row.pr_url, branch: row.branch, reportSeq: row.report_seq,
@@ -673,6 +686,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: specs skipped by Chief: ${clip(waves[n - 1]!.specsSkipped!, 500)}`),
         specWaves,
         sideWriters: sideRows.map((row) => ({ threadId: row.thread_id, wave: row.plan_wave!, reportPath: row.report_path })),
+        writers: [...writerRows.values()].map((row) => ({ threadId: row.thread_id, reportPath: row.report_path })),
         specUnplanned,
         specBaseline,
         recordedLines: recordedLines(recorded),

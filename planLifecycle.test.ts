@@ -177,9 +177,10 @@ describe("admitDelegation: spec flow", () => {
       expect(parent.admit({ ...writer, wave: 2 }), state).toMatchObject({ kind: "spec-writer", lane: "side" });
     }
     const none = world({ [P]: [{ path: "w1", spec: true, specsSkipped: "docs exist" }, { path: "w2", design: true, dependsOn: [] }, { path: "w3", dependsOn: [] }] });
-    expect(() => none.admit({ ...writer, wave: 1 })).toThrow("Specs on wave 1 were bypassed (docs exist); no Spec Writer runs on it.");
-    expect(() => none.admit({ ...writer, wave: 2 })).toThrow("Wave 2 is design-only: no Spec Writer runs on it.");
-    expect(() => none.admit({ ...writer, wave: 3 })).toThrow("Wave 3: no spec on this chain, so no Spec Writer runs on it.");
+    // A waived spec wave and a no-spec wave now take an implementation-lane writer: with no worker on the chain yet there is no owner to replace.
+    expect(() => none.admit({ ...writer, wave: 1 })).toThrow("no worker has started wave 1's chain yet");
+    expect(() => none.admit({ ...writer, wave: 2 })).toThrow("Wave 2 is design-only: it changes no repository files. Route its docs need to wave");
+    expect(() => none.admit({ ...writer, wave: 3 })).toThrow("no worker has started wave 3's chain yet");
   });
 
   test("a later implementation wave is admitted while a writer is pending, in every writer state", () => {
@@ -281,7 +282,7 @@ describe("admitDelegation: spec flow", () => {
   test("a Spec Writer repair after a tester or a worker (implementation lane) replaces the chain owner only", () => {
     const { admit } = world({ [P]: [{ path: "w1", spec: true }, { path: "w2", test: true }] }, [{ id: "w", plan: P, wave: 1 }, { id: "t", plan: P, wave: 2, kind: "tester" }, { id: "sw", plan: P, wave: 1, kind: "spec-writer" }]);
     expect(admit({ ...writer, wave: 2, prior: "t" })).toMatchObject({ kind: "spec-writer", lane: "implementation" });
-    expect(() => admit({ ...writer, wave: 2, prior: "w" })).toThrow(/replaces its latest worker: chief_delegate \(planThreadId: plan, wave: 2, replaces: t, kind: spec-writer\)/);
+    expect(() => admit({ ...writer, wave: 2, prior: "w" })).toThrow(/replaces the chain's current implementation row: chief_delegate \(planThreadId: plan, wave: 2, replaces: t, kind: spec-writer\)/);
   });
 
   test("baseline: a side writer on a baseline wave sets it, whether or not the worker has started; a worker, or a wave without the flag, does not", () => {
@@ -639,5 +640,88 @@ describe("admitDelegation: plan chains", () => {
       const { admit } = world({}, [{ id: "w", pr }]);
       expect(admit({ prior: "w", prUrl: "https://github.com/acme/shop/pull/9" }).kind).toBe("worker");
     });
+  });
+});
+
+// Contract (docs/specs/plan-chains.md "### Docs Ownership", C3 and C10): "the Spec Writers of this task" is one definition, and every
+// non-design plan wave has a legal Spec Writer route that replaces the chain's current implementation row. Regression: taskWriters
+// returns a writer of another plan, chain or unplanned task (a foreign writer then excuses a docs commit); the route is refused on a
+// non-spec, waived or test wave again; the route is admitted behind a non-owner row (a second row on the checkout).
+describe("docs ownership: taskWriters (C3)", () => {
+  const plans = {
+    [P]: [{ path: "w1", spec: true }, { path: "w2" }, { path: "w3", spec: true, dependsOn: [] }] as PlanWave[],
+    other: [{ path: "o1", spec: true }] as PlanWave[],
+  };
+  const ids = (writers: { thread_id: string }[]) => writers.map((row) => row.thread_id).sort();
+  const writersOf = (rows: Map<string, Row>, id: string, chain: string[]) => createWaveSchedule(() => rows).taskWriters(rows.get(id)!, chain);
+
+  test("a planned task gets the side writers on its chain's waves and the writers of its replaces chain, once each, and never a writer of another chain or plan", () => {
+    const { rows } = world(plans, [
+      { id: "w", plan: P, wave: 1 }, { id: "sw1", plan: P, wave: 1, kind: "spec-writer", state: "blocked", last: "blocked" },
+      { id: "w2", plan: P, wave: 2, replaces: "w" }, { id: "iw", plan: P, wave: 2, kind: "spec-writer", replaces: "w2" },
+      { id: "w3", plan: P, wave: 3 }, { id: "sw3", plan: P, wave: 3, kind: "spec-writer" },
+      { id: "ow", plan: "other", wave: 1 }, { id: "sw-other", plan: "other", wave: 1, kind: "spec-writer" },
+    ]);
+    // sw1 is both a side writer of the chain and listed in the replaces chain: it counts once.
+    expect(ids(writersOf(rows, "w2", ["w2", "w", "sw1", "iw"]))).toEqual(["iw", "sw1"]);
+    // Without the replaces chain only the side-lane writers of waves 1 and 2 remain; the implementation-lane writer needs the chain.
+    expect(ids(writersOf(rows, "w2", ["w2"]))).toEqual(["sw1"]);
+    // Wave 3 is its own chain: wave 1's writer is not its writer, and its own is.
+    expect(ids(writersOf(rows, "w3", ["w3"]))).toEqual(["sw3"]);
+    expect(ids(writersOf(rows, "w", ["w"]))).toEqual(["sw1"]);
+    expect(ids(writersOf(rows, "ow", ["ow"]))).toEqual(["sw-other"]);
+  });
+
+  test("an unplanned task gets only the writers of its own replaces chain, never another unplanned task's writer", () => {
+    const { rows } = world({}, [
+      { id: "u", kind: "worker" }, { id: "uw", kind: "spec-writer", replaces: "u" },
+      { id: "x", kind: "worker" }, { id: "xw", kind: "spec-writer", replaces: "x" },
+    ]);
+    expect(ids(writersOf(rows, "u", ["u", "uw"]))).toEqual(["uw"]);
+    expect(ids(writersOf(rows, "x", ["x", "xw"]))).toEqual(["xw"]);
+    expect(writersOf(rows, "u", ["u"])).toEqual([]);
+  });
+});
+
+describe("docs ownership: the implementation-lane Spec Writer route (C10)", () => {
+  const route = (waves: PlanWave[], workers: { id: string; wave: number; kind?: string; replaces?: string }[], wave: number, prior: string) =>
+    world({ [P]: waves }, workers.map((w) => ({ ...w, plan: P }))).admit({ ...planned, kind: "spec-writer", resolvedKind: "spec-writer", branch: CHAIN, wave, prior });
+
+  test.each([
+    ["a non-spec wave", [{ path: "w1" }, { path: "w2", test: true }], [{ id: "w", wave: 1 }], 1],
+    ["a waived spec wave", [{ path: "w1", spec: true, specsSkipped: "docs exist" }], [{ id: "w", wave: 1 }], 1],
+    ["a spec wave whose prior is the worker", [{ path: "w1", spec: true }], [{ id: "w", wave: 1 }], 1],
+    ["a test wave, replacing the tester", [{ path: "w1" }, { path: "w2", test: true }], [{ id: "w", wave: 1 }, { id: "t", wave: 2, kind: "tester", replaces: "w" }], 2],
+  ] as [string, PlanWave[], { id: string; wave: number; kind?: string; replaces?: string }[], number][])("is admitted on %s, replacing the chain owner", (_label, waves, workers, wave) => {
+    const owner = workers.at(-1)!.id;
+    expect(route(waves, workers, wave, owner)).toMatchObject({ kind: "spec-writer", lane: "implementation" });
+  });
+
+  test("a row that is not the chain owner is refused with the owner's call, on a non-spec chain too", () => {
+    const waves: PlanWave[] = [{ path: "w1" }, { path: "w2", test: true }];
+    const workers = [{ id: "w", wave: 1 }, { id: "t", wave: 2, kind: "tester", replaces: "w" }];
+    expect(() => route(waves, workers, 2, "w")).toThrow(`A Spec Writer here replaces the chain's current implementation row: chief_delegate (planThreadId: ${P}, wave: 2, replaces: t, kind: spec-writer).`);
+    expect(() => world({ [P]: waves }).admit({ ...planned, kind: "spec-writer", resolvedKind: "spec-writer", wave: 1 })).toThrow("no worker has started wave 1's chain yet");
+  });
+
+  test("a design-only wave refuses it and names the successor wave's route", () => {
+    const waves: PlanWave[] = [{ path: "d", design: true }, { path: "w2" }];
+    const rows = [{ id: "d", wave: 1, kind: "designer" }, { id: "w", wave: 2, replaces: "d" }];
+    expect(() => route(waves, rows.slice(0, 1), 1, "d")).toThrow(`Wave 1 is design-only: it changes no repository files. Route its docs need to wave 2: put it in that wave's Spec Writer mission when the wave is spec: true, else chief_delegate (planThreadId: ${P}, wave: 2, replaces: d, kind: spec-writer) once its worker has reported.`);
+    expect(() => route(waves, rows, 1, "d")).toThrow(`wave: 2, replaces: w, kind: spec-writer) once its worker has reported.`);
+    expect(() => world({ [P]: waves }).admit({ ...planned, kind: "spec-writer", resolvedKind: "spec-writer", wave: 1 })).toThrow("replaces: <that wave's chain owner>, kind: spec-writer");
+  });
+
+  test("the side lane is unchanged: a first writer on an unwaived spec wave is admitted beside the worker, and a second live one is refused", () => {
+    const waves: PlanWave[] = [{ path: "w1", spec: true }];
+    expect(world({ [P]: waves }, [{ id: "w", plan: P, wave: 1 }]).admit({ ...planned, kind: "spec-writer", resolvedKind: "spec-writer", branch: CHAIN, wave: 1 })).toMatchObject({ lane: "side" });
+    const live = world({ [P]: waves }, [{ id: "sw", plan: P, wave: 1, kind: "spec-writer", state: "active", last: null }]);
+    expect(() => live.admit({ ...planned, kind: "spec-writer", resolvedKind: "spec-writer", branch: CHAIN, wave: 1 })).toThrow("is still live");
+  });
+
+  test("a spec waiver waives the planned delta only: waiveSpecs is unchanged and the writer route stays open", () => {
+    const { lifecycle } = world({ [P]: [{ path: "w1", spec: true }] }, [{ id: "w", plan: P, wave: 1, state: "active", last: null }]);
+    expect(lifecycle.waiveSpecs(P, 1)).toMatchObject({ outcome: "waive" });
+    expect(route([{ path: "w1", spec: true, specsSkipped: "docs exist" }], [{ id: "w", wave: 1 }], 1, "w")).toMatchObject({ lane: "implementation" });
   });
 });

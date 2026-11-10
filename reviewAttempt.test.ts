@@ -6,6 +6,7 @@ import { READY, plan, planWave, readyIdle, report, reviewed, rowOf, setLive, too
 import { APPROVE, HEAD_SHA, TEST_WAVE, approvePlan, disposeAll, execFileMock, reviewContextOf, setup, snapshotText, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { acceptOwnership, dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -464,7 +465,7 @@ describe("tester role", () => {
     test("review attempt oracle", async () => {
       const head = await reviewAttemptFixture();
       // The make-native reviewer line follows each of the 31 reviewer prompts' "Classify the change" line; the rest is base's bytes.
-      expect(head).toBe(withReviewerLine(await snapshotText("review-attempt-cf92d9c.txt"), 31));
+      expect(dropDocsLines(dropSkippedNote(acceptOwnership(head)))).toBe(dropDocsLines(withReviewerLine(await snapshotText("review-attempt-cf92d9c.txt"), 31)));
     }, 300_000);
 
     // A host lookup that never answers no longer holds chief_review (#177): the ancestry check's 20 s deadline covers the

@@ -8,6 +8,7 @@ import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, 
 import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_NEW_DESIGN_BULLET, PLANNER_OLD_COMPLEX_TAIL, PLANNER_OLD_DESIGN_BULLET, PLANNER_RESHAPE_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { dropDocsLines } from "./test/docsOwnership";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -145,7 +146,7 @@ describe("tester role", () => {
       expect(items[0]).toBe("(1) code that contradicts the plan's contracts or the committed docs (a conflict that stale pre-plan specs cause is a docs finding);");
       expect(items[1]).toBe("(2) a test that contradicts them;");
       expect(items[2]).toBe("(3) a named Spec delta item that is missing or wrong in the final docs;");
-      expect(items[3]).toBe("(4) a docs/ change in a worker's, designer's or tester's own commit range, except the docs/ commits inside a side-lane Spec Writer's Fold base..Fold head range (each report under `## Side-lane Spec Writers` names its range);");
+      expect(items[3]).toBe("(4) a docs/ ownership violation (see Docs ownership), except the docs/ commits inside a side-lane Spec Writer's Fold base..Fold head range (each report under `## Side-lane Spec Writers` names its range);");
       expect(items[4]).toMatch(/^\(5\) in new or changed docs prose only: no lead sentence saying what the domain is for;/);
       expect(items).toHaveLength(6);
       expect(items[5]).toBe("Content already correct needs no new commit. Unchanged existing docs are out of scope. A bypass never excuses landed docs that contradict the code. ASD-STE100 sentence rules (Simplified Technical English) are nits, never blocking.");
@@ -235,7 +236,7 @@ describe("tester role", () => {
       const headCommit = "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.";
       const lines = head.split("\n");
       expect(lines.filter((line) => line === headCommit)).toHaveLength(2);
-      expect(lines.filter((line) => line !== headCommit).join("\n")).toBe(oracle);
+      expect(dropDocsLines(lines.filter((line) => line !== headCommit).join("\n"))).toBe(dropDocsLines(oracle));
     });
 
     // Contract 17 (planner and advisor briefs): they change on purpose, so assert the changed lines only. The planner is told the

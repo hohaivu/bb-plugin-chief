@@ -9,3 +9,4 @@ Read with the shared `chief-worker` skill; rules that bind two roles (the report
 
 - The design rules for your mode (design tool, design in code, or no spec) are in your brief's Design work block.
 - Screenshot evidence comes from the running app (simulator or browser) only. Never write or run golden or screenshot tests: a tester does.
+- Never change docs/, on every wave and on unplanned work: list a needed docs change under `## Docs needed` in your ready result. Chief routes it to a Spec Writer.

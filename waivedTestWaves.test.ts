@@ -5,6 +5,7 @@ import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { PLAN_FIXTURE, delegate, disposeAll, setup, snapshotText, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { acceptOwnership } from "./test/docsOwnership";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -235,7 +236,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     // Byte equivalence: the files were captured from chief_review at the pre-fix oracle (8f7e4d6) on these same inputs.
     const portable = (text: string) => text.replaceAll(state.storageRoot, "<storage>");
     // The prompt is the oracle plus the make-native reviewer line (the oracle file is untouched); the context is unchanged.
-    expect(portable(prompt)).toBe(withReviewerLine(await snapshotText("review-no-waiver.prompt.txt")));
+    expect(acceptOwnership(portable(prompt))).toBe(withReviewerLine(await snapshotText("review-no-waiver.prompt.txt")));
     await expect(portable(context)).toMatchFileSnapshot("./test/fixtures/review-no-waiver.context.txt");
   });
 
@@ -256,7 +257,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     };
     const omitted = reviewBrief(input);
     expect(reviewBrief({ ...input, waiverLines: [] })).toEqual(omitted);
-    expect(omitted.prompt).toBe(withReviewerLine(await snapshotText("review-brief-no-waiverlines.prompt.txt")));
+    expect(acceptOwnership(omitted.prompt)).toBe(withReviewerLine(await snapshotText("review-brief-no-waiverlines.prompt.txt")));
     await expect(omitted.context).toMatchFileSnapshot("./test/fixtures/review-brief-no-waiverlines.context.txt");
   });
 
