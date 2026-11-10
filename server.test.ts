@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readdir, readFile, rename, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import type { PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import {
@@ -16,6 +16,7 @@ import { checkPlan } from "./reportIntake";
 import { PR_AGENT_DIR } from "./prAgent";
 import { reviewBrief, type ReviewBriefInput } from "./reviewStart";
 import { managedSkills } from "./roles";
+import { loadBaseBuild } from "./scripts/loadBaseBuild";
 
 // Stands in for git/gh/glab so pull-request resolution tests never shell out for real.
 const execFileMock = vi.hoisted(() => vi.fn());
@@ -13812,12 +13813,8 @@ describe("Coordinator", () => {
     beforeAll(async () => {
       baseAvailable = await git("cat-file", "-t", BASE_SHA).then((type) => type === "commit", () => false);
       if (!baseAvailable) return;
-      const baseRoot = await mkdtemp(join(tmpdir(), "coord-base-"));
-      const real = await vi.importActual<typeof import("node:child_process")>("node:child_process");
-      real.execFileSync("sh", ["-c", `git -C "${HEAD_ROOT}" archive ${BASE_SHA} | tar -x -C "${baseRoot}"`]);
-      await symlink(join(HEAD_ROOT, "node_modules"), join(baseRoot, "node_modules"));
-      const baseModule = await import(/* @vite-ignore */ pathToFileURL(join(baseRoot, "server.ts")).href);
-      base = await capture(baseModule, baseRoot, BASE_SHA, false);
+      const { sourceRoot, module: baseModule } = await loadBaseBuild(HEAD_ROOT, BASE_SHA);
+      base = await capture(baseModule as any, sourceRoot, BASE_SHA, false);
       head = await capture({ default: plugin, MIGRATIONS }, HEAD_ROOT, await git("rev-parse", "HEAD"), true);
       console.info(`preservation-evidence ${JSON.stringify({ base: base.meta, head: head.meta, scope: "plain Chief is preserved against base 95aa7df (differential)", runnerRoot: process.cwd() })}`);
     }, 120_000);
