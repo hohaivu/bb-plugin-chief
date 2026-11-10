@@ -6,6 +6,8 @@ This page shows how Chief turns one owner request into a merged pull request. Th
 
 ## Chart
 
+> **Note.** The waves of one chain run one after another on one branch, each worker continuing the last through `replaces:`. Separate chains (separate branches and pull requests, started with `dependsOn: []`) can run in parallel.
+
 A solid arrow is a tool call or a push. A dashed arrow is a `chief_report` that the plugin turns into a lifecycle alert for Chief, or an owner message. Every managed thread reports to Chief only. Threads never message each other. The one exception is the pull-only plan log (`chief_log`), which carries no alert.
 
 ```mermaid
@@ -58,11 +60,12 @@ sequenceDiagram
   end
 
   loop each wave of the chain, later waves use replaces:
-    Chief->>Worker: chief_delegate (reshape wave for a big feature)
+    Chief->>Worker: chief_delegate, one worker for this wave
     Worker->>Forge: git push to task branch
     Worker-->>Chief: report (ready, or blocked with a split)
     Note over Chief,Worker: no review between waves. A blocked report leads to a new chief_plan for the rest
   end
+  Note over Chief,Worker: for a big feature the planner adds one optional reshape wave after the last feature wave. It is an ordinary worker wave in this loop
 
   Chief->>Tester: chief_delegate replaces: kind tester
   Tester->>Forge: git push tests
@@ -72,23 +75,33 @@ sequenceDiagram
   Reviewer-->>Chief: report with verdict approve or request_changes
   Note over Chief,Forge: the plugin posts each verdict, a blocked worker and the result on the PR
 
-  loop while verdict is request_changes
-    Chief->>Worker: fresh worker, chief_delegate replaces: with findings
-    Worker-->>Chief: report (ready)
-    opt second rejection in a row
-      Chief->>Advisor: chief_consult on the worker
-      Advisor-->>Chief: report (advice)
+  loop while the verdict is request_changes, counted in a row on the task
+    alt 1st rejection
+      Chief->>Worker: fresh worker, chief_delegate replaces: with the findings
+    else 2nd rejection
+      Chief->>Advisor: chief_consult on the worker, before any new replaces:
+      Advisor-->>Chief: report (advice), the next replaces: is refused until it arrives
+      Chief->>Worker: one more fresh worker, chief_delegate replaces: with the advice
+    else 3rd rejection, stop
+      Chief->>Forge: chief_escalate posts Need you with @owner
+      Chief->>Owner: Need you in chat, no new worker starts
+      Owner-->>Chief: decision (chat, or an answer on the tracker task)
+      opt owner authorizes one more round
+        Chief->>Worker: chief_delegate replaces: userApprovedRound true
+      end
     end
+    Worker-->>Chief: report (ready)
     Chief->>Reviewer: chief_review again
     Reviewer-->>Chief: report with verdict
   end
+  Note over Chief,Owner: if the owner does not authorize a round at the stop, the work ends there. An approve resets the count
 
-  opt third rejection in a row, or any decision only the owner can make
-    Chief->>Forge: chief_escalate posts Need you with @owner
-    Chief->>Owner: Need you in chat
-    Owner-->>Chief: decision (chat, or an answer on the tracker task)
+  opt any other decision only the owner can make
+    Chief->>Owner: Need you, also posted with chief_escalate
+    Owner-->>Chief: decision
   end
 
+  Note over Chief,Forge: only after an approve of the PR head, or skipReview or override with a reason
   Chief->>Forge: chief_complete marks the PR ready
   Owner->>Forge: merge
 ```
