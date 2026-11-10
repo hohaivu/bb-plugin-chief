@@ -2,9 +2,9 @@ import { cliAdapters, createForgeComments, sanitizeForge } from "../../forgeComm
 import { findingLines } from "../../reportIntake";
 import { type ManagedRow, type ReportFinding } from "../types";
 import { clip } from "../../text";
-import { trackerProjects } from "../../tracker";
-import { trackerSelector } from "../../trackerBbTasks";
-import { createTrackerSync } from "../../trackerSync";
+import { trackerProjects } from "../tracker/tracker";
+import { trackerSelector } from "../tracker/trackerBbTasks";
+import { createTrackerSync } from "../tracker/trackerSync";
 import { chainOf } from "../../waveSchedule";
 import { forgeEnv, prMerged, serverPath } from "../../forge";
 import { execFileAsync } from "./exec";
