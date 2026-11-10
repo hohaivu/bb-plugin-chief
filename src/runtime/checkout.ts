@@ -1,9 +1,9 @@
-import { commitStamp, fastForward, stampLine } from "../../checkoutSync";
+import { commitStamp, fastForward, stampLine } from "../forge/checkoutSync";
 import { type ManagedRow, terminal } from "../types";
 import { clip } from "../../text";
 import { bounded } from "./exec";
 import { BUSY_STATUSES } from "./constants";
-import { forgeEnv } from "../../forge";
+import { forgeEnv } from "../forge/forge";
 import type { Ctx } from "./context";
 
 export function createCheckout(ctx: Ctx) {

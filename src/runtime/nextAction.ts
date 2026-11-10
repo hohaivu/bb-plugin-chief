@@ -7,7 +7,7 @@ import { clip } from "../../text";
 import { type PlanWave } from "../../waveSchedule";
 import { BUSY_STATUSES } from "./constants";
 import { bounded } from "./exec";
-import { forgeEnv, prHead } from "../../forge";
+import { forgeEnv, prHead } from "../forge/forge";
 import type { Ctx } from "./context";
 
 const REVIEW_IDLE_WAIT_MS = 60_000;

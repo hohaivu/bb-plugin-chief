@@ -1,4 +1,4 @@
-import { cliAdapters, createForgeComments, sanitizeForge } from "../../forgeComments";
+import { cliAdapters, createForgeComments, sanitizeForge } from "../forge/forgeComments";
 import { findingLines } from "../../reportIntake";
 import { type ManagedRow, type ReportFinding } from "../types";
 import { clip } from "../../text";
@@ -6,7 +6,7 @@ import { trackerProjects } from "../tracker/tracker";
 import { trackerSelector } from "../tracker/trackerBbTasks";
 import { createTrackerSync } from "../tracker/trackerSync";
 import { chainOf } from "../../waveSchedule";
-import { forgeEnv, prMerged, serverPath } from "../../forge";
+import { forgeEnv, prMerged, serverPath } from "../forge/forge";
 import { execFileAsync } from "./exec";
 import type { Ctx } from "./context";
 

@@ -1,7 +1,7 @@
 import { createResearch } from "../../research";
 import { terminal } from "../types";
 import { clip } from "../../text";
-import { serverPath } from "../../forge";
+import { serverPath } from "../forge/forge";
 import { execFileAsync } from "./exec";
 import { MAX_RESULT_LENGTH } from "./constants";
 import type { Ctx } from "./context";

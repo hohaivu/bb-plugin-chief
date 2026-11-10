@@ -1,6 +1,6 @@
 import { type ManagedRow, terminal } from "../types";
 import { clip } from "../../text";
-import { markPrReady, prHead } from "../../forge";
+import { markPrReady, prHead } from "../forge/forge";
 import { BUSY_STATUSES, MAX_RESULT_LENGTH } from "./constants";
 import { overrideSchema } from "../tools/shapes";
 import type { Ctx } from "./context";

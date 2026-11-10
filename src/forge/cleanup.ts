@@ -1,4 +1,4 @@
-import { gitWithin } from "./src/review/impactSlice";
+import { gitWithin } from "../review/impactSlice";
 
 // Node built-ins only and erasable types only, so `node` can import this file directly.
 

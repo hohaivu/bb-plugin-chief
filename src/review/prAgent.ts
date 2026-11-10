@@ -2,7 +2,7 @@
 // pull request head. Pure text and parsing, no I/O: reviewStart.ts reads the setting and writes the files,
 // server.ts defines the settings. See docs/specs/review-engine.md.
 
-import { quote } from "../../forge";
+import { quote } from "../forge/forge";
 
 export type ReviewMode = "reviewer" | "pr-agent" | "both";
 export type ReviewEngine = { mode: ReviewMode; prAgentDir: string };

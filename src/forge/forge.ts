@@ -4,8 +4,8 @@
 // once, instead of being re-derived by a model on every delegation.
 
 import { createHash } from "node:crypto";
-import { clip } from "./text";
-import { execFileAsync } from "./src/runtime/exec";
+import { clip } from "../../text";
+import { execFileAsync } from "../runtime/exec";
 
 /** POSIX single-quoting: the only interpolation this script does. */
 export function quote(value: string) {

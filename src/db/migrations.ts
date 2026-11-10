@@ -1,4 +1,4 @@
-import { FORGE_COMMENTS_TABLE } from "../../forgeComments";
+import { FORGE_COMMENTS_TABLE } from "../forge/forgeComments";
 import { TRACKER_TABLES } from "../tracker/trackerSync";
 
 /** Append-only: the host records each statement's hash by index and rejects a changed
