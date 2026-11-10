@@ -177,9 +177,10 @@ describe("admitDelegation: spec flow", () => {
       expect(parent.admit({ ...writer, wave: 2 }), state).toMatchObject({ kind: "spec-writer", lane: "side" });
     }
     const none = world({ [P]: [{ path: "w1", spec: true, specsSkipped: "docs exist" }, { path: "w2", design: true, dependsOn: [] }, { path: "w3", dependsOn: [] }] });
-    expect(() => none.admit({ ...writer, wave: 1 })).toThrow("Specs on wave 1 were bypassed (docs exist); no Spec Writer runs on it.");
-    expect(() => none.admit({ ...writer, wave: 2 })).toThrow("Wave 2 is design-only: no Spec Writer runs on it.");
-    expect(() => none.admit({ ...writer, wave: 3 })).toThrow("Wave 3: no spec on this chain, so no Spec Writer runs on it.");
+    // A waived spec wave and a no-spec wave now take an implementation-lane writer: with no worker on the chain yet there is no owner to replace.
+    expect(() => none.admit({ ...writer, wave: 1 })).toThrow("no worker has started wave 1's chain yet");
+    expect(() => none.admit({ ...writer, wave: 2 })).toThrow("Wave 2 is design-only: it changes no repository files. Route its docs need to wave");
+    expect(() => none.admit({ ...writer, wave: 3 })).toThrow("no worker has started wave 3's chain yet");
   });
 
   test("a later implementation wave is admitted while a writer is pending, in every writer state", () => {
@@ -281,7 +282,7 @@ describe("admitDelegation: spec flow", () => {
   test("a Spec Writer repair after a tester or a worker (implementation lane) replaces the chain owner only", () => {
     const { admit } = world({ [P]: [{ path: "w1", spec: true }, { path: "w2", test: true }] }, [{ id: "w", plan: P, wave: 1 }, { id: "t", plan: P, wave: 2, kind: "tester" }, { id: "sw", plan: P, wave: 1, kind: "spec-writer" }]);
     expect(admit({ ...writer, wave: 2, prior: "t" })).toMatchObject({ kind: "spec-writer", lane: "implementation" });
-    expect(() => admit({ ...writer, wave: 2, prior: "w" })).toThrow(/replaces its latest worker: chief_delegate \(planThreadId: plan, wave: 2, replaces: t, kind: spec-writer\)/);
+    expect(() => admit({ ...writer, wave: 2, prior: "w" })).toThrow(/replaces the chain's current implementation row: chief_delegate \(planThreadId: plan, wave: 2, replaces: t, kind: spec-writer\)/);
   });
 
   test("baseline: a side writer on a baseline wave sets it, whether or not the worker has started; a worker, or a wave without the flag, does not", () => {

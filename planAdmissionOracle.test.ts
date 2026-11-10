@@ -7,6 +7,7 @@ import { READY, type State, ctxOf, delegateWave, plan, planWave, planWaves, read
 import { TEST_WAVE, approvePlan, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { acceptDesignRefusal, acceptOwnership, dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -598,7 +599,7 @@ describe("tester role", () => {
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "plan-admission-c8a0d76.txt"), "utf8");
       const kept = (text: string) => text.split(/^(?==== )/m).filter((block) => !REPLACED_BY_PARALLEL_LANE(block.slice(4, block.indexOf(" ===\n"))));
       expect(kept(oracle).length).toBeGreaterThan(30);
-      expect(kept(asBase(head)).join("")).toBe(kept(oracle).join(""));
+      expect(dropDocsLines(dropSkippedNote(acceptDesignRefusal(acceptOwnership(kept(asBase(head)).join("")))))).toBe(dropDocsLines(kept(oracle).join("")));
     });
   });
 });
