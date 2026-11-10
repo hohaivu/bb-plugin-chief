@@ -13503,4 +13503,179 @@ describe("Coordinator", () => {
       expect(needYouKeys(state).map((alert) => [alert.key, alert.delivered]).sort()).toEqual([[key(child, "A"), 0], [key(child, "B"), 0]].sort());
     });
   });
+
+  describe("done alert (COORD-7)", () => {
+    const stateOfRow = (state: S, id: string) => row(state, id).state as string;
+    /** A linked child Chief with one completed worker (not yet idle). */
+    async function withDone(state: S) {
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      const worker = (await delegate(state, child, "Fix totals")).threadId;
+      await completeWorker(state, child, worker);
+      return { coord, child, worker };
+    }
+    const doneAlerts = (state: S, coord: string) => sentToCoordinator(state, coord).filter((sent) => String(sent.input[0].text).includes("finished its work"));
+    const todo = (state: S, child: string, params: object) => call(state, "chief_roster", { todo: params }, child);
+    /** A worker reviewed and approved, with a reviewer that is still running when the worker completes. */
+    async function reviewedWorker(state: S, child: string) {
+      const worker = (await delegate(state, child, "Fix totals")).threadId;
+      await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker);
+      await call(state, "chief_review", { workerThreadId: worker }, child);
+      const reviewer = ((await state.harness.behavior.callRpc("status", null)) as any).threads.find((thread: any) => thread.role === "reviewer" && thread.workerThreadId === worker).threadId as string;
+      await call(state, "chief_report", { state: "ready", result: "Checked", verdict: "approve", findings: [] }, reviewer);
+      state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
+      await call(state, "chief_complete", { threadId: worker, testsSkipped: CLOSE_OUT.testsSkipped }, child);
+      await settle();
+      return { worker, reviewer };
+    }
+
+    test("idle with every owned thread complete alerts once; repeated idle, sweep and reconcile add nothing; a new completed round adds one", async () => {
+      const state = await setup();
+      const { coord, child, worker } = await withDone(state);
+      expect(doneKeys(state)).toEqual([]); // complete but not idle yet
+      await idle(state, child);
+      expect(doneKeys(state)).toEqual([{ key: `${child}:coordinator-done:${worker}`, source: child, target: coord, delivered: 1 }]);
+      const [message] = doneAlerts(state, coord);
+      expect(message.senderThreadId).toBe(child);
+      expect(message.input[0].text).toContain(child);
+      expect(message.input[0].text).toContain("chief_roster");
+
+      await idle(state, child);
+      await state.supervisorCycle();
+      await call(state, "chief_roster", {}, child);
+      await settle();
+      expect(doneKeys(state)).toHaveLength(1);
+      expect(doneAlerts(state, coord)).toHaveLength(1);
+
+      const second = (await delegate(state, child, "Second round")).threadId;
+      await completeWorker(state, child, second);
+      await idle(state, child);
+      expect(doneKeys(state).map((alert) => alert.key).sort()).toEqual([`${child}:coordinator-done:${worker}`, `${child}:coordinator-done:${second}`].sort());
+      expect(doneAlerts(state, coord)).toHaveLength(2);
+    });
+
+    test("no alert while a managed row is open, a todo is open (waiting or not), or nothing was ever completed; each condition lifts it", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      await idle(state, child);
+      expect(doneKeys(state)).toEqual([]); // no completed row
+
+      const open = (await delegate(state, child, "Still open")).threadId;
+      await completeWorker(state, child, (await delegate(state, child, "Finished")).threadId);
+      await idle(state, child);
+      expect(doneKeys(state)).toEqual([]); // an open row remains
+
+      await todo(state, child, { text: "Later", after: "the release" });
+      await completeWorker(state, child, open);
+      await idle(state, child);
+      expect(doneKeys(state)).toEqual([]); // every row is complete, but a waiting todo is open
+      const waiting = (state.db.prepare("SELECT id FROM chief_todos").get() as { id: number }).id;
+      await todo(state, child, { text: "Now" });
+      await todo(state, child, { id: waiting, state: "dropped" });
+      await idle(state, child);
+      expect(doneKeys(state)).toEqual([]); // an open todo remains
+      const now = (state.db.prepare("SELECT id FROM chief_todos WHERE state='open'").get() as { id: number }).id;
+      await todo(state, child, { id: now, state: "done" });
+      await idle(state, child);
+      expect(doneKeys(state)).toHaveLength(1);
+    });
+
+    test.each(["thread.active", "thread.failed", "thread.archived", "thread.deleted"])("a %s event for a finished child is not a done alert", async (event) => {
+      const state = await setup();
+      const { child } = await withDone(state);
+      state.live.set(child, { ...state.live.get(child)!, status: event === "thread.active" ? "active" : "idle" } as any);
+      await state.harness.behavior.emitThreadEvent(event as any, { thread: state.live.get(child)!, lastAssistantText: "x", error: null });
+      await settle();
+      expect(doneKeys(state)).toEqual([]);
+    });
+
+    test("an inactive Coordinator receives no done alert", async () => {
+      const state = await setup();
+      const { coord, child } = await withDone(state);
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(coord)! });
+      await settle();
+      expect(stateOfRow(state, coord)).toBe("archived");
+      await idle(state, child);
+      expect(doneKeys(state)).toEqual([]);
+    });
+
+    test("an absorbed reviewer that completes in a later sweep gives one alert then, not before", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      const { reviewer } = await reviewedWorker(state, child);
+      await idle(state, child);
+      expect(stateOfRow(state, reviewer)).toBe("active");
+      expect(doneKeys(state)).toEqual([]);
+      state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "idle" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(reviewer)!, lastAssistantText: "done" });
+      await settle();
+      expect(stateOfRow(state, reviewer)).toBe("complete");
+      expect(doneKeys(state)).toHaveLength(1);
+    });
+
+    test("a transient threads.get failure delays the alert; the next sweep gives exactly one", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      const { reviewer } = await reviewedWorker(state, child);
+      await idle(state, child);
+      state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "idle" });
+      state.failNextGet(reviewer);
+      await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(reviewer)!, lastAssistantText: "done" });
+      await settle();
+      expect(stateOfRow(state, reviewer)).toBe("idle");
+      expect(doneKeys(state)).toEqual([]);
+      await idle(state, child); // a later sweep reads the reviewer again
+      expect(stateOfRow(state, reviewer)).toBe("complete");
+      expect(doneKeys(state)).toHaveLength(1);
+    });
+
+    test("a missed idle event is recovered by reconcile and its sweep: one alert", async () => {
+      const state = await setup();
+      const { coord, child } = await withDone(state);
+      state.live.set(child, { ...state.live.get(child)!, status: "idle" }); // the host never delivered thread.idle
+      expect(doneKeys(state)).toEqual([]);
+      await state.supervisorCycle();
+      await settle();
+      expect(stateOfRow(state, child)).toBe("idle");
+      expect(doneKeys(state)).toHaveLength(1);
+      await state.supervisorCycle();
+      await settle();
+      expect(doneAlerts(state, coord)).toHaveLength(1);
+    });
+
+    test("attaching an idle, finished Chief gives exactly one done alert through the sweep the link starts; a repeat attach gives none", async () => {
+      const state = await setup();
+      const plain = await make(state);
+      const worker = (await delegate(state, plain, "Fix totals")).threadId;
+      await completeWorker(state, plain, worker);
+      await idle(state, plain);
+      expect(kinds(state)).toEqual([]); // unlinked: nobody to alert
+      const coord = await coordinator(state);
+      expect(await call(state, "chief_attach", { threadIds: [plain] }, coord)).toBe(`${plain}: attached.`);
+      await settle();
+      expect(doneKeys(state)).toEqual([{ key: `${plain}:coordinator-done:${worker}`, source: plain, target: coord, delivered: 1 }]);
+      expect(await call(state, "chief_attach", { threadIds: [plain] }, coord)).toBe(`${plain}: already attached (no change).`);
+      await settle();
+      expect(doneKeys(state)).toHaveLength(1);
+      expect(doneAlerts(state, coord)).toHaveLength(1);
+    });
+
+    test("Need-you and done alerts never evict each other while pending", async () => {
+      const state = await setup();
+      const { child } = await withDone(state);
+      state.failNextSend();
+      await call(state, "chief_escalate", { request: "First question" }, child);
+      await settle();
+      state.failNextSend();
+      await idle(state, child);
+      state.failNextSend();
+      await call(state, "chief_escalate", { request: "Second question" }, child);
+      await settle();
+      expect(kinds(state).map((alert) => [alert.key.split(":")[1], alert.delivered]).sort()).toEqual([["coordinator-done", 0], ["coordinator-need-you", 0], ["coordinator-need-you", 0]]);
+    });
+  });
 });
