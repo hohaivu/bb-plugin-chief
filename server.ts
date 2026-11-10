@@ -302,7 +302,7 @@ const planParams = delegateShape.pick({ title: true, mission: true, context: tru
   revises: z.string().trim().min(1).optional().describe("A planner whose plan its one advisor review sent back with changes: the new planner revises that plan with the advice attached, and its plan is delegated with no second review."),
 }).transform(titled((v) => v.mission));
 
-interface ChiefHandoff { fromChiefThreadId: string; title: string; request: string; context: string }
+interface ChiefHandoff { fromChiefThreadId: string; title: string; request: string; context: string; /** Set when a Coordinator hands the task off: the new Chief becomes its child. */ coordinatorThreadId?: string }
 
 // Oversize input is refused, never clipped. With a todo attached, `\n\nTodo #<id>: <text>` (text <= 500) is
 // appended to context, so the handoff's context is at most 12_000 + that prefix + 500 characters.
@@ -311,6 +311,7 @@ const spawnParams = z.object({
   request: z.string().trim().min(1).max(4_000).describe("The owner's words asking for this task, verbatim."),
   context: z.string().trim().min(1).max(12_000).describe("Goal and success criteria, evidence, linked threads/issues/PRs/branches, plan and verdict file paths, and open decisions."),
   todoId: z.number().int().optional().describe("Your own open todo to move to the new Chief."),
+  projectId: z.string().trim().min(1).optional().describe("Coordinator only: the project the new Chief works in. Defaults to your own project."),
 }).transform(titled((v) => v.request));
 
 const consultParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
@@ -556,6 +557,10 @@ export interface ManagedRow {
   tests_skipped: string | null;
   /** Worker row only: the command the worker's brief makes it run; nothing reruns it. */
   verify_command: string | null;
+  /** Chief row only: 1 for a Coordinator. */
+  coordinator: number | null;
+  /** Chief row only: the Coordinator this child Chief reports to. */
+  coordinator_thread_id: string | null;
   /** Worker row only: 1/0 for planning on/off at delegation; null for rows from before the column. */
   planner_on: number | null;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
@@ -623,6 +628,14 @@ const ROSTER_CHIEF_INSTRUCTIONS =
 /** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
 const WAIT_CHIEF_INSTRUCTIONS =
   "Lifecycle alerts wake you when a managed thread reports, fails transiently, or stalls. After you act, end your turn and wait: never poll managed threads with `bb thread wait`, `bb thread show`, or sleep loops.";
+
+/** A Coordinator's whole rule set, in place of the Chief rules: those tell a Chief to continue and complete managed work. */
+const COORDINATOR_INSTRUCTIONS = [
+  "You never edit code or run anything in a worktree, and you never plan, delegate, review, complete or implement: child Chiefs do the work.",
+  "Call chief_roster at the start of every turn: its Children block is your work list. Attach only Chiefs the owner names (chief_attach). Start new work as a child with chief_spawn; pass projectId for another project.",
+  "A Need-you alert is information: the owner answers it in the child thread. Never answer or relay it. A done alert means: check chief_roster, then tell the owner how work stands across your children.",
+  "Share a coordination fact with a child only through `bb thread tell`, and never decide for the owner. After you act, end your turn and wait: never poll children.",
+].join("\n");
 
 /** Claude Code defers MCP tools until ToolSearch loads them; an agent that calls one first guesses its arguments and is refused. */
 function toolSchemaLine(tools: string[], compact: boolean) {
@@ -1073,6 +1086,9 @@ export const MIGRATIONS = [
     // One owner per shared worktree and cleanup action: the first cleanup job to reach the decisive teardown observation claims it; other jobs on that environment skip it.
     `CREATE TABLE IF NOT EXISTS cleanup_environment_claims (environment_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('branch','trouble','stuck')), thread_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (environment_id, action))`,
     ...TRACKER_TABLES,
+    // A Coordinator is a Chief row with coordinator=1; a child Chief names its Coordinator here. chief_thread_id keeps meaning "managed work".
+    `ALTER TABLE managed_threads ADD COLUMN coordinator INTEGER`,
+    `ALTER TABLE managed_threads ADD COLUMN coordinator_thread_id TEXT`,
 ];
 
 export default async function plugin(bb: BbPluginApi) {
@@ -1155,10 +1171,10 @@ export default async function plugin(bb: BbPluginApi) {
   db.prepare(`INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('artifact_fallbacks_since', ?)`).run(String(Date.now()));
 
   const activeChiefForProject = db.prepare<[string]>(
-    `SELECT * FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND project_id=? AND state NOT IN ('failed','deleted','archived','complete') ORDER BY created_at DESC LIMIT 1`,
+    `SELECT * FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND COALESCE(coordinator,0)=0 AND project_id=? AND state NOT IN ('failed','deleted','archived','complete') ORDER BY created_at DESC LIMIT 1`,
   );
   const latestChiefForProject = db.prepare<[string]>(
-    `SELECT * FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND project_id=? ORDER BY created_at DESC LIMIT 1`,
+    `SELECT * FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND COALESCE(coordinator,0)=0 AND project_id=? ORDER BY created_at DESC LIMIT 1`,
   );
   const chiefCountForProject = db.prepare<[string]>(
     `SELECT COUNT(*) AS count FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND project_id=?`,
@@ -1275,6 +1291,7 @@ export default async function plugin(bb: BbPluginApi) {
       do {
         sweepAgain = false;
         await completeAbsorbed();
+        alertDoneChildren();
       } while (sweepAgain);
     })().catch((error) => bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`)).finally(() => { sweeping = null; });
     return sweeping;
@@ -1641,6 +1658,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (previous && previous.thread_id !== thread.id) handOver(previous.thread_id, thread.id, target);
     store.insert({
       threadId: thread.id, role: "chief", projectId: target, title, state: "starting", status: thread.status,
+      coordinatorThreadId: handoff?.coordinatorThreadId,
     });
     return { threadId: thread.id, created: true as const };
   }
@@ -1649,7 +1667,9 @@ export default async function plugin(bb: BbPluginApi) {
   function handoffSection(handoff: ChiefHandoff) {
     return [
       "## Handed-off task",
-      `Handed off by Chief ${handoff.fromChiefThreadId}. It keeps no link to you: it will not see your roster or alerts, and you do not report to it.`,
+      handoff.coordinatorThreadId
+        ? `Handed off by Coordinator ${handoff.fromChiefThreadId}. It supervises you as a child Chief and sees you in its Children block. It gets an alert when you call chief_escalate and when you finish all your work. The owner answers every Need you in this thread, never through the Coordinator.`
+        : `Handed off by Chief ${handoff.fromChiefThreadId}. It keeps no link to you: it will not see your roster or alerts, and you do not report to it.`,
       "",
       "### Owner's request (verbatim)",
       handoff.request,
@@ -1663,6 +1683,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Supersedes a Chief: marks it complete and moves its open work, todos and undelivered alerts to its successor. */
   function handOver(previousId: string, nextId: string, projectId: string) {
+    if (isCoordinator(store.get(previousId)) || isCoordinator(store.get(nextId))) throw new Error("A Coordinator owns no managed work: it cannot hand work over or take it.");
     const now = Date.now();
     store.batch(() => {
       store.completeChief(previousId, now);
@@ -2828,15 +2849,17 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /** The outbox write itself, in no transaction of its own: the report intake calls it inside its store.batch. The row needs a Chief. */
-  function writeAlert(row: ManagedRow, key: string, message: string) {
+  function writeAlert(row: ManagedRow, key: string, message: string, supersede = true) {
     const dedupeKey = `${row.thread_id}:${key}`;
     // Only an alert of the same kind (the segment before the first ":") is stale
     // once this one lands — a newer report supersedes an older undelivered report,
     // but generic lifecycle noise (idle, active, stall, ...) must never evict a
     // pending report/verdict alert Chief has not received yet.
     const kind = key.slice(0, key.indexOf(":"));
-    db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>? AND dedupe_key LIKE ?`)
-      .run(row.thread_id, dedupeKey, `${row.thread_id}:${kind}:%`);
+    if (supersede) {
+      db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND delivered_at IS NULL AND dedupe_key<>? AND dedupe_key LIKE ?`)
+        .run(row.thread_id, dedupeKey, `${row.thread_id}:${kind}:%`);
+    }
     db.prepare(`INSERT OR IGNORE INTO alert_outbox
       (dedupe_key, target_thread_id, source_thread_id, message, created_at)
       VALUES (?, ?, ?, ?, ?)`).run(
@@ -2919,6 +2942,35 @@ export default async function plugin(bb: BbPluginApi) {
   async function alertChief(row: ManagedRow, key: string, message: string) {
     const outboxKey = enqueueAlert(row, key, message);
     return deliverAlert(outboxKey);
+  }
+
+  /** Alerts a child Chief's Coordinator once per key: one outbox row, never a deletion of another pending row. A key already
+   * written adds nothing, and a failure is logged, never thrown: retryAlerts redelivers the row. */
+  function alertCoordinator(child: ManagedRow | undefined, key: string, message: string) {
+    try {
+      const coordinator = child?.coordinator_thread_id ? store.get(child.coordinator_thread_id) : undefined;
+      if (!child || !isActiveChief(coordinator) || !isCoordinator(coordinator)) return;
+      if (db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key=?`).get(`${child.thread_id}:${key}`)) return;
+      void deliverAlert(writeAlert({ ...child, chief_thread_id: coordinator.thread_id }, key, message, false));
+    } catch (error) {
+      bb.log.warn(`Could not alert Coordinator of ${child?.thread_id}: ${String(error)}`);
+    }
+  }
+
+  /** The line that names a child Chief in a Coordinator alert. */
+  const childLabel = (child: ManagedRow) => `Child Chief “${clip(child.title, 120)}” (${child.thread_id}, project ${child.project_id})`;
+
+  /** A linked child Chief is done when it is idle, owns no open row or todo and owns a completed row. The alert key holds the newest completed row, so a later round alerts again and a repeat adds nothing. */
+  function alertDoneChildren() {
+    for (const child of store.all()) {
+      if (child.role !== "chief" || child.state !== "idle" || !child.coordinator_thread_id) continue;
+      const owned = store.all().filter((row) => row.chief_thread_id === child.thread_id);
+      if (owned.some((row) => !terminal(row.state))) continue;
+      const latest = owned.filter((row) => row.state === "complete").reduce<ManagedRow | undefined>((best, row) => (!best || row.updated_at >= best.updated_at ? row : best), undefined);
+      if (!latest || db.prepare(`SELECT 1 FROM chief_todos WHERE chief_thread_id=? AND state='open'`).get(child.thread_id)) continue;
+      alertCoordinator(child, `coordinator-done:${latest.thread_id}`,
+        `${childLabel(child)} finished its work: every thread it owns is complete and it has no open todo. Check chief_roster, then tell the owner how work stands across your children.`);
+    }
   }
 
   async function retryAlerts() {
@@ -3237,6 +3289,7 @@ export default async function plugin(bb: BbPluginApi) {
           : kind === "failed" ? "failed"
             : kind === "archived" ? "archived" : "deleted";
       store.recordState(thread.id, state, thread.status ?? state, now);
+      if (state === "idle") alertDoneChildren();
       return;
     }
     if (kind === "active") {
@@ -3434,6 +3487,11 @@ export default async function plugin(bb: BbPluginApi) {
    * handed its workers to the replacement) must not still be able to act as Chief. */
   function isActiveChief(caller: ManagedRow | undefined): caller is ManagedRow {
     return !!caller && caller.role === "chief" && !INACTIVE_CHIEF_STATES.includes(caller.state);
+  }
+
+  /** A Coordinator is a Chief row with coordinator=1 (COORD-1). Nothing clears the flag. */
+  function isCoordinator(row: ManagedRow | undefined): boolean {
+    return !!row && row.role === "chief" && row.coordinator === 1;
   }
 
   /** The one guard in front of every way to start a reviewer: only the active Chief may. */
@@ -3896,7 +3954,22 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   let forgeRuns: Promise<unknown> = Promise.resolve();
-  bb.agents.registerTool({
+  /** COORD-2: a Coordinator runs no planner, worker, reviewer, tester, advisor or researcher, so these tools refuse it before they read any input. */
+  const COORDINATOR_REFUSED = new Set([
+    "chief_plan", "chief_consult", "chief_delegate", "chief_forge_init", "chief_review", "chief_inspect", "chief_continue", "chief_stop",
+    "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research",
+  ]);
+  const coordinatorRefusal = (what: string) => `${what} is not available to a Coordinator: it runs no planner, worker, reviewer, tester, advisor or researcher. Ask the child Chief that owns the work.`;
+  const registerChiefTool = ((tool: { name: string; execute: (params: never, context: never) => unknown }) =>
+    bb.agents.registerTool((COORDINATOR_REFUSED.has(tool.name) ? {
+      ...tool,
+      execute: (params: never, context: { threadId?: string | null }) => {
+        if (isCoordinator(context.threadId ? store.get(context.threadId) : undefined)) throw new Error(coordinatorRefusal(tool.name));
+        return tool.execute(params, context as never);
+      },
+    } : tool) as never)) as unknown as typeof bb.agents.registerTool;
+
+  registerChiefTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
     description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan until its required advisor review resolves. For a plan, call it only on a chain head (a wave nothing precedes) that has no worker yet: a chain has one branch and one pull request, its later waves continue it with chief_delegate replaces:, and the pull request body lists every wave of the chain. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
@@ -4029,7 +4102,7 @@ export default async function plugin(bb: BbPluginApi) {
       ].join("\n");
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_delegate",
     presentation: { label: { pending: "Delegating work…", completed: "Delegated work" } },
     description: `Delegate one clearly titled unit of implementation work to a visible worker in its own managed worktree. See kind for Designer work. verifyCommand goes into the worker's brief as its own check. One plan chain has one branch, pull request and worktree: a later wave of a chain needs replaces: the chain's latest worker, replaces: never crosses to another chain, a started chain is not delegated fresh again, and a replacement keeps its prior's prUrl. replaces: is refused after ${CONSULT_AFTER_REJECTIONS} consecutive request_changes on the task until a consult has given its advice (a ready or blocked report), and from ${STOP_AFTER_REJECTIONS} on unless userApprovedRound is set; the count follows the replaces: chain and every reviewer, and only an approve resets it. A plan with more than one wave or marked complex is refused until its one advisor review resolves (chief_consult planThreadId).`,
@@ -4043,7 +4116,7 @@ export default async function plugin(bb: BbPluginApi) {
       return `Started worker “${result.title}” in thread ${result.threadId}. Track it with chief_roster.`;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_plan",
     presentation: { label: { pending: "Starting planner…", completed: "Started planner" } },
     description: "Send one unit of work to a read-only planner. It proposes an implementation plan, split into waves; its ready alert names the exact next call. With revises, a fresh planner revises a plan whose one advisor review asked for changes; the revision is delegated with no second review.",
@@ -4057,7 +4130,7 @@ export default async function plugin(bb: BbPluginApi) {
       return `Started planner “${result.title}” in thread ${result.threadId}. Its ready alert lists the wave schedule and the exact next call.${result.warning ? `\n${result.warning}` : ""}`;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_spawn",
     presentation: { label: { pending: "Starting new Chief…", completed: "Started new Chief" } },
     description: "Hand one task to a new Chief for this project when the user asks to do it in a new Chief. Pass a literal title, the user's request verbatim, and the context it needs (goal, evidence, linked threads, issues, PRs, branches, plan and verdict files, open decisions). todoId moves your own open todo to it. It never takes over your managed threads: hand over only a task with no unfinished worker — every worker on it complete (chief_stop and a ready report do not release a worker's branch); otherwise keep the task.",
@@ -4067,7 +4140,12 @@ export default async function plugin(bb: BbPluginApi) {
       if (!isActiveChief(caller)) {
         throw new Error("chief_spawn requires an active registered Chief thread.");
       }
-      // Validated before spawning, so a refused todo leaves no thread and no row.
+      // Validated before spawning, so a refused todo, project or caller leaves no thread and no row.
+      const coordinator = isCoordinator(caller);
+      if (params.projectId !== undefined && !coordinator) throw new Error("projectId is for a Coordinator only: a Chief starts new Chiefs in its own project.");
+      const target = params.projectId ?? caller.project_id;
+      if (params.projectId !== undefined) await bb.sdk.projects.get({ projectId: target }).catch(() => { throw new Error(`No project ${target}.`); });
+      if (params.todoId !== undefined && target !== caller.project_id) throw new Error("todoId is for a Chief in your own project: todos belong to one project.");
       const todo = params.todoId === undefined ? undefined : todoById.get(params.todoId, caller.project_id) as TodoRow | undefined;
       if (params.todoId !== undefined && (!todo || todo.state !== "open" || todo.chief_thread_id !== caller.thread_id)) {
         throw new Error(`Todo #${params.todoId} is not one of your open todos; only your own open todo can move to a new Chief.`);
@@ -4077,9 +4155,12 @@ export default async function plugin(bb: BbPluginApi) {
         title: params.title,
         request: params.request,
         context: todo ? `${params.context}\n\nTodo #${todo.id}: ${todo.text}` : params.context,
+        ...(coordinator ? { coordinatorThreadId: caller.thread_id } : {}),
       };
-      const { threadId } = await createChief(caller.project_id, handoff);
-      const lines = [`Started Chief “${params.title}” in thread ${threadId}. It owns this task now and is not your managed work: it is not in your roster, sends you no alerts, and you cannot inspect or steer it.`];
+      const { threadId } = await createChief(target, handoff);
+      const lines = [coordinator
+        ? `Started Chief “${params.title}” in thread ${threadId}, project ${target}. It is linked as your child: it shows in your Children block and alerts you when it needs the owner or finishes. The owner answers it in its own thread.`
+        : `Started Chief “${params.title}” in thread ${threadId}. It owns this task now and is not your managed work: it is not in your roster, sends you no alerts, and you cannot inspect or steer it.`];
       if (todo) {
         // Check-and-set: the todo may have changed owner or state while the Chief was starting.
         const moved = db.prepare(`UPDATE chief_todos SET chief_thread_id=?, updated_at=? WHERE id=? AND project_id=? AND chief_thread_id=? AND state='open'`)
@@ -4101,7 +4182,56 @@ export default async function plugin(bb: BbPluginApi) {
       return lines.join("\n");
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
+    name: "chief_coordinate",
+    presentation: { label: { pending: "Becoming Coordinator…", completed: "Became Coordinator" } },
+    description: "Upgrade this Chief to a Coordinator, once and for good: it then supervises child Chiefs in any project and runs no managed threads. Refused while this Chief owns an open managed thread, or if it is a child Chief. Call it only when the owner asks for /coordinator.",
+    parameters: z.object({}),
+    async execute(_params, context) {
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
+      if (!isActiveChief(caller)) throw new Error("chief_coordinate requires an active registered Chief thread.");
+      if (isCoordinator(caller)) return "Already a Coordinator.";
+      if (caller.coordinator_thread_id) throw new Error(`This Chief is a child of Coordinator ${caller.coordinator_thread_id}: a child cannot become a Coordinator.`);
+      if (!store.setCoordinator(caller.thread_id, Date.now())) {
+        const open = store.all().filter((row) => row.chief_thread_id === caller.thread_id && !terminal(row.state)).map((row) => row.thread_id);
+        throw new Error(open.length
+          ? `This Chief still owns open managed threads: ${open.join(", ")}. Finish them (complete or stop and complete) before upgrading.`
+          : "This Chief cannot become a Coordinator now; read chief_roster and try again.");
+      }
+      return "This Chief is now a Coordinator. The upgrade is one-way. It runs no managed threads: it supervises child Chiefs in any project. Attach existing Chiefs the owner names with chief_attach, start new work in a child with chief_spawn (projectId names its project), and read chief_roster for the Children block. A child's Need you and its done state arrive here as alerts; the owner answers in the child thread.";
+    },
+  });
+  registerChiefTool({
+    name: "chief_attach",
+    presentation: { label: { pending: "Attaching Chiefs…", completed: "Attached Chiefs" } },
+    description: "Coordinator only: link existing Chief threads as your children, in any project. Give the thread ids the owner names (1-20). One result line per id; a bad id never blocks the others. An id that is not a Chief row needs `bb chief adopt --thread <id>` first.",
+    parameters: z.object({ threadIds: z.array(z.string().trim().min(1)).min(1).max(20) }),
+    async execute({ threadIds }, context) {
+      const caller = context.threadId ? store.get(context.threadId) : undefined;
+      if (!isCoordinator(caller) || !isActiveChief(caller)) throw new Error("chief_attach is for a Coordinator only: a Chief becomes one with chief_coordinate.");
+      const lines = [...new Set(threadIds)].map((id) => {
+        const refuse = (row: ManagedRow | undefined): string | null => {
+          if (id === caller.thread_id) return "is you";
+          if (!row || row.role !== "chief") return `is not a Chief row: run \`bb chief adopt --thread ${id}\` first`;
+          if (INACTIVE_CHIEF_STATES.includes(row.state)) return `is ${row.state}`;
+          if (isCoordinator(row)) return "is a Coordinator";
+          if (row.coordinator_thread_id === caller.thread_id) return "is already your child";
+          if (row.coordinator_thread_id) return `already belongs to Coordinator ${row.coordinator_thread_id}`;
+          return null;
+        };
+        const before = refuse(store.get(id));
+        if (before) return `${id}: ${before === "is already your child" ? "already attached (no change)" : `not attached: ${before}`}.`;
+        if (!store.linkToCoordinator(id, caller.thread_id, Date.now())) {
+          const after = refuse(store.get(id));
+          return `${id}: ${after === "is already your child" ? "already attached (no change)" : `not attached: ${after ?? "its state changed; try again"}`}.`;
+        }
+        return `${id}: attached.`;
+      });
+      alertDoneChildren();
+      return lines.join("\n");
+    },
+  });
+  registerChiefTool({
     name: "chief_consult",
     presentation: { label: { pending: "Starting advisor…", completed: "Started advisor" } },
     description: "Start a read-only advisor on a hard problem or a change that keeps failing review. It may read code and run commands to reproduce it, never edits, and reports its advice back to you. With planThreadId, it gives a multi-wave or complex plan its one review before delegation; refused for any other plan.",
@@ -4125,7 +4255,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_roster",
     presentation: { label: { pending: "Reading roster…", completed: "Read roster" } },
     description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert. Add a todo with `todo.text` (and optional `after`, e.g. 'PR #42 merges'); change one by `todo.id`; close it with `state: done|dropped`. Track all Chief work here — including queued work nobody has delegated yet. Todos with an after: condition are summarised as one line; pass includeWaiting: true to list them. Each todo belongs to the Chief that added it; others' todos are listed apart and tagged — leave them unless the user asks.",
@@ -4160,6 +4290,16 @@ export default async function plugin(bb: BbPluginApi) {
         }
         store.reload();
       }
+      if (isCoordinator(caller)) {
+        const children = store.all().filter((row) => row.role === "chief" && row.coordinator_thread_id === caller.thread_id);
+        const share = Math.floor(4_000 / Math.max(children.length, 1));
+        return clip([
+          ...(children.length
+            ? ["## Children", ...children.map((child) => clip(`- “${clip(child.title, 120)}” (${child.thread_id}) · project ${child.project_id} · ${child.state}\n${pendingBlock(child.thread_id, includeWaiting, share).replace(/\n/g, "\n  ")}`, share))]
+            : ["No child Chiefs. Attach ones the owner names with chief_attach, or start one with chief_spawn."]),
+          note + pendingBlock(caller.thread_id, includeWaiting, 1_500),
+        ].join("\n"), 6_000);
+      }
       const rows = rosterForChief(caller.thread_id, includeComplete);
       const reversed = [...rows].reverse();
       // The Pending block is clipped on its own so it always survives whole (or
@@ -4176,7 +4316,7 @@ export default async function plugin(bb: BbPluginApi) {
       return `${pending}\n${rest}`;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_inspect",
     presentation: { label: { pending: "Inspecting thread…", completed: "Inspected thread" } },
     description: "Inspect one managed thread's live status, persisted report summary, full-report file path, and bounded last assistant output before deciding what to do.",
@@ -4192,7 +4332,7 @@ export default async function plugin(bb: BbPluginApi) {
       return inspect(threadId, caller.project_id);
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_continue",
     presentation: { label: { pending: "Nudging thread…", completed: "Nudged thread" } },
     description: `Send a short nudge (at most ${MAX_NUDGE_LENGTH} characters) to a managed thread that is still working. Refused for any thread that has reported (ready or complete); follow-up work goes to a fresh worker, planner, reviewer, advisor or researcher (see the core rules).`,
@@ -4209,7 +4349,7 @@ export default async function plugin(bb: BbPluginApi) {
       return `Continued ${threadId}.${capped ? stallCapNote : ""}`;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_stop",
     presentation: { label: { pending: "Stopping thread…", completed: "Stopped thread" } },
     description: "Interrupt a running managed thread that is stuck or looping. Keeps its worktree, branch, and history; the reply names the reroute steps.",
@@ -4223,7 +4363,7 @@ export default async function plugin(bb: BbPluginApi) {
       return `Stopped “${row.title}” (${threadId}). Its worktree, branch, and history are kept. ${rerouteSteps(row)}`;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_review",
     presentation: { label: { pending: "Starting review…", completed: "Started review" } },
     description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
@@ -4240,7 +4380,7 @@ export default async function plugin(bb: BbPluginApi) {
       return (await startBranchReview(caller, { branch: params.branch, pullRequest: params.pullRequest }, params.focus)).reply;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_complete",
     presentation: { label: { pending: "Completing work…", completed: "Completed work" } },
     description: "Mark an idle managed worker or reviewer complete after Chief has inspected sufficient evidence. Completing a worker also completes its reviewers and the advisors consulted on it, and — after the plan's final wave — its planner. A worker completed with an approving review (or a design wave with the owner's approval) while the cleanupApproved setting is on is then cleaned up by a background cleanup worker: it archives the task's threads when nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; override and skipReview completions are never cleaned up. A design-only wave's worker completes only with the owner's approval recorded by chief_owner_approval. Any other worker with a pull request completes only when the newest review is an approve for the pull request's current head commit (a worker without one: for its current report); otherwise it is refused naming the reason. override (a reason) is the only bypass and is recorded in the result. skipReview (your reason) completes a worker without any review when you judge one unnecessary. A Spec Writer is never completed on any path (override and skipReview included), except on a test wave chief_skip_tests waived: its worker (or a tester rerun) follows it. After a worker completes, this call marks its draft pull request ready for review: never run gh pr ready or glab mr update --ready yourself for a worker's pull request.",
@@ -4261,7 +4401,7 @@ export default async function plugin(bb: BbPluginApi) {
       return `Marked “${row.title}” complete${overridden ? ` without a matching approve (override recorded in its result)` : skipped ? " without a review (reason recorded)" : ""}.${ready.line}${cleanupLine(cleanup)}${todoLine}`;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_owner_approval",
     presentation: { label: { pending: "Recording approval…", completed: "Recorded approval" } },
     description: "Record the owner's approval of a design-only wave (a plan wave marked design: true). Only the owner approves design-only work; chief_review refuses it. Show the user the artboards from the designer's ready report, ask for explicit approval, then call this with their words verbatim. The wave that implements the artboards cannot be delegated, and the design wave cannot be completed, without it. A new report or chief_continue on the designer clears it. Refused for any other thread.",
@@ -4277,7 +4417,7 @@ export default async function plugin(bb: BbPluginApi) {
       return recordOwnerApproval(target, approval);
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_skip_tests",
     presentation: { label: { pending: "Waiving tests…", completed: "Waived tests" } },
     description: "Go without a plan's test wave (test: true), by your own judgment: your reason is recorded on that wave and shown in chief_roster and chief_inspect. Before the wave is delegated, the wave drops out of the plan and its parent's worker ends the chain. After a tester ran on it, that tester stays the branch owner and you review or complete it (a blocked report counts). Refused while the wave's latest worker is running, once it is complete, or for a wave that is not a test wave. Calling it again changes nothing.",
@@ -4303,7 +4443,7 @@ export default async function plugin(bb: BbPluginApi) {
       return next ?? `Wave ${parent} has not reported ready yet; its ready alert names the next call.`;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_skip_specs",
     presentation: { label: { pending: "Waiving specs…", completed: "Waived specs" } },
     description: "Go without the Spec Writer of a plan's spec: true implementation wave, by your own judgment, before that wave's first delegation: your reason is recorded on that wave (no Spec Writer can be delegated on it; its worker runs first and the review judges it against its plan) and shown in chief_roster, chief_inspect and the review. It never waives the tests. Refused for a wave that is not a spec: true implementation wave, or once any worker was delegated on it (re-plan with a fresh chief_plan instead). Calling it again changes nothing.",
@@ -4324,21 +4464,27 @@ export default async function plugin(bb: BbPluginApi) {
       return nextStep;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_escalate",
     presentation: { label: { pending: "Posting escalation…", completed: "Posted escalation" } },
-    description: "Before you write a **Need you** request in chat, post it on the managed thread's pull request (else its tracking issue) with an @mention of the owner, so it is on record where the work is. threadId is the managed thread the request concerns; request is the full request. It returns at once; the post happens in the background. A planner with no tracking issue yet returns \"chat only\": then write the request in chat alone. Calling it again with the same request posts nothing new.",
+    description: "Before you write a **Need you** request in chat, post it on the managed thread's pull request (else its tracking issue) with an @mention of the owner, so it is on record where the work is. threadId is the managed thread the request concerns; request is the full request. It returns at once; the post happens in the background. A planner with no tracking issue yet returns \"chat only\": then write the request in chat alone. Calling it again with the same request posts nothing new. Omit threadId only when no managed thread concerns the request yet.",
     parameters: z.object({
-      threadId: z.string(),
+      threadId: z.string().optional(),
       request: z.string().trim().min(1).max(12_000).describe("The full request, as you will write it in chat under Need you."),
       merge: z.boolean().optional().describe("true when the request only asks permission to merge: no tracker decision is posted"),
     }),
     async execute({ threadId, request, merge }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
-      if (!isActiveChief(caller)) throw new Error(`No managed thread ${threadId} for this Chief.`);
-      const concerned = await controlledTarget(threadId, caller);
+      if (!isActiveChief(caller)) throw new Error(threadId === undefined ? "chief_escalate requires an active registered Chief thread." : `No managed thread ${threadId} for this Chief.`);
+      const concerned = threadId === undefined ? undefined : await controlledTarget(threadId, caller);
       touchCallerChief(caller);
       const chatOnly = "No pull request or issue to post on; write the request in chat only.";
+      alertCoordinator(caller, `coordinator-need-you:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`, [
+        `${childLabel(caller)} is blocked on a Need you${concerned ? ` about ${concerned.role} “${clip(concerned.title, 120)}” (${concerned.thread_id})` : ""}:`,
+        clip(request, 600),
+        `The owner answers it in ${caller.thread_id}; do not answer or relay it.`,
+      ].join("\n"));
+      if (!concerned || threadId === undefined) return chatOnly;
       const url = concerned.pr_url ?? concerned.issue_url
         ?? (concerned.role === "reviewer" ? ledger.targets(concerned.thread_id).map((target) => target.pr_url ?? store.get(target.worker_thread_id)?.pr_url).find(Boolean) : undefined)
         ?? (concerned.role === "planner" ? concerned.plan_issue_url : undefined);
@@ -4352,7 +4498,7 @@ export default async function plugin(bb: BbPluginApi) {
       return queued ? `Queued for ${url}. Now write the same request in chat under **Need you**.` : chatOnly;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_sync",
     presentation: { label: { pending: "Syncing checkout…", completed: "Synced checkout" } },
     description: "Fast-forward your own checkout to origin's default branch before you read code yourself. It never overwrites uncommitted or ignored files and never errors on a skip: it returns the old and new commit, or why it left the checkout as it is (a researcher or sharing planner is running, uncommitted changes, commits of its own, a failed fetch).",
@@ -4367,7 +4513,7 @@ export default async function plugin(bb: BbPluginApi) {
       return result.from === result.to ? `Your checkout is already at ${result.to.slice(0, 12)}.` : `Fast-forwarded your checkout from ${result.from.slice(0, 12)} to ${result.to.slice(0, 12)}.`;
     },
   });
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_report",
     presentation: { label: { pending: "Reporting to Chief…", completed: "Reported to Chief" } },
     description: "Report managed work state and evidence to Chief. Use ready, not complete; blocked requires blocker and recommendation; a reviewer's ready report requires a verdict and findings; a planner's ready report requires plan (the full plan body), which Chief receives as a file, and may set complex; a plan review's ready report requires a verdict. Send a short `summary` with a long `result`; the full result is saved to a per-report file. Any length of result is accepted; an invalid report is refused with one line per field to fix.",
@@ -4379,7 +4525,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_log",
     presentation: { label: { pending: "Reading plan log…", completed: "Read plan log" } },
     description: "Plan workers only: append FACT/FAIL notes for peer waves, and read unread peer notes plus every wave's current worker and state. Never alerts Chief or changes your state.",
@@ -4391,7 +4537,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.registerTool({
+  registerChiefTool({
     name: "chief_research",
     presentation: { label: { pending: "Researching…", completed: "Researched" } },
     description: [
@@ -4431,19 +4577,37 @@ export default async function plugin(bb: BbPluginApi) {
     // A researcher's brief says how to use chief_research, so it has no line but still needs the tool while research is on.
     const researchTool = !!research || (role === "researcher" && !!researchActive?.enabled);
     const claudeCode = context.provider.id === "claude-code";
+    if (role === "chief" && isCoordinator(row)) {
+      const tools = ["chief_roster", "chief_spawn", "chief_attach"];
+      return {
+        tools,
+        skills: [],
+        instructions: [
+          `You are the registered Coordinator for ${clip(context.project.name, 100)}: you supervise child Chiefs in any project, not managed threads.`,
+          ...(claudeCode ? [toolSchemaLine(tools, true)] : []),
+          "",
+          COORDINATOR_INSTRUCTIONS,
+          // Last: the SDK cuts instructions at 4096 chars. The built-in rules tell a Chief to continue and complete managed work, so only a project chief.md follows.
+          ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
+        ].join("\n"),
+      };
+    }
     if (role === "chief") {
       const tools = [
         ...(plannerActive ? ["chief_plan"] : []),
         "chief_consult", "chief_spawn",
         "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync",
         ...(researchTool ? ["chief_research"] : []),
+        // A child Chief is already supervised: it may not upgrade itself.
+        ...(row?.coordinator_thread_id ? [] : ["chief_coordinate"]),
       ];
       return {
         tools,
-        skills: ["chief"],
+        skills: row?.coordinator_thread_id ? ["chief"] : ["chief", "coordinator"],
         instructions: [
           `You are the registered Chief supervisor for ${clip(context.project.name, 100)}. Use ordinary visible BB threads and drive managed work through completion.`,
           ...(claudeCode ? [toolSchemaLine(tools, true)] : []),
+          ...(row?.coordinator_thread_id ? [`Coordinator ${row.coordinator_thread_id} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`] : []),
           "",
           ROSTER_CHIEF_INSTRUCTIONS,
           WAIT_CHIEF_INSTRUCTIONS,
@@ -4629,6 +4793,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (caller && !isActiveChief(caller) && command !== "status" && command !== "inspect") {
           return fail(`bb chief ${command} is for the active Chief only${callerRole === "chief" ? "" : `; a managed ${callerRole} reports with chief_report`}.`);
         }
+        if (isCoordinator(caller) && ["plan", "consult", "delegate", "inspect", "continue", "stop", "complete"].includes(command)) return fail(coordinatorRefusal(`bb chief ${command}`));
         // A managed Chief reads only its own roster; an operator shell keeps the project-wide view.
         const readScope = isActiveChief(caller) ? caller.thread_id : undefined;
         const readProject = caller?.project_id ?? context.projectId;
@@ -4672,6 +4837,7 @@ export default async function plugin(bb: BbPluginApi) {
           // Adoption rewrites the row in place, so re-adopting a worker would
           // discard the branch and forge links its open PR depends on.
           const registered = store.get(threadId);
+          if (isCoordinator(registered)) return fail(`Thread ${threadId} is a Coordinator: it owns no managed work and cannot be adopted as a project's Chief.`);
           if (registered && registered.role !== "chief") {
             return fail(`Thread ${threadId} is already a managed ${registered.role} (“${registered.title}”). Adopting it would discard its branch, forge links, and report.`);
           }

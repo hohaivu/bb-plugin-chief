@@ -223,6 +223,15 @@ Chief can mirror its work to a task tracker. It is off by default.
 - Answers: the plugin polls the task. One owner comment answers one decision (start it with `#N` when several are open) and reaches Chief once, as a lifecycle alert, through the plugin only. The tracker's own notify setting plays no part, and Chief never runs tracker commands.
 - Switching `tracker` off deletes nothing and stops every tracker call. Switching it back on resumes pending work.
 
+## Coordinator
+
+Ask a Chief to run `/coordinator` to make it a Coordinator. The upgrade is one-way, and only a Chief that owns no open work can take it.
+
+- A Coordinator supervises child Chiefs in any project. It runs no planner, worker, reviewer, tester, advisor or researcher, and `chief_plan`, `chief_delegate`, `chief_complete` and the other work tools refuse it.
+- Attach existing Chiefs the owner names with `chief_attach`. Start new ones with `chief_spawn` and `projectId`. `chief_roster` shows a Children block with each child's state and pending items.
+- It gets an alert each time a child calls `chief_escalate` (a Need you) and once when a child finishes all its work. The owner still answers a Need you in the child's own thread.
+- There is one level: a child cannot become a Coordinator, and a Coordinator cannot be attached or handed work.
+
 ## CLI
 
 ```sh
