@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { verdictPreview } from "./delegationBrief";
+import { verdictPreview } from "../../delegationBrief";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
-import type { ManagedSpawn } from "./managedSpawn";
+import type { ManagedSpawn } from "../../managedSpawn";
 import { helperPrompt, isPinned, PR_AGENT_DIR, prAgentScript, prAgentSection, type EngineTarget, type ReviewEngine } from "./prAgent";
-import type { createReviewLedger } from "./reviewLedger";
-import { REVIEW_ONLY } from "./roles";
-import { clip, clipMiddle, recordedLines, type RecordedCommand } from "./text";
-import { terminal } from "./src/types";
-import type { ThreadStore } from "./threadStore";
-import { chainOf, type PlanWave } from "./waveSchedule";
+import type { createReviewLedger } from "../../reviewLedger";
+import { REVIEW_ONLY } from "../../roles";
+import { clip, clipMiddle, recordedLines, type RecordedCommand } from "../../text";
+import { terminal } from "../types";
+import type { ThreadStore } from "../../threadStore";
+import { chainOf, type PlanWave } from "../../waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 type LiveThread = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["get"]>>;

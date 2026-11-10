@@ -1,6 +1,6 @@
 import { createPlanLifecycle } from "../../planLifecycle";
 import { createPlanProgress } from "../../planProgress";
-import { PR_AGENT_DIR } from "../../prAgent";
+import { PR_AGENT_DIR } from "../review/prAgent";
 import { agentCapSchema, RESEARCH_DEFAULT_TIMEOUT_MINUTES, timeoutSchema } from "../../research";
 import { createReviewLedger } from "../../reviewLedger";
 import { MIGRATIONS } from "../db/migrations";

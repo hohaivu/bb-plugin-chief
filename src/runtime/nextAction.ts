@@ -1,7 +1,7 @@
 import { type RepairTarget } from "../../planProgress";
-import { reviewEngine } from "../../prAgent";
+import { reviewEngine } from "../review/prAgent";
 import { STOP_AFTER_REJECTIONS } from "../../reviewLedger";
-import { createReviewStart } from "../../reviewStart";
+import { createReviewStart } from "../review/reviewStart";
 import { type ManagedRow } from "../types";
 import { clip } from "../../text";
 import { type PlanWave } from "../../waveSchedule";
