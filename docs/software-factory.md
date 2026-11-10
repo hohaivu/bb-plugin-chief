@@ -33,7 +33,7 @@ sequenceDiagram
   Chief->>Planner: chief_plan
   Planner-->>Chief: report with plan, alert lists waves and next call
 
-  opt more than one implementation wave, or planner marked complex
+  opt more than one implementation wave (design and test waves do not count), or planner marked complex
     Chief->>Advisor: chief_consult planThreadId
     Advisor-->>Chief: report (advice, one review only)
     opt request_changes
@@ -45,7 +45,7 @@ sequenceDiagram
   Chief->>Forge: chief_forge_init, once per chain head
   Forge-->>Chief: branch, issue_url, pr_url (draft PR)
 
-  opt design-only wave
+  opt design-only wave, for UI whose look nothing fixes yet
     Chief->>Designer: chief_delegate kind designer
     Designer->>Forge: git push to task branch
     Designer-->>Chief: report (artboards)
@@ -148,7 +148,7 @@ A plan chain has one branch, one pull request and one worker worktree. Worker ki
 
 | Role | Kind or thread role | Job | Waived by |
 | --- | --- | --- | --- |
-| Designer | `kind: "designer"` | Decides or implements how the UI looks. A design-only wave draws artboards. | n/a |
+| Designer | `kind: "designer"` | Decides or implements how the UI looks. In a plan it draws artboards in its own design-only wave, before the wave that builds the UI. | n/a |
 | Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs first on a `spec: true` wave. | `chief_skip_specs` |
 | Worker | `kind: "worker"` | Implements one wave. It never writes tests. A reshape wave is also a worker. | n/a |
 | Tester | `kind: "tester"` | Writes and runs the tests for the waves it builds on. | `chief_skip_tests`, or `testsSkipped` on `chief_complete` |
