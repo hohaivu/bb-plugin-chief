@@ -38,10 +38,11 @@ export function acceptPlanningLine(nowText: string, wasText: string) {
   });
   return lines.join("\n");
 }
-/** Chief's core rules (host.ts) were trimmed so a linked Chief's rules end inside the 4096-char cut. Each trimmed line must show the new words and none of the old, then base wins. The Tests line is back to base (the Retest rule lives in the chief skill), so it needs no entry; the 4096-cut fit is asserted in coordinator.test.ts. */
+/** Chief's core rules (host.ts) were trimmed so a linked Chief's rules end inside the 4096-char cut. Each trimmed line must show the new words and none of the old, then base wins. */
 const TRIMMED_RULES: [string, RegExp, RegExp][] = [
   ["- Fresh worker:", /\(same worktree, branch, PR; so is a plan chain's next wave\)/, /a plan chain has exactly one of each/],
   ["- Review:", /when a ready alert says to/, /when a worker's ready alert says to/],
+  ["- Tests:", /a tester does, as a plan's test wave or via chief_delegate \(replaces: the worker, kind: tester\)\. Spec waves: see the chief skill\.$/, /a tester \(kind: tester\) does|Retest/],
 ];
 export function acceptCoreRuleTrim(nowText: string, wasText: string) {
   const old = wasText.split("\n");
