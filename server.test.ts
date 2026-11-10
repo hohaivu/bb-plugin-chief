@@ -26,7 +26,7 @@ vi.mock("node:child_process", () => {
 });
 
 // Every skill dir the plugin ships: managedSkills (roles.ts) selects from these, and the fake host throws on an unknown id.
-const AGENT_SKILL_IDS = ["chief", "chief-worker", "chief-role-read-only", "chief-role-worker", "chief-role-reviewer", "chief-role-designer", "chief-role-tester", "chief-role-spec-writer"];
+const AGENT_SKILL_IDS = ["chief", "coordinator", "chief-worker", "chief-role-read-only", "chief-role-worker", "chief-role-reviewer", "chief-role-designer", "chief-role-tester", "chief-role-spec-writer"];
 
 // gh pr view --json headRefName,headRefOid,baseRefName: the pull request's head branch, pinned commit and base.
 const HEAD_SHA = "a".repeat(40);
@@ -1555,7 +1555,13 @@ describe("Chief backend", () => {
         // The fixture's own failure and stats cutoffs are stamped by SQLite's real clock at setup: pin them.
         state.db.prepare("UPDATE plugin_meta SET value=? WHERE key IN ('stats_since','failure_events_since')").run(String(Date.UTC(2026, 0, 1)));
 
-        const table = (name: string) => state.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all();
+        // The Coordinator migration appends two columns to managed_threads; the oracle hash predates them, so they are checked NULL and dropped.
+        const table = (name: string) => (state.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all() as Record<string, unknown>[]).map((row) => {
+          if (name !== "managed_threads") return row;
+          const { coordinator, coordinator_thread_id: coordinatorThreadId, ...legacy } = row;
+          expect([coordinator ?? null, coordinatorThreadId ?? null]).toEqual([null, null]);
+          return legacy;
+        });
         // Only the random temp storage root (in report_path and verdict_path) is normalized.
         const fixtureHash = createHash("sha256").update(JSON.stringify(["managed_threads", "review_targets", "reviewer_verdicts", "plugin_meta"].map(table)).replaceAll(state.storageRoot, "<storage>")).digest("hex");
         const runs = [];
@@ -2663,8 +2669,8 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
-    expect(chief.skills).toEqual(["chief"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_coordinate", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
+    expect(chief.skills).toEqual(["chief", "coordinator"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker", "chief-role-worker"]);
     for (const tool of [...chief.tools, ...worker.tools] as any[]) {
@@ -10776,6 +10782,30 @@ describe("tool-call stability", () => {
     expect(escalate.inputSchema.properties.merge).toMatchObject({ type: "boolean" });
     expect(escalate.inputSchema.required ?? []).not.toContain("merge");
     delete escalate.inputSchema.properties.merge;
+    // Allowed difference (f), Coordinator spec COORD-2/5/6/9: a plain Chief gains chief_coordinate (right after chief_spawn) and the coordinator skill;
+    // chief_spawn gains the optional projectId; chief_escalate's threadId becomes optional with one more description sentence.
+    // Each is checked exactly here, then dropped so the rest still compares against base.
+    expect(now.catalog["chief_coordinate"]).toBeDefined();
+    delete now.catalog["chief_coordinate"];
+    for (const entry of now.entries) {
+      const plainChief = entry.key.includes("| chief |");
+      expect(entry.tools.includes("chief_coordinate"), entry.key).toBe(plainChief);
+      if (!plainChief) continue;
+      expect(entry.tools[entry.tools.indexOf("chief_spawn") + 1], entry.key).toBe("chief_coordinate");
+      expect(entry.skills, entry.key).toEqual(["chief", "coordinator"]);
+      entry.tools = entry.tools.filter((name) => name !== "chief_coordinate");
+      entry.skills = ["chief"];
+    }
+    const projectId = now.catalog["chief_spawn"]!.inputSchema.properties.projectId as { type?: string; description?: string };
+    expect(projectId.description).toBe("Coordinator only: the project the new Chief works in. Defaults to your own project.");
+    expect(now.catalog["chief_spawn"]!.inputSchema.required ?? []).not.toContain("projectId");
+    delete now.catalog["chief_spawn"]!.inputSchema.properties.projectId;
+    const ESCALATE_SENTENCE = " Omit threadId only when no managed thread concerns the request yet.";
+    expect(base.catalog["chief_escalate"]!.inputSchema.required).toContain("threadId");
+    expect(escalate.inputSchema.required).toEqual(base.catalog["chief_escalate"]!.inputSchema.required!.filter((field) => field !== "threadId"));
+    escalate.inputSchema.required = base.catalog["chief_escalate"]!.inputSchema.required;
+    expect(escalate.description.endsWith(ESCALATE_SENTENCE)).toBe(true);
+    escalate.description = escalate.description.slice(0, -ESCALATE_SENTENCE.length);
     expect(now.entries.map((entry) => entry.key)).toEqual(base.entries.map((entry) => entry.key));
     expect(Object.keys(now.catalog)).toEqual(Object.keys(base.catalog));
 
@@ -10806,6 +10836,8 @@ describe("tool-call stability", () => {
       if (!entry.key.includes("| claude-code |")) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
       if (!entry.tools.length) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
       expect(preloadLine(entry), entry.key).toHaveLength(1);
+      // Allowed differences (d) and (f): the base snapshot predates chief_sync; a plain Chief's preload asks for chief_sync and chief_coordinate on top of it.
+      if (entry.key.includes("| chief |")) expect(preloadLine(entry)[0], entry.key).toMatch(new RegExp(`max_results ${old.tools.length + 2}$`));
       const without = entry.instructions!.split("\n").filter((line) => !line.includes("ToolSearch")).join("\n");
       if (entry.instructions!.length < 4096) expect(without, entry.key).toBe(old.instructions);
       else { cut += 1; expect(old.instructions!.startsWith(without), entry.key).toBe(true); }
@@ -12876,7 +12908,21 @@ describe("tracker off-mode equivalence with base 310043a", () => {
     const withoutMerge = (outputs: Golden["outputs"]) => {
       const escalate = outputs.tools.find((tool) => tool.name === "chief_escalate") as any;
       expect(JSON.stringify(escalate)).toContain("merge");
-      return { ...outputs, tools: outputs.tools.map((tool) => (tool === escalate ? JSON.parse(JSON.stringify(tool, (key, value) => (key === "merge" ? undefined : value))) : tool)) };
+      // Authorized Coordinator deltas (COORD-2/5/6), each asserted exactly, then removed: chief_coordinate; chief_spawn's optional projectId;
+      // chief_escalate's optional threadId and its one added description sentence.
+      const coordinate = outputs.tools.find((tool) => tool.name === "chief_coordinate");
+      expect(coordinate).toBeDefined();
+      const spawn = JSON.parse(JSON.stringify(outputs.tools.find((tool) => tool.name === "chief_spawn")));
+      expect(spawn.inputSchema.properties.projectId.description).toBe("Coordinator only: the project the new Chief works in. Defaults to your own project.");
+      expect(spawn.inputSchema.required).not.toContain("projectId");
+      delete spawn.inputSchema.properties.projectId;
+      const stripped = JSON.parse(JSON.stringify(escalate, (key, value) => (key === "merge" ? undefined : value)));
+      const SENTENCE = " Omit threadId only when no managed thread concerns the request yet.";
+      expect(stripped.inputSchema.required).not.toContain("threadId");
+      stripped.inputSchema.required = ["threadId", ...stripped.inputSchema.required];
+      expect(stripped.description.endsWith(SENTENCE)).toBe(true);
+      stripped.description = stripped.description.slice(0, -SENTENCE.length);
+      return { ...outputs, tools: outputs.tools.filter((tool) => tool !== coordinate).map((tool) => (tool === escalate ? stripped : tool.name === "chief_spawn" ? spawn : tool)) };
     };
     // [name, mode, whether the supervisor's one cached availability probe is expected]: off never probes; unmapped may (the probe runs before
     // any unit is read); a mapped project with units must.
