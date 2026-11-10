@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { MIGRATIONS } from "./src/db/migrations";
 import { checkPlan } from "./src/report/reportIntake";
 import { managedSkills } from "./src/core/roles";
 import { READY, type State, ctxOf, delegateWave, fixedAfterRejection, followRoute, plan, planWave, planWaves, readyIdle, readyImpl, refusal, report, reviewed, review, reviewerCount, rerunRoute, rowOf, setLive, tick, tool, twoRejectedChains, unplannedFix, unplannedRoute, wavePaths, withTester, workerOn } from "./test/testerHelpers";
-import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, disposeAll, legacyWave, setup, start, status, wave } from "./test/harness";
+import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, disposals, disposeAll, legacyWave, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -423,6 +425,71 @@ describe("tester role", () => {
     const alert = await reviewed(state, chief.threadId, rerun, "request_changes");
     expect(alert).toContain("chief_consult");
     expect(alert).toContain(`chief_delegate (replaces: ${rerun}, kind: worker) for product-code findings or chief_delegate (replaces: ${rerun}, kind: tester) for test-only fin`);
+  });
+
+  // Retest debt contract (ladder): at the consult and stop rungs only the exact tester hand-off the review refusal renders is admitted
+  // without a consult or userApprovedRound; a worker replacement of the same fix, and a tester replacing another row, still meet the
+  // ladder. Regression: the exemption keyed on kind alone lets any tester through, or is not applied and the rerun route is unreachable.
+  test.each([[2, "Call chief_consult"], [3, "escalate to the user with both positions"]] as const)("at a streak of %i the exact retest hand-off is admitted; a worker replacement still meets the ladder", async (streak, ladder) => {
+    const state = await setup();
+    const { chief, fix } = await unplannedFix(state);
+    const reviewer = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='reviewer' ORDER BY rowid DESC`).get() as { thread_id: string }).thread_id;
+    state.db.prepare(`UPDATE managed_threads SET reject_streak=? WHERE thread_id=?`).run(streak, reviewer);
+    await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, chief.threadId);
+    const message = await refusal(review(state, chief, fix));
+    expect(message).toContain(`rerun the tests — ${unplannedRoute(fix)}`);
+    const rows = (await status(state)).threads.length;
+    await expect(tool(state, "chief_delegate", { title: "Fix", mission: "Fix again", replaces: fix, kind: "worker", unplannedReason: "again" }, chief.threadId)).rejects.toThrow(ladder);
+    expect((await status(state)).threads.length).toBe(rows);
+    const followed = await followRoute(state, chief.threadId, message);
+    expect(rowOf(state, followed.thread)).toMatchObject({ kind: "tester", replaces_thread_id: fix });
+  });
+
+  // Retest debt contract (migration, storage): retest_skipped is the last appended migration entry; a database one entry behind gains
+  // a NULL column and keeps its rows, and a fresh one has it. Regression: the column is added out of order or not at all, so the
+  // waiver write throws on an upgraded database.
+  test("the retest_skipped column exists on a fresh database and is added NULL to one a migration behind", () => {
+    const columns = (db: any) => (db.prepare(`PRAGMA table_info(managed_threads)`).all() as { name: string }[]).map((column) => column.name);
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-retest-migration" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    bb.storage.migrate(db, MIGRATIONS.slice(0, -1));
+    expect(columns(db)).not.toContain("retest_skipped");
+    db.prepare(`INSERT INTO managed_threads (thread_id, role, state, project_id, title, created_at, updated_at) VALUES ('old', 'worker', 'ready', 'p', 't', 1, 1)`).run();
+    bb.storage.migrate(db, MIGRATIONS);
+    expect(columns(db)).toContain("retest_skipped");
+    expect(db.prepare(`SELECT retest_skipped FROM managed_threads WHERE thread_id='old'`).get()).toEqual({ retest_skipped: null });
+  });
+
+  // Retest debt contract (exemptions): a fix owes a rerun only when the chain's newest verdict is a rejection and no review covers the
+  // fix. Regression: debt read from "a worker row exists after any review" refuses an approved chain's follow-up, or a fix whose
+  // report an (waived) review already covers.
+  test("no rerun is owed when the newest verdict is an approve, or once a review covers the fix", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const first = await delegate(state, chief.threadId, "Totals");
+    await readyIdle(state, first.threadId, "Done");
+    await reviewed(state, chief.threadId, first.threadId, "approve");
+    await tick();
+    const followUp = (await delegate(state, chief.threadId, "Follow-up", { replaces: first.threadId })).threadId;
+    await readyIdle(state, followUp, "More");
+    expect(await review(state, chief, followUp)).toMatch(/^Started “Review/);
+
+    const rejected = await unplannedFix(state);
+    await review(state, rejected.chief, rejected.fix, { retestSkipped: "docs only" });
+    expect(await review(state, rejected.chief, rejected.fix)).toMatch(/^Using existing “Review/);
+  });
+
+  // Retest debt contract (waiver, public chief_review): the waiver writes the fix's retest_skipped and refreshes the row cache, and the
+  // review then starts for that same fix, whatever pull request or branch it has. Regression: the reviewable-head check compares the
+  // refreshed row cache's object with the one read before the waiver write, so a plan worker with no pull request head and no branch is
+  // refused as unreadable only when waived.
+  test("a waived review of a plan fix with no branch or pull request head starts", async () => {
+    const state = await setup();
+    const { chief, fix } = await fixedAfterRejection(state);
+    expect(rowOf(state, fix)).toMatchObject({ branch: null, pr_url: null });
+    expect(await review(state, chief, fix, { retestSkipped: "tests unaffected" })).toMatch(/^Started “Review/);
+    expect(rowOf(state, fix).retest_skipped).toBe("tests unaffected");
   });
 
   // Contract (blocked tester): a tester that reports blocked is a test failure: the next call is a fresh worker for the
