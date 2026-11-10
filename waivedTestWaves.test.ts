@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
-import { reviewBrief, type ReviewBriefInput } from "./reviewStart";
+import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { PLAN_FIXTURE, delegate, disposeAll, setup, snapshotText, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -236,7 +236,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     const portable = (text: string) => text.replaceAll(state.storageRoot, "<storage>");
     // The prompt is the oracle plus the make-native reviewer line (the oracle file is untouched); the context is unchanged.
     expect(portable(prompt)).toBe(withReviewerLine(await snapshotText("review-no-waiver.prompt.txt")));
-    await expect(portable(context)).toMatchFileSnapshot("./__snapshots__/review-no-waiver.context.txt");
+    await expect(portable(context)).toMatchFileSnapshot("./test/fixtures/review-no-waiver.context.txt");
   });
 
   // Contract: reviewBrief without waiverLines (an older caller) renders what it rendered before, and an empty list changes nothing.
@@ -257,7 +257,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     const omitted = reviewBrief(input);
     expect(reviewBrief({ ...input, waiverLines: [] })).toEqual(omitted);
     expect(omitted.prompt).toBe(withReviewerLine(await snapshotText("review-brief-no-waiverlines.prompt.txt")));
-    await expect(omitted.context).toMatchFileSnapshot("./__snapshots__/review-brief-no-waiverlines.context.txt");
+    await expect(omitted.context).toMatchFileSnapshot("./test/fixtures/review-brief-no-waiverlines.context.txt");
   });
 
   const pushRules = (prompt: string, branch: string) => {

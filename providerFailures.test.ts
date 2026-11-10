@@ -515,7 +515,7 @@ describe("Chief backend", () => {
       expect(runs.map((run) => run.exitCode)).toEqual([0, 0, 0, 0, 0, 0]);
 
       const actual = JSON.stringify({ fixtureHash, runs }, null, 2) + "\n";
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "chief-stats-512cfeb.json"), "utf8");
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "chief-stats-512cfeb.json"), "utf8");
       expect(actual).toBe(oracle); // oracle-compare
     });
   });

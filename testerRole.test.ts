@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { checkPlan } from "./reportIntake";
-import { managedSkills } from "./roles";
+import { checkPlan } from "./src/report/reportIntake";
+import { managedSkills } from "./src/core/roles";
 import { READY, type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
 import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, disposeAll, legacyWave, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";

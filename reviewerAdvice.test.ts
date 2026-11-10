@@ -16,7 +16,7 @@ describe("tester role", () => {
   describe("Spec Writer role", () => {
     // ---- Reviewer advice: characterization on base 626c3cd (tests first, before planProgress.reviewAdvice takes the repair decision) ----
     // Contract: for each case below, the reviewer's ready-report alert (nextAction forAlert = true, as Chief received it) and the
-    // reviewer's chief_roster Pending line (forAlert = false, whole) give the text saved in __snapshots__/reviewer-advice-626c3cd.txt;
+    // reviewer's chief_roster Pending line (forAlert = false, whole) give the text saved in test/fixtures/reviewer-advice-626c3cd.txt;
     // a null decision shows no Pending line and the alert's fallback. The real handlers run (chief_review, chief_report,
     // chief_roster, chief_delegate); nothing is observed through a production seam. The storage root is normalized and the forge is
     // execFileMock. A reviewer's carried reject_streak is set in SQL before its report (the report adds one), so the rung does not depend
@@ -343,7 +343,7 @@ describe("tester role", () => {
 
     test("reviewer advice oracle", async () => {
       const head = await reviewerAdviceFixture();
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "reviewer-advice-626c3cd.txt"), "utf8");
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "reviewer-advice-626c3cd.txt"), "utf8");
       expect(head).toBe(oracle);
     }, 180_000);
 

@@ -15,7 +15,7 @@ describe("tester role", () => {
   describe("Spec Writer role", () => {
     // ---- Plan admission and waivers: characterization on base c8a0d76 (tests first, before planLifecycle.ts) ----
     // Contract: for each case below, chief_delegate, chief_skip_tests and chief_skip_specs give the outcome saved in
-    // __snapshots__/plan-admission-c8a0d76.txt: the refusal text, or the accepted kind plus the prompt the launched thread
+    // test/fixtures/plan-admission-c8a0d76.txt: the refusal text, or the accepted kind plus the prompt the launched thread
     // received. The real handlers run; nothing is observed through a production seam; only the storage root is normalized.
     // Regression: a refactor of admission or the waiver predicates changes a refusal sentence or its order, a worker prompt
     // field, an idempotent repeat, or tightens a loose path (a terminal prior, a review after a worker fix on a test wave).
@@ -579,7 +579,7 @@ describe("tester role", () => {
 
     test("plan admission oracle", async () => {
       const head = await admissionFixture();
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "plan-admission-c8a0d76.txt"), "utf8");
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "plan-admission-c8a0d76.txt"), "utf8");
       expect(head).toBe(oracle);
     });
   });

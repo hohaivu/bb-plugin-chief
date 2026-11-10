@@ -13,7 +13,7 @@ vi.mock("node:child_process", async () => (await import("./test/execMock")).chil
 afterEach(disposeAll);
 // ---- Tool-call stability (plan thr_g9mqzq4cy9, wave 2): preload line, provider env, optional title ----
 // Contract: tool-config oracle. The block below was run unchanged against base 7178582 to capture
-// __snapshots__/tool-config-7178582.txt; only the storage root is normalized. It builds every role's configuration
+// test/fixtures/tool-config-7178582.txt; only the storage root is normalized. It builds every role's configuration
 // for providers codex and claude-code, planner and research on and off, plus Chief's worst case (a 32,000-char chief.md
 // and a 5,000-char project name). Non-chief roles use the seeded-metadata path with fixed ids; Chief has a real row.
 // <tool-config-oracle-fixture>
@@ -71,7 +71,7 @@ describe("tool-call stability", () => {
   type Entry = { key: string; tools: string[]; skills: string[]; instructions: string | null | undefined };
   type Definition = { description: string; inputSchema: { required?: string[]; properties: Record<string, { description?: string }> } };
   type Fixture = { catalog: Record<string, Definition>; entries: Entry[] };
-  const snapshotPath = join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "tool-config-7178582.txt");
+  const snapshotPath = join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "tool-config-7178582.txt");
   let headFixture: Promise<Fixture> | undefined;
   const head = () => headFixture ??= toolConfigFixture().then((text) => JSON.parse(text) as Fixture);
   const preloadLine = (entry: Entry) => (entry.instructions ?? "").split("\n").filter((line) => line.includes("ToolSearch"));

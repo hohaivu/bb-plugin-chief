@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { MERGE_MIN_MS, commitStamp, fastForward, stampLine } from "./checkoutSync";
+import { MERGE_MIN_MS, commitStamp, fastForward, stampLine } from "./src/forge/checkoutSync";
 
 // Real git against local bare remotes in temp dirs: no network, no mocks.
 const ENV = process.env;

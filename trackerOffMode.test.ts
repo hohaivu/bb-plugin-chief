@@ -10,7 +10,7 @@ import { provideSdk } from "./test/sdk";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
-// Byte-equivalence with base 310043a (before the tracker existed). The golden file tracker.base310043a.oracle.json was recorded on that
+// Byte-equivalence with base 310043a (before the tracker existed). The golden file test/fixtures/tracker-310043a.json was recorded on that
 // commit by running the scenario block below, extracted verbatim between its markers, with ORACLE_OUT_TRACKER set. Here the head
 // output of the same fixture, in each mode that must behave as "off", must equal it. With ORACLE_OUT_TRACKER set, this describe
 // writes {meta, outputs} to that path instead of comparing.
@@ -82,7 +82,7 @@ async function trackerOracleRun(mode: TrackerOracleMode) {
 
 describe("tracker off-mode equivalence with base 310043a", () => {
   const fixtureHash = createHash("sha256").update(JSON.stringify(TRACKER_ORACLE_FIXTURE)).digest("hex");
-  const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "tracker.base310043a.oracle.json");
+  const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "test/fixtures/tracker-310043a.json");
   type Golden = { meta: { head: string; fixtureHash: string; cwd: string; runnerRoot: string; scenarios: number }; outputs: Awaited<ReturnType<typeof trackerOracleRun>> };
   const statusProbe: [string, string[]] = [TRACKER_ORACLE_BB, ["tasks", "status", "--json"]];
 

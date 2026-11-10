@@ -813,7 +813,7 @@ describe("checkout freshness", () => {
       { name: "CLI plan --json, confirmed separate checkout", projectPath: "/elsewhere/worktree-default", behind: true, call: "cli-plan-json" },
     ];
     const fixtureHash = createHash("sha256").update(JSON.stringify(FIXTURE)).digest("hex");
-    const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "checkoutFreshness.oracle.json");
+    const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "checkout-freshness-948c49c.json");
 
     async function outputs() {
       const out: Record<string, unknown> = {};
@@ -921,7 +921,7 @@ describe("checkout freshness", () => {
       { name: "CLI plan --json, sharing unknown", projectPath: "clone", run: async (w) => { delete w.cfg.env.path; return cli(w, "--json"); } },
     ];
     const fixtureHash = createHash("sha256").update(FIXTURE.map((s) => `${s.name}|${s.projectPath}`).join("\n")).digest("hex");
-    const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "checkoutFreshness.base0e3ab0c.oracle.json");
+    const GOLDEN = join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "checkout-freshness-0e3ab0c.json");
 
     async function outputs() {
       const out: Record<string, unknown> = {};

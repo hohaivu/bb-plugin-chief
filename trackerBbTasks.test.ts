@@ -1,6 +1,6 @@
 import { access, readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { bbTasksTracker, trackerSelector } from "./trackerBbTasks";
+import { bbTasksTracker, trackerSelector } from "./src/tracker/trackerBbTasks";
 
 // Contract (docs/specs/tracker.md, The bb Tasks adapter): the exact argv and env of every `bb tasks` call. The fake stands in
 // for the CLI at the injected execFileAsync boundary; no real bb Tasks process runs and nothing is created in any tracker.

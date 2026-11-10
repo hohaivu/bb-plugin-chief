@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { PR_AGENT_DIR } from "./prAgent";
+import { PR_AGENT_DIR } from "./src/review/prAgent";
 import { readyIdle, report, tool } from "./test/testerHelpers";
 import { disposeAll, execFileMock, setup, start } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";

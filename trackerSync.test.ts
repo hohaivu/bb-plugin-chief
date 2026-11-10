@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import type { ManagedRow } from "./src/types";
-import type { Tracker, TrackerComment } from "./tracker";
-import { TRACKER_TABLES, createTrackerSync } from "./trackerSync";
+import type { Tracker, TrackerComment } from "./src/tracker/tracker";
+import { TRACKER_TABLES, createTrackerSync } from "./src/tracker/trackerSync";
 
 // Contracts come from docs/specs/tracker.md (Units, Mirroring, Reconcile pass, Decisions and answers, Off/unmapped/unavailable).
 // The Tracker is a fake at the protocol boundary; the rows, the clock and the db are real. Nothing here knows a provider.

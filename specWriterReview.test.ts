@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { reviewBrief, type ReviewBriefInput } from "./reviewStart";
+import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
 import { PLANNER_ANCHOR, PLANNER_RESHAPE_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, approvePlan, delegate, disposeAll, planFile, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
@@ -185,7 +185,7 @@ describe("tester role", () => {
     test("a plan with no spec wave produces the strings #164's head produced", async () => {
       const state = await setup();
       const head = await stringsFixture(state);
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "strings-no-spec-7c3a89d.txt"), "utf8");
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "strings-no-spec-7c3a89d.txt"), "utf8");
       expect(head).toBe(oracle);
     });
 
@@ -220,7 +220,7 @@ describe("tester role", () => {
     test("worker, designer and tester prompts equal base 8250f0c's apart from the tester Head commit line", async () => {
       const state = await setup();
       const head = await briefFixture(state);
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "briefs-base-8250f0c.txt"), "utf8");
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "briefs-base-8250f0c.txt"), "utf8");
       const headCommit = "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.";
       const lines = head.split("\n");
       expect(lines.filter((line) => line === headCommit)).toHaveLength(2);
@@ -317,7 +317,7 @@ describe("tester role", () => {
     };
     // <baseline-oracle-end>
 
-    const oracleFile = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", name), "utf8");
+    const oracleFile = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", name), "utf8");
     const WRITER_BASELINE = "- Baseline: this wave's plan has a `## Spec baseline` heading.";
     const TESTER_BASELINE = "- A new spec's baseline (the current behaviour a Spec Writer documented";
     const gateOf = (prompt: string) => prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!.split("\n");

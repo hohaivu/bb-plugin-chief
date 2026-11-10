@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { helperPrompt, PR_AGENT_DIR, prAgentScript, prAgentSection as renderSection, reviewEngine, type EngineTarget } from "./prAgent";
+import { helperPrompt, PR_AGENT_DIR, prAgentScript, prAgentSection as renderSection, reviewEngine, type EngineTarget } from "./src/review/prAgent";
 
 // Contract: docs/specs/review-engine.md, "Engine Behaviour". prAgent.ts owns the setting parse, the wrapper script, the
 // translation table, the engine section and the helper prompt. The wrapper is executed for real with /bin/bash (3.2 on

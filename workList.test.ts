@@ -15,7 +15,7 @@ afterEach(disposeAll);
 // WORKLIST_ORACLE_OUT=<file>; this replay must match it byte for byte on head. Both sides run the same scenario through the real
 // `chief_roster` tool and `bb chief status` CLI; the database rows are read back only to see what handOver moved.
 // Regression: a roster/status/hand-off byte changing with the panel removal, e.g. the Pending block reading a deleted `todoItems`, a todo not moved to the successor, or an undelivered alert left on the superseded Chief.
-const WORKLIST_ORACLE = join(dirname(fileURLToPath(import.meta.url)), "workList.base310043a.oracle.json");
+const WORKLIST_ORACLE = join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "work-list-310043a.json");
 async function workListScenario() {
   vi.useFakeTimers({ toFake: ["Date"], now: 1_700_000_000_000 });
   try {

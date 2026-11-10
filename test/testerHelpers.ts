@@ -1,5 +1,5 @@
 import { test } from "vitest";
-import { checkPlan } from "../reportIntake";
+import { checkPlan } from "../src/report/reportIntake";
 import { PLAN_FIXTURE, TEST_WAVE, setup, status, wave } from "./harness";
 
 export type State = Awaited<ReturnType<typeof setup>>;

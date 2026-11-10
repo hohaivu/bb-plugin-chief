@@ -14,7 +14,7 @@ describe("tester role", () => {
   describe("Spec Writer role", () => {
     // ---- Review decisions: characterization on base 4b5ad00 (tests first, before reviewLedger takes the decisions) ----
     // Contract: for each case below, chief_delegate (replaces:), the advisor's and reviewer's alerts, chief_complete,
-    // chief_complete with skipReview and chief_review give the outcome saved in __snapshots__/review-decisions-4b5ad00.txt:
+    // chief_complete with skipReview and chief_review give the outcome saved in test/fixtures/review-decisions-4b5ad00.txt:
     // the refusal text, or the reply, or the alert Chief received. The real handlers run; nothing is observed through a
     // production seam; the storage root is normalized, and the forge is execFileMock (gh pr view / gh pr ready).
     // Timestamps that the consult gate compares are set in SQL, so no case depends on the clock.
@@ -404,7 +404,7 @@ describe("tester role", () => {
 
     test("review decisions oracle", async () => {
       const head = await reviewDecisionsFixture();
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "__snapshots__", "review-decisions-4b5ad00.txt"), "utf8");
+      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "review-decisions-4b5ad00.txt"), "utf8");
       expect(head).toBe(oracle);
     }, 120_000);
 
