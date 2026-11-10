@@ -157,6 +157,17 @@ describe("docsCommits", () => {
       const found = await read(work, { branch: "task", sha: "b".repeat(40) });
       expect(found).toEqual({ skipped: `pull request head ${"b".repeat(12)} not found after fetching origin/task` });
     });
+    test("the default base cannot be fetched while the task branch can: skipped, not a diff against the stale cached origin/main", async () => {
+      const { work, origin, commit } = repos();
+      git(work, "checkout", "-q", "-b", "task");
+      commit(work, "docs/specs/a.md", "docs: bare");
+      git(work, "push", "-q", "origin", "task");
+      // origin's HEAD moves to task and main is deleted there: `fetch origin task` works, `fetch origin main` fails, work's cached origin/HEAD still names origin/main.
+      git(origin, "symbolic-ref", "HEAD", "refs/heads/task");
+      git(origin, "update-ref", "-d", "refs/heads/main");
+      expect(git(work, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")).toBe("origin/main");
+      expect(await read(work, { branch: "task" })).toEqual({ skipped: "could not fetch origin/main" });
+    });
     test("origin/HEAD is not set and no base is given", async () => {
       const { work, commit } = repos();
       git(work, "checkout", "-q", "-b", "task");
