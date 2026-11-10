@@ -133,6 +133,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - A child Chief gets a refusal that names its Coordinator.
 - A Chief that owns any open row gets a refusal that lists the row ids. Ready and blocked rows count as open.
 - Open todos do not block the upgrade. They stay with the Coordinator.
+- The upgrade renames the thread: a leading `Chief ·` becomes `Coordinator ·`, and the rest of the title stays. The row title changes in the same statement.
 - The success text says that the upgrade is one-way, that the Coordinator runs no managed threads, and how to attach, spawn and read the roster.
 - No tool, CLI command or SQL statement clears `coordinator`. Reason: the owner decided that the upgrade is one-way.
 

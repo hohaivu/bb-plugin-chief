@@ -165,10 +165,10 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       wrote();
     },
     /** chief_coordinate: upgrades a Chief with no managed work to a Coordinator, once. Returns whether the row changed. */
-    setCoordinator(threadId: string, now: number) {
-      const { changes } = db.prepare(`UPDATE managed_threads SET coordinator=1, updated_at=?
+    setCoordinator(threadId: string, now: number, title: string) {
+      const { changes } = db.prepare(`UPDATE managed_threads SET coordinator=1, title=?, updated_at=?
         WHERE thread_id=? AND role='chief' AND COALESCE(coordinator,0)=0 AND coordinator_thread_id IS NULL
-        AND NOT EXISTS (SELECT 1 FROM managed_threads w WHERE w.chief_thread_id=? AND w.state NOT IN ('complete','archived','deleted'))`).run(now, threadId, threadId);
+        AND NOT EXISTS (SELECT 1 FROM managed_threads w WHERE w.chief_thread_id=? AND w.state NOT IN ('complete','archived','deleted'))`).run(title, now, threadId, threadId);
       if (changes) wrote();
       return changes > 0;
     },

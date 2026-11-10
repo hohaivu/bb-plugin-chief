@@ -4214,12 +4214,15 @@ export default async function plugin(bb: BbPluginApi) {
       if (!isActiveChief(caller)) throw new Error("chief_coordinate requires an active registered Chief thread.");
       if (isCoordinator(caller)) return "Already a Coordinator.";
       if (isLinkedChild(caller)) throw new Error(`This Chief is a child of Coordinator ${caller.coordinator_thread_id}: a child cannot become a Coordinator.`);
-      if (!store.setCoordinator(caller.thread_id, Date.now())) {
+      const title = caller.title.replace(/^Chief(?= ·)/, "Coordinator");
+      if (!store.setCoordinator(caller.thread_id, Date.now(), title)) {
         const open = store.all().filter((row) => row.chief_thread_id === caller.thread_id && !terminal(row.state)).map((row) => row.thread_id);
         throw new Error(open.length
           ? `This Chief still owns open managed threads: ${open.join(", ")}. Finish them (complete or stop and complete) before upgrading.`
           : "This Chief cannot become a Coordinator now; read chief_roster and try again.");
       }
+      // The upgrade stands even if the rename fails: the row already holds the new title.
+      if (title !== caller.title) await bb.sdk.threads.update({ threadId: caller.thread_id, title }).catch((error) => bb.log.warn(`Coordinator title rename failed for ${caller.thread_id}: ${String(error)}`));
       return "This Chief is now a Coordinator. The upgrade is one-way. It runs no managed threads: it supervises child Chiefs in any project. Attach existing Chiefs the owner names with chief_attach, start new work in a child with chief_spawn (projectId names its project), and read chief_roster for the Children block. A child's Need you and its done state arrive here as alerts; the owner answers in the child thread.";
     },
   });
