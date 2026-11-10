@@ -13079,4 +13079,226 @@ describe("Coordinator", () => {
       expect(row(state, chief).coordinator).toBe(1);
     });
   });
+
+  describe("purity (COORD-2)", () => {
+    // The refused list is COORD-2's own list.
+    const REFUSED: Array<[string, object]> = [
+      ["chief_plan", { title: "T", mission: "M" }],
+      ["chief_consult", { title: "T", mission: "M" }],
+      ["chief_delegate", { title: "T", mission: "M", unplannedReason: "r" }],
+      ["chief_forge_init", { title: "T" }],
+      ["chief_review", { branch: "b" }],
+      ["chief_inspect", { threadId: "thr_x" }],
+      ["chief_continue", { threadId: "thr_x", instruction: "go" }],
+      ["chief_stop", { threadId: "thr_x" }],
+      ["chief_complete", { threadId: "thr_x" }],
+      ["chief_owner_approval", { workerThreadId: "thr_x", approval: "ok" }],
+      ["chief_skip_tests", { planThreadId: "thr_x", wave: 1, reason: "r" }],
+      ["chief_skip_specs", { planThreadId: "thr_x", wave: 1, reason: "r" }],
+      ["chief_escalate", { request: "help" }],
+      ["chief_sync", {}],
+      ["chief_research", { mode: "survey", question: "q", items: ["a"] }],
+    ];
+
+    test("a Coordinator is configured with exactly chief_roster, chief_spawn and chief_attach, and no skills", async () => {
+      const state = await setup();
+      const id = await coordinator(state);
+      const configuration = await state.harness.behavior.resolveAgentConfiguration(configurationContext(id));
+      expect(configuration.tools.map((tool: { name: string }) => tool.name).sort()).toEqual(["chief_attach", "chief_roster", "chief_spawn"]);
+      expect(configuration.skills).toEqual([]);
+    });
+
+    test.each(REFUSED)("%s refuses a Coordinator before it does anything", async (tool, params) => {
+      const state = await setup();
+      const id = await coordinator(state);
+      const rows = state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads").get();
+      const spawned = state.spawned.length;
+      await expect(call(state, tool, params, id)).rejects.toThrow(/not available to a Coordinator.*ask the child Chief that owns the work/i);
+      await expect(call(state, tool, params, id)).rejects.toThrow(/planner, worker, reviewer, tester, advisor or researcher/);
+      expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads").get()).toEqual(rows);
+      expect(state.spawned.length).toBe(spawned);
+    });
+
+    test("the same tools still work for a plain Chief (the refusal is the Coordinator's alone)", async () => {
+      const state = await setup();
+      const chief = await make(state);
+      await expect(call(state, "chief_inspect", { threadId: "thr_x" }, chief)).rejects.toThrow("No managed thread thr_x for this Chief");
+      expect(await call(state, "chief_sync", {}, chief)).not.toMatch(/Coordinator/);
+    });
+
+    test.each([
+      [["plan", "--title", "T", "--mission", "M"]],
+      [["consult", "--title", "T", "--mission", "M"]],
+      [["delegate", "--title", "T", "--mission", "M", "--unplanned-reason", "r", "--json"]],
+      [["stop", "thr_x"]],
+      [["inspect", "thr_x"]],
+      [["continue", "thr_x", "--instruction", "go"]],
+      [["complete", "thr_x"]],
+    ])("bb chief %j refuses a Coordinator with the same message", async (args) => {
+      const state = await setup();
+      const id = await coordinator(state);
+      const result = await cli(state, args, id);
+      expect(result.exitCode).not.toBe(0);
+      expect(`${result.stderr}${result.stdout}`).toMatch(/not available to a Coordinator.*ask the child Chief that owns the work/i);
+      expect(state.spawned.filter((spawn) => spawn.pluginMetadata?.role === "worker" || spawn.pluginMetadata?.role === "planner")).toEqual([]);
+    });
+
+    test("chief_report, chief_log and a repeated chief_coordinate keep their ordinary results for a Coordinator", async () => {
+      const state = await setup();
+      const plain = await make(state);
+      const id = await coordinator(state);
+      const outcome = async (caller: string) => call(state, "chief_report", { state: "ready", result: "x" }, caller).then((text) => text, (error: Error) => `throw ${error.message}`);
+      const normalize = (text: string, caller: string) => text.split(caller).join("<caller>");
+      expect(normalize(await outcome(id), id)).toBe(normalize(await outcome(plain), plain));
+      expect(await call(state, "chief_log", {}, id)).toBe("Not part of a plan run.");
+      expect(await call(state, "chief_coordinate", {}, id)).toBe("Already a Coordinator.");
+    });
+
+    test("routing never lands on a Coordinator, even when it is the newest Chief of the project", async () => {
+      const state = await setup();
+      const only = await coordinator(state);
+      // A project whose only Chief is a Coordinator: start makes a plain Chief and leaves the Coordinator alone.
+      const first = await start(state);
+      expect(first).toMatchObject({ created: true });
+      expect(first.threadId).not.toBe(only);
+      expect(row(state, only)).toMatchObject({ coordinator: 1, state: expect.not.stringMatching(/complete|archived/) });
+      // The Coordinator is now newer than the plain Chief; start and an operator delegate still pick the plain Chief.
+      const newer = await coordinator(state);
+      expect(await start(state)).toEqual({ threadId: first.threadId, created: false });
+      const worker = await delegate(state, first.threadId, "Plain work");
+      await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
+      const operator = await cli(state, ["delegate", "--title", "Shell work", "--mission", "M", "--unplanned-reason", "r", "--json"]);
+      expect(operator.exitCode, operator.stderr).toBe(0);
+      const shellWorker = JSON.parse(operator.stdout!).threadId as string;
+      expect([row(state, worker.threadId).chief_thread_id, row(state, shellWorker).chief_thread_id]).toEqual([first.threadId, first.threadId]);
+      expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads WHERE chief_thread_id IN (?, ?)").get(only, newer)).toEqual({ n: 0 });
+    });
+  });
+
+  describe("ownership (COORD-3)", () => {
+    test("bb chief adopt of a Coordinator fails and changes nothing: the active Chief keeps its work, todo and undelivered alert", async () => {
+      const state = await setup();
+      const plain = (await start(state)).threadId;
+      const worker = await delegate(state, plain);
+      await call(state, "chief_roster", { todo: { text: "Keep me" } }, plain);
+      state.failNextSend();
+      await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker.threadId);
+      const id = await coordinator(state);
+      const snapshot = () => ({
+        rows: state.db.prepare("SELECT thread_id, state, chief_thread_id, coordinator, coordinator_thread_id FROM managed_threads ORDER BY thread_id").all(),
+        todos: state.db.prepare("SELECT chief_thread_id, state FROM chief_todos").all(),
+        pending: state.db.prepare("SELECT dedupe_key, target_thread_id FROM alert_outbox WHERE delivered_at IS NULL ORDER BY dedupe_key").all(),
+      });
+      const before = snapshot();
+      expect((before.pending as any[]).some((alert) => alert.target_thread_id === plain)).toBe(true);
+      const result = await cli(state, ["adopt", "--thread", id]);
+      expect(result.exitCode).not.toBe(0);
+      expect(`${result.stderr}${result.stdout}`).toContain("Coordinator");
+      expect(snapshot()).toEqual(before);
+      expect(row(state, plain).state).not.toBe("complete");
+      expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads WHERE chief_thread_id=?").get(id)).toEqual({ n: 0 });
+    });
+
+    test("an archived Chief's open work, todos and alerts go to a plain Chief, never to a Coordinator in the same project", async () => {
+      const state = await setup();
+      const old = (await start(state)).threadId;
+      const worker = await delegate(state, old);
+      await call(state, "chief_roster", { todo: { text: "Carry me" } }, old);
+      const id = await coordinator(state);
+      state.live.set(old, { ...state.live.get(old)!, archivedAt: Date.now() });
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(old)! });
+      await state.supervisorCycle();
+      const owner = row(state, worker.threadId).chief_thread_id as string;
+      expect(row(state, old).state).toBe("complete");
+      expect(owner).not.toBe(old);
+      expect(owner).not.toBe(id);
+      expect(row(state, owner)).toMatchObject({ role: "chief", coordinator: null });
+      expect(state.db.prepare("SELECT chief_thread_id FROM chief_todos").all()).toEqual([{ chief_thread_id: owner }]);
+      expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads WHERE chief_thread_id=?").get(id)).toEqual({ n: 0 });
+      expect(row(state, id)).toMatchObject({ coordinator: 1, state: expect.not.stringMatching(/complete|archived/) });
+    });
+
+    test("re-adopting a linked child keeps its Coordinator link", async () => {
+      const state = await setup();
+      const parent = await coordinator(state);
+      const child = (await spawnChild(state, parent, { projectId: "proj_2" })).id;
+      expect(row(state, child).coordinator_thread_id).toBe(parent);
+      const result = await cli(state, ["adopt", "--thread", child]);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(row(state, child)).toMatchObject({ role: "chief", coordinator_thread_id: parent });
+    });
+  });
+
+  describe("attach (COORD-4)", () => {
+    const reload = (state: S, caller: string) => call(state, "chief_roster", { todo: { text: "reload" } }, caller);
+
+    test("one result line per id: every outcome, in any project, never touching chief_thread_id", async () => {
+      const state = await setup();
+      const parent = await coordinator(state);
+      const other = await coordinator(state, "proj_2");
+      const owner = await make(state);
+      const worker = (await delegate(state, owner, "Plain work")).threadId;
+      const archived = await make(state);
+      const finished = await make(state);
+      const linkedElsewhere = (await spawnChild(state, other, {}, "proj_2")).id;
+      const mine = (await spawnChild(state, parent)).id;
+      const sameProject = await make(state);
+      const otherProject = await make(state, "proj_2");
+      state.db.prepare("UPDATE managed_threads SET state='archived' WHERE thread_id=?").run(archived);
+      state.db.prepare("UPDATE managed_threads SET state='complete' WHERE thread_id=?").run(finished);
+      await reload(state, parent);
+      const before = row(state, mine);
+      const ids = [parent, worker, "thr_nowhere", archived, finished, other, linkedElsewhere, mine, sameProject, otherProject];
+      const lines = (await call(state, "chief_attach", { threadIds: ids }, parent)).split("\n");
+      expect(lines).toEqual([
+        `${parent}: not attached: is you.`,
+        `${worker}: not attached: is not a Chief row: run \`bb chief adopt --thread ${worker}\` first.`,
+        "thr_nowhere: not attached: is not a Chief row: run `bb chief adopt --thread thr_nowhere` first.",
+        `${archived}: not attached: is archived.`,
+        `${finished}: not attached: is complete.`,
+        `${other}: not attached: is a Coordinator.`,
+        `${linkedElsewhere}: not attached: already belongs to Coordinator ${other}.`,
+        `${mine}: already attached (no change).`,
+        `${sameProject}: attached.`,
+        `${otherProject}: attached.`,
+      ]);
+      expect(row(state, mine)).toEqual(before);
+      for (const id of [sameProject, otherProject]) expect(row(state, id)).toMatchObject({ coordinator_thread_id: parent, chief_thread_id: null, coordinator: null });
+      expect(row(state, linkedElsewhere).coordinator_thread_id).toBe(other);
+      expect(row(state, other).coordinator_thread_id).toBeNull();
+      expect(row(state, parent).coordinator_thread_id).toBeNull();
+    });
+
+    test("a repeated attach is a no-op line and writes nothing", async () => {
+      const state = await setup();
+      const parent = await coordinator(state);
+      const chief = await make(state);
+      await call(state, "chief_attach", { threadIds: [chief] }, parent);
+      const before = state.db.prepare("SELECT * FROM managed_threads ORDER BY thread_id").all();
+      expect(await call(state, "chief_attach", { threadIds: [chief, chief] }, parent)).toBe(`${chief}: already attached (no change).`);
+      expect(state.db.prepare("SELECT * FROM managed_threads ORDER BY thread_id").all()).toEqual(before);
+    });
+
+    test("two Coordinators attaching the same Chief at once leave exactly one link", async () => {
+      const state = await setup();
+      const first = await coordinator(state);
+      const second = await coordinator(state);
+      const chief = await make(state);
+      const results = await Promise.all([call(state, "chief_attach", { threadIds: [chief] }, first), call(state, "chief_attach", { threadIds: [chief] }, second)]);
+      expect(results.filter((line) => line.endsWith(": attached."))).toHaveLength(1);
+      const winner = row(state, chief).coordinator_thread_id as string;
+      expect([first, second]).toContain(winner);
+      expect(results.find((line) => !line.endsWith(": attached."))).toBe(`${chief}: not attached: already belongs to Coordinator ${winner}.`);
+    });
+
+    test("only an active Coordinator may attach, and 1 to 20 ids are accepted", async () => {
+      const state = await setup();
+      const plain = await make(state);
+      const parent = await coordinator(state);
+      await expect(call(state, "chief_attach", { threadIds: [plain] }, plain)).rejects.toThrow("for a Coordinator only");
+      await expect(call(state, "chief_attach", { threadIds: [] }, parent)).rejects.toThrow("invalid");
+      await expect(call(state, "chief_attach", { threadIds: Array.from({ length: 21 }, (_, i) => `thr_${i}`) }, parent)).rejects.toThrow("invalid");
+      expect((await call(state, "chief_attach", { threadIds: Array.from({ length: 20 }, (_, i) => `thr_none${i}`) }, parent)).split("\n")).toHaveLength(20);
+    });
+  });
 });
