@@ -5,7 +5,7 @@ import { BUSY_STATUSES } from "../runtime/constants";
 import type { Ctx } from "../runtime/context";
 
 export function registerSkipTestsTool(ctx: Ctx) {
-  const { bb, plans, store, waveWorkers } = ctx;
+  const { bb, latestWorker, plans, store } = ctx;
   ctx.registerChiefTool({
     name: "chief_skip_tests",
     presentation: { label: { pending: "Waiving tests…", completed: "Waived tests" } },
@@ -27,7 +27,7 @@ export function registerSkipTestsTool(ctx: Ctx) {
       }
       if (!alreadyWaived) store.skipWave(planThreadId, wave, { testsSkipped: reason });
       if (latest) return ctx.waivedLine(latest);
-      const owner = parent !== null ? waveWorkers(planThreadId, parent).at(-1) : undefined;
+      const owner = parent !== null ? latestWorker(planThreadId, parent) : undefined;
       const next = owner?.state === "ready" ? ctx.workerReadyNextStep(owner, true) : null;
       return next ?? `Wave ${parent} has not reported ready yet; its ready alert names the next call.`;
     },

@@ -20,24 +20,48 @@ export const swap = async (state: State, chief: { threadId: string }, planThread
 export async function specPlan(state: State, waves: object[] = [specImpl(), TEST_WAVE(2)], approve = false) {
   const chief = await start(state);
   const planner = await plan(state, chief.threadId, waves);
-  if (approve) await approvePlan(state, chief.threadId, planner.threadId);
+  // A plan with two or more implementation waves needs its one advisor review first.
+  if (approve || waves.filter((entry: any) => !entry.test && !entry.design).length > 1) await approvePlan(state, chief.threadId, planner.threadId);
   return { chief, planner };
 }
-/** specPlan with wave 1's Spec Writer delegated by the default call (still busy). */
+/** The newest implementation-lane row (worker, designer, tester or a legacy writer that replaced one) and the newest side writer of a wave. */
+export const ownerOn = (state: State, planThreadId: string, waveNo: number) =>
+  state.db.prepare(`SELECT * FROM managed_threads WHERE plan_thread_id=? AND plan_wave=? AND role='worker' AND (kind IS NULL OR kind<>'spec-writer' OR replaces_thread_id IN (SELECT thread_id FROM managed_threads WHERE kind IS NULL OR kind<>'spec-writer')) ORDER BY rowid DESC`).get(planThreadId, waveNo) as any;
+export const writerOn = (state: State, planThreadId: string, waveNo: number) =>
+  state.db.prepare(`SELECT * FROM managed_threads WHERE plan_thread_id=? AND plan_wave=? AND kind='spec-writer' ORDER BY rowid DESC`).get(planThreadId, waveNo) as any;
+/** Delegates wave `waveNo`'s Spec Writer beside its worker: a side-lane row in its own worktree. */
+export const CHAIN = "feature/chain";
+export const CHAIN_PR = "https://github.com/o/r/pull/7";
+export const delegateWriter = async (state: State, chief: { threadId: string }, planThreadId: string, waveNo = 1, extra: object = {}) => {
+  // A head wave's writer takes the chain's branch and PR from chief_forge_init; a later wave's comes from the chain's owner.
+  const chain = waveNo === 1 ? { branch: CHAIN, prUrl: CHAIN_PR } : {};
+  await delegateWave(state, chief.threadId, planThreadId, waveNo, { kind: "spec-writer", ...chain, ...extra });
+  return writerOn(state, planThreadId, waveNo).thread_id as string;
+};
+/** specPlan with wave 1's worker delegated by the default call (still busy). */
+export async function withWorker(state: State, waves?: object[], extra: object = {}) {
+  const ctx = await specPlan(state, waves);
+  await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR, ...extra });
+  return { ...ctx, worker: ownerOn(state, ctx.planner.threadId, 1).thread_id as string };
+}
+/** specPlan with wave 1's Spec Writer delegated first (still busy); its worker has not started. */
 export async function withWriter(state: State, waves?: object[], extra: object = {}) {
   const ctx = await specPlan(state, waves);
-  await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 1, extra);
-  return { ...ctx, writer: workerOn(state, ctx.planner.threadId, 1).thread_id as string };
+  return { ...ctx, writer: await delegateWriter(state, ctx.chief, ctx.planner.threadId, 1, extra) };
 }
-/** The whole spec-first chain, every row ready and idle: Spec Writer, wave 1's worker, wave 2's tester. */
+/** Wave 1's worker, then its Spec Writer beside it, both busy. */
+export async function withBoth(state: State, waves?: object[]) {
+  const ctx = await withWorker(state, waves);
+  return { ...ctx, writer: await delegateWriter(state, ctx.chief, ctx.planner.threadId, 1) };
+}
+/** The whole parallel chain, every row ready and idle: wave 1's worker and Spec Writer, wave 2's tester (which replaces the worker). */
 export async function fullChain(state: State, waves?: object[]) {
-  const ctx = await withWriter(state, waves);
+  const ctx = await withBoth(state, waves);
+  await readyIdle(state, ctx.worker);
   await readyIdle(state, ctx.writer);
-  const worker = await swap(state, ctx.chief, ctx.planner.threadId, 1, ctx.writer, "worker");
-  await readyIdle(state, worker);
-  const tester = await swap(state, ctx.chief, ctx.planner.threadId, 2, worker, "tester");
+  const tester = await swap(state, ctx.chief, ctx.planner.threadId, 2, ctx.worker, "tester");
   await readyIdle(state, tester);
-  return { ...ctx, worker, tester };
+  return { ...ctx, tester };
 }
 
 /** Puts wave 1's Spec Writer into `how`: ready (busy host), ready and idle, blocked and idle, idle with no report, or complete.

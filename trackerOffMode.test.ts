@@ -1,3 +1,4 @@
+import { acceptSpecLaneWording } from "./test/specLaneWording";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
@@ -139,7 +140,10 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       const rest = { ...actual, exec: actual.exec.filter((call) => !extra.includes(call)) };
       const baseSchemas = golden.outputs.tools;
       expect({ ...withoutMerge(rest), tools: undefined }, name).toEqual({ ...golden.outputs, tools: undefined });
-      expect(withoutMerge(rest).tools, `${name}: tool schemas`).toEqual(baseSchemas);
+      // Plan 2 contract 6: the Spec Writer wording of three tools moved; asserted, then restored to the recorded text.
+      const shown = structuredClone(withoutMerge(rest).tools);
+      for (const tool of shown) acceptSpecLaneWording(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
+      expect(shown, `${name}: tool schemas`).toEqual(baseSchemas);
     }
   });
 });

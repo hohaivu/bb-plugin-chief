@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The plan chains domain manages execution topology, branch allocation, pull requests, worker environments, reviewer worktrees, and cleanup claims.
+The plan chains domain manages execution topology, branch allocation, pull requests, worker environments, Spec Writer side worktrees, reviewer worktrees, and cleanup claims.
 
 ## Domain Terms
 
@@ -12,6 +12,15 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Chain tip**: a plan wave that has no successor wave.
 - **Task branch**: the Git branch created for a plan chain.
 - **Worker environment**: the managed worktree environment assigned to a worker thread.
+- **Spec wave**: a plan wave marked `spec: true` that a test, design, or skipped-specs rule does not exclude.
+- **Side-lane Spec Writer**: a planned `spec-writer` row on a spec wave. Every row in its `replaces:` ancestry is also a `spec-writer`. It runs in parallel with the wave worker, in its own side worktree.
+- **Implementation lane**: every other worker row. This includes worker, designer, and tester rows. It also includes a `spec-writer` that replaced a worker, designer, or tester.
+- **Side worktree**: a private managed worktree on a `bb/` side branch cut from the task branch. A side-lane Spec Writer uses it.
+- **Fold**: the push of the docs commits of a side-lane Spec Writer onto the task branch. The push is fast-forward only.
+- **Fold base**: the task branch commit that the Spec Writer rebased onto before the successful fold push.
+- **Fold head**: the commit that the fold push wrote to the task branch. `Fold: none` means that the writer changed nothing, and Fold base equals Fold head.
+- **Chain owner**: the latest implementation-lane row of a chain. A live row wins over a finished row.
+- **Pending writer**: a spec wave that has no Spec Writer row, or whose latest Spec Writer row is not ready, not idle after a ready report, and not complete.
 - **Legacy plan**: an earlier plan where each wave received an independent branch.
 - **Pinned review**: a review round bound to a specific pull request commit SHA.
 - **Unpinned review**: a review round without a readable commit SHA.
@@ -23,14 +32,15 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 
 ## Ownership and Entry Points
 
-Six modules own the plan chains domain:
+Seven modules own the plan chains domain:
 
-1. `src/plan/waveSchedule.ts` owns graph traversal, wave relationships, and wave absence.
+1. `src/plan/waveSchedule.ts` owns graph traversal, wave relationships, wave absence, the lane predicate `sideLane`, and `writerPending`.
 2. `src/plan/planLifecycle.ts` owns delegation admission, role progression, and waivers.
-3. `server.ts` owns worker execution, forge initialization, delegation tools, and cleanup steps.
-4. `src/plan/planProgress.ts` owns progress checks, review readiness, legacy restack rules, and the repair decision after a reviewer verdict.
-5. `src/review/reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
-6. `src/review/reviewLedger.ts` owns reviewer tracking, coverage checks, and historical task chain queries.
+3. `src/runtime/delegation.ts` owns `startWorker`, which launches workers and Spec Writers. `src/tools/forgeInit.ts` owns forge initialization. `src/runtime/cleanup.ts` owns cleanup steps.
+4. `src/plan/planProgress.ts` owns progress checks, review readiness, the release route to the tester, legacy restack rules, and the repair decision after a reviewer verdict.
+5. `src/runtime/nextAction.ts` and `src/runtime/completion.ts` own the text of the next call and the completion rules.
+6. `src/research/delegationBrief.ts` owns the worker brief. `src/review/reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
+7. `src/review/reviewLedger.ts` owns reviewer tracking, coverage checks, and historical task chain queries.
 
 Callers interact with these entry points:
 
@@ -39,7 +49,12 @@ Callers interact with these entry points:
 - `successorOf(waves, n)`: returns the successor wave number of wave `n`, or null for a chain tip.
 - `heads(waves)`: returns every chain head in the plan.
 - `tips(waves)`: returns every chain tip in the plan.
-- `admitDelegation(request)`: admits or rejects a delegation request for a wave.
+- `admitDelegation(request)`: admits or rejects a delegation request for a wave. The admission names the lane, `side` or `implementation`.
+- `sideLane(row)`: returns true for a side-lane Spec Writer. It is the only lane predicate.
+- `chainOwner(planThreadId, chain)`: returns the latest implementation-lane row of a chain. It never returns a side-lane Spec Writer.
+- `chainStarted(planThreadId, chain)`: returns any row of a chain, in any lane.
+- `specWriters(planThreadId, wave?)`: returns the side-lane Spec Writers, oldest first. `waveWorkers` returns the implementation-lane rows only.
+- `writerPending(planThreadId, waves, n)`: returns true when wave `n` is a spec wave with a pending writer.
 - `chief_forge_init(params)`: initializes the forge repository branch, pull request, and issue.
 - `startWorker(params)`: prepares and launches a worker thread in an environment.
 - `restackOf(worker, waves)`: determines whether a legacy wave requires a restack.
@@ -61,10 +76,23 @@ A plan chain follows this lifecycle:
 3. Chief calls `chief_delegate` to launch a worker on the chain head.
 4. The server creates a managed worktree checkout on the task branch.
 5. The head worker executes and reports ready.
-6. Chief calls `chief_delegate` for the next wave using `replaces:` referencing the prior worker.
+6. Chief calls `chief_delegate` for the next wave using `replaces:` referencing the chain owner.
 7. The server assigns the existing worker environment, task branch, and pull request.
 8. Later waves in the chain repeat this replacement sequence.
 9. The chain tip worker reports ready, and Chief starts the plan review.
+
+A spec wave adds a Spec Writer that runs in parallel with the wave worker:
+
+1. Chief delegates the worker without a kind. Chief delegates the Spec Writer with `kind: spec-writer` and no `replaces:`. Either order is legal, and both calls can share one turn.
+2. The server launches the Spec Writer in a new side worktree on a `bb/` side branch cut from the task branch. It completes no row and repoints no row.
+3. The Spec Writer commits only `docs/` files on its side branch.
+4. Before it reports ready, the Spec Writer folds its commits onto the task branch. It runs these steps on a clean tree:
+   1. Fetch the task branch and note the commit `U`.
+   2. Rebase onto `U` with no autostash. On a conflict, abort the rebase and report blocked.
+   3. Check that the diff `U..HEAD` lists only `docs/` paths.
+   4. Push `HEAD` to the task branch with a plain push. A rejected push repeats the steps from the fetch.
+5. The Spec Writer records Fold base and Fold head, or `Fold: none`.
+6. The tester call of the test wave waits until every Spec Writer of the chain reports ready. Then Chief delegates the tester with `replaces:` referencing the chain owner of the parent wave.
 
 Independent chains run in parallel:
 
@@ -94,21 +122,56 @@ Shared worktree cleanup coordinates action ownership:
 
 ### Chain Resource Allocation
 
-- The server assigns exactly one task branch, one pull request, and one worker worktree to each plan chain. Reason: shared environments reduce worktree disk use across dependent waves.
+- The server assigns exactly one task branch, one pull request, and one implementation worktree to each plan chain. A side-lane Spec Writer adds a private side worktree. It adds no second task branch, review branch, or pull request. Reason: shared environments reduce worktree disk use across dependent waves, and one chain keeps one pull request.
 - The server creates a fresh managed worktree for each independent chain head. Reason: independent chains must execute in parallel without shared worktree state.
 - `startWorker` reuses the environment of the prior worker when `replaces:` is present. Reason: chain waves share installed dependencies and build outputs.
-- `startWorker` rejects a delegation when another non-terminal worker holds the same branch. Reason: git prohibits simultaneous checkouts of one branch in different worktrees.
+- `startWorker` checks every non-terminal row on the same branch, except the row in `replaces:`. Reason: git prohibits simultaneous checkouts of one branch in different worktrees.
+  - A same-plan implementation-lane row and same-plan side-lane Spec Writers coexist.
+  - Side-lane Spec Writers of different waves of one plan coexist.
+  - A second live side-lane Spec Writer on one wave is rejected, unless it replaces the first.
+  - A second live implementation-lane row is rejected.
+  - A holder from another plan, or an unplanned holder, is rejected.
+  - Reason: a side worktree checks out its own `bb/` side branch, so it never blocks the task branch.
 - `startWorker` rejects a delegation when `params.branch` differs from the branch of the prior worker. Reason: replacement workers must remain on the established chain branch.
 
 ### Chain Admission and Delegation
 
-- `admitDelegation` rejects a non-head wave delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
-- `admitDelegation` names `replaces: <latest>` when rejecting a non-head wave without a replacement target. Reason: callers must know the latest worker thread to continue the chain.
-- `admitDelegation` rejects a delegation without `replaces:` when any wave in the chain already has a worker row. Reason: started chains must not allocate duplicate workers or environments.
+- `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
+- `admitDelegation` names `replaces: <chain owner>` when it rejects a non-head wave without a replacement target. Reason: callers must know the latest implementation thread to continue the chain.
+- `admitDelegation` rejects an implementation delegation without `replaces:` when any wave in the chain already has an implementation-lane row. Reason: started chains must not allocate duplicate workers or environments.
+- A later implementation wave is admitted while a Spec Writer is pending. Reason: Spec Writers never gate implementation waves.
 - `admitDelegation` rejects a replacement target from another chain of the same plan. Reason: independent chains must not inherit foreign branches or environments.
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
 - `admitDelegation` permits a tester wave to start fresh on a new branch when the tested worker completed. Reason: post-merge testing verifies code after branch deletion.
-- `admitDelegation` permits a fresh plan wave 1 Spec Writer to replace a blocked Spec Writer of another plan. Reason: specification repair across plans enables recovery from specification errors.
+- `admitDelegation` permits a fresh plan wave 1 delegation to replace a blocked row of another plan. The rule applies to each lane. Reason: re-planning allows recovery on the blocked worktree or side worktree.
+
+### Spec Writer Side Lane
+
+- The default kind of a spec wave first hand-off is `worker`. A Spec Writer needs an explicit `kind: spec-writer`. Reason: the Worker builds from the plan and from the specs that existed before this plan, so the writer is opt-in.
+- `admitDelegation` admits a first Spec Writer on a spec wave when all of these conditions hold. Reason: the writer needs the same branch and pull request as the worker.
+  - The call has `kind: spec-writer` and no `replaces:`.
+  - The wave is a head wave, or the chain owner of the parent wave is ready, idle after a ready report, or complete.
+  - The wave has no live side-lane Spec Writer.
+  - The call carries the branch and pull request of the chain. A different branch is rejected.
+- The call order of the Spec Writer and the worker does not matter. Writer first never makes the worker `replaces:` the writer. Reason: the two rows are in different lanes.
+- `startWorker` launches a first side-lane Spec Writer with a managed worktree whose base branch is the task branch. It completes no row and repoints no row. Reason: the writer must never take over the implementation worktree.
+- `replaces:` a side-lane Spec Writer with `kind: spec-writer` is a docs repair. The new writer reuses the side worktree and completes the old writer. Reason: a repair keeps the fold history of the side branch.
+- `replaces:` a side-lane Spec Writer with another kind is rejected, and the text names the chain owner. Reason: a product repair belongs to the implementation lane.
+- A worker or designer may replace a ready writer only when the wave has no implementation-lane row. Reason: this legacy hand-off covers a head Spec Writer that ran before its worker.
+- A legacy `spec-writer` that replaced a worker, designer, or tester is in the implementation lane, and its hand-off stays normal. A `spec-writer` without a plan is never in the side lane. Reason: no data migration is needed.
+- A test wave delegation is rejected while a spec wave of its chain has a pending writer. The text names each pending writer, or the wave that has no writer. Reason: the Tester derives tests from the committed docs.
+- The tester call has `replaces:` referencing the chain owner of the parent wave. Reason: the tester continues the implementation worktree.
+- `planProgress` returns a `waitWriters` step when the parent implementation row reports ready while a writer is pending. It returns the exact tester call when the last writer reports ready. Reason: Chief must not call a tester that admission rejects.
+- A ready report and an idle thread after a ready report count the same for both triggers. Reason: the thread convention is the same in every ready check.
+- The plan review is rejected while a spec wave has a pending writer. The review step names an implementation chain tip. Reason: the review must see the folded docs.
+- A side-lane Spec Writer is a separate review target. `fixRound` never puts it in a legacy stack. It always lists the writer as a loose target. Reason: the writer shares the task branch, so it is not a stacked branch.
+- A side-lane Spec Writer completes with a covering approve, `skipReview`, or `override`. An implementation-lane `spec-writer` keeps the rejection, except on a waived test wave. Reason: a side writer has its own report and fold head.
+- `chief_skip_specs` is rejected after the wave has any `spec-writer` row. It works while only the worker exists. Reason: it only bypasses a Spec Writer that Chief never delegated.
+- A side-lane Spec Writer folds with a plain fast-forward push and never force-pushes. Reason: a force-push can erase the commits of the worker.
+- An implementation-lane agent that reuses the chain worktree first requires a clean tree, fetches the task branch, and fast-forwards to it. It reports blocked when the fast-forward fails. Reason: the folded docs must be in the checkout before the agent reads files.
+- A Tester checks that the Fold head of each listed Spec Writer is an ancestor of its HEAD. Reason: the Tester must test against the folded docs.
+- The Reviewer scopes a side-lane writer by Fold base to Fold head. `Fold: none` means an empty scope. A docs commit inside a fold range is not drift in the range of a worker. Reason: the fold commits land in the task branch while the worker runs.
+- A worker or designer on a spec wave treats the plan as its source of truth, and pre-plan specs can be stale. Reason: the Spec Writer records the change in parallel.
 
 ### Pull Request Pinning
 
@@ -117,11 +180,11 @@ Shared worktree cleanup coordinates action ownership:
 
 ### Forge Pre-flight Operations
 
-- `chief_forge_init` executes only for a chain head that has no worker row and no recorded pull request. Reason: secondary waves and started chains already possess branch and pull request identities.
+- `chief_forge_init` executes only for a chain head that has no row in any lane and no recorded pull request. Reason: secondary waves and started chains already possess branch and pull request identities.
 - `chief_forge_init` rejects any wave that has a parent wave. Reason: only chain heads create pull requests and task branches.
 - `chief_forge_init` names the chain head when rejecting a non-head wave. Reason: callers must know which wave opens the pull request for the chain.
-- `chief_forge_init` rejects a chain head when its chain already contains a worker row. Reason: started chains must not allocate duplicate forge resources.
-- `chief_forge_init` names the latest worker when rejecting a started chain head. Reason: callers must continue started work through replacement.
+- `chief_forge_init` rejects a chain head when its chain already contains a row in any lane, so a chain with only a side-lane Spec Writer counts as started. Reason: started chains must not allocate duplicate forge resources.
+- `chief_forge_init` names the chain owner when it rejects a started chain head and an owner exists. Reason: callers must continue started work through replacement.
 - `chief_forge_init` includes one section for each wave of the chain in the pull request body. Reason: reviewers inspect contracts for the entire chain in a single pull request.
 - `chief_forge_init` includes waived test waves in the pull request body with their recorded waiver reasons. Reason: reviewers must see omitted test coverage and its justification.
 - `chief_forge_init` clips wave contracts at 2,000 characters in the pull request body. Reason: bounded bodies prevent forge payload limit rejections.
@@ -154,7 +217,7 @@ Shared worktree cleanup coordinates action ownership:
 ### Legacy Restack Handling
 
 - `src/plan/planProgress.ts` evaluates restack requirements only for legacy plans where waves have distinct branches. Reason: new chains share a single branch and never require branch restacking.
-- `server.ts` words restack instructions only for the legacy stacks that `reviewAdvice` returns. It never groups targets itself. Reason: historical plan graphs in SQLite require backward compatibility.
+- `src/runtime/nextAction.ts` words restack instructions only for the legacy stacks that `reviewAdvice` returns. It never groups targets itself. Reason: historical plan graphs in SQLite require backward compatibility.
 - The server never instructs new chain workers to restack branches. Reason: all waves in a new chain commit directly to the shared branch.
 
 ### Baseline Graph and Schedule Operations
@@ -167,9 +230,10 @@ Shared worktree cleanup coordinates action ownership:
 
 ## Invariants
 
-- A task branch hosts at most one active worker thread at any time. Reason: concurrent git operations on the same branch corrupt git reflogs.
-- Every worker in a plan chain shares the identical environment identifier, branch name, and pull request URL. Reason: chain identity must remain uniform across all wave transitions.
+- A task branch hosts at most one active implementation-lane thread, plus at most one side-lane Spec Writer for each spec wave of the same plan. Reason: only one thread checks out the task branch. Each writer uses its own side branch, and its fold is a fast-forward push.
+- Every implementation-lane row in a plan chain shares the identical environment identifier, branch name, and pull request URL. Every side-lane Spec Writer shares the branch name and pull request URL, and has its own environment. Reason: chain identity must remain uniform across all wave transitions.
 - A replacement worker marks its superseded worker as complete. Reason: superseded workers must release active claims on resources.
+- A completed or ready earlier Spec Writer of a spec wave satisfies that wave. Reason: legacy chains that ran the writer first need no migration.
 - Exactly one cleanup job owns each action for a shared environment in `cleanup_environment_claims`. Reason: primary key constraints prevent duplicate claim owners.
 - A reviewer worktree never hosts review execution on the live environment of an active target worker. Reason: concurrent reviewer execution inside a worker workspace causes file collisions.
 - `test/fixtures/legacy-wave-graph-bf73de5.json` decisions remain identical to base commit results. Reason: legacy plan verification contracts require strict regression avoidance.
@@ -177,9 +241,9 @@ Shared worktree cleanup coordinates action ownership:
 - `reviewAdvice` takes its rung from the `reject_streak` that the reviewer carries, through `ledger.rung`. Reason: one carried streak gives one answer for the alert, Pending, and the action panel.
 - `ledger.replacement` keeps permission for a `replaces:`. It decides from task history, consult timing, and user approval. Reason: permission depends on the task, not on the plan.
 - A satisfied consult still shows consult advice. `chief_delegate` decides whether the `replaces:` proceeds. Reason: advice stays plan-wide wording.
-- `server.ts` `nextAction` formats the result of `reviewAdvice` and makes no repair decision of its own. Reason: one module reads plan state and reviewer state together, and the server only writes sentences.
+- `src/runtime/nextAction.ts` `nextAction` formats the result of `reviewAdvice` and makes no repair decision of its own. Reason: one module reads plan state and reviewer state together, and the server only writes sentences.
 - The report alert, `chief_roster` Pending, and the action panel read the same `reviewAdvice` answer. Reason: the three surfaces must never give different advice.
 
 ## Related Decisions
 
-None.
+- [Spec Writer runs in parallel on a side worktree](../decisions/2026-11-10-spec-writer-parallel-side-worktree.md)

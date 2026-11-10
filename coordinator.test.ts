@@ -7,6 +7,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { MIGRATIONS } from "./src/db/migrations";
 import { loadBaseBuild } from "./scripts/loadBaseBuild";
+import { acceptCoreRuleTrim, acceptPlanningLine, acceptSpecLaneWording } from "./test/specLaneWording";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -992,8 +993,11 @@ describe("Coordinator", () => {
       expect(escalate.description).toBe(oldEscalate.description + SENTENCE);
       escalate.inputSchema.required = oldEscalate.inputSchema.required;
       escalate.description = oldEscalate.description;
+      // Plan 2 contract 6: the Spec Writer wording of chief_delegate, chief_complete and chief_skip_specs moved; asserted, then restored to base.
+      for (const tool of now.tools) acceptSpecLaneWording(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       expect(now.tools).toEqual(was.tools);
       // Instructions: only the preload line's max_results moves by one (claude-code); codex is byte-identical.
+      now.instructions = acceptCoreRuleTrim(acceptPlanningLine(now.instructions, was.instructions), was.instructions);
       const preload = (config: Config) => config.instructions.split("\n").filter((line) => line.includes("ToolSearch"));
       if (provider === "codex") expect(preload(was)).toEqual([]);
       else expect(preload(was)).toHaveLength(1);
@@ -1009,7 +1013,7 @@ describe("Coordinator", () => {
       const lines = child.instructions.split("\n");
       const added = lines.filter((line) => /^Coordinator thr_\w+ supervises you: call chief_escalate before every Need you/.test(line));
       expect(added).toHaveLength(1);
-      expect(lines.filter((line) => line !== added[0])).toEqual(was.instructions.split("\n"));
+      expect(acceptCoreRuleTrim(acceptPlanningLine(lines.filter((line) => line !== added[0]).join("\n"), was.instructions), was.instructions).split("\n")).toEqual(was.instructions.split("\n"));
     });
   });
 
@@ -1068,6 +1072,35 @@ describe("Coordinator", () => {
       const expected = plainConfig.instructions.replace(`max_results ${plainConfig.tools.length}`, `max_results ${childConfig.tools.length}`).split("\n");
       expect(lines.filter((line) => !line.startsWith("Coordinator "))).toEqual(expected);
       if (provider === "claude-code") expect(preload(childConfig)).toContain(`max_results ${childConfig.tools.length}`);
+    });
+
+    // The SDK cuts instructions at 4096 chars: the core rules (the last, mandatory one is the Need-you escalation) go before the project rules, so they must end inside the cut even for the longest supported inputs.
+    test("claude-code, planning and research on, linked child, 14-char Coordinator id, 40-char project name: the core rules, Need-you rule included, end inside the 4096 cut", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      const idPadding = 14 - coord.length; // the harness ids are short; the real ones are 14 chars (thr_ + 10), and the Coordinator line carries the id once
+      const name = "P".repeat(40);
+      const resolve = async (id: string) => {
+        const context = configurationContext(id, "proj_1", name);
+        return (await state.harness.behavior.resolveAgentConfiguration({ ...context, provider: { ...context.provider, id: "claude-code" } })) as { tools: { name: string }[]; instructions: string };
+      };
+      const [linked, plain] = [await resolve(child), await resolve(await make(state))];
+      for (const config of [linked, plain]) {
+        const names = config.tools.map((tool) => tool.name);
+        expect(names).toContain("chief_plan");
+        expect(names).toContain("chief_research");
+        expect(config.instructions).toContain(`registered Chief supervisor for ${name}.`);
+      }
+      expect(linked.instructions).toContain(`Coordinator ${coord} supervises you: call chief_escalate before every Need you`);
+      const NEED_YOU_END = "call chief_escalate with the thread and the full request.";
+      const coreEnd = (text: string) => text.indexOf(NEED_YOU_END) + NEED_YOU_END.length;
+      expect(linked.instructions.indexOf("# Chief core rules")).toBeGreaterThan(0);
+      expect(linked.instructions.indexOf(NEED_YOU_END)).toBeGreaterThan(0);
+      expect(idPadding).toBeGreaterThanOrEqual(0);
+      expect(coreEnd(linked.instructions) + idPadding).toBeLessThanOrEqual(4096);
+      expect(coreEnd(plain.instructions)).toBeLessThanOrEqual(coreEnd(linked.instructions));
+      expect(coreEnd(plain.instructions)).toBeLessThan(4000);
     });
 
     test("the coordinator skill declares the name the plain Chief's configure lists", async () => {

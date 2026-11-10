@@ -15,7 +15,7 @@ const MAX_STALL_RESETS = 2;
 const MAX_LOG_READ = 30;
 
 export function createDelegation(ctx: Ctx) {
-  const { bb, db, ledger, planWavesFor, plans, reviewerFails, store, waveWorkers } = ctx;
+  const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, reviewerFails, store } = ctx;
   /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
     if (!(await ctx.plannerEnabled())) {
@@ -184,30 +184,34 @@ export function createDelegation(ctx: Ctx) {
       if (params.branch && params.branch !== prior.branch) throw new Error(`replaces: ${prior.thread_id} carries branch ${prior.branch}; pass no --branch or the same one.`);
     }
     const resolved = resolveDelegation(params, prior);
-    const { branch, issueUrl, prUrl, planThreadId, wave, verifyCommand, unplannedReason } = resolved;
+    const { issueUrl, planThreadId, wave, verifyCommand, unplannedReason } = resolved;
     // Planning on means every new delegation starts from a plan wave. replaces: hands off
     // an already-gated delegation, so it passes; the escape hatch must say why.
     const plannerOn = await ctx.plannerEnabled();
     if (planThreadId === undefined && !prior && !params.unplannedReason && plannerOn) {
       throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. To skip the plan, pass unplannedReason (CLI: --unplanned-reason) with your reason.");
     }
-    const { kind, planPath, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, specSources, specDocs, baseline } = plans.admitDelegation({
+    const { kind, planPath, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, specSources, specDocs, baseline, specWave, lane, sideChain } = plans.admitDelegation({
       chiefId: chief.thread_id, prior, kind: params.kind, resolvedKind: resolved.kind, planThreadId, wave, branch: params.branch, prUrl: params.prUrl,
     });
+    // A first side-lane writer folds onto the chain's one branch and pull request, whatever Chief passed.
+    const branch = sideChain?.branch ?? resolved.branch;
+    const prUrl = sideChain ? sideChain.prUrl ?? undefined : resolved.prUrl;
     if (implementsDesign !== null) {
       // The design worker whose artboards this wave builds on: the one being replaced, else the wave's latest.
       const designer = prior && prior.plan_thread_id === planThreadId && prior.plan_wave === implementsDesign
         ? prior
-        : waveWorkers(planThreadId!, implementsDesign).at(-1);
+        : latestWorker(planThreadId!, implementsDesign);
       if (!designer?.owner_approval) {
         throw new Error(`Wave ${implementsDesign} is design-only and wave ${wave} implements it: the owner must approve its artboards first. ${designer ? `Show the user the artboards from ${designer.thread_id}'s report, then record their decision with chief_owner_approval (workerThreadId: ${designer.thread_id}) and repeat this call.` : `No worker has delegated wave ${implementsDesign} yet.`}`);
       }
     }
-    // One task branch carries one active worker: a second worktree cannot check out a
-    // branch another one already holds, and the spawn would fail with a raw git error.
+    // One task branch carries one implementation-lane worker plus one side-lane Spec Writer per spec wave of the same plan:
+    // a second worktree cannot check out a branch another one already holds, and the spawn would fail with a raw git error.
     const holder = branch
       ? store.all().find((row) => row.role === "worker" && !terminal(row.state)
-        && row.project_id === projectId && row.branch === branch && row.thread_id !== params.replaces)
+        && row.project_id === projectId && row.branch === branch && row.thread_id !== params.replaces
+        && !(planThreadId !== undefined && coexists(row, planThreadId, wave, lane)))
       : undefined;
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
@@ -224,8 +228,9 @@ export function createDelegation(ctx: Ctx) {
     const { prompt, reviewerBrief } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
-      specDocs,
+      specDocs, specWave, lane,
     });
+    // A first side-lane writer never reuses the chain's worktree: its own managed worktree is cut from the chain branch.
     const thread = await ctx.managedSpawn.launch(prepared, {
       projectId,
       environment: prior
@@ -333,10 +338,14 @@ export function createDelegation(ctx: Ctx) {
       ...(more ? [`${more} more unread: call chief_log again.`] : []),
       "", "## Waves",
       ...waves.map((_, index) => {
-        const current = waveWorkers(planThreadId, index + 1).at(-1);
-        if (!current) return `- wave ${index + 1}: not delegated`;
-        const last = (current.result ?? current.status ?? "").split("\n").find((line) => line.trim()) ?? "";
-        return `- wave ${index + 1}: @thread:${current.thread_id} ${current.state}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
+        const line = (current: ManagedRow, label = "") => {
+          const last = (current.result ?? current.status ?? "").split("\n").find((entry) => entry.trim()) ?? "";
+          return `${label}@thread:${current.thread_id} ${current.state}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
+        };
+        const current = latestWorker(planThreadId, index + 1);
+        const writer = latestSideWriter(planThreadId, index + 1);
+        if (!current && !writer) return `- wave ${index + 1}: not delegated`;
+        return `- wave ${index + 1}: ${[current ? line(current) : "no implementation row", ...(writer ? [line(writer, "Spec Writer ")] : [])].join("; ")}`;
       }),
     ].filter((line) => line !== null).join("\n");
   }

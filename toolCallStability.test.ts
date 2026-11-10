@@ -7,6 +7,7 @@ import plugin from "./server";
 import { completeWorker, configurationContext, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { acceptPlanningLine, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -136,6 +137,8 @@ describe("tool-call stability", () => {
     const MISSION_TITLE = "Exact concise title for the worker thread. Optional: defaults to the first line of mission, clipped to 160 characters.";
     const SPAWN_TITLE = "A literal task label, used in the new Chief's thread title. Optional: defaults to the first line of request, clipped to 160 characters.";
     for (const [name, definition] of Object.entries(now.catalog)) {
+      // Plan 2 contract 6: the Spec Writer wording moved; asserted, then restored to base so the rest still compares.
+      acceptSpecLaneWording(definition, base.catalog[name], name);
       if (!titleTools.includes(name)) { expect(definition, name).toEqual(base.catalog[name]); continue; }
       const old = structuredClone(base.catalog[name]!);
       const next = structuredClone(definition);
@@ -152,6 +155,8 @@ describe("tool-call stability", () => {
     let cut = 0;
     now.entries.forEach((entry, index) => {
       const old = base.entries[index]!;
+      // Only an uncut text is rewritten: a text the SDK cut at 4096 must keep its own planning line, so a cut that eats Chief's rules still fails.
+      if (entry.instructions && old.instructions && entry.instructions.length < 4096) entry.instructions = acceptPlanningLine(entry.instructions, old.instructions);
       expect(entry.tools, entry.key).toEqual(old.tools);
       expect(entry.skills, entry.key).toEqual(old.skills);
       expect(preloadLine(old), entry.key).toEqual([]);
@@ -171,6 +176,24 @@ describe("tool-call stability", () => {
 
   // Contract: no drift. The expected line is rebuilt from each entry's own configured tool names.
   // Regression: a hard-coded or stale tool list in the line, or a line built before the tools were chosen.
+  // Plan 2 contract 6 (Chief-facing tool texts): the Spec Writer runs beside its worker in a side worktree and a side writer completes.
+  // The tool-config oracle also checks this, but only after its other comparisons pass; this test stands alone.
+  // Regression: a tool text again says the Spec Writer runs first, shares one worktree, or is never completed.
+  test("Chief's tool descriptions describe the parallel Spec Writer side lane", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const base = configurationContext(chief.threadId, "proj_1", "Asha");
+    // Chief's tools, plus chief_report, which only a managed planner holds.
+    const tools = [
+      ...(await state.harness.behavior.resolveAgentConfiguration({ ...base, provider: { ...base.provider, id: "codex" } })).tools as any[],
+      ...(await state.harness.behavior.resolveAgentConfiguration({ ...configurationContext("thr_seed_planner", "proj_1", "Asha"), provider: { ...base.provider, id: "codex" }, pluginMetadata: { role: "planner", chiefThreadId: chief.threadId } })).tools as any[],
+    ];
+    const catalog = Object.fromEntries(tools.map((tool) => [tool.name, { description: tool.description, inputSchema: tool.inputSchema }]));
+    assertSpecLaneWording(catalog);
+    expect(JSON.stringify(catalog)).not.toMatch(/Spec Writer runs first|runs its Spec Writer before|its worker runs first|before its worker|never completed|is never completed/);
+    expect(catalog["chief_skip_specs"]!.description).toContain("once a Spec Writer was delegated on it");
+  });
+
   test("the claude-code preload line follows configured.tools for every role, planner and research toggle", async () => {
     const entries = claudeEntries(await head()).filter((entry) => entry.tools.length);
     expect(entries.length).toBeGreaterThan(40);

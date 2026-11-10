@@ -24,10 +24,24 @@ describe("tester role", () => {
     // worker; the design-owner-approval refusal of a wave with no replaces is pre-empted by the same rule and still holds on replaces:);
     // the independent-wave brief line names the chain. Every other block is the base's bytes.
     // <plan-admission-oracle-begin>
+    // The Spec Writer runs beside its worker (plan thr_y72683k2qk): these recorded blocks drive the old writer-first model (a default first
+    // delegation is the Spec Writer, a Spec Writer owes the next wave, chief_skip_specs refuses once any row exists), so their base outcomes
+    // are no longer the contract. Their parallel-lane successors are specWriterRouting.test.ts, planLifecycle.test.ts and specWriterReview.test.ts.
+    // The legacy blocks below stay byte for byte, apart from the prompt lines normalized by `asBase`.
+    const REPLACED_BY_PARALLEL_LANE = (name: string) =>
+      name.startsWith("spec flow:") || name.startsWith("skip_specs:") || name === "explicitKind on a Spec Writer";
+    /** The authorized text changes, undone: wave 2's prompt lines (local sync before reading, the no-autostash rebase, a tester's merge-base check)
+     * and wave 1's test-wave refusal, which names the chain's owner (plan thr_y72683k2qk, `chainOwner`) where the base wrote a placeholder. */
+    const asBase = (text: string) => text
+      .replace(/(wave: 3, replaces: )thr_4(, kind: tester\)\.\n--- wave 2 replaces wave 1's worker)/, "$1<wave 2's latest worker>$2")
+      .replace(/^Before you read any file, sync this checkout with .*\n/gm, "")
+      .replace(/^- Before you derive tests, for each Spec Writer listed above .*\n/gm, "")
+      .replace(/`git fetch origin ([^`\s]+)` then `git rebase --no-autostash origin\/\1` on a clean tree and push again/g, "`git fetch origin $1`, rebase onto origin/$1 and push again");
     const admissionFixture = async () => {
       const blocks: string[] = [];
       const newestId = (state: State) => (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker' ORDER BY rowid DESC`).get() as any).thread_id as string;
       const run = async (name: string, body: (k: any) => Promise<void>) => {
+        if (REPLACED_BY_PARALLEL_LANE(name)) return;
         const state = await setup();
         const lines: string[] = [];
         const emit = (label: string, text: string) => lines.push(`--- ${label}\n${text.replaceAll(state.storageRoot, "<storage>")}`);
@@ -582,7 +596,9 @@ describe("tester role", () => {
     test("plan admission oracle", async () => {
       const head = await admissionFixture();
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "plan-admission-c8a0d76.txt"), "utf8");
-      expect(head).toBe(oracle);
+      const kept = (text: string) => text.split(/^(?==== )/m).filter((block) => !REPLACED_BY_PARALLEL_LANE(block.slice(4, block.indexOf(" ===\n"))));
+      expect(kept(oracle).length).toBeGreaterThan(30);
+      expect(kept(asBase(head)).join("")).toBe(kept(oracle).join(""));
     });
   });
 });

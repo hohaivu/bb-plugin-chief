@@ -4,9 +4,10 @@ import { markPrReady, prHead } from "../forge/forge";
 import { BUSY_STATUSES, MAX_RESULT_LENGTH } from "./constants";
 import { overrideSchema } from "../tools/shapes";
 import type { Ctx } from "./context";
+import { isWriter } from "../plan/waveSchedule";
 
 export function createCompletion(ctx: Ctx) {
-  const { bb, isDesignWave, isTestWave, ledger, planWavesFor, progress, store, waveWorkers } = ctx;
+  const { bb, isDesignWave, isTestWave, latestWorker, ledger, planWavesFor, progress, sideLane, store } = ctx;
   /** Why a worker may not complete yet, or null when its newest review covers what it would ship.
    * With a pull request the verdict must be an approve given for the PR head the forge reports now;
    * without one it must be an approve for the worker's current report. A design-wave worker needs the owner's recorded approval instead.
@@ -40,8 +41,8 @@ export function createCompletion(ctx: Ctx) {
     let approved = false;
     let reviewSkipped: string | null = null;
     let testsSkippedReason: string | null = null;
-    // A Spec Writer never counts as done work: its worker (or, on a test wave, the rerun tester) follows. Only a waived test wave ends on one.
-    if (row.role === "worker" && row.kind === "spec-writer") {
+    // An implementation-lane Spec Writer never counts as done work: its worker (or, on a test wave, the rerun tester) follows. Only a waived test wave ends on one. A side-lane writer completes like a worker.
+    if (row.role === "worker" && isWriter(row.kind) && !sideLane(row)) {
       const waves = planWavesFor(row.plan_thread_id);
       const testWave = row.plan_wave != null ? waves[row.plan_wave - 1] : undefined;
       if (!(testWave?.test && testWave.testsSkipped)) {
@@ -70,7 +71,7 @@ export function createCompletion(ctx: Ctx) {
       if (isDesignWave(row)) refuse("design-only work is approved by the owner only: record it with chief_owner_approval, or pass override.");
       // A waived test wave is Chief's recorded decision to accept that branch, so its blocked report also counts.
       const waived = row.last_report_state === "blocked" && isTestWave(row) && !!planWavesFor(row.plan_thread_id)[row.plan_wave! - 1]!.testsSkipped
-        && waveWorkers(row.plan_thread_id!, row.plan_wave!).at(-1)?.thread_id === row.thread_id;
+        && latestWorker(row.plan_thread_id!, row.plan_wave!)?.thread_id === row.thread_id;
       if (row.last_report_state !== "ready" && !waived) refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
       const busy = ledger.busyReview(threadId);
       if (busy) refuse(`review ${busy.thread_id} is still running; wait for its verdict.`);
