@@ -2,6 +2,7 @@ import type { ExecFileOptions } from "node:child_process";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { ManagedSpawn } from "./managedSpawn";
+import { modelSelectionSchema, type ModelSelection } from "./src/types";
 import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from "./roles";
 
 /** How long one chief_research call waits before handing back a runId to resume with. */
@@ -30,13 +31,7 @@ const reasoningSchema = z.enum([
   "ultra",
   "ultracode",
 ]);
-/** reasoningLevel is a plain string like the SDK's own: providers may define levels beyond `reasoningSchema`, which only guards tool input. */
-export const modelSelectionSchema = z.object({
-  providerId: z.string().trim().min(1),
-  model: z.string().trim().min(1),
-  reasoningLevel: z.string().trim().min(1),
-});
-export type ModelSelection = z.infer<typeof modelSelectionSchema>;
+export { modelSelectionSchema, type ModelSelection } from "./src/types";
 
 const stageSchema = z.enum(["scan", "verify", "combine"]);
 export const researchModeSchema = z.enum(["survey", "investigate"]);

@@ -3,17 +3,22 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
-  defineRpcContract,
   type BbPluginApi,
   type PluginCliContext,
   type PluginCliResult,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { MIGRATIONS } from "./src/db/migrations";
+import { rpcContract } from "./src/rpcContract";
+import {
+  failEntry, reportParams, terminal,
+  type FailEntry, type ManagedRow, type ManagedThread, type ModelConfiguration, type ModelSelection, type ReportFinding, type ReportParams,
+} from "./src/types";
 import { forgeInitScript } from "./forge";
-import { cliAdapters, createForgeComments, FORGE_COMMENTS_TABLE, sanitizeForge } from "./forgeComments";
+import { cliAdapters, createForgeComments, sanitizeForge } from "./forgeComments";
 import { trackerProjects } from "./tracker";
 import { trackerSelector } from "./trackerBbTasks";
-import { TRACKER_TABLES, createTrackerSync } from "./trackerSync";
+import { createTrackerSync } from "./trackerSync";
 import { CONSULT_AFTER_REJECTIONS, STOP_AFTER_REJECTIONS, createReviewLedger } from "./reviewLedger";
 import { createManagedSpawn } from "./managedSpawn";
 import { cleanupEligible, deleteSafeBranch, ownedBranch } from "./cleanup";
@@ -22,8 +27,7 @@ import { PR_AGENT_DIR, reviewEngine } from "./prAgent";
 import { createReviewStart } from "./reviewStart";
 import { createThreadStore, type ThreadInsert } from "./threadStore";
 import {
-  LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX,
-  MAX_CARRIED_FAILS, createReportIntake, findingLines,
+  MAX_WAVES, MAX_CARRIED_FAILS, createReportIntake, findingLines,
 } from "./reportIntake";
 import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "./delegationBrief";
 import { clip, type RecordedCommand } from "./text";
@@ -36,13 +40,16 @@ import {
   type ModelRole, type Role,
 } from "./roles";
 import {
-  RESEARCH_DEFAULT_TIMEOUT_MINUTES, agentCapSchema, createResearch, modelSelectionSchema, researchConfigurationSchema, researchLine,
-  researchModeSchema, researchParams, researchSettingsPatchSchema, researchSettingsSchema, timeoutSchema,
-  type ModelSelection, type ResearchMode, type ResearchSettings,
+  RESEARCH_DEFAULT_TIMEOUT_MINUTES, agentCapSchema, createResearch, modelSelectionSchema, researchLine,
+  researchModeSchema, researchParams, timeoutSchema,
+  type ResearchMode, type ResearchSettings,
 } from "./research";
 
 export { RESEARCH_SCRIPTS } from "./research";
-export type { ModelSelection, ResearchConfiguration } from "./research";
+export { MIGRATIONS } from "./src/db/migrations";
+export { rpcContract } from "./src/rpcContract";
+export type { ResearchConfiguration } from "./research";
+export type { ManagedRow, ManagedThread, FailEntry, ReportFinding, ReportParams, ModelConfiguration, ModelSelection };
 
 const SECTION_NAME = "Chief";
 const RULES_FILE = "chief.md";
@@ -209,63 +216,6 @@ const spawnMetadataSchema = z.object({
   kind: workerKindSchema.optional(),
   planThreadId: z.string().optional(),
 });
-/** A reviewer's structured judgement. Chief routes on this field instead of
- * parsing a ship-or-fix opinion out of the report prose. */
-const verdictSchema = z.enum(["approve", "request_changes"]);
-const stateSchema = z.enum([
-  "starting",
-  "pending",
-  "active",
-  "stopping",
-  "idle",
-  "ready",
-  "blocked",
-  "failed",
-  "archived",
-  "deleted",
-  "complete",
-]);
-
-const modelConfigurationSchema = z.object({
-  hosts: z.array(z.object({
-    hostId: z.string(),
-    hostName: z.string(),
-    connected: z.boolean(),
-    /** A valid starting point for the picker when a role has no selection. */
-    fallback: modelSelectionSchema.nullable(),
-    error: z.string().nullable(),
-    selections: z.object({
-      chief: modelSelectionSchema.nullable(),
-      planner: modelSelectionSchema.nullable(),
-      worker: modelSelectionSchema.nullable(),
-      designer: modelSelectionSchema.nullable(),
-      tester: modelSelectionSchema.nullable(),
-      "spec-writer": modelSelectionSchema.nullable(),
-      reviewer: modelSelectionSchema.nullable(),
-      advisor: modelSelectionSchema.nullable(),
-    }),
-    /** Roles whose stored pick this machine can no longer serve, so spawns use BB's default. */
-    unusable: z.array(modelRoleSchema),
-  })),
-});
-export type ModelConfiguration = z.infer<typeof modelConfigurationSchema>;
-
-const managedThreadSchema = z.object({
-  threadId: z.string(),
-  role: roleSchema,
-  projectId: z.string(),
-  chiefThreadId: z.string().nullable(),
-  workerThreadId: z.string().nullable(),
-  title: z.string(),
-  state: stateSchema,
-  status: z.string().nullable(),
-  result: z.string().nullable(),
-  blocker: z.string().nullable(),
-  recommendation: z.string().nullable(),
-  createdAt: z.number(),
-  updatedAt: z.number(),
-});
-export type ManagedThread = z.infer<typeof managedThreadSchema>;
 
 const delegateShape = z.object({
   title: z.string().trim().min(1).max(160).optional().describe("Exact concise title for the worker thread. Optional: defaults to the first line of mission, clipped to 160 characters."),
@@ -338,139 +288,12 @@ const stopParams = z.object({
   reason: z.string().trim().max(1_000).optional().describe("Why it is being stopped: what the evidence shows it stuck on."),
 });
 
-const failEntry = z.object({
-  text: z.string().trim().min(1).max(400),
-  scope: z.string().trim().min(1).max(120),
-  basis: z.string().trim().min(1).max(200).describe("the command, test or input that reproduces it"),
-});
-export type FailEntry = z.infer<typeof failEntry>;
-/** chief_report's fails entry. Published without length limits: checkReport enforces them in one pass, with a fix per field. */
-const reportFailEntry = z.object({
-  text: z.string().trim().describe("at most 400 characters"),
-  scope: z.string().trim().describe("at most 120 characters"),
-  basis: z.string().trim().describe("at most 200 characters: the command, test or input that reproduces it"),
-});
-// A string is a JSON-encoded array some callers send; the report intake decodes it and checkReport refuses anything else.
-const failsParam = z.union([z.string().trim(), z.array(reportFailEntry)]).optional().describe(
-  `Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most ${MAX_REPORT_FAILS} per report.`,
-);
-/** A reviewer's structured finding, published without limits; checkReport enforces them. */
-const reportFinding = z.object({
-  file: z.string().trim().describe("1-300 characters"),
-  line: z.number().int().optional().describe("1-based line"),
-  severity: z.enum(["blocking", "nit"]),
-  message: z.string().trim().describe("1-1000 characters"),
-  fix: z.string().trim().optional().describe("at most 1000 characters"),
-});
-export type ReportFinding = z.infer<typeof reportFinding>;
-const findingsParam = z.union([z.string().trim(), z.array(reportFinding)]).optional().describe(
-  `Ready only, reviewer only. Required on a reviewer's ready report ([] allowed for an approve with nothing to note). One entry per finding, at most ${MAX_FINDINGS}. request_changes iff at least one blocking. \`[AMBIGUOUS: …]\` items stay in result, not here.`,
-);
 const MAX_LOG_READ = 30;
 const logParams = z.object({
   entries: z.array(failEntry.extend({ kind: z.enum(["FACT", "FAIL"]) })).max(5).optional().describe(
     "Notes for peer waves: FACT for a finding that could change their next step, FAIL for a dead end. Omit to only read.",
   ),
 });
-/** One wave of a planner's plan array, published without limits; checkReport enforces them. */
-const waveShape = z.object({
-  body: z.string().trim(),
-  dependsOn: z.array(z.number().int()).optional().describe(
-    "1-based index of the earlier wave this one builds on, at most one. [] = independent: it starts its own branch and pull request on the default base. [k] = builds on wave k and continues on its branch. Omitted = depends on the previous wave (wave 1: none).",
-  ),
-  design: z.boolean().optional().describe(
-    "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
-  ),
-  test: z.boolean().optional().describe(
-    "true for a test wave: a tester writes and runs the tests for its parent wave on that wave's branch. Every chain ends with one; its parent is an implementation wave (neither design nor test).",
-  ),
-  spec: z.boolean().optional().describe(
-    "true only on an implementation wave that changes documented behaviour: before its worker, a Spec Writer commits docs/ from the wave's `## Spec delta`. Never on a test or design wave.",
-  ),
-});
-// One flat object, published without length limits: the validator's own errors cannot be customised, so checkReport()
-// in the report intake enforces every limit and per-state rule and names all failing fields in one error.
-const reportParams = z.object({
-  state: z.enum(["active", "idle", "failed", "ready", "blocked"]),
-  result: z.string().trim().optional().describe(
-    "The full report, any length; the plugin saves it to a per-report file. Required and non-empty when state is ready.",
-  ),
-  summary: z.string().trim().optional().describe(
-    `Short summary Chief reads in the alert, at most ${SUMMARY_MAX} characters: outcome, changed files or verdict, verification commands with exit status, and next action. Put the full report in \`result\`; the plugin saves it to a file Chief can open. Leave this unset when \`result\` is already this short.`,
-  ),
-  verdict: verdictSchema.optional().describe(
-    "Ready only. Required in a review thread: approve when the change can ship as it stands, request_changes only when at least one blocking finding exists; nits alone never reject. Workers leave this unset.",
-  ),
-  lesson: z.string().trim().optional().describe(
-    `Ready only, advisor or reviewer, at most ${LESSON_MAX} characters. An advisor records one durable, project-level rule future workers should follow so this class of rejection does not recur; a reviewer records a durable review rule or known false positive, shown to future reviewers only. Omit when the cause is task-specific.`,
-  ),
-  regression: z.boolean().optional().describe(
-    "Ready only, reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
-  ),
-  complex: z.boolean().optional().describe(
-    "Planner ready report only: true when the plan is high-risk (see your brief). A multi-wave plan gets one advisor review either way.",
-  ),
-  plan: z.union([
-    z.string().trim(),
-    z.array(waveShape),
-  ]).optional().describe(
-    `Ready only. A planner's ready report requires this: an array of 2 to ${MAX_WAVES} {body, dependsOn, design?, test?, spec?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; test: true marks a test wave, and every chain ends with one; spec: true marks an implementation wave whose ## Spec delta a Spec Writer turns into docs/ before its worker runs. Chief receives each wave as its own file, not inline. No other role sets this.`,
-  ),
-  blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
-  recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
-  fails: failsParam,
-  findings: findingsParam,
-});
-
-export type ReportParams = z.infer<typeof reportParams>;
-
-export const rpcContract = defineRpcContract({
-  status: {
-    input: z.null(),
-    output: z.object({ sectionId: z.string().nullable(), threads: z.array(managedThreadSchema) }),
-  },
-  start: {
-    input: z.object({ projectId: z.string().trim().min(1).nullable() }).strict(),
-    output: z.object({ threadId: z.string(), created: z.boolean() }).strict(),
-  },
-  create: {
-    input: z.object({ projectId: z.string().trim().min(1) }).strict(),
-    output: z.object({ threadId: z.string(), created: z.literal(true) }).strict(),
-  },
-  modelConfiguration: {
-    input: z.null(),
-    output: modelConfigurationSchema,
-  },
-  researchConfiguration: {
-    input: z.null(),
-    output: researchConfigurationSchema,
-  },
-  setResearchModel: {
-    input: z.object({
-      hostId: z.string().trim().min(1),
-      mode: researchModeSchema,
-      selection: modelSelectionSchema.nullable(),
-    }).strict(),
-    output: z.object({ ok: z.literal(true) }).strict(),
-  },
-  setResearchSettings: {
-    input: researchSettingsPatchSchema,
-    output: researchSettingsSchema,
-  },
-  setRoleModel: {
-    input: z.object({
-      hostId: z.string().trim().min(1),
-      role: modelRoleSchema,
-      selection: modelSelectionSchema.nullable(),
-    }).strict(),
-    output: z.object({ ok: z.literal(true) }).strict(),
-  },
-  role: {
-    input: z.object({ threadId: z.string() }).strict(),
-    output: z.object({ role: roleSchema.nullable() }).strict(),
-  },
-});
-
 interface TodoRow {
   id: number;
   project_id: string;
@@ -481,102 +304,6 @@ interface TodoRow {
   updated_at: number;
 }
 
-export interface ManagedRow {
-  thread_id: string;
-  role: Role;
-  branch: string | null;
-  issue_url: string | null;
-  /** Planner row only: the one tracking issue every wave of its plan shares, once chief_forge_init has made it. */
-  plan_issue_url: string | null;
-  pr_url: string | null;
-  project_id: string;
-  chief_thread_id: string | null;
-  worker_thread_id: string | null;
-  parent_thread_id?: string | null;
-  title: string;
-  state: z.infer<typeof stateSchema>;
-  status: string | null;
-  result: string | null;
-  blocker: string | null;
-  recommendation: string | null;
-  verdict: z.infer<typeof verdictSchema> | null;
-  /** Reviewer row only: the last request_changes verdict's regression flag, persisted so
-   * nextAction (a pure function of ManagedRow) can see it on a later call, not just the
-   * report intake turn that set it. */
-  regression: number | null;
-  brief: string | null;
-  active_since: number | null;
-  active_cycle: number;
-  reject_streak: number;
-  stall_alerted_cycle: number | null;
-  stop_alerted_cycle: number | null;
-  /** chief_continue calls since the last report that re-armed the stall clock, capped at MAX_STALL_RESETS. */
-  stall_resets: number;
-  lifecycle_alert_key: string | null;
-  /** Planner row only: JSON `[{path}]`, the schedule a planner-ready report persisted. */
-  plan_waves: string | null;
-  /** Planner row only: NULL (no review needed), 'required', or the one review's outcome 'approved' or 'changes'. */
-  plan_review: string | null;
-  /** Advisor row only: when it first reported ready or blocked, or null. */
-  advised_at: number | null;
-  /** Worker row: the planner it was delegated from, with plan_wave, when planThreadId/wave was given. Advisor row: the planner whose plan it reviews. */
-  plan_thread_id: string | null;
-  plan_wave: number | null;
-  /** Worker row only: the reason it was delegated without a plan while planning was on. */
-  unplanned_reason: string | null;
-  /** Incremented on every chief_report call from this row, regardless of role. */
-  report_seq: number;
-  /** Reviewer row only: the worker's report_seq this reviewer was started for —
-   * the tie nextAction uses to know whether it already covers the worker's latest
-   * report, instead of comparing updated_at timestamps. */
-  reviewed_report_seq: number | null;
-  /** Reviewer row only: the PR head commit the forge reported when this reviewer was spawned, or null (no PR, or head unreadable). */
-  reviewed_head_sha: string | null;
-  /** Worker row: the worker it replaced through replaces:. Planner row: the planner whose plan it revises. Otherwise null. */
-  replaces_thread_id: string | null;
-  /** Design-wave worker only: the owner's approval of its artboards, in the owner's words as Chief quoted them; null until recorded, and cleared by the worker's next report or chief_continue. */
-  owner_approval: string | null;
-  owner_approved_at: number | null;
-  /** The state of the row's latest chief_report, or null (none sent). */
-  last_report_state: string | null;
-  /** Reviewer row only: the verdict-<seq>.md its last ready report was written to, or null. */
-  verdict_path: string | null;
-  /** The last chief_report's short summary, or null (none sent, or chief_complete replaced the result). */
-  summary: string | null;
-  /** The report-<seq>.md holding that report in full, or null (short report, reviewer verdict, or write failed). */
-  report_path: string | null;
-  /** Incremented when chief_complete replaces the result; guards the report_path publication in the report intake. */
-  result_rev: number;
-  /** Worker row only: "designer" for design-tool work, "tester" for test work; null (pre-migration or plain) means worker. */
-  kind: "designer" | "tester" | "spec-writer" | null;
-  /** legacy: workers delegated on the retired simple tag; read only by bb chief stats */
-  simple: number | null;
-  /** Worker row only: Chief's reason for completing it with skipReview, without a review; null otherwise. */
-  review_skipped: string | null;
-  /** Worker row only: Chief's reason for completing unplanned work with no tester (chief_complete testsSkipped); null otherwise. */
-  tests_skipped: string | null;
-  /** Worker row only: the command the worker's brief makes it run; nothing reruns it. */
-  verify_command: string | null;
-  /** Chief row only: 1 for a Coordinator. */
-  coordinator: number | null;
-  /** Chief row only: the Coordinator this child Chief reports to. */
-  coordinator_thread_id: string | null;
-  /** Worker row only: 1/0 for planning on/off at delegation; null for rows from before the column. */
-  planner_on: number | null;
-  /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
-  fails: string | null;
-  findings: string | null;
-  /** Worker row on a plan: the highest plan_log id chief_log has shown it, or null. */
-  log_read_id: number | null;
-  /** Non-transient failed events counted for bb chief stats (since stats_since). */
-  thread_errors: number;
-  /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
-  busy_rejections: number;
-  /** Worker row only: when chief_complete stamped it as positively approved while cleanupApproved was on; NULL otherwise, and on every row from before the column. */
-  cleanup_approved_at: number | null;
-  created_at: number;
-  updated_at: number;
-}
 
 /** One worker a reviewer covers: the report and PR head its verdict is bound to. */
 interface AlertRow {
@@ -688,417 +415,6 @@ function transientFailure(text: string): { usageLimit: boolean; resetSeconds: nu
 }
 
 
-/** Append-only: the host records each statement's hash by index and rejects a changed
- * or reordered one. Exported so the upgrade path can be tested on a real database. */
-export const MIGRATIONS = [
-    `CREATE TABLE IF NOT EXISTS plugin_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS managed_threads (
-      thread_id TEXT PRIMARY KEY,
-      role TEXT NOT NULL CHECK(role IN ('chief','worker','reviewer')),
-      project_id TEXT NOT NULL,
-      chief_thread_id TEXT,
-      worker_thread_id TEXT,
-      title TEXT NOT NULL,
-      state TEXT NOT NULL,
-      status TEXT,
-      result TEXT,
-      blocker TEXT,
-      recommendation TEXT,
-      active_since INTEGER,
-      active_cycle INTEGER NOT NULL DEFAULT 0,
-      stall_alerted_cycle INTEGER,
-      lifecycle_alert_key TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )`,
-    `CREATE INDEX IF NOT EXISTS managed_threads_chief ON managed_threads (chief_thread_id, created_at)`,
-    `CREATE TABLE IF NOT EXISTS alert_outbox (
-      dedupe_key TEXT PRIMARY KEY,
-      target_thread_id TEXT NOT NULL,
-      source_thread_id TEXT NOT NULL,
-      message TEXT NOT NULL,
-      delivered_at INTEGER,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      created_at INTEGER NOT NULL
-    )`,
-    `CREATE INDEX IF NOT EXISTS alert_outbox_pending ON alert_outbox (delivered_at, created_at)`,
-    `CREATE TABLE IF NOT EXISTS chief_models (
-      host_id TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('chief','worker','reviewer')),
-      provider_id TEXT NOT NULL,
-      model TEXT NOT NULL,
-      reasoning_level TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (host_id, role)
-    )`,
-    // One row per (worker, base branch): a delta only means something when both
-    // cycles scored the same comparison point.
-    `CREATE TABLE IF NOT EXISTS jev_scores (
-      worker_thread_id TEXT NOT NULL,
-      base_branch TEXT NOT NULL,
-      evaluation TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (worker_thread_id, base_branch)
-    )`,
-    `ALTER TABLE managed_threads ADD COLUMN tier TEXT`,
-    // SQLite cannot ALTER a CHECK constraint, so the 'worker'/'chief'/'reviewer'
-    // key becomes 'junior'/'senior'/'chief'/'reviewer' via a table rebuild.
-    // Existing picks under 'worker' survive as 'senior'.
-    `CREATE TABLE chief_models_new (
-      host_id TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('chief','junior','senior','reviewer')),
-      provider_id TEXT NOT NULL,
-      model TEXT NOT NULL,
-      reasoning_level TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (host_id, role)
-    )`,
-    `INSERT INTO chief_models_new (host_id, role, provider_id, model, reasoning_level, updated_at)
-      SELECT host_id, CASE role WHEN 'worker' THEN 'senior' ELSE role END, provider_id, model, reasoning_level, updated_at
-      FROM chief_models`,
-    `DROP TABLE chief_models`,
-    `ALTER TABLE chief_models_new RENAME TO chief_models`,
-    `ALTER TABLE managed_threads ADD COLUMN branch TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN issue_url TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN pr_url TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN verdict TEXT`,
-    // The brief a worker was delegated with, so its reviewer can judge the change
-    // against the same standard instead of an unanchored one.
-    `ALTER TABLE managed_threads ADD COLUMN brief TEXT`,
-    // Finding 8 asks whether the applicability gate really abstains on thin diffs
-    // instead of guessing. jev_scores only keeps the latest evaluation per worker
-    // and base, so the answer has to be counted as the scores are produced.
-    // ponytail: aggregate counters, not one row per pass — no slicing by project,
-    // diff size, or truncation. Add a column pair if the total hides the answer.
-    `CREATE TABLE IF NOT EXISTS jev_metric_stats (
-      metric TEXT PRIMARY KEY,
-      samples INTEGER NOT NULL,
-      abstained INTEGER NOT NULL,
-      score_sum REAL NOT NULL,
-      updated_at INTEGER NOT NULL
-    )`,
-    // Admitting the planner role means widening two CHECK constraints, and SQLite
-    // cannot drop one. Both tables are rebuilt; the statements above keep their old
-    // text because migrations are append-only. Column order matches the live table,
-    // ALTER-added columns last, which is what SELECT * relies on.
-    `CREATE TABLE managed_threads_v2 (
-      thread_id TEXT PRIMARY KEY,
-      role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer')),
-      project_id TEXT NOT NULL,
-      chief_thread_id TEXT,
-      worker_thread_id TEXT,
-      title TEXT NOT NULL,
-      state TEXT NOT NULL,
-      status TEXT,
-      result TEXT,
-      blocker TEXT,
-      recommendation TEXT,
-      active_since INTEGER,
-      active_cycle INTEGER NOT NULL DEFAULT 0,
-      stall_alerted_cycle INTEGER,
-      lifecycle_alert_key TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      tier TEXT,
-      branch TEXT,
-      issue_url TEXT,
-      pr_url TEXT,
-      verdict TEXT,
-      brief TEXT
-    )`,
-    `INSERT INTO managed_threads_v2 SELECT * FROM managed_threads`,
-    `DROP TABLE managed_threads`,
-    `ALTER TABLE managed_threads_v2 RENAME TO managed_threads`,
-    // Dropping the table dropped its index with it.
-    `CREATE INDEX IF NOT EXISTS managed_threads_chief ON managed_threads (chief_thread_id, created_at)`,
-    `CREATE TABLE chief_models_v3 (
-      host_id TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('chief','planner','junior','senior','reviewer')),
-      provider_id TEXT NOT NULL,
-      model TEXT NOT NULL,
-      reasoning_level TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (host_id, role)
-    )`,
-    `INSERT INTO chief_models_v3 SELECT * FROM chief_models`,
-    `DROP TABLE chief_models`,
-    `ALTER TABLE chief_models_v3 RENAME TO chief_models`,
-    // A reviewer's active_cycle counts every resume, not rejection rounds.
-    // Consecutive request_changes verdicts need their own counter so an
-    // unrelated resume can't misread as a deadlock.
-    `ALTER TABLE managed_threads ADD COLUMN reject_streak INTEGER NOT NULL DEFAULT 0`,
-    // Jev scoring is removed for cost reasons; its tables and settled state go with it.
-    `DROP TABLE IF EXISTS jev_scores`,
-    `DROP TABLE IF EXISTS jev_metric_stats`,
-    `DELETE FROM plugin_meta WHERE key='jev_verified'`,
-    // Child threads spawned by Chief or filed under Chief track their parent thread.
-    `ALTER TABLE managed_threads ADD COLUMN parent_thread_id TEXT`,
-    // Admitting the advisor role means widening two CHECK constraints again, and
-    // SQLite still cannot drop one. Same rebuild pattern as managed_threads_v2 /
-    // chief_models_v3 above: column order matches the live table, ALTER-added
-    // columns last, which is what SELECT * relies on.
-    `CREATE TABLE managed_threads_v3 (
-      thread_id TEXT PRIMARY KEY,
-      role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor')),
-      project_id TEXT NOT NULL,
-      chief_thread_id TEXT,
-      worker_thread_id TEXT,
-      title TEXT NOT NULL,
-      state TEXT NOT NULL,
-      status TEXT,
-      result TEXT,
-      blocker TEXT,
-      recommendation TEXT,
-      active_since INTEGER,
-      active_cycle INTEGER NOT NULL DEFAULT 0,
-      stall_alerted_cycle INTEGER,
-      lifecycle_alert_key TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      tier TEXT,
-      branch TEXT,
-      issue_url TEXT,
-      pr_url TEXT,
-      verdict TEXT,
-      brief TEXT,
-      reject_streak INTEGER NOT NULL DEFAULT 0,
-      parent_thread_id TEXT
-    )`,
-    `INSERT INTO managed_threads_v3 SELECT * FROM managed_threads`,
-    `DROP TABLE managed_threads`,
-    `ALTER TABLE managed_threads_v3 RENAME TO managed_threads`,
-    // Dropping the table dropped its index with it.
-    `CREATE INDEX IF NOT EXISTS managed_threads_chief ON managed_threads (chief_thread_id, created_at)`,
-    `CREATE TABLE chief_models_v4 (
-      host_id TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('chief','planner','junior','senior','reviewer','advisor')),
-      provider_id TEXT NOT NULL,
-      model TEXT NOT NULL,
-      reasoning_level TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (host_id, role)
-    )`,
-    `INSERT INTO chief_models_v4 SELECT * FROM chief_models`,
-    `DROP TABLE chief_models`,
-    `ALTER TABLE chief_models_v4 RENAME TO chief_models`,
-    // The hard stall alert (2x stallMinutes) fires once per active cycle, like the soft one.
-    `ALTER TABLE managed_threads ADD COLUMN stop_alerted_cycle INTEGER`,
-    // Persisted wave schedule (planner row) and the link a worker delegated from it carries.
-    `ALTER TABLE managed_threads ADD COLUMN plan_waves TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN plan_thread_id TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN plan_wave INTEGER`,
-    // A reviewer's regression flag, so nextAction can see it on a later call too.
-    `ALTER TABLE managed_threads ADD COLUMN regression INTEGER`,
-    // A monotonic per-row report counter and a reviewer's snapshot of the worker's
-    // count at spawn time — a robust (not timestamp-based) tie between a reviewer
-    // and the exact report it covers, immune to same-millisecond collisions and to
-    // the reviewer later completing.
-    `ALTER TABLE managed_threads ADD COLUMN report_seq INTEGER NOT NULL DEFAULT 0`,
-    `ALTER TABLE managed_threads ADD COLUMN reviewed_report_seq INTEGER`,
-    // Worker row only: the reason a delegation skipped chief_plan while planning was on.
-    `ALTER TABLE managed_threads ADD COLUMN unplanned_reason TEXT`,
-    // Chief's own todos, per project so they survive replacement Chiefs.
-    `CREATE TABLE IF NOT EXISTS chief_todos (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, text TEXT NOT NULL, after TEXT, state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','done','dropped')), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
-    `CREATE INDEX IF NOT EXISTS chief_todos_project ON chief_todos (project_id, state, id)`,
-    // One worker type: senior picks carry over as worker; junior picks are dropped.
-    `CREATE TABLE chief_models_v5 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
-    `INSERT INTO chief_models_v5 (host_id, role, provider_id, model, reasoning_level, updated_at) SELECT host_id, CASE role WHEN 'senior' THEN 'worker' ELSE role END, provider_id, model, reasoning_level, updated_at FROM chief_models WHERE role <> 'junior'`,
-    `DROP TABLE chief_models`,
-    `ALTER TABLE chief_models_v5 RENAME TO chief_models`,
-    // Inert legacy column, kept for schema compatibility; nothing reads or writes it.
-    `ALTER TABLE managed_threads ADD COLUMN release_pending INTEGER NOT NULL DEFAULT 0`,
-    // chief_research's per-machine model pick for each role and stage; no row means inherit the caller's.
-    `CREATE TABLE IF NOT EXISTS research_models (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','reviewer')), stage TEXT NOT NULL CHECK(stage IN ('scan','verify','combine')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role, stage))`,
-    // One chief_research pick per machine for every stage and role; per-role, per-stage picks are discarded.
-    `CREATE TABLE IF NOT EXISTS research_model (host_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
-    `DROP TABLE IF EXISTS research_models`,
-    // chief_research's per-machine pick per mode; the single pick is copied to every mode.
-    `CREATE TABLE IF NOT EXISTS research_mode_models (host_id TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('survey','review','investigate')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, mode))`,
-    `INSERT INTO research_mode_models (host_id, mode, provider_id, model, reasoning_level, updated_at) SELECT r.host_id, m.mode, r.provider_id, r.model, r.reasoning_level, r.updated_at FROM research_model r CROSS JOIN (SELECT 'survey' AS mode UNION ALL SELECT 'review' UNION ALL SELECT 'investigate') m`,
-    // The single pick now lives on in every mode.
-    `DROP TABLE IF EXISTS research_model`,
-    // A child Chief's todos are its own: NULL keeps the project-wide scope top-level Chiefs share.
-    `ALTER TABLE chief_todos ADD COLUMN chief_thread_id TEXT`,
-    // A provider model hit its usage limit; new spawns on it are refused until until_at. model '' rows are legacy and ignored.
-    `CREATE TABLE IF NOT EXISTS provider_cooldowns (provider_id TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', until_at INTEGER NOT NULL, reason TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (provider_id, model))`,
-    // One per machine: reviewers and research switch to it while their primary cools down.
-    `CREATE TABLE IF NOT EXISTS chief_fallback_model (host_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
-    // A worker's replaces: predecessor, so a branchless fix chain still groups into one task for bb chief stats.
-    `ALTER TABLE managed_threads ADD COLUMN replaces_thread_id TEXT`,
-    // bb chief stats counters; neither was recorded before this migration (see stats_since).
-    `ALTER TABLE managed_threads ADD COLUMN thread_errors INTEGER NOT NULL DEFAULT 0`,
-    `ALTER TABLE managed_threads ADD COLUMN busy_rejections INTEGER NOT NULL DEFAULT 0`,
-    `INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('stats_since', CAST(strftime('%s','now') AS INTEGER) * 1000)`,
-    // The per-machine fallback model was removed; a cooling provider is refused outright.
-    `DROP TABLE IF EXISTS chief_fallback_model`,
-    // A reviewer's full verdict file, handed to the replacement worker, the next reviewer and the advisor.
-    `ALTER TABLE managed_threads ADD COLUMN verdict_path TEXT`,
-    // A worker's kind ("designer" for design-tool work); NULL reads as a plain worker.
-    `ALTER TABLE managed_threads ADD COLUMN kind TEXT`,
-    // A Designer model pick; no row inherits the Worker pick.
-    `CREATE TABLE chief_models_v6 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','designer')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
-    `INSERT INTO chief_models_v6 SELECT * FROM chief_models`,
-    `DROP TABLE chief_models`,
-    `ALTER TABLE chief_models_v6 RENAME TO chief_models`,
-    // Nested Chiefs were removed: existing ones become ordinary top-level Chiefs, and their todos join the project-wide list.
-    `UPDATE managed_threads SET chief_thread_id=NULL, state=CASE WHEN state IN ('ready','blocked') THEN 'idle' ELSE state END, blocker=CASE WHEN state='blocked' THEN NULL ELSE blocker END WHERE role='chief' AND chief_thread_id IS NOT NULL`,
-    `UPDATE chief_todos SET chief_thread_id=NULL WHERE chief_thread_id IS NOT NULL`,
-    // Approaches a worker or reviewer ruled out, carried down a replaces: chain into the successor's brief.
-    `ALTER TABLE managed_threads ADD COLUMN fails TEXT`,
-    // Shared plan-run log: FACT/FAIL notes workers on one plan read with chief_log, each from its own cursor.
-    `CREATE TABLE plan_log (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_thread_id TEXT NOT NULL, author_thread_id TEXT NOT NULL, wave INTEGER, kind TEXT NOT NULL CHECK (kind IN ('FACT','FAIL')), text TEXT NOT NULL, scope TEXT NOT NULL, basis TEXT NOT NULL, created_at TEXT NOT NULL)`,
-    `CREATE INDEX plan_log_plan ON plan_log(plan_thread_id, id)`,
-    `ALTER TABLE managed_threads ADD COLUMN log_read_id INTEGER`,
-    // legacy: workers delegated on the retired simple tag; read only by bb chief stats
-    `ALTER TABLE managed_threads ADD COLUMN simple INTEGER`,
-    // chief_continue stall-clock resets since the last report, so repeated nudges cannot postpone the hard stall alert forever.
-    `ALTER TABLE managed_threads ADD COLUMN stall_resets INTEGER NOT NULL DEFAULT 0`,
-    // bb chief stats usage tracking; nothing is backfilled, so older rows read as unknown (planner_on NULL) or absent.
-    // One row per chief_research call. outcome: succeeded | partial | failed | still_running | timed_out | spawned | start_failed | error.
-    `CREATE TABLE chief_research_calls (id INTEGER PRIMARY KEY, caller_thread_id TEXT, role TEXT, mode TEXT, run_id TEXT, outcome TEXT, started_at INTEGER, ended_at INTEGER)`,
-    // Worker row only: whether planning was on when it was delegated (1/0); NULL for rows from before this column.
-    `ALTER TABLE managed_threads ADD COLUMN planner_on INTEGER`,
-    // One row per reviewer verdict report; survives chief_continue (which clears the row's verdict) and replacement reviewers.
-    `CREATE TABLE reviewer_verdicts (id INTEGER PRIMARY KEY, reviewer_thread_id TEXT, worker_thread_id TEXT, verdict TEXT, report_seq INTEGER, at INTEGER)`,
-    // The last chief_report's short summary and the per-report file holding its full text; both follow `result`.
-    `ALTER TABLE managed_threads ADD COLUMN summary TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN report_path TEXT`,
-    // Bumped each time chief_complete replaces the result, so a pending report-path publication can tell its result was replaced.
-    `ALTER TABLE managed_threads ADD COLUMN result_rev INTEGER NOT NULL DEFAULT 0`,
-    // Advisor row only: when it first sent a ready or blocked report (its actual advice). Set once; stop, complete, status sync and later reports never clear it. Old rows stay NULL.
-    `ALTER TABLE managed_threads ADD COLUMN advised_at INTEGER`,
-    // Durable lessons an advisor recorded at a consult; the newest few are injected into every later managed thread in the project.
-    `CREATE TABLE chief_lessons (id INTEGER PRIMARY KEY, project_id TEXT NOT NULL, text TEXT NOT NULL, source_thread_id TEXT NOT NULL, worker_thread_id TEXT, at INTEGER NOT NULL)`,
-    `CREATE INDEX chief_lessons_project ON chief_lessons(project_id, at)`,
-    // Admitting the researcher role widens managed_threads' role CHECK, which SQLite cannot alter, so rebuild it once more
-    // (same pattern as managed_threads_v3). Column order is the live table's: v3's columns, then every ALTER-added column in
-    // migration order, which INSERT ... SELECT * relies on. If another migration that adds a managed_threads column is
-    // merged before this one, list its column here too; a mismatch fails the INSERT loudly instead of dropping data.
-    `CREATE TABLE managed_threads_v4 (
-      thread_id TEXT PRIMARY KEY,
-      role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','researcher')),
-      project_id TEXT NOT NULL,
-      chief_thread_id TEXT,
-      worker_thread_id TEXT,
-      title TEXT NOT NULL,
-      state TEXT NOT NULL,
-      status TEXT,
-      result TEXT,
-      blocker TEXT,
-      recommendation TEXT,
-      active_since INTEGER,
-      active_cycle INTEGER NOT NULL DEFAULT 0,
-      stall_alerted_cycle INTEGER,
-      lifecycle_alert_key TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      tier TEXT,
-      branch TEXT,
-      issue_url TEXT,
-      pr_url TEXT,
-      verdict TEXT,
-      brief TEXT,
-      reject_streak INTEGER NOT NULL DEFAULT 0,
-      parent_thread_id TEXT,
-      stop_alerted_cycle INTEGER,
-      plan_waves TEXT,
-      plan_thread_id TEXT,
-      plan_wave INTEGER,
-      regression INTEGER,
-      report_seq INTEGER NOT NULL DEFAULT 0,
-      reviewed_report_seq INTEGER,
-      unplanned_reason TEXT,
-      release_pending INTEGER NOT NULL DEFAULT 0,
-      replaces_thread_id TEXT,
-      thread_errors INTEGER NOT NULL DEFAULT 0,
-      busy_rejections INTEGER NOT NULL DEFAULT 0,
-      verdict_path TEXT,
-      kind TEXT,
-      fails TEXT,
-      log_read_id INTEGER,
-      simple INTEGER,
-      stall_resets INTEGER NOT NULL DEFAULT 0,
-      planner_on INTEGER,
-      summary TEXT,
-      report_path TEXT,
-      result_rev INTEGER NOT NULL DEFAULT 0,
-      advised_at INTEGER
-    )`,
-    `INSERT INTO managed_threads_v4 SELECT * FROM managed_threads`,
-    `DROP TABLE managed_threads`,
-    `ALTER TABLE managed_threads_v4 RENAME TO managed_threads`,
-    // Dropping the table dropped its index with it.
-    `CREATE INDEX IF NOT EXISTS managed_threads_chief ON managed_threads (chief_thread_id, created_at)`,
-    // Backlog board: a todo exported to a task ("pending:<id>" while the file is being created), and the task a worker implements.
-    `ALTER TABLE chief_todos ADD COLUMN backlog_task_id TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN backlog_task_id TEXT`,
-    // The PR head commit a verdict was given for (copied from the reviewer row by the server, never from a report), and the commit a PR-bound reviewer was pinned to at spawn.
-    `ALTER TABLE reviewer_verdicts ADD COLUMN head_sha TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN reviewed_head_sha TEXT`,
-    // Design-wave worker only: the owner's approval of its artboards as Chief quoted it (chief_owner_approval), and when. A new report or chief_continue clears both.
-    `ALTER TABLE managed_threads ADD COLUMN owner_approval TEXT`,
-    `ALTER TABLE managed_threads ADD COLUMN owner_approved_at INTEGER`,
-    // The state of the row's latest chief_report (ready, blocked, active, idle, failed): row.state moves on once the thread runs again, this does not.
-    `ALTER TABLE managed_threads ADD COLUMN last_report_state TEXT`,
-    // Rows from before the column: a ready row that has reported provably last reported ready. Active/blocked/idle rows stay NULL (unknown).
-    `UPDATE managed_threads SET last_report_state='ready' WHERE state='ready' AND report_seq > 0 AND last_report_state IS NULL`,
-    // One review covers every branch of a plan: one row per worker a reviewer covers, with the report and PR head it was bound to. Reviewers from before are backfilled from their own row.
-    `CREATE TABLE IF NOT EXISTS review_targets (reviewer_thread_id TEXT NOT NULL, worker_thread_id TEXT NOT NULL, report_seq INTEGER, head_sha TEXT, pr_url TEXT, branch TEXT, PRIMARY KEY (reviewer_thread_id, worker_thread_id))`,
-    `INSERT OR IGNORE INTO review_targets (reviewer_thread_id, worker_thread_id, report_seq, head_sha, pr_url, branch) SELECT thread_id, worker_thread_id, reviewed_report_seq, reviewed_head_sha, NULL, branch FROM managed_threads WHERE role='reviewer' AND worker_thread_id IS NOT NULL`,
-    // The covered worker's report a verdict row was given for (-1: re-pointed before the verdict); NULL on rows from before, which read the reviewer's reviewed_report_seq.
-    `ALTER TABLE reviewer_verdicts ADD COLUMN worker_report_seq INTEGER`,
-    // A reviewer's latest structured findings (JSON array of {file, line?, severity, message, fix?}); replaced by each report.
-    `ALTER TABLE managed_threads ADD COLUMN findings TEXT`,
-    // Who recorded a lesson: 'reviewer' lessons go to later reviewers only; NULL (older rows) or 'advisor' go to every managed thread.
-    `ALTER TABLE chief_lessons ADD COLUMN role TEXT`,
-    // Worker row only: the shell command the worker's brief makes it run; inherited through replaces:. (Legacy: a removed gate once reran it.)
-    `ALTER TABLE managed_threads ADD COLUMN verify_command TEXT`,
-    // One row per (source thread, active cycle, kind), written when a transient provider failure or a stall is detected, whether or not its alert is delivered. `detail` is classified from the provider error text only; legacy=1 rows were copied from older alerts and are approximate.
-    `CREATE TABLE IF NOT EXISTS chief_failure_events (source_thread_id TEXT NOT NULL, active_cycle INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('provider','stall','hard_stall')), detail TEXT CHECK(detail IS NULL OR detail IN ('usage_limit','connection')), legacy INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL, PRIMARY KEY (source_thread_id, active_cycle, kind))`,
-    // One-time copy of the surviving failed:/stall: alerts, classified as bb chief stats classified them ("usage limit" in the message), so totals carry over. error: and report: keys are never copied.
-    `INSERT OR IGNORE INTO chief_failure_events (source_thread_id, active_cycle, kind, detail, legacy, at)
-     SELECT source_thread_id,
-       CAST(CASE WHEN dedupe_key LIKE '%:failed:%' THEN substr(dedupe_key, instr(dedupe_key, ':failed:') + 8) ELSE substr(dedupe_key, instr(dedupe_key, ':stall:') + 7) END AS INTEGER),
-       CASE WHEN dedupe_key LIKE '%:failed:%' THEN 'provider' WHEN dedupe_key LIKE '%:hard' THEN 'hard_stall' ELSE 'stall' END,
-       CASE WHEN dedupe_key LIKE '%:failed:%' THEN CASE WHEN instr(message, 'usage limit') > 0 THEN 'usage_limit' ELSE 'connection' END END,
-       1, created_at
-     FROM alert_outbox WHERE dedupe_key LIKE '%:failed:%' OR dedupe_key LIKE '%:stall:%'`,
-    // forge comments outbox: text lives in forgeComments.ts; never edit it (hashed by index)
-    FORGE_COMMENTS_TABLE,
-    // Planner row only: the tracking issue shared by every wave of its plan.
-    `ALTER TABLE managed_threads ADD COLUMN plan_issue_url TEXT`,
-    // Planner row only: its one advisor review — NULL (none needed), 'required', 'approved' or 'changes'.
-    `ALTER TABLE managed_threads ADD COLUMN plan_review TEXT`,
-    // Legacy: one row per gate thread of the removed review gate; no longer written or read.
-    `CREATE TABLE IF NOT EXISTS gate_threads (thread_id TEXT PRIMARY KEY, environment_id TEXT, chief_thread_id TEXT, worker_thread_id TEXT NOT NULL, created_at INTEGER NOT NULL, thread_deleted INTEGER NOT NULL DEFAULT 0, delete_attempts INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0)`,
-    // Worker row only: when chief_complete saw a positive approval with cleanupApproved on. NULL (override, skipReview, legacy: workers delegated on the retired simple tag, setting off, rows from before) is never cleaned up.
-    `ALTER TABLE managed_threads ADD COLUMN cleanup_approved_at INTEGER`,
-    // One row per thread the post-approval cleanup handles: its current step, the generation (archived_at) it archived, and the bounded-retry state of that step.
-    `CREATE TABLE IF NOT EXISTS cleanup_jobs (thread_id TEXT PRIMARY KEY, chief_thread_id TEXT NOT NULL, project_id TEXT NOT NULL, environment_id TEXT, branch TEXT, step TEXT NOT NULL CHECK(step IN ('archive','teardown','branch','storage','done')), step_at INTEGER NOT NULL, archived_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, outcome TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
-    // A thread whose Chief artifacts were written to its storage root because the BB data dir was unknown: its storage may hold evidence and is never cleared.
-    `CREATE TABLE IF NOT EXISTS artifact_fallbacks (thread_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
-    // Worker row only: Chief's reason for completing it with chief_complete skipReview (no review); NULL otherwise.
-    `ALTER TABLE managed_threads ADD COLUMN review_skipped TEXT`,
-    // Worker row only: Chief's reason for completing unplanned work with no tester (chief_complete testsSkipped); NULL otherwise.
-    `ALTER TABLE managed_threads ADD COLUMN tests_skipped TEXT`,
-    // A Tester model pick; no row inherits the Worker pick.
-    `CREATE TABLE chief_models_v7 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','designer','tester')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
-    `INSERT INTO chief_models_v7 SELECT * FROM chief_models`,
-    `DROP TABLE chief_models`,
-    `ALTER TABLE chief_models_v7 RENAME TO chief_models`,
-    // A Spec Writer model pick; no row inherits the Worker pick.
-    `CREATE TABLE chief_models_v8 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','designer','tester','spec-writer')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
-    `INSERT INTO chief_models_v8 SELECT * FROM chief_models`,
-    `DROP TABLE chief_models`,
-    `ALTER TABLE chief_models_v8 RENAME TO chief_models`,
-    // One owner per shared worktree and cleanup action: the first cleanup job to reach the decisive teardown observation claims it; other jobs on that environment skip it.
-    `CREATE TABLE IF NOT EXISTS cleanup_environment_claims (environment_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('branch','trouble','stuck')), thread_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (environment_id, action))`,
-    ...TRACKER_TABLES,
-    // A Coordinator is a Chief row with coordinator=1; a child Chief names its Coordinator here. chief_thread_id keeps meaning "managed work".
-    `ALTER TABLE managed_threads ADD COLUMN coordinator INTEGER`,
-    `ALTER TABLE managed_threads ADD COLUMN coordinator_thread_id TEXT`,
-];
 
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
@@ -1255,7 +571,6 @@ export default async function plugin(bb: BbPluginApi) {
   const rulesCache = new Map<string, string>();
   const alertDeliveries = new Map<string, Promise<boolean>>();
 
-  const terminal = (state: string) => ["complete", "archived", "deleted"].includes(state);
   const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
   const { onSpecChain } = progress;
   const plans = createPlanLifecycle<ManagedRow>(store, schedule, ledger, planReviewRefusal);

@@ -8,7 +8,9 @@ import {
   useSettings,
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import type { ModelConfiguration, ModelSelection, ResearchConfiguration, rpcContract } from "./server";
+import type { ResearchConfiguration } from "./research";
+import type { rpcContract } from "./src/rpcContract";
+import type { ModelConfiguration, ModelSelection } from "./src/types";
 
 const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 

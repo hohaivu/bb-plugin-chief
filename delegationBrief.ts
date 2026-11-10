@@ -1,12 +1,12 @@
 import { MAX_WAVES, findingLines } from "./reportIntake";
 import { ADVISE_ONLY, PLAN_ONLY, type WorkerKind } from "./roles";
+import type { FailEntry } from "./src/types";
 import { bullets, clip, clipMiddle } from "./text";
 
 // The delegation split, like reviewBrief in reviewStart.ts: resolve what a replaces: successor inherits, and render
 // the worker, planner and advisor prompts. Pure: startWorker, startPlan and startConsult gather the inputs
 // (live checks, DB reads) first and keep every effect. Structural row types, so this file never imports ./server.
 
-type FailEntry = { text: string; scope: string; basis: string };
 type Finding = { file: string; line?: number; severity: "blocking" | "nit"; message: string; fix?: string };
 
 /** What a verdict preview reads from a reviewer's row. */

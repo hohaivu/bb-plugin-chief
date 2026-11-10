@@ -1,5 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { ModelSelection } from "./research";
+import type { ModelSelection } from "./src/types";
 import type { ModelRole } from "./roles";
 
 type SpawnInput = Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0];
