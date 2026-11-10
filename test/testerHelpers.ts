@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import { checkPlan } from "../src/report/reportIntake";
-import { PLAN_FIXTURE, TEST_WAVE, setup, status, wave } from "./harness";
+import { PLAN_FIXTURE, TEST_WAVE, approvePlan, delegate, setup, start, status, wave } from "./harness";
 
 export type State = Awaited<ReturnType<typeof setup>>;
 export const ctxOf = (state: State, chiefThreadId: string) => ({ threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
@@ -49,4 +49,93 @@ export const readyIdle = async (state: State, threadId: string, result = READY) 
 
 /** Two non-test waves make the plan's one advisor review a prerequisite of delegation. */
 export const wavePaths = (state: State, planThreadId: string) => (JSON.parse(planWaves(state, planThreadId)) as { path: string }[]).map((entry) => entry.path);
+
+
+/** A real ms boundary: verdict and row times are Date.now(), and a fix only counts when created strictly after the rejection. */
+export const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 3));
+
+/** Executes the `index`th chief_delegate call a refusal or alert text advertises (the route sweep): the text is the only source of its parameters. */
+export async function followRoute(state: State, chiefThreadId: string, text: string, index = 0, mission = "Rerun the tests.") {
+  const call = [...text.matchAll(/chief_delegate \(([^)]*)\)/g)][index];
+  if (!call) throw new Error(`no chief_delegate route #${index} in: ${text}`);
+  const params = Object.fromEntries(call[1]!.split(", ").map((pair) => { const [key, value] = pair.split(": "); return [key, key === "wave" ? Number(value) : value]; }));
+  const before = new Set((await status(state)).threads.map((row) => row.threadId));
+  await tool(state, "chief_delegate", { title: "Route", mission, ...params }, chiefThreadId);
+  const created = (await status(state)).threads.filter((row) => !before.has(row.threadId));
+  return { params, thread: created.at(-1)!.threadId as string };
+}
+export const refusal = async (promise: Promise<unknown>) => { try { await promise; } catch (error) { return (error as Error).message; } throw new Error("expected a refusal"); };
+
+/** Chief + a [implementation, test] plan with wave 1 delegated, ready and idle. */
+export async function readyImpl(state: State, wave1: object = {}) {
+  const chief = await start(state);
+  const planner = await plan(state, chief.threadId);
+  await delegateWave(state, chief.threadId, planner.threadId, 1, wave1);
+  const impl = workerOn(state, planner.threadId, 1);
+  await report(state, impl.thread_id, { state: "ready", result: READY });
+  setLive(state, impl.thread_id, "idle");
+  return { chief, planner, impl: impl.thread_id as string };
+}
+
+/** The same plan with the tester delegated on wave 2 (still busy: the fake host starts it active). */
+export async function withTester(state: State) {
+  const ctx = await readyImpl(state);
+  await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ctx.impl });
+  return { ...ctx, tester: workerOn(state, ctx.planner.threadId, 2).thread_id as string };
+}
+
+/** Plan [impl, test]; the test wave's tester T0 is rejected by a review and fixed by F, which is ready and idle: F owes a tester rerun. */
+export async function fixedAfterRejection(state: State, wave1: object = {}) {
+  const ctx = await readyImpl(state, wave1);
+  await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ctx.impl });
+  const tester = workerOn(state, ctx.planner.threadId, 2).thread_id as string;
+  await readyIdle(state, tester);
+  await reviewed(state, ctx.chief.threadId, tester, "request_changes");
+  await tick();
+  await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: tester, kind: "worker" });
+  const fix = workerOn(state, ctx.planner.threadId, 2).thread_id as string;
+  await readyIdle(state, fix);
+  await tick();
+  return { ...ctx, oldTester: tester, fix };
+}
+export const review = (state: State, chief: { threadId: string }, workerThreadId: string, extra: object = {}) => tool(state, "chief_review", { workerThreadId, ...extra }, chief.threadId);
+export const rerunRoute = (planner: { threadId: string }, wave: number, replaces: string) => `chief_delegate (planThreadId: ${planner.threadId}, wave: ${wave}, replaces: ${replaces}, kind: tester)`;
+export const reviewerCount = async (state: State) => (await status(state)).threads.filter((row) => row.role === "reviewer").length;
+
+/** An unplanned task rejected once and fixed by F (a persisted normal worker, kind NULL), ready and idle: F owes a tester rerun. */
+export async function unplannedFix(state: State, first: object = {}) {
+  const chief = await start(state);
+  const worker = await delegate(state, chief.threadId, "Fix totals", first);
+  await readyIdle(state, worker.threadId, "Done");
+  await reviewed(state, chief.threadId, worker.threadId, "request_changes");
+  await tick();
+  const fix = (await delegate(state, chief.threadId, "Fix", { replaces: worker.threadId })).threadId;
+  await readyIdle(state, fix, "Fixed");
+  await tick();
+  return { chief, first: worker.threadId, fix };
+}
+export const unplannedRoute = (replaces: string) => `chief_delegate (replaces: ${replaces}, kind: tester)`;
+
+/** Two independent chains [1, 2 test] and [3, 4 test], every row ready and idle; one review rejects both, and both chains are fixed (FA on wave 2, FB on wave 4). */
+export async function twoRejectedChains(state: State) {
+  const chief = await start(state);
+  const planner = await plan(state, chief.threadId, [planWave(1), TEST_WAVE(2), planWave(3, { dependsOn: [] }), TEST_WAVE(4, [3])]);
+  await approvePlan(state, chief.threadId, planner.threadId);
+  const ready = async (waveNo: number, extra: object) => {
+    await delegateWave(state, chief.threadId, planner.threadId, waveNo, extra);
+    const row = workerOn(state, planner.threadId, waveNo).thread_id as string;
+    await readyIdle(state, row);
+    return row;
+  };
+  const implA = await ready(1, { branch: "feature/a" });
+  const testA = await ready(2, { replaces: implA });
+  const implB = await ready(3, { branch: "feature/b" });
+  const testB = await ready(4, { replaces: implB });
+  await reviewed(state, chief.threadId, testA, "request_changes");
+  await tick();
+  const fixA = await ready(2, { replaces: testA, kind: "worker" });
+  const fixB = await ready(4, { replaces: testB, kind: "worker" });
+  await tick();
+  return { chief, planner, fixA, fixB };
+}
 
