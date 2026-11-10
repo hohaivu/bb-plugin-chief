@@ -515,13 +515,6 @@ describe("tester role", () => {
     // replaced W1 is handed off as the implementation row and keeps the implementation-lane completion refusal.
     // Regression: the writer-pending rule reads the old sequential shape as pending (stranding finished chains), the legacy head can
     // no longer reach its worker, or a legacy implementation-lane writer is treated as a side-lane one.
-    let legacySeed = 0;
-    const legacyRow = async (state: State, chiefThreadId: string, planThreadId: string, waveNo: number, kind: string | null, replaces: string | null, branch: string) => {
-      // The CLI refuses a second live row on one branch, so each row is seeded on its own and then moved onto the chain's branch.
-      const { threadId } = await legacyWave(state, chiefThreadId, planThreadId, waveNo, `${branch}-seed-${(legacySeed += 1)}`);
-      state.db.prepare(`UPDATE managed_threads SET kind=?, replaces_thread_id=?, branch=? WHERE thread_id=?`).run(kind, replaces, branch, threadId);
-      return threadId;
-    };
     test("a completed legacy S1→W1→S2→W2 chain has no pending writer: tester admitted, review runs, rows complete", async () => {
       const state = await setup();
       const { chief, planner } = await specPlan(state, [specImpl(1), specImpl(2), TEST_WAVE(3)], true);
@@ -704,9 +697,12 @@ describe("tester role", () => {
       const handoff = lastAlert(reviewState);
       expect(handoff).toContain(`chief_delegate (replaces: ${chain.writer}, kind: spec-writer) for docs findings`);
       expect(handoff).toContain(`chief_delegate (replaces: ${chain.tester}, kind: worker) for product-code findings, chief_delegate (replaces: ${chain.tester}, kind: tester) for test-only findings`);
-      // The side writer is a target of its own and takes docs findings only; the test wave has no side writer, so its tester's docs route is the implementation-lane writer.
+      // The side writer is a target of its own and takes docs findings only; the test wave has no side writer of its own, but docs findings still go to
+      // its chain's writer: the tester is never offered the docs replacement (it would take over the tester's checkout instead of repairing the side worktree).
       expect(handoff).not.toContain(`replaces: ${chain.writer}, kind: worker`);
       expect(handoff).not.toContain(`replaces: ${chain.writer}, kind: tester`);
+      expect(handoff).not.toContain(`replaces: ${chain.tester}, kind: spec-writer`);
+      expect(handoff).not.toContain(`replaces: ${chain.worker}, kind: spec-writer`);
 
       const plainState = await setup();
       const plain = await specPlan(plainState, [planWave(1), TEST_WAVE(2)]);
@@ -720,6 +716,54 @@ describe("tester role", () => {
       await readyIdle(plainState, t2);
       await reviewed(plainState, plain.chief.threadId, t2, "request_changes");
       expect(lastAlert(plainState)).not.toContain("spec-writer");
+    });
+
+    let legacySeed = 0;
+    const legacyRow = async (state: State, chiefThreadId: string, planThreadId: string, waveNo: number, kind: string | null, replaces: string | null, branch: string) => {
+      // The CLI refuses a second live row on one branch, so each row is seeded on its own and then moved onto the chain's branch.
+      const { threadId } = await legacyWave(state, chiefThreadId, planThreadId, waveNo, `${branch}-seed-${(legacySeed += 1)}`);
+      state.db.prepare(`UPDATE managed_threads SET kind=?, replaces_thread_id=?, branch=? WHERE thread_id=?`).run(kind, replaces, branch, threadId);
+      return threadId;
+    };
+    // Wave 1 contract 12 (docs findings on an implementation tip): with several side writers on the chain each is named with its wave, and the
+    // tester is never offered the docs replacement; a chain with no side writer (spec waiver) keeps the implementation-lane fallback.
+    // Regression: docs findings routed to the tester or worker beside live side writers, one writer's wave dropped, or the fallback lost.
+    test("docs findings name each of the chain's side writers by wave and never the tester; a chain without a side writer falls back to its tip", async () => {
+      const state = await setup();
+      const { chief, planner } = await specPlan(state, [specImpl(1), specImpl(2), TEST_WAVE(3)], true);
+      const P = planner.threadId;
+      const s1 = await delegateWriter(state, chief, P, 1);
+      await delegateWave(state, chief.threadId, P, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+      const w1 = ownerOn(state, P, 1).thread_id as string;
+      await readyIdle(state, w1);
+      await delegateWave(state, chief.threadId, P, 2, { replaces: w1 });
+      const w2 = ownerOn(state, P, 2).thread_id as string;
+      const s2 = await delegateWriter(state, chief, P, 2);
+      for (const id of [s1, s2, w2]) await readyIdle(state, id);
+      const tester = await swap(state, chief, P, 3, w2, "tester");
+      await readyIdle(state, tester);
+      await reviewed(state, chief.threadId, tester, "request_changes");
+      const advice = (await roster(state, chief.threadId)).split("\n").find((line) => line.includes("The reviewer requires changes"))!;
+      expect(advice).toContain(`chief_delegate (replaces: ${s1}, kind: spec-writer) for wave 1 docs findings or chief_delegate (replaces: ${s2}, kind: spec-writer) for wave 2 docs findings`);
+      expect(advice).toContain(`replaces: ${tester}, kind: worker) for product-code findings`);
+      for (const owner of [tester, w2, w1]) expect(advice).not.toContain(`replaces: ${owner}, kind: spec-writer`);
+
+      // Legacy shape with no side-lane writer (plain wave 1's W1, then wave 2's Spec Writer that replaced W1 = implementation lane, then W2): docs findings keep the implementation-lane fallback, the tester.
+      const legacy = await setup();
+      const lp = await specPlan(legacy, [planWave(1), specImpl(2), TEST_WAVE(3)], true);
+      const LP = lp.planner.threadId;
+      const lw1 = await legacyRow(legacy, lp.chief.threadId, LP, 1, null, null, "feature/legacy");
+      const l2 = await legacyRow(legacy, lp.chief.threadId, LP, 2, "spec-writer", lw1, "feature/legacy");
+      const lw2 = await legacyRow(legacy, lp.chief.threadId, LP, 2, null, l2, "feature/legacy");
+      for (const id of [lw1, l2]) legacy.db.prepare(`UPDATE managed_threads SET state='complete' WHERE thread_id=?`).run(id);
+      await readyIdle(legacy, lw2);
+      await delegateWave(legacy, lp.chief.threadId, LP, 3, { replaces: lw2, kind: "tester" });
+      const lt = ownerOn(legacy, LP, 3).thread_id as string;
+      await readyIdle(legacy, lt);
+      await reviewed(legacy, lp.chief.threadId, lt, "request_changes");
+      const legacyAdvice = (await roster(legacy, lp.chief.threadId)).split("\n").find((line) => line.includes("The reviewer requires changes"))!;
+      expect(legacyAdvice).toContain(`or chief_delegate (replaces: ${lt}, kind: spec-writer) for docs findings`);
+      for (const done of [lw1, l2]) expect(legacyAdvice).not.toContain(`replaces: ${done}`);
     });
 
     // Wave 1 contract 11 (fixRound): a side writer never builds on an implementation row, so it is loose beside a same-branch tester
