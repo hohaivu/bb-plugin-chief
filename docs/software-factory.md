@@ -2,11 +2,11 @@
 
 This page shows how Chief turns one owner request into a merged pull request. The sequence chart shows who messages whom. The tables list the roles and the support tools.
 
-> **Keep this page current.** When a change alters a tool, a role kind, a gate, or the order of steps, update the charts and tables in the same pull request. The code and the skills win over this page: `server.ts`, `src/core/roles.ts`, `skills/chief/SKILL.md`, and the README "Workflow" and "Planning" sections.
+> **Keep this page current.** When a change alters a tool, a role kind, a gate, or the order of steps, update the charts and tables in the same pull request. The code and the skills win over this page: `src/plan/planLifecycle.ts`, `src/runtime/delegation.ts`, `src/core/roles.ts`, `skills/chief/SKILL.md`, and the README "Workflow" and "Planning" sections.
 
 ## Chart
 
-> **Note.** The waves of one chain run one after another on one branch, each worker continuing the last through `replaces:`. Separate chains (separate branches and pull requests, started with `dependsOn: []`) can run in parallel.
+> **Note.** The waves of one chain run one after another on one branch, each worker continuing the last through `replaces:`. A Spec Writer runs beside the worker of its wave in a side worktree and folds `docs/` onto the same branch. Separate chains (separate branches and pull requests, started with `dependsOn: []`) can run in parallel.
 
 A solid arrow is a tool call or a push. A dashed arrow is a `chief_report` that the plugin turns into a lifecycle alert for Chief, or an owner message. Every managed thread reports to Chief only. Threads never message each other. The one exception is the pull-only plan log (`chief_log`), which carries no alert.
 
@@ -53,18 +53,20 @@ sequenceDiagram
     Owner-->>Chief: approval, Chief calls chief_owner_approval
   end
 
-  opt wave marked spec: true
-    Chief->>SpecWriter: chief_delegate kind spec-writer
-    SpecWriter->>Forge: git push docs/ only
-    SpecWriter-->>Chief: report, alert names the worker call
-  end
-
   loop each wave of the chain, later waves use replaces:
-    Chief->>Worker: chief_delegate, one worker for this wave
-    Worker->>Forge: git push to task branch
-    Worker-->>Chief: report (ready, or blocked with a split)
+    par wave marked spec: true
+      Chief->>Worker: chief_delegate, one worker for this wave
+      Chief->>SpecWriter: chief_delegate kind spec-writer
+    and
+      Worker->>Forge: git push to task branch
+      Worker-->>Chief: report (ready, or blocked with a split)
+    and
+      SpecWriter->>Forge: fold docs/ fast-forward only
+      SpecWriter-->>Chief: report (ready)
+    end
     Note over Chief,Worker: no review between waves. A blocked report leads to a new chief_plan for the rest
   end
+  Note over Chief,SpecWriter: the tester and the review wait for every Spec Writer
   Note over Chief,Worker: for a big feature the planner adds one optional reshape wave after the last feature wave. It is an ordinary worker wave in this loop
 
   Chief->>Tester: chief_delegate replaces: kind tester
@@ -139,17 +141,17 @@ flowchart LR
 | Plan review | `chief_forge_init` and `chief_delegate` refuse a qualifying plan until its one advisor review resolves. There is no skip. |
 | Forge | Chief owns the forge. `chief_forge_init` runs on a chain head with no worker yet. A worker never touches the pull request. |
 | Review | `chief_review` is refused for an intermediate wave, a design wave, and while any wave is not ready. `skipReview` on `chief_complete` needs a reason. |
-| Complete | `chief_complete` needs the newest review to approve the PR's current head. `skipReview` or `override` with a reason bypass it. A design wave needs the owner's approval. A Spec Writer is never completed. |
+| Complete | `chief_complete` needs the newest review to approve the PR's current head. `skipReview` or `override` with a reason bypass it. A design wave needs the owner's approval. A Spec Writer completes like a worker, on a covering approve, `skipReview` or `override`. |
 | Merge | Only the owner merges. Chief never merges. |
 
 ## Roles inside a plan chain
 
-A plan chain has one branch, one pull request and one worker worktree. Worker kinds come from `workerKindSchema` in `src/core/roles.ts`. Planner, Advisor, Researcher and Reviewer are thread roles.
+A plan chain has one branch, one pull request and one implementation worktree. Each Spec Writer has a side worktree. Worker kinds come from `workerKindSchema` in `src/core/roles.ts`. Planner, Advisor, Researcher and Reviewer are thread roles.
 
 | Role | Kind or thread role | Job | Waived by |
 | --- | --- | --- | --- |
 | Designer | `kind: "designer"` | Decides or implements how the UI looks. In a plan it draws artboards in its own design-only wave, before the wave that builds the UI. | n/a |
-| Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs first on a `spec: true` wave. | `chief_skip_specs` |
+| Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs in parallel with the worker of a `spec: true` wave, in its own worktree. Folds `docs/` onto the chain branch. | `chief_skip_specs` |
 | Worker | `kind: "worker"` | Implements one wave. It never writes tests. A reshape wave is also a worker. | n/a |
 | Tester | `kind: "tester"` | Writes and runs the tests for the waves it builds on. | `chief_skip_tests`, or `testsSkipped` on `chief_complete` |
 | Reviewer | thread role `reviewer` | Reports a `verdict` of `approve` or `request_changes`. It never edits. | `skipReview` |
