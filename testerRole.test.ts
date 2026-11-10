@@ -940,6 +940,28 @@ describe("tester role", () => {
   // still wins over retest. Following the restack routes through the real startWorker ends in a tester created after the fix; when it reports
   // ready the debt is paid and the review starts. Regression: the route names the earlier-wave fix as a direct tester, or the restacked tester
   // does not pay the debt. Seeded rows stand for the legacy shape (real hand-offs complete the replaced row and share one branch, so only seeds keep W2 live, each wave on its own branch).
+  // Contract (fresh-ready milestone): only a tester that started AFTER the fix pays, even one started after the rejection. Regression: any
+  // ready tester newer than the rejection discharges the debt, so a rerun that predates the fix hides the unverified code.
+  test("a ready tester started after the rejection but before the fix pays nothing", async () => {
+    const state = await setup();
+    const { chief, planner, impl } = await readyImpl(state);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+    const first = workerOn(state, planner.threadId, 2).thread_id as string;
+    await readyIdle(state, first);
+    await reviewed(state, chief.threadId, first, "request_changes");
+    await tick();
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: first, kind: "tester" });
+    const early = workerOn(state, planner.threadId, 2).thread_id as string;
+    await readyIdle(state, early);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: early, kind: "worker" });
+    const fix = workerOn(state, planner.threadId, 2).thread_id as string;
+    await readyIdle(state, fix);
+    await tick();
+    expect(rowOf(state, early).last_report_state).toBe("ready");
+    expect(await refusal(review(state, chief, fix))).toContain(`${fix} changed code after the review's rejection`);
+    expect(await reviewerCount(state)).toBe(1);
+  });
+
   test("a legacy fix on an earlier wave is restacked first; the restacked tester pays the debt", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -1036,7 +1058,7 @@ describe("tester role", () => {
     await tick();
     // A designer row created after the rejection is no fix: the tip's review starts without a rerun.
     const { threadId: later } = await legacyWave(state, chief.threadId, planner.threadId, 1, "feature/design-seed");
-    state.db.prepare(`UPDATE managed_threads SET kind='designer', replaces_thread_id=? WHERE thread_id=?`).run(designer, later);
+    state.db.prepare(`UPDATE managed_threads SET replaces_thread_id=? WHERE thread_id=?`).run(designer, later);
     await readyIdle(state, later, `${READY}\nArtboards: Checkout`);
     await tick();
     await review(state, chief, tester);
