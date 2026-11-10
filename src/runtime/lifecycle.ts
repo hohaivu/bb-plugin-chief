@@ -1,4 +1,4 @@
-import { createReportIntake } from "../../reportIntake";
+import { createReportIntake } from "../report/reportIntake";
 import { type ManagedRow } from "../types";
 import { clip } from "../../text";
 import { spawnMetadataSchema } from "../tools/shapes";

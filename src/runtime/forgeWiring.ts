@@ -1,5 +1,5 @@
 import { cliAdapters, createForgeComments, sanitizeForge } from "../forge/forgeComments";
-import { findingLines } from "../../reportIntake";
+import { findingLines } from "../report/reportIntake";
 import { type ManagedRow, type ReportFinding } from "../types";
 import { clip } from "../../text";
 import { trackerProjects } from "../tracker/tracker";

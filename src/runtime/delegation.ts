@@ -1,5 +1,5 @@
 import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
-import { MAX_CARRIED_FAILS } from "../../reportIntake";
+import { MAX_CARRIED_FAILS } from "../report/reportIntake";
 import { researchLine } from "../research/research";
 import { CONTINUE_REMINDERS } from "../../roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";

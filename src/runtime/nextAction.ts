@@ -1,4 +1,4 @@
-import { type RepairTarget } from "../../planProgress";
+import { type RepairTarget } from "../plan/planProgress";
 import { reviewEngine } from "../review/prAgent";
 import { STOP_AFTER_REJECTIONS } from "../../reviewLedger";
 import { createReviewStart } from "../review/reviewStart";

@@ -9,7 +9,7 @@ import type { createReviewLedger } from "../../reviewLedger";
 import { REVIEW_ONLY } from "../../roles";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "../../text";
 import { terminal } from "../types";
-import type { ThreadStore } from "../../threadStore";
+import type { ThreadStore } from "../db/threadStore";
 import { chainOf, type PlanWave } from "../../waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;

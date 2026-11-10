@@ -1,5 +1,5 @@
 import { type ManagedRow } from "../types";
-import { type ThreadInsert } from "../../threadStore";
+import { type ThreadInsert } from "../db/threadStore";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Ctx } from "./context";

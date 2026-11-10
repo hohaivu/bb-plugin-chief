@@ -1,4 +1,4 @@
-import { MAX_WAVES } from "../../reportIntake";
+import { MAX_WAVES } from "../report/reportIntake";
 import { STOP_AFTER_REJECTIONS } from "../../reviewLedger";
 import { roleSchema, workerKindSchema } from "../../roles";
 import { failEntry } from "../types";

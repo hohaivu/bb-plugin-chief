@@ -1,4 +1,4 @@
-import { type SegmentState } from "../../planProgress";
+import { type SegmentState } from "../plan/planProgress";
 import { type ManagedRow } from "../types";
 import { clip } from "../../text";
 import { spawnMetadataSchema, type TodoRow } from "../tools/shapes";

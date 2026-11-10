@@ -1,4 +1,4 @@
-import { MAX_WAVES, findingLines } from "../../reportIntake";
+import { MAX_WAVES, findingLines } from "../report/reportIntake";
 import { ADVISE_ONLY, PLAN_ONLY, type WorkerKind } from "../../roles";
 import type { FailEntry } from "../types";
 import { bullets, clip, clipMiddle } from "../../text";
