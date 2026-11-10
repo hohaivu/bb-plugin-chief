@@ -1,4 +1,4 @@
-import { createResearch } from "../../research";
+import { createResearch } from "../research/research";
 import { terminal } from "../types";
 import { clip } from "../../text";
 import { serverPath } from "../forge/forge";

@@ -1,4 +1,4 @@
-import { researchParams } from "../../research";
+import { researchParams } from "../research/research";
 import type { Ctx } from "../runtime/context";
 
 export function registerResearchTool(ctx: Ctx) {

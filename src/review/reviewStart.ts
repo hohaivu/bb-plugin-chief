@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { verdictPreview } from "../../delegationBrief";
+import { verdictPreview } from "../research/delegationBrief";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
-import type { ManagedSpawn } from "../../managedSpawn";
+import type { ManagedSpawn } from "../research/managedSpawn";
 import { helperPrompt, isPinned, PR_AGENT_DIR, prAgentScript, prAgentSection, type EngineTarget, type ReviewEngine } from "./prAgent";
 import type { createReviewLedger } from "../../reviewLedger";
 import { REVIEW_ONLY } from "../../roles";

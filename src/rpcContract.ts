@@ -1,6 +1,6 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { researchConfigurationSchema, researchModeSchema, researchSettingsPatchSchema, researchSettingsSchema } from "../research";
+import { researchConfigurationSchema, researchModeSchema, researchSettingsPatchSchema, researchSettingsSchema } from "./research/research";
 import { modelRoleSchema, roleSchema } from "../roles";
 import { managedThreadSchema, modelConfigurationSchema, modelSelectionSchema } from "./types";
 

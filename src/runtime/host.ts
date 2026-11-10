@@ -1,4 +1,4 @@
-import { researchLine, type ResearchMode, researchModeSchema } from "../../research";
+import { researchLine, type ResearchMode, researchModeSchema } from "../research/research";
 import { managedSkills, type ModelRole, modelRoleSchema } from "../../roles";
 import { rpcContract } from "../rpcContract";
 import { clip } from "../../text";

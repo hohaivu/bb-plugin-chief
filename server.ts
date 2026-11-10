@@ -42,10 +42,10 @@ import { registerHost } from "./src/runtime/host";
 import { registerCli } from "./src/runtime/cli";
 import type { FailEntry, ManagedRow, ManagedThread, ModelConfiguration, ModelSelection, ReportFinding, ReportParams } from "./src/types";
 
-export { RESEARCH_SCRIPTS } from "./research";
+export { RESEARCH_SCRIPTS } from "./src/research/research";
 export { MIGRATIONS } from "./src/db/migrations";
 export { rpcContract } from "./src/rpcContract";
-export type { ResearchConfiguration } from "./research";
+export type { ResearchConfiguration } from "./src/research/research";
 export type { ManagedRow, ManagedThread, FailEntry, ReportFinding, ReportParams, ModelConfiguration, ModelSelection };
 
 export default async function plugin(bb: BbPluginApi) {

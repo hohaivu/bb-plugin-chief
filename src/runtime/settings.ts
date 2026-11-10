@@ -1,4 +1,4 @@
-import { modelSelectionSchema, type ResearchMode, type ResearchSettings } from "../../research";
+import { modelSelectionSchema, type ResearchMode, type ResearchSettings } from "../research/research";
 import { MODEL_FALLBACK, type ModelRole } from "../../roles";
 import { type ManagedRow, type ModelSelection } from "../types";
 import { clip } from "../../text";

@@ -8,7 +8,7 @@ import {
   useSettings,
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import type { ResearchConfiguration } from "./research";
+import type { ResearchConfiguration } from "./src/research/research";
 import type { rpcContract } from "./src/rpcContract";
 import type { ModelConfiguration, ModelSelection } from "./src/types";
 
