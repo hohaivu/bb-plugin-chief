@@ -20,3 +20,4 @@
 - [Spec Writer runs in parallel on a side worktree](decisions/2026-11-10-spec-writer-parallel-side-worktree.md)
 - [Retest after a fix round gates the review](decisions/2026-11-10-retest-after-fix-round.md)
 - [Only a Spec Writer changes docs](decisions/2026-11-10-docs-owned-by-spec-writer.md)
+- [Managed threads keep tool search](decisions/2026-11-11-managed-threads-keep-tool-search.md)
