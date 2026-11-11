@@ -135,12 +135,11 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   const specWriter = isWriter(kind);
   const side = specWriter && lane === "side" && branch !== undefined;
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
-  const at = (entry: Finding) => `${entry.file}${entry.line ? `:${entry.line}` : ""}`;
   // Evidence mode: with no Chief constraints, the blocking findings' fixes become the constraints (each fix once).
   const moved = evidence && !params.constraints?.length && findings?.result
     ? (structured ?? []).filter((entry) => entry.severity === "blocking" && entry.fix)
     : [];
-  const constraints = moved.length ? moved.map((entry) => `${at(entry)}: ${entry.fix}`) : params.constraints;
+  const constraints = moved.length ? moved.map((entry) => `${entry.file}${entry.line ? `:${entry.line}` : ""}: ${entry.fix}`) : params.constraints;
   // A tester brief drops an empty list's section; every other kind keeps "None stated.".
   const listed = (heading: string, values?: string[]) => tester && !values?.length ? [] : ["", heading, bullets(values)];
   const render = (mission: string, contextText?: string) => [
@@ -160,9 +159,8 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", `## Review findings to fix (${findings.thread_id})`,
       ...(structured ? [
         ...(findings.verdict_path ? [`Verdict file: ${findings.verdict_path}`] : []),
-        ...(evidence
-          ? structured.filter((entry) => entry.severity === "blocking").map((entry) => `- ${at(entry)} — ${entry.message}${entry.fix && !moved.includes(entry) ? ` (fix: ${entry.fix})` : ""}`)
-          : findingLines(structured, "blocking")),
+        // A fix that became a constraint is not repeated on its finding.
+        ...findingLines(structured.map((entry) => moved.includes(entry) ? { ...entry, fix: undefined } : entry), "blocking"),
         ...(structured.some((entry) => entry.severity === "nit") ? ["Optional nits:", ...findingLines(structured, "nit")] : []),
       ] : verdictPreview(findings)),
       ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
@@ -182,9 +180,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Wave",
       specWriter
         ? `Wave ${wave} of ${waveTotal}: ${side ? `you run in parallel with its worker, in your own worktree on a side branch cut from ${branch}` : "its worker continues from your branch once you report ready"}. Your work is only its \`## Spec delta\` and the docs rules in the \`chief-role-spec-writer\` skill. Name "Wave ${wave} of ${waveTotal}" in your ready result.`
-        : evidence
-          ? `Wave ${wave} of ${waveTotal}. Name "Wave ${wave} of ${waveTotal}" in your ready result.`
-          : `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
+        : `Wave ${wave} of ${waveTotal}.${evidence ? "" : " Implement only this wave's plan file."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
       waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
       ...(waveIndependent ? ["This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch."] : []),
       ...(implementsDesign !== null ? [`This wave implements the artboards that wave ${implementsDesign} drew and the owner approved. Read them through the design tool's MCP (read-only; never edit the design) and match them; the artboard names are in your mission or wave ${implementsDesign}'s report.`] : []),
@@ -233,8 +229,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
         "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
       ]),
     ] : []),
-    ...(evidence && branch ? ["", "## Git workflow", `Before you read any file, on a clean tree run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`; if either fails, report blocked.`] : []),
-    ...(!evidence && (branch || issueUrl || prUrl) ? [
+    ...(evidence ? (branch ? ["", "## Git workflow", `Before you read any file, on a clean tree run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`; if either fails, report blocked.`] : []) : branch || issueUrl || prUrl ? [
       "", "## Git workflow",
       ...(side ? [`Your worktree is on a side branch cut from ${branch}. Commit only docs/ changes on it. The only push you make is the fold into ${branch}, in \`## Fold\`: never push the side branch or any other branch.`]
         : branch ? [
@@ -258,10 +253,21 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "Record `Fold base: <U of the successful attempt>` and `Fold head: <the pushed sha>` in your report. When no docs change was needed, record `Fold: none` with Fold base and Fold head both equal to U.",
       "Never use autostash, never force, never touch another worktree.",
     ] : []),
-    ...(evidence && prior?.result ? [
+    ...(prior?.result ? [
       "", "## Predecessor's last report",
-      prior.report_path ?? `bb chief inspect ${prior.thread_id}`,
-      ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
+      ...(tester && !evidence ? ((text) => {
+        const sha = (label: string) => text.match(new RegExp(`${label}:\\s*\`?([0-9a-f]{7,40})`))?.[1];
+        const head = sha("Head commit");
+        const base = sha("Base commit");
+        return [head
+          ? `Head commit: ${head}.${base ? ` Changed files: \`git diff --name-only ${base}..${head}\`.` : ""}`
+          : "Its report names no Head commit: read the full report."];
+      })([prior.result, prior.blocker, prior.summary].filter(Boolean).join("\n")) : [
+        evidence ? prior.report_path ?? `bb chief inspect ${prior.thread_id}` : prior.summary ?? clip(prior.result, 1_500),
+        ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
+        ...(!evidence && prior.recommendation ? [`Recommendation: ${clip(prior.recommendation, 600)}`] : []),
+      ]),
+      ...(!evidence && prior.report_path ? [`Full report: ${prior.report_path}`] : []),
     ] : []),
     ...(evidence ? [
       "", "## Evidence work",
@@ -271,22 +277,6 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- Run each command alone and record `echo exit=$?` right after it (before a pipe, `set -o pipefail`), with per-file pass counts.",
       "- Ready: per command, base and head side by side (commit, exit status, pass counts); explain every difference, since an unexplained one is a regression. Before you report, HEAD equals Head commit and `git status --porcelain` prints nothing.",
       "- Blocked: name the command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: tester)` for a wrong test, `kind: worker` for product code.",
-    ] : []),
-    ...(!evidence && prior?.result ? [
-      "", "## Predecessor's last report",
-      ...(tester ? ((text) => {
-        const sha = (label: string) => text.match(new RegExp(`${label}:\\s*\`?([0-9a-f]{7,40})`))?.[1];
-        const head = sha("Head commit");
-        const base = sha("Base commit");
-        return [head
-          ? `Head commit: ${head}.${base ? ` Changed files: \`git diff --name-only ${base}..${head}\`.` : ""}`
-          : "Its report names no Head commit: read the full report."];
-      })([prior.result, prior.blocker, prior.summary].filter(Boolean).join("\n")) : [
-        prior.summary ?? clip(prior.result, 1_500),
-        ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
-        ...(prior.recommendation ? [`Recommendation: ${clip(prior.recommendation, 600)}`] : []),
-      ]),
-      ...(prior.report_path ? [`Full report: ${prior.report_path}`] : []),
     ] : []),
     "", "## Working contract",
     ...(evidence ? [
