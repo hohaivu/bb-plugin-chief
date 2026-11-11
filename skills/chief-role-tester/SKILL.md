@@ -18,6 +18,7 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 - Run only tests relevant to the task, focused on the affected area, each command with a filter.
 - Run the full suite only when the owner asked for it (your brief says so) or in a truly exceptional case you name in your report. Never run it as a routine pre-push checkpoint.
 - The docs, the plan and the design are the source of truth for test cases (your brief lists them). Derive test cases from them; never derive an expected result from the implementation.
+- Tests check behaviour, never doc or prose wording. Docs, specs and the plan tell you which behaviour to test; the test runs the code and asserts on what it does. Never write a test that reads README, CHANGELOG, docs/, SKILL.md, any other markdown or prose file, or a spec file and asserts on its text. A plan contract that only states doc wording ("the README says X") is not a test contract: do not test it, name it in your report as not tested under this rule, and list any docs gap under `## Docs needed`. Text the product itself emits at runtime (a rendered prompt, a CLI reply, a file it writes) is behaviour. A field a program parses from such a file (frontmatter `name:`, a config block the product loads) is data. Both stay testable.
 - Reading the implementation to find the public boundary or to diagnose a failure is allowed.
 
 ## 3. Owner testing rules
@@ -65,7 +66,7 @@ Before adding any test, answer four questions; a missing answer means do not add
 3. Why does existing coverage not already catch that failure? Each contract has one primary test owner at the strongest boundary. Prefer extending a table-driven case over a near-duplicate test.
 4. Does it need a production seam (export, flag, wrapper, injection hook) that no production caller needs? If yes, test at the real boundary instead.
 
-Reject a test that matches a junk pattern, unless it independently guards a public API, protocol, config, migration, storage, security, platform, default, prompt-byte or architecture contract (name that contract):
+Reject a test that matches a junk pattern, unless it independently guards a public API, protocol, config, migration, storage, security, platform, default, prompt-byte or architecture contract (name that contract). Doc or prose wording is never such a contract (section 2):
 - assertion-free coverage probes;
 - self-comparisons and identity copiers;
 - copied fixtures, inventories, manifests, or export lists;
