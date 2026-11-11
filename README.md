@@ -31,7 +31,7 @@ Put `chief.md` at the project root. Chief reads it through BB's project file API
 
 Every managed thread loads the shared `chief-worker` skill (brief, scope, `chief_report`, the report contract reviewers check) plus its role's skill: `chief-role-worker` (workers; designers also get `chief-role-designer`, testers `chief-role-tester`, Spec Writers `chief-role-spec-writer`), `chief-role-reviewer`, or `chief-role-read-only` (planners and advisors); researchers get the core only.
 
-For managed Claude Code threads, Chief contributes `ENABLE_TOOL_SEARCH=false` so that MCP tool schemas load up front. This is best-effort: another plugin's provider-env value for the same name (such as account-pool's) may win, and a thread's first session can start before Chief records the thread. In those cases the schema-preload instruction line is the fallback.
+For Chief threads on Claude Code, Chief contributes `ENABLE_TOOL_SEARCH=false` so that MCP tool schemas load up front. Full schemas cost about 18k+ tokens per request, so managed worker-side threads (planners, workers, testers, designers, Spec Writers, researchers) keep Claude Code's tool search: deferred tools are listed by name and load on demand, and the schema-preload line loads their `chief_*` tools. The Chief contribution is best-effort: another plugin's provider-env value for the same name (such as account-pool's) may win, and a thread's first session can start before Chief records the thread. In those cases the schema-preload instruction line is the fallback.
 
 ## Configuration
 

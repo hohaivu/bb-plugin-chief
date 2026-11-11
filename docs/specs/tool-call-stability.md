@@ -42,8 +42,9 @@ The domain exposes four entry points in `server.ts`:
 1. The platform resolves provider environment variables for a thread and provider.
 2. If the provider is not `claude-code`, Chief returns an empty array.
 3. Chief checks the store for an existing thread row.
-4. If the thread row exists, Chief contributes `ENABLE_TOOL_SEARCH=false`.
-5. If the thread row is missing, Chief returns an empty array.
+4. If the thread row exists and its role is `chief`, Chief contributes `ENABLE_TOOL_SEARCH=false`. A Coordinator row has the role `chief`.
+5. If the thread row has any other role, Chief returns an empty array.
+6. If the thread row is missing, Chief returns an empty array.
 
 ### Brief Title Defaulting Flow
 
@@ -79,13 +80,16 @@ The domain exposes four entry points in `server.ts`:
 ### Provider Environment Contribution
 
 - Chief contributes `ENABLE_TOOL_SEARCH=false` only for the `claude-code` provider. Reason: this setting targets Claude Code tool deferral behavior.
-- Chief contributes `ENABLE_TOOL_SEARCH=false` only when a thread row exists in the store. Reason: unmanaged threads must not inherit Chief environment settings.
-- Chief contributes `ENABLE_TOOL_SEARCH=false` for every managed role, including Chief. Reason: all managed roles require upfront schema loading.
+- Chief contributes `ENABLE_TOOL_SEARCH=false` only when a thread row exists in the store and its role is `chief`. A Coordinator row has the role `chief`. Reason: unmanaged threads must not inherit Chief environment settings.
+- Chief contributes an empty array for a managed row with any other role. Reason: with deferral off, each such thread carries about 18k system-tool tokens and 3k to 23k MCP-tool tokens in every request.
+- For a managed row that is not a Chief row, the effective value of `ENABLE_TOOL_SEARCH` comes from another plugin, from user settings, or from the Claude Code default. Example: the account pooler contributes `true`. Reason: Chief does not own that value for these rows.
+- Chief never contributes `ENABLE_TOOL_SEARCH=true`. Reason: a proxy may not forward tool reference blocks.
 - Chief contributes an empty array when the thread row is absent. Reason: Chief cannot verify role ownership before thread insertion.
 - Chief contributes an empty array for any provider other than `claude-code`. Reason: other providers do not support this environment variable.
 - The environment contribution operates per session and leaves user settings unchanged. Reason: plugin environment variables must not alter global user configuration.
-- The preload instruction line acts as a fallback when another plugin wins environment precedence. Reason: the host selects the first plugin contributor for a variable name.
-- The preload instruction line acts as a fallback when a session starts before thread database insertion. Reason: the environment resolver queries the database before insertion finishes.
+- For a managed role other than Chief, the preload line is the primary mechanism that loads `chief_*` schemas. Reason: tool search stays on for these threads, and the exact `select:` line loads their one to three tools.
+- For the Chief role, the preload instruction line acts as a fallback when another plugin wins environment precedence. Reason: the host selects the first plugin contributor for a variable name.
+- For the Chief role, the preload instruction line acts as a fallback when a session starts before thread database insertion. Reason: the environment resolver queries the database before insertion finishes.
 
 ### Title Defaulting and Input Validation
 
@@ -113,9 +117,11 @@ The domain exposes four entry points in `server.ts`:
 
 ## Trade-offs
 
-- Disabling tool search deferral increases prompt token consumption for managed threads. Full tool schemas load at session start rather than on demand.
+- Disabling tool search deferral increases prompt token consumption. Full tool schemas load at session start rather than on demand. This cost applies only to Chief threads.
+- A managed thread that is not a Chief thread may call a deferred `chief_*` tool before it loads the schema, if it ignores the preload line. Chief accepts this risk for the token saving.
 - The keyword query `+chief` for Chief does not guarantee exact tool name resolution. Third-party tools containing `chief` in their name could match the query.
 
 ## Related Decisions
 
+- [Managed threads keep tool search](../decisions/2026-11-11-managed-threads-keep-tool-search.md)
 - [Coordinator stays a Chief row with two nullable columns](../decisions/2026-11-10-coordinator-stays-chief-row.md)

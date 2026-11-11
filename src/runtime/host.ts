@@ -136,9 +136,10 @@ export function registerHost(ctx: Ctx) {
     };
   });
 
+  // Chief rows only (Coordinators included): their keyword preload line is not exact. Managed roles keep tool search; their `select:` preload line loads their chief_* schemas, which saves ~18k+ tokens per request.
   // Best-effort: another plugin's ENABLE_TOOL_SEARCH (account-pool) may win, and a session before insertThread gets none; the preload line is the fallback.
   bb.providers.experimental_contributeEnv("claude-code", ({ threadId }) =>
-    store.get(threadId) ? [{ name: "ENABLE_TOOL_SEARCH", value: "false", reason: "Chief-managed threads call chief_* tools before a deferred schema loads" }] : []);
+    store.get(threadId)?.role === "chief" ? [{ name: "ENABLE_TOOL_SEARCH", value: "false", reason: "Chief threads call chief_* tools before a deferred schema loads" }] : []);
 
   bb.rpc.register(rpcContract, {
     status: () => ({ sectionId: ctx.storedSectionId(), threads: store.all().map(ctx.toManaged) }),
