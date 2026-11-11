@@ -1,4 +1,4 @@
-import { acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
+import { ATTACH_DEFINITION, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
@@ -111,9 +111,11 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       const escalate = outputs.tools.find((tool) => tool.name === "chief_escalate") as any;
       expect(JSON.stringify(escalate)).toContain("merge");
       // Authorized Coordinator deltas (COORD-2/5/6), each asserted exactly, then removed: chief_coordinate; chief_spawn's optional projectId;
-      // chief_escalate's optional threadId and its one added description sentence.
+      // chief_escalate's optional threadId and its one added description sentence; and (#213) chief_attach, asserted in full.
       const coordinate = outputs.tools.find((tool) => tool.name === "chief_coordinate");
       expect(coordinate).toBeDefined();
+      const attach = outputs.tools.find((tool) => tool.name === "chief_attach");
+      expect({ description: attach?.description, inputSchema: attach?.inputSchema }).toEqual(ATTACH_DEFINITION);
       const spawn = JSON.parse(JSON.stringify(outputs.tools.find((tool) => tool.name === "chief_spawn")));
       expect(spawn.inputSchema.properties.projectId.description).toBe("Coordinator only: the project the new Chief works in. Defaults to your own project.");
       expect(spawn.inputSchema.required).not.toContain("projectId");
@@ -124,7 +126,7 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       stripped.inputSchema.required = ["threadId", ...stripped.inputSchema.required];
       expect(stripped.description.endsWith(SENTENCE)).toBe(true);
       stripped.description = stripped.description.slice(0, -SENTENCE.length);
-      return { ...outputs, tools: outputs.tools.filter((tool) => tool !== coordinate).map((tool) => (tool === escalate ? stripped : tool.name === "chief_spawn" ? spawn : tool)) };
+      return { ...outputs, tools: outputs.tools.filter((tool) => tool !== coordinate && tool !== attach).map((tool) => (tool === escalate ? stripped : tool.name === "chief_spawn" ? spawn : tool)) };
     };
     // [name, mode, whether the supervisor's one cached availability probe is expected]: off never probes; unmapped may (the probe runs before
     // any unit is read); a mapped project with units must.
@@ -146,6 +148,8 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       for (const tool of shown) acceptSpecLaneWording(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       for (const tool of shown) acceptReviewerToolDelta(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       for (const tool of shown) acceptRetestDelta(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
+      // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.
+      for (const tool of shown) acceptEvidenceOnlyDelta(tool, tool.name);
       expect(shown, `${name}: tool schemas`).toEqual(baseSchemas);
     }
   });

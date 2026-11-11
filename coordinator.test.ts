@@ -7,7 +7,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { MIGRATIONS } from "./src/db/migrations";
 import { loadBaseBuild } from "./scripts/loadBaseBuild";
-import { acceptCoreRuleTrim, acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
+import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -977,9 +977,14 @@ describe("Coordinator", () => {
     test.each(["codex", "claude-code"] as const)("%s configure: a plain unlinked Chief = base plus exactly the authorized deltas", (provider) => {
       requireBase();
       const [was, now] = [base.configure[provider], structuredClone(head.configure[provider])];
-      // chief_coordinate sits right after chief_spawn; the coordinator skill is added; both asserted, then dropped.
+      // chief_coordinate sits right after chief_spawn and chief_attach (#213, exact definition) right after chief_coordinate; the coordinator skill is added; all asserted, then dropped.
       const names = now.tools.map((tool) => tool.name);
       expect(names[names.indexOf("chief_spawn") + 1]).toBe("chief_coordinate");
+      expect(names[names.indexOf("chief_coordinate") + 1]).toBe("chief_attach");
+      const attach = now.tools.find((tool) => tool.name === "chief_attach")!;
+      expect({ description: attach.description, inputSchema: attach.inputSchema }).toEqual(ATTACH_DEFINITION);
+      // Remove only the one checked chief_attach; a duplicate stays and fails the exact tools equality below.
+      now.tools.splice(names.indexOf("chief_coordinate") + 1, 1);
       now.tools = now.tools.filter((tool) => tool.name !== "chief_coordinate");
       expect(now.skills).toEqual([...was.skills, "coordinator"]);
       now.skills = was.skills;
@@ -1001,13 +1006,15 @@ describe("Coordinator", () => {
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
       for (const tool of now.tools) acceptReviewerToolDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       for (const tool of now.tools) acceptRetestDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
+      // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.
+      for (const tool of now.tools) acceptEvidenceOnlyDelta(tool, tool.name);
       expect(now.tools).toEqual(was.tools);
-      // Instructions: only the preload line's max_results moves by one (claude-code); codex is byte-identical.
+      // Instructions: only the preload line's max_results moves by two (claude-code: chief_coordinate and chief_attach); codex is byte-identical.
       now.instructions = acceptCoreRuleTrim(acceptPlanningLine(now.instructions, was.instructions), was.instructions);
       const preload = (config: Config) => config.instructions.split("\n").filter((line) => line.includes("ToolSearch"));
       if (provider === "codex") expect(preload(was)).toEqual([]);
       else expect(preload(was)).toHaveLength(1);
-      expect(now.instructions.replace(`max_results ${was.tools.length + 1}`, `max_results ${was.tools.length}`)).toBe(was.instructions);
+      expect(now.instructions.replace(`max_results ${was.tools.length + 2}`, `max_results ${was.tools.length}`)).toBe(was.instructions);
       expect(now.skills).toEqual(was.skills);
     });
 
@@ -1062,7 +1069,7 @@ describe("Coordinator", () => {
       expect(line.endsWith(`query "+chief", max_results 3`)).toBe(true);
     });
 
-    test.each(["codex", "claude-code"] as const)("%s: a linked child is a plain Chief minus chief_coordinate, plus exactly one escalate line", async (provider) => {
+    test.each(["codex", "claude-code"] as const)("%s: a linked child is a plain Chief minus chief_coordinate and chief_attach, plus exactly one escalate line", async (provider) => {
       const state = await setup({ rules: `${MARKER}\n- Keep rules small.` });
       const plain = await make(state);
       const coord = await coordinator(state);
@@ -1071,7 +1078,7 @@ describe("Coordinator", () => {
       expect(plainConfig.instructions.length).toBeLessThan(4000);
       expect(plainConfig.skills).toEqual(["chief", "coordinator"]);
       expect(childConfig.skills).toEqual(["chief"]);
-      expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate"));
+      expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate" && name !== "chief_attach"));
       const lines = childConfig.instructions.split("\n");
       const added = lines.filter((line) => line.startsWith("Coordinator "));
       expect(added).toEqual([`Coordinator ${coord} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`]);

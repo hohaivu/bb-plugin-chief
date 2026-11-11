@@ -309,7 +309,7 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_coordinate", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_coordinate", "chief_attach", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
     expect(chief.skills).toEqual(["chief", "coordinator"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker", "chief-role-worker"]);

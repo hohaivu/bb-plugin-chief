@@ -7,7 +7,7 @@ import plugin from "./server";
 import { completeWorker, configurationContext, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { acceptCoreRuleTrim, acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
+import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 
 provideSdk(sdkTesting);
@@ -89,7 +89,7 @@ describe("tool-call stability", () => {
   // Contract: non-Claude preservation and Claude preservation, against base 7178582 through resolveAgentConfiguration.
   // Allowed differences: (a) title leaves `required` and gets a new description on chief_delegate/plan/consult/spawn;
   // (b) claude-code: the one preload line; (c) everything else, including every codex instruction, is identical; (e) chief_escalate
-  // gains the optional boolean `merge` (tracker spec), the only schema change of that feature; (g) Chief's four trimmed core rules (acceptCoreRuleTrim);
+  // gains the optional boolean `merge` (tracker spec), the only schema change of that feature; (i) a plain Chief also gets chief_attach right after chief_coordinate (#213); (g) Chief's four trimmed core rules (acceptCoreRuleTrim);
   // (h) the SDK instruction cap moved from 4096 to 32768 (SDK 0.6.132), so a base text cut at 4096 is a prefix of the head text.
   // Regression: any stray change to tool selection or order, to a tool schema, to codex instructions or to claude instructions.
   test("tool-config oracle: head equals base 7178582 apart from the title schema, chief_escalate's optional merge field and the claude-code preload line", async () => {
@@ -112,12 +112,19 @@ describe("tool-call stability", () => {
     // Each is checked exactly here, then dropped so the rest still compares against base.
     expect(now.catalog["chief_coordinate"]).toBeDefined();
     delete now.catalog["chief_coordinate"];
+    // Allowed difference (i), #213: a plain Chief also gains chief_attach right after chief_coordinate; its definition is asserted in full, then dropped.
+    expect(now.catalog["chief_attach"]).toEqual(ATTACH_DEFINITION);
+    delete now.catalog["chief_attach"];
     for (const entry of now.entries) {
       const plainChief = entry.key.includes("| chief |");
       expect(entry.tools.includes("chief_coordinate"), entry.key).toBe(plainChief);
+      expect(entry.tools.includes("chief_attach"), entry.key).toBe(plainChief);
       if (!plainChief) continue;
       expect(entry.tools[entry.tools.indexOf("chief_spawn") + 1], entry.key).toBe("chief_coordinate");
+      expect(entry.tools[entry.tools.indexOf("chief_coordinate") + 1], entry.key).toBe("chief_attach");
       expect(entry.skills, entry.key).toEqual(["chief", "coordinator"]);
+      // Remove only the one checked chief_attach; a duplicate stays and fails the exact tools comparison against base.
+      entry.tools.splice(entry.tools.indexOf("chief_coordinate") + 1, 1);
       entry.tools = entry.tools.filter((name) => name !== "chief_coordinate");
       entry.skills = ["chief"];
     }
@@ -145,6 +152,8 @@ describe("tool-call stability", () => {
       acceptSpecLaneWording(definition, base.catalog[name], name);
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
       acceptRetestDelta(definition, base.catalog[name], name);
+      // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.
+      acceptEvidenceOnlyDelta(definition, name);
       if (!titleTools.includes(name)) { expect(definition, name).toEqual(base.catalog[name]); continue; }
       const old = structuredClone(base.catalog[name]!);
       const next = structuredClone(definition);
@@ -172,8 +181,8 @@ describe("tool-call stability", () => {
       const preloaded = entry.key.includes("| claude-code |") && entry.tools.length > 0;
       if (preloaded) {
         expect(preloadLine(entry), entry.key).toHaveLength(1);
-        // Allowed differences (d) and (f): the base snapshot predates chief_sync; a plain Chief's preload asks for chief_sync and chief_coordinate on top of it.
-        if (entry.key.includes("| chief |")) expect(preloadLine(entry)[0], entry.key).toMatch(new RegExp(`max_results ${old.tools.length + 2}$`));
+        // Allowed differences (d), (f) and (i): the base snapshot predates chief_sync; a plain Chief's preload asks for chief_sync, chief_coordinate and chief_attach on top of it.
+        if (entry.key.includes("| chief |")) expect(preloadLine(entry)[0], entry.key).toMatch(new RegExp(`max_results ${old.tools.length + 3}$`));
       }
       if (!entry.instructions || !old.instructions) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
       const restored = accepted(preloaded ? withoutPreload(entry.instructions) : entry.instructions);

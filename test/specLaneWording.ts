@@ -73,3 +73,27 @@ export function acceptRetestDelta(now: any, was: any, name: string) {
   delete now.inputSchema.properties.retestSkipped;
   now.description = was.description;
 }
+
+// #214: chief_delegate gains the optional boolean evidenceOnly, with this exact description (src/tools/shapes.ts). The one authorized delta, asserted exactly and then removed.
+export const EVIDENCE_ONLY_PROPERTY = {
+  description: "Tester only: the brief asks for run evidence (commands on given commits, exit statuses, comparison) and no commits. Not inherited through replaces:.",
+  type: "boolean",
+};
+/** Asserts chief_delegate carries exactly the evidenceOnly property (optional, exact text), then removes it so the rest still compares against base. Other tools are untouched. Mutates `tool`. */
+export function acceptEvidenceOnlyDelta(tool: any, name: string) {
+  if (name !== "chief_delegate") return;
+  const properties = tool.inputSchema.properties;
+  if (JSON.stringify(properties.evidenceOnly) !== JSON.stringify(EVIDENCE_ONLY_PROPERTY) || (tool.inputSchema.required ?? []).includes("evidenceOnly")) throw new Error("chief_delegate.evidenceOnly: must be the one optional boolean with the #214 description");
+  delete properties.evidenceOnly;
+}
+
+// #213: a plain, unlinked Chief gains chief_attach right after chief_coordinate. The full definition, asserted exactly by every tool-config oracle before it removes the tool.
+export const ATTACH_DEFINITION = {
+  description: "Coordinator only: link existing Chief threads as your children, in any project. Give the thread ids the owner names (1-20). One result line per id; a bad id never blocks the others. An id that is not a Chief row needs `bb chief adopt --thread <id>` first.",
+  inputSchema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    properties: { threadIds: { minItems: 1, maxItems: 20, type: "array", items: { type: "string", minLength: 1 } } },
+    required: ["threadIds"],
+  },
+};
