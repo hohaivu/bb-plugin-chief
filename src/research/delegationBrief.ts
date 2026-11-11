@@ -132,10 +132,12 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   const specWriter = isWriter(kind);
   const side = specWriter && lane === "side" && branch !== undefined;
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
+  // A tester brief drops an empty list's section; every other kind keeps "None stated.".
+  const listed = (heading: string, values?: string[]) => tester && !values?.length ? [] : ["", heading, bullets(values)];
   const render = (mission: string, contextText?: string) => [
     "## Mission", mission,
-    "", "## Success criteria", bullets(params.successCriteria),
-    "", "## Constraints", bullets(params.constraints),
+    ...listed("## Success criteria", params.successCriteria),
+    ...listed("## Constraints", params.constraints),
     ...(contextText ? ["", "## Context", contextText] : []),
   ].join("\n");
   const brief = render(params.mission, context);
@@ -192,7 +194,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ...specDocs,
       ...(tester ? [
         "- Before you derive tests, for each Spec Writer listed above run `git merge-base --is-ancestor <Fold head> HEAD`, using the Fold head from that writer's report. If it fails, report blocked: that writer's docs are not in your HEAD. A report with no Fold head (an implementation-lane writer) needs no check.",
-        "- Code that contradicts the docs: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: worker)`. Docs that are wrong: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.",
+        "- Code that contradicts the docs is product code that is wrong: follow the product-code rule in `## Test work`. Docs that are wrong: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.",
         ...(baseline ? ["- A new spec's baseline (the current behaviour a Spec Writer documented, listed in its report) is a source for regression tests, the same as the Spec delta's contracts. When the Spec delta changes a baseline statement, test only the delta's value. Behaviour under a Spec Writer's Open questions is not a contract."] : []),
       ] : [
         specWave
@@ -202,23 +204,25 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ]),
     ] : []),
     ...(contracts && !specWriter ? [
-      "", "## Contracts to verify", clip(contracts, 3_000),
+      "", "## Contracts to verify", contracts,
       "Keep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.",
     ] : []),
     ...(verifyCommand !== null && !specWriter ? [
       "", "## Verify command",
       // Fence longer than any backtick run so a ``` line in the command cannot close it.
       ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
-      "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
-      tester
-        ? "If this command runs the whole test suite and this brief does not say the owner asked for that, do not run it: list it as \"not run: full suite not asked for\" under Automated Verification."
-        : "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
+      ...(tester ? [
+        "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure that also occurs at your Base commit is a baseline: list it and do not fix it. Any other failure in product code follows the product-code rule in `## Test work`. If this command runs the whole test suite, run it only when your mission or `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".",
+      ] : [
+        "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
+        "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
+      ]),
     ] : []),
     ...(branch || issueUrl || prUrl ? [
       "", "## Git workflow",
       ...(side ? [`Your worktree is on a side branch cut from ${branch}. Commit only docs/ changes on it. The only push you make is the fold into ${branch}, in \`## Fold\`: never push the side branch or any other branch.`]
         : branch ? [
-          `Before you read any file, sync this checkout with ${branch}: require a clean tree (\`git status --porcelain\` prints nothing), run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`, and record \`Local sync: <sha>\` (\`git rev-parse HEAD\`). If the tree is not clean or the fast-forward fails, report blocked. Never use autostash, never force, never touch another worktree.`,
+          `Before you read any file, sync this checkout with ${branch}: require a clean tree (\`git status --porcelain\` prints nothing), run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`, and record \`${tester ? "Base commit" : "Local sync"}: <sha>\` (\`git rev-parse HEAD\`). If the tree is not clean or the fast-forward fails, report blocked. Never use autostash, never force, never touch another worktree.`,
           `Your worktree is based on ${branch}. Commit on the current worktree branch and push every commit to ${branch}: \`git push origin HEAD:${branch}\`. Never push any other branch: Chief, the pull request and the reviewer read only ${branch}. If that push is rejected because ${branch} moved, run \`git fetch origin ${branch}\` then \`git rebase --no-autostash origin/${branch}\` on a clean tree and push again; never force-push.`,
         ] : []),
       ...(prior ? [`This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them.${prior.result ? "" : ` Its last report: bb chief inspect ${prior.thread_id}`}`] : []),
@@ -240,29 +244,41 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(prior?.result ? [
       "", "## Predecessor's last report",
-      prior.summary ?? clip(prior.result, 1_500),
-      ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
-      ...(prior.recommendation ? [`Recommendation: ${clip(prior.recommendation, 600)}`] : []),
+      ...(tester ? ((text) => {
+        const sha = (label: string) => text.match(new RegExp(`${label}:\\s*\`?([0-9a-f]{7,40})`))?.[1];
+        const head = sha("Head commit");
+        const base = sha("Base commit");
+        return [head
+          ? `Head commit: ${head}.${base ? ` Changed files: \`git diff --name-only ${base}..${head}\`.` : ""}`
+          : "Its report names no Head commit: read the full report."];
+      })([prior.result, prior.blocker, prior.summary].filter(Boolean).join("\n")) : [
+        prior.summary ?? clip(prior.result, 1_500),
+        ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
+        ...(prior.recommendation ? [`Recommendation: ${clip(prior.recommendation, 600)}`] : []),
+      ]),
       ...(prior.report_path ? [`Full report: ${prior.report_path}`] : []),
     ] : []),
     "", "## Working contract",
     "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file or verdict file, read that file in full too before starting.",
-    "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
+    tester
+      ? "- Own the requested outcome in this worktree. Keep scope narrow."
+      : "- Own the requested outcome in this worktree. Keep scope narrow and verify the user journey or closest executable seam.",
     side
       ? "- Commit docs/ changes on your worktree branch after each meaningful step (a passing sub-change, before any risky edit, before reporting). Push only through the `## Fold` steps: the folded branch is what the reviewer sees."
       : "- Commit and push after each meaningful step (a passing sub-change, before any risky edit, before reporting); the pushed branch is your checkpoint and what the reviewer sees.",
     "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
     "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
     ...(planContextLine !== undefined ? ["- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`."] : []),
-    ...(tester ? ["- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, compare old and new behaviour through tests on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression."] : []),
     "- A blocked report must include the blocker and your recommended decision or next action.",
-    "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".",
+    ...(tester ? [] : ["- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\"."]),
     ...(specWriter ? [
       "- Only the Tester writes tests. Never write, edit or run tests, builds or linters. Change only files under docs/: never code, tests, config or root guideline files.",
       "- Every commit you make carries the trailer Chief-Spec-Writer: commit with git commit --trailer \"Chief-Spec-Writer: $BB_THREAD_ID\". A rebase keeps it. Never squash or amend it away.",
       "- When your mission names docs/ commits that another role made, check each one. Correct the docs in your own commits (a revert is a correction). List each such commit's sha under \"## Adopted docs commits\" in your ready result.",
     ] : [
-      "- Never change docs/: only a Spec Writer does, on every wave and on unplanned work. When the task needs a docs/ change, do not make it: list it under \"## Docs needed\" in your ready result and its summary. Chief routes it to a Spec Writer.",
+      tester
+        ? "- Never change docs/: only a Spec Writer does."
+        : "- Never change docs/: only a Spec Writer does, on every wave and on unplanned work. When the task needs a docs/ change, do not make it: list it under \"## Docs needed\" in your ready result and its summary. Chief routes it to a Spec Writer.",
       ...(tester ? [] : [
         "- Never write, edit or run tests of any kind (unit, integration, end-to-end, screenshot or golden); a tester does. Verify with lint/analyze, build and the Verify command.",
         "- When the change touches code, run the project's lint/analyze and build after your last commit (and the Verify command when given) and list each with its exit status under Automated Verification. Reviewers read code only and never run them, and Chief may complete without a review, so your recorded runs are the only build/lint evidence.",
@@ -285,7 +301,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Test work",
       "- Follow the `chief-role-tester` skill: it is your testing policy and wins over the shared skill's verification lines.",
       "- Change only test files, fixtures, test helpers and test config; never product code.",
-      "- When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report.",
+      ...(branch === undefined ? ["- When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report."] : []),
       "- Ready: tests committed and pushed; Automated Verification lists each filtered test command with its exit status and maps each test to the contract it proves.",
       `- Blocked when a test fails because product code is wrong: commit and push the tests, name the failing tests, the filtered command, its exit status and an output excerpt, and recommend \`chief_delegate (replaces: <your thread id>, kind: worker)\` with the failures as its mission.`,
       "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.",
