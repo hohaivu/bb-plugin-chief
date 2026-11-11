@@ -38,22 +38,23 @@ export function acceptPlanningLine(nowText: string, wasText: string) {
   });
   return lines.join("\n");
 }
-/** Chief's core rules (host.ts) were trimmed so a linked Chief's rules end inside the 4096-char cut. Each trimmed line must show the new words and none of the old, then base wins. */
-const TRIMMED_RULES: [string, RegExp, RegExp, [string, string]?][] = [
-  ["- Fresh worker:", /\(same worktree, branch, PR; so is a plan chain's next wave\)/, /a plan chain has exactly one of each/],
-  ["- Review:", /when a ready alert says to/, /when a worker's ready alert says to/],
-  ["- Tests, docs:", /^- Tests, docs: only a tester writes or runs tests \(a plan's test wave, or chief_delegate replaces: the worker, kind: tester\); only a Spec Writer changes docs\/, on every wave and unplanned work \(chief skill\)\.$/, /Spec waves: see the chief skill|a tester does, as a plan's test wave/],
-  // The one authorized Skips change: the base line with exactly this phrase swapped, byte for byte. Any other difference in the line (such as a dropped lint/build/verify sentence) throws.
-  ["- Skips:", /Small, low-risk changes suit a skip\./, /Guidance, not a rule/, ["Guidance, not a rule: small", "Small"]],
+/** Chief's core rules (host.ts) were trimmed so a linked Chief's rules end inside the SDK cut. Each trim is one exact edit of the base line, so any other byte on the line still fails. */
+const TEST_DOCS_LINE = "- Tests, docs: only a tester writes or runs tests (a plan's test wave, or chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).";
+const TRIMMED_RULES: [string, string, (old: string) => string][] = [
+  ["- Fresh worker:", "- Fresh worker:", (old) => old.replace("(same worktree, branch, PR; a plan chain has exactly one of each, so its next wave is a replaces: too)", "(same worktree, branch, PR; so is a plan chain's next wave)")],
+  ["- Review:", "- Review:", (old) => old.replace("when a worker's ready alert says to", "when a ready alert says to")],
+  // The base line is "- Tests: ..."; the head line replaces it whole, so it must equal the one authorized text.
+  ["- Tests, docs:", "- Tests:", () => TEST_DOCS_LINE],
+  ["- Skips:", "- Skips:", (old) => old.replace("Guidance, not a rule: small", "Small")],
 ];
 export function acceptCoreRuleTrim(nowText: string, wasText: string) {
   const old = wasText.split("\n");
   return nowText.split("\n").map((line, index) => {
     const rule = TRIMMED_RULES.find(([prefix]) => line.startsWith(prefix));
     if (!rule || line === old[index]) return line;
-    if (!rule[1].test(line) || rule[2].test(line)) throw new Error(`${rule[0]} trimmed wording must match ${rule[1]} and not ${rule[2]}`);
-    if (rule[3] && old[index]!.replace(rule[3][0], rule[3][1]) !== line) throw new Error(`${rule[0]} must differ from base only by replacing "${rule[3][0]}" with "${rule[3][1]}"`);
-    return old[index]!;
+    const was = old[index] ?? "";
+    if (!was.startsWith(rule[1]) || rule[2](was) === was || rule[2](was) !== line) throw new Error(`${rule[0]} must differ from base only by replacing the authorized wording`);
+    return was;
   }).join("\n");
 }
 /** Asserts the final catalog says each reworded thing and none of the old, with no preservation baseline needed. */
