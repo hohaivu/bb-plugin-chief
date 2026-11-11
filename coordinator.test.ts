@@ -8,6 +8,7 @@ import plugin from "./server";
 import { MIGRATIONS } from "./src/db/migrations";
 import { loadBaseBuild } from "./scripts/loadBaseBuild";
 import { acceptCoreRuleTrim, acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
+import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -998,6 +999,7 @@ describe("Coordinator", () => {
       // Plan 2 contract 6: the Spec Writer wording of chief_delegate, chief_complete and chief_skip_specs moved; asserted, then restored to base.
       for (const tool of now.tools) acceptSpecLaneWording(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
+      for (const tool of now.tools) acceptReviewerToolDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       for (const tool of now.tools) acceptRetestDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       expect(now.tools).toEqual(was.tools);
       // Instructions: only the preload line's max_results moves by one (claude-code); codex is byte-identical.

@@ -8,6 +8,7 @@ import { completeWorker, configurationContext, delegate, disposeAll, setup, star
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { acceptCoreRuleTrim, acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
+import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -139,6 +140,8 @@ describe("tool-call stability", () => {
     const SPAWN_TITLE = "A literal task label, used in the new Chief's thread title. Optional: defaults to the first line of request, clipped to 160 characters.";
     for (const [name, definition] of Object.entries(now.catalog)) {
       // Plan 2 contract 6: the Spec Writer wording moved; asserted, then restored to base so the rest still compares.
+      // Reviewer-prompt wave: chief_review's focus/acceptedGaps and chief_report's plan flags; asserted, then restored to base (before the wording restore below rewrites the plan text).
+      acceptReviewerToolDelta(definition, base.catalog[name], name);
       acceptSpecLaneWording(definition, base.catalog[name], name);
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
       acceptRetestDelta(definition, base.catalog[name], name);
