@@ -196,7 +196,8 @@ Shared worktree cleanup coordinates action ownership:
 Only a Spec Writer changes `docs/`. The sections above define the lanes. This section defines who may change docs, how the plugin attributes a docs commit, and when `skipReview` refuses.
 
 - A worker, designer, or tester never changes `docs/`, on any plan wave or on unplanned work. Reason: the owner gives docs to the Spec Writer.
-- Every non-writer brief states the rule and its route. A needed docs change goes under `## Docs needed` in the ready result, and Chief delegates a Spec Writer. Reason: a needed change must reach the owner of docs.
+- A worker or designer brief states the rule and its route. A needed docs change goes under `## Docs needed` in the ready result, and Chief delegates a Spec Writer. Reason: a needed change must reach the owner of docs.
+- A tester brief states the rule only. Its route lives in the `chief-role-tester` skill, which the brief orders the tester to follow. Reason: a tester brief carries no worker-only block, and the route keeps one owner.
 - `admitDelegation` admits an implementation-lane Spec Writer on any non-design wave. The writer replaces the chain owner. The wave can be a non-spec wave, a waived spec wave, a test wave, or a spec wave whose prior row is the worker. Reason: every non-design wave needs a legal docs route, and the chain owner holds the checkout.
 - `admitDelegation` rejects a Spec Writer that replaces a row other than the chain owner. The text names the call that replaces the owner. Reason: a second row on the checkout would break the single implementation owner.
 - `admitDelegation` rejects a Spec Writer on a design-only wave. The text names the successor wave and the call for it. Reason: a design wave changes no repository files, so its docs need goes to the successor wave.
@@ -214,6 +215,30 @@ Only a Spec Writer changes `docs/`. The sections above define the lanes. This se
 - When the check cannot run, `skipReview` proceeds and the `chief_complete` reply says `docs/ check skipped: <reason>`. The causes are no local checkout, a remote host, an unreadable pull request, no task branch, a failed fetch, or the 20 second deadline. Reason: Chief decided to fail open with an explicit note.
 - The check does not run on an approve or an `override`. Reason: an approve had the reviewer rule, and an override is Chief's stated decision.
 - `docsCommits` in `src/review/impactSlice.ts` reads the history and never throws. A failure returns a skip reason.
+
+### Brief Contents
+
+`workerBrief` in `src/research/delegationBrief.ts` renders the brief of every kind. `admitDelegation` in `src/plan/planLifecycle.ts` fills the source list for the brief. The "prior row" is the row that a delegation replaces.
+
+- Every brief renders `## Contracts to verify` in full, with no 3,000-character cut. Reason: the brief says "Keep every item above", and a cut list drops items. The wave body limit of 64,000 characters bounds the size.
+- A Spec Writer brief lists each wave of the chain under `## Read-only context`, with the plan path and its contracts clipped at 3,000 characters. Reason: the writer reads the contracts of the chain as source text.
+- A planned tester brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Source of truth for test cases`. It lists the approved-design line when one exists. It lists no contract text. Reason: the tester reads the plan files, and its own contracts appear once.
+- An unplanned tester brief keeps the head brief as its source of truth, clipped in the middle at 4,000 characters. Reason: no plan file exists.
+- `admitDelegation` admits and refuses the same calls for a tester as for every other kind. Only the source list of a tester changes. Reason: the change affects text, not admission.
+
+A tester brief has these rules:
+
+- It omits `## Success criteria` and `## Constraints` when the list is empty. Other kinds always render both. Reason: an empty section adds only the text "None stated."
+- `## Verify command` keeps the command fence and has one rule. The tester lists the exit status under Automated Verification and never changes product code to make the command pass. Reason: the worker rule "Fix the work until it exits 0" contradicts the ban on product code.
+- A failure that also occurs at the Base commit is a baseline. The tester lists it and does not fix it. Reason: the tester must not change product code.
+- The tester runs a command for the whole suite only when its mission or `## Contracts to verify` asks for it. Otherwise it lists the command as "not run: full suite not asked for". Reason: the full suite runs on request only. A contract such as `npx vitest run` exit 0 counts as a request.
+- It tells the tester to record the synced `git rev-parse HEAD` as `Base commit` one time. With a branch, the sync sentence holds the instruction. Without a branch, `## Test work` holds it. A worker brief records it as `Local sync`. Reason: one commit needs one record.
+- `## Test work` holds the one procedure for a test that fails because product code is wrong. It recommends `chief_delegate (... kind: worker)`. The `## Spec` block points to that procedure for code that contradicts the docs. Reason: two procedures for one failure conflict.
+- The `## Spec` block keeps the route for wrong docs: report blocked and recommend `kind: spec-writer`. Reason: only a Spec Writer changes docs.
+- `## Predecessor's last report` gives the Head commit of the prior row and the `git diff --name-only <base>..<head>` command when a Base commit is found. It also gives the path of the full report. It never quotes the summary, the blocker, or the recommendation. Reason: the tester needs the commit and the full report, not the narrative of the prior row.
+- When the prior report names no Head commit, the section says so and orders the tester to read the full report. Reason: the full report holds the facts that the section omits.
+- The working contract tells the tester to keep scope narrow. It omits the user-journey wording, the `## Docs needed` route, and the re-plan line. It says "Never change docs/". Reason: those lines belong to workers.
+- No brief renders the refactor oracle rule. The `chief-role-tester` skill holds it. Reason: the rule applies to the tester role, so the skill owns it once.
 
 ### Retest Debt
 
