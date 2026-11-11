@@ -122,22 +122,31 @@ export type WorkerBriefInput = {
   specWave?: boolean;
   /** side: a Spec Writer in its own side worktree, folding docs/ onto the chain branch. Absent or implementation: every other row. */
   lane?: "side" | "implementation";
+  /** Tester only: a compact no-commit evidence brief. Optional: older callers omit it. */
+  evidenceOnly?: boolean;
 };
 
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation" } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false } = input;
   const tester = kind === "tester";
+  const evidence = evidenceOnly && tester;
   const specWriter = isWriter(kind);
   const side = specWriter && lane === "side" && branch !== undefined;
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
+  const at = (entry: Finding) => `${entry.file}${entry.line ? `:${entry.line}` : ""}`;
+  // Evidence mode: with no Chief constraints, the blocking findings' fixes become the constraints (each fix once).
+  const moved = evidence && !params.constraints?.length && findings?.result
+    ? (structured ?? []).filter((entry) => entry.severity === "blocking" && entry.fix)
+    : [];
+  const constraints = moved.length ? moved.map((entry) => `${at(entry)}: ${entry.fix}`) : params.constraints;
   // A tester brief drops an empty list's section; every other kind keeps "None stated.".
   const listed = (heading: string, values?: string[]) => tester && !values?.length ? [] : ["", heading, bullets(values)];
   const render = (mission: string, contextText?: string) => [
     "## Mission", mission,
     ...listed("## Success criteria", params.successCriteria),
-    ...listed("## Constraints", params.constraints),
+    ...listed("## Constraints", constraints),
     ...(contextText ? ["", "## Context", contextText] : []),
   ].join("\n");
   const brief = render(params.mission, context);
@@ -145,20 +154,24 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   // it judges against the criteria and constraints, which stay in full.
   const reviewerBrief = render(clip(params.mission, 1_500), context && clipMiddle(context, 1_500));
   const prompt = [
-    `You are the managed worker for “${title}”. Report to Chief thread ${chiefThreadId}.`,
+    `You are the managed ${evidence ? "tester" : "worker"} for “${title}”. Report to Chief thread ${chiefThreadId}.`,
     "", brief,
     ...(findings?.result ? [
       "", `## Review findings to fix (${findings.thread_id})`,
       ...(structured ? [
         ...(findings.verdict_path ? [`Verdict file: ${findings.verdict_path}`] : []),
-        ...findingLines(structured, "blocking"),
+        ...(evidence
+          ? structured.filter((entry) => entry.severity === "blocking").map((entry) => `- ${at(entry)} — ${entry.message}${entry.fix && !moved.includes(entry) ? ` (fix: ${entry.fix})` : ""}`)
+          : findingLines(structured, "blocking")),
         ...(structured.some((entry) => entry.severity === "nit") ? ["Optional nits:", ...findingLines(structured, "nit")] : []),
       ] : verdictPreview(findings)),
       ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
-      "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
-      "Do not apply a finding that is wrong, or that contradicts the brief or plan. List it in your ready result under `## Disputed findings`, with evidence: file:line, command output, or the brief or plan text it contradicts.",
-      "Nits are optional: fix one only when it is trivial and inside this task's scope.",
-      "An `[AMBIGUOUS: …]` item is a question for Chief, not a finding to fix.",
+      ...(evidence ? ["Verify each finding first; list one that does not hold under `## Disputed findings` with evidence. An `[AMBIGUOUS: …]` item is a question for Chief."] : [
+        "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
+        "Do not apply a finding that is wrong, or that contradicts the brief or plan. List it in your ready result under `## Disputed findings`, with evidence: file:line, command output, or the brief or plan text it contradicts.",
+        "Nits are optional: fix one only when it is trivial and inside this task's scope.",
+        "An `[AMBIGUOUS: …]` item is a question for Chief, not a finding to fix.",
+      ]),
     ] : []),
     ...(ruledOut.length ? [
       "", "## Already ruled out",
@@ -169,7 +182,9 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Wave",
       specWriter
         ? `Wave ${wave} of ${waveTotal}: ${side ? `you run in parallel with its worker, in your own worktree on a side branch cut from ${branch}` : "its worker continues from your branch once you report ready"}. Your work is only its \`## Spec delta\` and the docs rules in the \`chief-role-spec-writer\` skill. Name "Wave ${wave} of ${waveTotal}" in your ready result.`
-        : `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
+        : evidence
+          ? `Wave ${wave} of ${waveTotal}. Name "Wave ${wave} of ${waveTotal}" in your ready result.`
+          : `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
       waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
       ...(waveIndependent ? ["This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch."] : []),
       ...(implementsDesign !== null ? [`This wave implements the artboards that wave ${implementsDesign} drew and the owner approved. Read them through the design tool's MCP (read-only; never edit the design) and match them; the artboard names are in your mission or wave ${implementsDesign}'s report.`] : []),
@@ -179,12 +194,12 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Read-only context",
       "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below belong to the worker and the tester: never write code or tests for them.",
       ...specSources,
-    ] : specSources.length ? [
+    ] : specSources.length && !evidence ? [
       "", "## Source of truth for test cases",
       "Read each in full, with the docs they name. Derive every test case from these, never from the implementation.",
       ...specSources,
     ] : []),
-    ...((specDocs.length || specWave) && !specWriter ? [
+    ...((specDocs.length || specWave) && !specWriter && !evidence ? [
       "", "## Spec",
       tester
         ? "The committed docs are the source of truth. Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed. Derive tests from those docs and the plan contracts, not from the code."
@@ -203,11 +218,11 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
         "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
       ]),
     ] : []),
-    ...(contracts && !specWriter ? [
+    ...(contracts && !specWriter && !evidence ? [
       "", "## Contracts to verify", contracts,
       "Keep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.",
     ] : []),
-    ...(verifyCommand !== null && !specWriter ? [
+    ...(verifyCommand !== null && !specWriter && !evidence ? [
       "", "## Verify command",
       // Fence longer than any backtick run so a ``` line in the command cannot close it.
       ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
@@ -218,7 +233,8 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
         "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
       ]),
     ] : []),
-    ...(branch || issueUrl || prUrl ? [
+    ...(evidence && branch ? ["", "## Git workflow", `Before you read any file, on a clean tree run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`; if either fails, report blocked.`] : []),
+    ...(!evidence && (branch || issueUrl || prUrl) ? [
       "", "## Git workflow",
       ...(side ? [`Your worktree is on a side branch cut from ${branch}. Commit only docs/ changes on it. The only push you make is the fold into ${branch}, in \`## Fold\`: never push the side branch or any other branch.`]
         : branch ? [
@@ -242,7 +258,21 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "Record `Fold base: <U of the successful attempt>` and `Fold head: <the pushed sha>` in your report. When no docs change was needed, record `Fold: none` with Fold base and Fold head both equal to U.",
       "Never use autostash, never force, never touch another worktree.",
     ] : []),
-    ...(prior?.result ? [
+    ...(evidence && prior?.result ? [
+      "", "## Predecessor's last report",
+      prior.report_path ?? `bb chief inspect ${prior.thread_id}`,
+      ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
+    ] : []),
+    ...(evidence ? [
+      "", "## Evidence work",
+      "- This brief overrides the `chief-role-tester` skill: write no tests. Run only the commands your mission names, on the commits it names, in this worktree. Commit nothing, push nothing, edit no tracked file; never use stash, autostash or another worktree. Chief owns the forge.",
+      "- Record `git rev-parse HEAD` as `Head commit: <sha>` before any run.",
+      "- Base runs: `git switch --detach <base>` on a clean tree; afterwards `git switch -` and check HEAD equals Head commit. After each switch, reinstall dependencies if the lockfile differs, and reset any database or state the suites write.",
+      "- Run each command alone and record `echo exit=$?` right after it (before a pipe, `set -o pipefail`), with per-file pass counts.",
+      "- Ready: per command, base and head side by side (commit, exit status, pass counts); explain every difference, since an unexplained one is a regression. Before you report, HEAD equals Head commit and `git status --porcelain` prints nothing.",
+      "- Blocked: name the command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: tester)` for a wrong test, `kind: worker` for product code.",
+    ] : []),
+    ...(!evidence && prior?.result ? [
       "", "## Predecessor's last report",
       ...(tester ? ((text) => {
         const sha = (label: string) => text.match(new RegExp(`${label}:\\s*\`?([0-9a-f]{7,40})`))?.[1];
@@ -259,6 +289,10 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ...(prior.report_path ? [`Full report: ${prior.report_path}`] : []),
     ] : []),
     "", "## Working contract",
+    ...(evidence ? [
+      ...(findings?.result && findings.verdict_path ? ["- Read the verdict file in full."] : []),
+      "- Report with chief_report: state ready and a `result` listing each command, its commit and exit status under Automated Verification, and under Manual what only a human can confirm; also a `summary` of at most 800 characters. Only Chief can mark it complete.",
+    ] : [
     "- Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset. When the context above names a plan file or verdict file, read that file in full too before starting.",
     tester
       ? "- Own the requested outcome in this worktree. Keep scope narrow."
@@ -268,10 +302,11 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       : "- Commit and push after each meaningful step (a passing sub-change, before any risky edit, before reporting); the pushed branch is your checkpoint and what the reviewer sees.",
     "- Use chief_report with state ready and a non-empty result when your work is ready for Chief's verification. Only Chief can mark it complete.",
     "- A ready result names changed files by file:line, then splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm). Put all of that in `result`; also send a `summary` of at most 800 characters (outcome, changed files, verification commands with exit status, next action) — the alert shows only the summary and the full result goes to a file.",
+    ]),
     ...(planContextLine !== undefined ? ["- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`."] : []),
     "- A blocked report must include the blocker and your recommended decision or next action.",
     ...(tester ? [] : ["- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\"."]),
-    ...(specWriter ? [
+    ...(evidence ? [] : specWriter ? [
       "- Only the Tester writes tests. Never write, edit or run tests, builds or linters. Change only files under docs/: never code, tests, config or root guideline files.",
       "- Every commit you make carries the trailer Chief-Spec-Writer: commit with git commit --trailer \"Chief-Spec-Writer: $BB_THREAD_ID\". A rebase keeps it. Never squash or amend it away.",
       "- When your mission names docs/ commits that another role made, check each one. Correct the docs in your own commits (a revert is a correction). List each such commit's sha under \"## Adopted docs commits\" in your ready result.",
@@ -297,7 +332,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- In your report prose, name design nodes by layer name, never by raw node ID.",
       ...(designWave ? ["- Design-only wave: use Design tool mode. Draw or edit the artboards only; write no app code and change no repo files. In your ready result, list each artboard by layer name with its screenshot path so the owner can approve it."] : []),
     ] : []),
-    ...(tester ? [
+    ...(tester && !evidence ? [
       "", "## Test work",
       "- Follow the `chief-role-tester` skill: it is your testing policy and wins over the shared skill's verification lines.",
       "- Change only test files, fixtures, test helpers and test config; never product code.",

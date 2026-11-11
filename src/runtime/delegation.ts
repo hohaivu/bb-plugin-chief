@@ -196,6 +196,7 @@ export function createDelegation(ctx: Ctx) {
     const { kind, planPath, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, specSources, specDocs, baseline, specWave, lane, sideChain } = plans.admitDelegation({
       chiefId: chief.thread_id, prior, kind: params.kind, resolvedKind: resolved.kind, planThreadId, wave, branch: params.branch, prUrl: params.prUrl,
     });
+    if (params.evidenceOnly && kind !== "tester") throw new Error("evidenceOnly is only for a tester: pass kind: tester (CLI --kind tester), or drop evidenceOnly.");
     // A first side-lane writer folds onto the chain's one branch and pull request, whatever Chief passed.
     const branch = sideChain?.branch ?? resolved.branch;
     const prUrl = sideChain ? sideChain.prUrl ?? undefined : resolved.prUrl;
@@ -230,7 +231,7 @@ export function createDelegation(ctx: Ctx) {
     const { prompt, reviewerBrief } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
-      specDocs, specWave, lane,
+      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly,
     });
     // A first side-lane writer never reuses the chain's worktree: its own managed worktree is cut from the chain branch.
     const thread = await ctx.managedSpawn.launch(prepared, {
