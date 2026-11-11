@@ -110,10 +110,13 @@ describe("tester role", () => {
       expect(prompt).toContain("Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names");
       expect(prompt).toMatch(new RegExp(`Earlier here: [^.]*tester ${tester}[^.]*`));
       expect(prompt).not.toMatch(new RegExp(`Earlier here: [^.]*${writer}`));
-      expect(prompt).toContain(`check only its fold range, from the Fold base to the Fold head its report names`);
+      // Wave 1 states the Fold range rule once, under Docs ownership; the side-lane target line keeps the range and the scope-drift rule.
+      expect(prompt).toContain("check its Fold base..Fold head range (git diff <Fold base>..<Fold head> --stat); any path outside docs/ in it is scope drift");
+      expect(prompt).not.toContain("check only its fold range");
       // Wave 2 contract 5: `Fold: none` (equal endpoints) is an empty scope that never falls back to the writer's Base commit, and the
       // spec paragraph no longer says the docs were written before the worker implemented against them.
-      expect(prompt).toContain("`Fold: none` with equal Fold base and Fold head is an empty scope: there is nothing to check, and you never fall back to its Base commit");
+      expect(prompt).toContain("`Fold: none` with equal Fold base and Fold head is an empty scope: nothing to check, never fall back to its Base commit");
+      expect(prompt.split("`Fold: none`")).toHaveLength(2);
       expect(prompt).not.toMatch(/before the worker implemented against them|before its worker/);
 
       const plainState = await setup();
@@ -146,7 +149,7 @@ describe("tester role", () => {
       expect(items[0]).toBe("(1) code that contradicts the plan's contracts or the committed docs (a conflict that stale pre-plan specs cause is a docs finding);");
       expect(items[1]).toBe("(2) a test that contradicts them;");
       expect(items[2]).toBe("(3) a named Spec delta item that is missing or wrong in the final docs;");
-      expect(items[3]).toBe("(4) a docs/ ownership violation (see Docs ownership), except the docs/ commits inside a side-lane Spec Writer's Fold base..Fold head range (each report under `## Side-lane Spec Writers` names its range);");
+      expect(items[3]).toBe("(4) a docs/ ownership violation (see Docs ownership);");
       expect(items[4]).toMatch(/^\(5\) in new or changed docs prose only: no lead sentence saying what the domain is for;/);
       expect(items).toHaveLength(6);
       expect(items[5]).toBe("Content already correct needs no new commit. Unchanged existing docs are out of scope. A bypass never excuses landed docs that contradict the code. ASD-STE100 sentence rules (Simplified Technical English) are nits, never blocking.");
@@ -247,7 +250,7 @@ describe("tester role", () => {
       const chief = await start(state);
       await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chief.threadId));
       const planPrompt = state.spawned.at(-1).prompt as string;
-      expect(planPrompt).toContain("`{body, dependsOn, design?, test?, spec?}`");
+      expect(planPrompt).toContain("`{body, dependsOn, design?, test?, spec?, feature?, reshape?}`");
       expect(planPrompt).toContain("mark the implementation wave that makes the change `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full). Test waves are never `spec: true`.");
       expect(planPrompt).not.toContain("mark its test wave `spec: true`");
       expect(planPrompt).not.toContain("before the wave's worker runs");
@@ -362,8 +365,22 @@ describe("tester role", () => {
       const OLD_SPEC = "who commits the docs before the wave's worker runs. Test waves";
       const NEW_SPEC = "who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full). Test waves";
       const OLD_PHASES = "except that a `spec: true` implementation wave runs its Spec Writer before its worker.";
+      // Wave 1 of the reviewer-prompt plan (step 5b, 6b): the Contracts bullet gains the checkable-contract sentence (2), the plan-field bullet lists the two
+      // flags and gains the marking sentence (2 each), the reshape bullet gains "Mark it `reshape: true`." (2).
+      const CHECKABLE = " Write each item so a reviewer can check it by reading the pinned pull request commit and the reports. Name a commit by a fixed sha or by where the reviewer finds it (\"the Head commit wave 1's worker report names\"), never a `<…>` placeholder. Leave out facts about the worker's process (its HEAD before the first edit, force pushes, branches or pull requests it did not create): put those in the wave's steps. Never need another repository's checkout: pin that content by commit and quote it in the plan.";
+      const MARK = " Mark every implementation wave that adds new behaviour `feature: true`, and the reshape wave `reshape: true`; the reviewer runs the native-design check only for them.";
+      const endOfBullet = (text: string, start: string, add: string) => {
+        const lines = text.split("\n");
+        expect(lines.filter((line) => line.startsWith(start))).toHaveLength(2);
+        return lines.map((line) => (line.startsWith(start) ? `${line}${add}` : line)).join("\n");
+      };
       const NEW_PHASES = "except that a `spec: true` implementation wave has a Spec Writer that runs in parallel with its worker.";
-      expect(await plannerFixture(state)).toBe(replaceText(replaceText(expected, OLD_SPEC, NEW_SPEC, 2), OLD_PHASES, NEW_PHASES, 2));
+      let wave1 = replaceText(replaceText(expected, OLD_SPEC, NEW_SPEC, 2), OLD_PHASES, NEW_PHASES, 2);
+      wave1 = endOfBullet(wave1, "- Give every wave a `## Contracts to verify` Markdown heading", CHECKABLE);
+      wave1 = endOfBullet(wave1, PLANNER_RESHAPE_LINE, " Mark it `reshape: true`.");
+      wave1 = replaceText(wave1, "`{body, dependsOn, design?, test?, spec?}`", "`{body, dependsOn, design?, test?, spec?, feature?, reshape?}`", 2);
+      wave1 = endOfBullet(wave1, "- Submit the plan through chief_report's `plan` field", MARK);
+      expect(await plannerFixture(state)).toBe(wave1);
     });
 
     // Contract (mixed chain, existing-only first): wave 1's Spec Writer and worker prompts are base 6d288a2's bytes although wave 2 has
