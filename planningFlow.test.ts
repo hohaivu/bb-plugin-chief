@@ -249,7 +249,7 @@ describe("Chief backend", () => {
     const planPrompt = spawned.prompt as string;
     expect(planPrompt).toContain("do not create, modify, or delete any file the repository tracks, and do not commit or push");
     // The plan body goes through chief_report's plan field, never a direct file write.
-    expect(planPrompt).toContain("chief_report's `plan` field");
+    expect(planPrompt).toContain("chief_report state ready and the plan in its `plan` field, never as a file write");
     expect(planPrompt).not.toContain("$BB_THREAD_STORAGE");
     // Split success criteria and the out-of-scope section are the planner's contract, not an afterthought.
     expect(planPrompt).toContain("Read every file this brief names in full before proposing anything: no partial reads, no limit or offset.");

@@ -201,5 +201,11 @@ export function reviewAttemptExpected(base: string) {
     out.push("prompt:", next);
     i = split - 1;
   }
-  return out.join("\n");
+  // Wave 1 of the tester-brief plan: a tester's brief drops its empty `## Success criteria` / `## Constraints` sections. The only tester scenario reviews one tester,
+  // so the edit is one counted removal inside that block of the base transcript.
+  const TESTER_BLOCK = "=== earlier workers: implementer then tester ===";
+  const NONE_SECTIONS = "## Success criteria\n- None stated.\n\n## Constraints\n- None stated.\n\n";
+  const blocks = out.join("\n").split(/^(?==== )/m);
+  expect(blocks.filter((block) => block.startsWith(TESTER_BLOCK))).toHaveLength(1);
+  return blocks.map((block) => block.startsWith(TESTER_BLOCK) ? replaceText(block, NONE_SECTIONS, "", 1) : block).join("");
 }
