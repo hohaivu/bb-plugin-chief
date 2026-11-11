@@ -85,8 +85,8 @@ export function registerHost(ctx: Ctx) {
         "chief_consult", "chief_spawn",
         "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync",
         ...(researchTool ? ["chief_research"] : []),
-        // A child Chief is already supervised: it may not upgrade itself.
-        ...(child ? [] : ["chief_coordinate"]),
+        // A child Chief is already supervised: it may not upgrade itself. chief_attach is listed here too because BB applies tools only when a session is built: a Chief upgraded by chief_coordinate could not attach until a restart. Its handler refuses a non-Coordinator.
+        ...(child ? [] : ["chief_coordinate", "chief_attach"]),
       ];
       return {
         tools,
