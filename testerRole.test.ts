@@ -580,13 +580,16 @@ describe("tester role", () => {
   // Contract (provenance, tester brief): the tester's brief lists every present wave file and contract of its chain as
   // its source of truth, and the approved design when the chain has one; unplanned, the head worker's brief.
   // Regression: the tester is briefed from the diff alone (no spec section), so its cases are derived from the code.
-  test("a tester's brief lists its chain's plan files and contracts as the source of truth", async () => {
+  // Contract (wave 1 of the brief trim): the source of truth names the plan files only; the contracts appear once, in full, under `## Contracts to verify`.
+  test("a tester's brief lists its chain's plan files as the source of truth and its contracts once, under Contracts to verify", async () => {
     const state = await setup();
     const { chief, planner, impl } = await readyImpl(state);
     await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
     const [path1, path2] = wavePaths(state, planner.threadId);
     expect(state.spawned.at(-1).prompt).toContain(
-      `## Source of truth for test cases\nRead each in full, with the docs they name. Derive every test case from these, never from the implementation.\nWave 1 of 2: ${path1}\n- Totals stay non-negative\nWave 2 of 2: ${path2}\n- Wave 2 keeps its invariant`);
+      `## Source of truth for test cases\nRead each in full, with the docs they name. Derive every test case from these, never from the implementation.\nWave 1 of 2: ${path1}\nWave 2 of 2: ${path2}\n\n## Contracts to verify\n- Wave 2 keeps its invariant\n`);
+    expect(String(state.spawned.at(-1).prompt).split("- Totals stay non-negative")).toHaveLength(1);
+    expect(String(state.spawned.at(-1).prompt).split("- Wave 2 keeps its invariant")).toHaveLength(2);
   });
 
   test("a tester's brief on an approved design chain names the approval and the designer report", async () => {

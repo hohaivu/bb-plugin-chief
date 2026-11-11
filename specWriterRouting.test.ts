@@ -868,7 +868,7 @@ describe("tester role", () => {
     });
 
     const BASE_HEAD = "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.";
-    const localSync = (branch: string) => `Before you read any file, sync this checkout with ${branch}: require a clean tree (\`git status --porcelain\` prints nothing), run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`, and record \`Local sync: <sha>\` (\`git rev-parse HEAD\`). If the tree is not clean or the fast-forward fails, report blocked. Never use autostash, never force, never touch another worktree.`;
+    const localSync = (branch: string, label = "Local sync") => `Before you read any file, sync this checkout with ${branch}: require a clean tree (\`git status --porcelain\` prints nothing), run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`, and record \`${label}: <sha>\` (\`git rev-parse HEAD\`). If the tree is not clean or the fast-forward fails, report blocked. Never use autostash, never force, never touch another worktree.`;
     const rejectedPush = (branch: string) => `If that push is rejected because ${branch} moved, run \`git fetch origin ${branch}\` then \`git rebase --no-autostash origin/${branch}\` on a clean tree and push again; never force-push.`;
     const BLOCKED_PLAN = "- If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.";
     const WORKER_SPEC_RULES = [
@@ -941,7 +941,9 @@ describe("tester role", () => {
       const prompt = state.spawned.at(-1).prompt as string;
       expect(section(prompt, "Spec")).toContain(`Wave 1 Spec Writer ${writer}:`);
       expect(section(prompt, "Spec")).toContain("- Before you derive tests, for each Spec Writer listed above run `git merge-base --is-ancestor <Fold head> HEAD`, using the Fold head from that writer's report. If it fails, report blocked: that writer's docs are not in your HEAD. A report with no Fold head (an implementation-lane writer) needs no check.");
-      expect(section(prompt, "Git workflow")).toContain(localSync(CHAIN));
+      // The tester's sync records its Base commit, so its `## Test work` does not ask for it again.
+      expect(section(prompt, "Git workflow")).toContain(localSync(CHAIN, "Base commit"));
+      expect(prompt.split("Base commit: <sha>")).toHaveLength(2);
     });
 
     // Wave 2 contract 2/4 (fix worker): a test-wave product-fix worker keeps the docs-matching block with the chain's writer report

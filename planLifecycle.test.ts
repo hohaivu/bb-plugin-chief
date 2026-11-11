@@ -394,19 +394,33 @@ describe("admitDelegation: specSources", () => {
   const sourcePlan: PlanWave[] = [{ path: "w1", contracts: "contract one" }, { path: "w2", contracts: "contract two", test: true }];
   const tester = { kind: "tester" as const, resolvedKind: "tester" as const };
 
-  test("a tester lists every wave of its chain with its contracts; a worker lists none", () => {
+  // Contract (wave 1): a tester's specSources hold only the `Wave n of N: path` lines; the plan files carry the contracts and the brief's
+  // `## Contracts to verify` lists them in full. Regression: contracts (clipped or not) still pushed for a tester.
+  test("a tester lists every wave of its chain by path only, never its contracts; a worker lists none", () => {
     const { admit } = world({ [P]: sourcePlan }, [{ id: "w", plan: P, wave: 1 }]);
-    expect(admit({ ...planned, wave: 2, prior: "w", ...tester }).specSources).toEqual(["Wave 1 of 2: w1", "contract one", "Wave 2 of 2: w2", "contract two"]);
+    expect(admit({ ...planned, wave: 2, prior: "w", ...tester }).specSources).toEqual(["Wave 1 of 2: w1", "Wave 2 of 2: w2"]);
     expect(world({ [P]: [{ path: "w1" }, { path: "w2", contracts: "c" }] }, [{ id: "w", plan: P, wave: 1 }]).admit({ ...planned, wave: 2, prior: "w" }).specSources).toEqual([]);
   });
 
-  test("a wave without contracts adds only its path line; long contracts are clipped to about 3000 characters", () => {
+  test("a tester gets no contract text however long the contracts are", () => {
+    const { admit } = world({ [P]: [{ path: "w1" }, { path: "w2", contracts: "x".repeat(10_000), test: true }] }, [{ id: "w", plan: P, wave: 1 }]);
+    expect(admit({ ...planned, wave: 2, prior: "w", ...tester }).specSources).toEqual(["Wave 1 of 2: w1", "Wave 2 of 2: w2"]);
+  });
+
+  // Contract (wave 1): a Spec Writer keeps its read-only context of the wave's contracts, clipped at 3,000 characters.
+  // Regression: the tester change also dropping or lengthening the Spec Writer's contracts.
+  test("a Spec Writer lists its wave's path and its contracts clipped to about 3000 characters", () => {
     const long = "x".repeat(10_000);
-    const { admit } = world({ [P]: [{ path: "w1" }, { path: "w2", contracts: long, test: true }] }, [{ id: "w", plan: P, wave: 1 }]);
-    const sources = admit({ ...planned, wave: 2, prior: "w", ...tester }).specSources;
+    const plan: PlanWave[] = [{ path: "w1", spec: true, contracts: long }, { path: "w2", test: true }];
+    const { admit } = world({ [P]: plan }, [{ id: "w", plan: P, wave: 1, state: "active", last: null }]);
+    const sources = admit({ ...planned, wave: 1, kind: "spec-writer", resolvedKind: "spec-writer", branch: undefined }).specSources;
+    expect(sources).toHaveLength(3);
     expect(sources[0]).toBe("Wave 1 of 2: w1");
-    expect(sources[1]).toBe("Wave 2 of 2: w2");
-    expect(sources[2]!.length).toBeLessThan(3_100);
+    expect(sources[2]).toBe("Wave 2 of 2: w2");
+    expect(sources[1]!.length).toBeGreaterThan(2_900);
+    expect(sources[1]!.length).toBeLessThan(3_100);
+    const short = world({ [P]: [{ path: "w1", spec: true, contracts: "contract one" }, { path: "w2", test: true }] }, [{ id: "w", plan: P, wave: 1, state: "active", last: null }]);
+    expect(short.admit({ ...planned, wave: 1, kind: "spec-writer", resolvedKind: "spec-writer", branch: undefined }).specSources).toEqual(["Wave 1 of 2: w1", "contract one", "Wave 2 of 2: w2"]);
   });
 
   test("a design wave on the chain adds the owner's approval line, or says none was recorded", () => {
