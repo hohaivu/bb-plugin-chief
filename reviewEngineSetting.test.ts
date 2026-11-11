@@ -44,12 +44,11 @@ describe("tester role", () => {
       await readyIdle(state, worker);
       await tool(state, "chief_review", { workerThreadId: worker }, chief);
       const reviewer = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='reviewer'`).get() as any).thread_id as string;
-      // review-context.md is in the reviewer's storage; the engine files are in Chief's data folder for the worker on the reviewer's host, keyed by its
-      // report and a fresh attempt id.
+      // review-context.md and the engine files share Chief's data folder for the worker on the reviewer's host, keyed by its report and a fresh attempt id.
       const reportFolder = join(reviewerData, "chief", "proj_1", worker, "review-1");
       const attempts = await readdir(reportFolder).catch(() => [] as string[]);
       const engineDir = attempts.length === 1 ? join(reportFolder, attempts[0]!) : null;
-      const file = (name: string) => readFile(join(name === "review-context.md" ? join(state.storageRoot, reviewer) : engineDir ?? join(reportFolder, "none"), name), "utf8").catch(() => null);
+      const file = (name: string) => readFile(join(engineDir ?? join(reportFolder, "none"), name), "utf8").catch(() => null);
       return { prompt: String(state.spawned.at(-1).prompt), file, engineDir, attempts, writes, worker, state };
     }
 
@@ -101,18 +100,19 @@ describe("tester role", () => {
       expect(helper).not.toContain("## Review engine");
     });
 
-    // Contract (docs/specs/review-engine.md, Engine folder): the engine files are written on the host the reviewer runs on, under a fresh attempt id;
-    // the reviewer's storage keeps only review-context.md. Regression: writing on the worker's thread-storage host leaves host_1 without the files.
-    test("the engine files are written on the reviewer's host, not on the host of the worker's storage", async () => {
+    // Contract (docs/specs/review-engine.md, Attempt folder): review-context.md and the engine files are written on the host the reviewer runs on, under
+    // a fresh attempt id. Regression: writing on the worker's thread-storage host leaves host_1 without the files.
+    test("the attempt folder files are written on the reviewer's host, not on the host of the worker's storage", async () => {
       const { prompt, engineDir, attempts, writes, worker, state } = await review({ reviewEngine: "both" });
       expect(attempts).toHaveLength(1);
       expect(attempts[0]).toMatch(/^[0-9a-f]{8}$/);
       const engineWrites = writes.filter(({ path }) => path.includes("review-1"));
       expect(engineWrites.map(({ hostId, path }) => [hostId, path])).toEqual([
+        ["host_1", join(engineDir!, "review-context.md")],
         ["host_1", join(engineDir!, "pr-agent-review.sh")],
         ["host_1", join(engineDir!, "review-helper.md")],
       ]);
-      expect(writes.filter(({ path }) => path.endsWith("review-context.md")).map(({ hostId }) => hostId)).toEqual(["host_storage"]);
+      expect(prompt).toContain(`Read \`${join(engineDir!, "review-context.md")}\` in full before reviewing`);
       expect(prompt).toContain(`bash "${engineDir}/pr-agent-review.sh"`);
       // The worker's own host (host_storage, whose data dir is the storage root) holds no engine folder.
       expect(await readdir(join(state.storageRoot, "chief", "proj_1", worker, "review-1")).catch(() => [])).toEqual([]);
@@ -126,7 +126,9 @@ describe("tester role", () => {
       expect(prompt).not.toContain("pr-agent-review.sh");
       expect(attempts).toEqual([]);
       expect(writes.filter(({ path }) => path.includes("pr-agent-review") || path.includes("review-helper"))).toEqual([]);
-      expect(writes.filter(({ path }) => path.endsWith("review-context.md"))).toHaveLength(1);
+      // The context cannot be written either, so it is inlined (and its own alert names the file); the engine alert stays one.
+      expect(writes.filter(({ path }) => path.endsWith("review-context.md"))).toEqual([]);
+      expect(prompt).toContain("## review-context.md");
       expect(state.sent.map((message) => String(message.input?.[0]?.text)).filter((text) => text.includes("pr-agent-review.sh"))).toHaveLength(1);
     }, 15_000);
   });
