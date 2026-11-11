@@ -2,10 +2,11 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
-import { PLAN_FIXTURE, delegate, disposeAll, setup, reviewContextOf, snapshotText, start, status, wave, withReviewerLine } from "./test/harness";
+import { PLAN_FIXTURE, delegate, disposeAll, setup, reviewContextOf, snapshotText, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { acceptOwnership } from "./test/docsOwnership";
+import { wave1Prompt } from "./test/reviewWave1";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -206,7 +207,9 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     const path2 = join(state.storageRoot, "chief", "proj_1", planner.threadId, "plan-2.md");
 
     expect(context).toContain(`## Waived test waves\nWave 2 of 2: ${path2}: tests skipped by Chief: ${WAIVER_REASON}`);
-    expect(prompt).toContain("- The test waves Chief waived, with Chief's reason for each.");
+    // Wave 1 removed the `## Context` bullet list; the waiver rule line (unchanged) still points the reviewer at the section.
+    expect(prompt).not.toContain("- The test waves Chief waived, with Chief's reason for each.");
+    expect(prompt).toContain("Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason.");
     expect(prompt).toContain(RULE);
     expect(prompt).toContain(KEEP);
     expect(prompt).toContain("Totals stay non-negative");
@@ -234,9 +237,14 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
       expect(text).not.toContain("authorized omissions");
     }
     // Byte equivalence: the files were captured from chief_review at the pre-fix oracle (8f7e4d6) on these same inputs.
-    const portable = (text: string) => text.replaceAll(state.storageRoot, "<storage>");
-    // The prompt is the oracle plus the make-native reviewer line (the oracle file is untouched); the context is unchanged.
-    expect(acceptOwnership(portable(prompt))).toBe(withReviewerLine(await snapshotText("review-no-waiver.prompt.txt")));
+    const portable = (text: string) => text.replaceAll(state.storageRoot, "<storage>").replace(/review-(\d+)\/[0-9a-f]{8}\//g, "review-$1/<attempt>/");
+    // The prompt is the oracle (the oracle file is untouched) plus wave 1's named edits; the context is unchanged. A plan with no feature flag has no native line;
+    // every slice here is skipped (no checkout), so the test-audit rule stays.
+    const baseContext = await snapshotText("review-no-waiver.context.txt");
+    const expected = wave1Prompt(await snapshotText("review-no-waiver.prompt.txt"), baseContext, {
+      native: "none", testAudit: true, contextPath: `<storage>/chief/proj_1/${tester}/review-1/<attempt>/review-context.md`,
+    });
+    expect(acceptOwnership(portable(prompt))).toBe(expected);
     await expect(portable(context)).toMatchFileSnapshot("./test/fixtures/review-no-waiver.context.txt");
   });
 
@@ -257,7 +265,10 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     };
     const omitted = reviewBrief(input);
     expect(reviewBrief({ ...input, waiverLines: [] })).toEqual(omitted);
-    expect(acceptOwnership(omitted.prompt)).toBe(withReviewerLine(await snapshotText("review-brief-no-waiverlines.prompt.txt")));
+    // No contextPath: the prompt inlines the context. Defaults: native line without the reshape parts, test audit kept.
+    const baseContext = await snapshotText("review-brief-no-waiverlines.context.txt");
+    const expected = `${wave1Prompt(await snapshotText("review-brief-no-waiverlines.prompt.txt"), baseContext, { native: "noReshape", testAudit: true, contextPath: null })}\n\n## review-context.md\n${baseContext}`;
+    expect(acceptOwnership(omitted.prompt)).toBe(expected);
     await expect(omitted.context).toMatchFileSnapshot("./test/fixtures/review-brief-no-waiverlines.context.txt");
   });
 
