@@ -40,7 +40,7 @@ export const READ_ONLY = "do not create, modify, or delete any file the reposito
 /** One wording for the reviewer's read-only rule, said when the review starts and
  * again on every continuation — the two places an edit instruction could arrive. */
 export const REVIEW_ONLY = `Remain review-only: ${READ_ONLY}. A repair goes back to the worker, which then earns its own review.`;
-/** Same for a planner: said when the plan starts and again on every continuation. */
+/** Said on every planner continuation; the planner brief states the same rules in its Working contract. */
 export const PLAN_ONLY = `Remain read-only: ${READ_ONLY}. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.`;
 /** Same for an advisor: said when the consult starts and again on every continuation. */
 export const ADVISE_ONLY = `Remain advisory: ${READ_ONLY}. You may read code and run commands to reproduce the problem (a filtered test or build whose only side effects are untracked build or cache output). Report your advice to Chief; a worker makes the change.`;
