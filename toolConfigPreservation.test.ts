@@ -7,14 +7,15 @@ import { disposeAll } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { type ToolConfig, compareToolConfig, toolConfigFixture } from "./test/toolConfigFixture";
-import { acceptCoreRuleTrim } from "./test/specLaneWording";
+import { ATTACH_DEFINITION, acceptCoreRuleTrim } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
 
 // Contract C13 (plan wave 1 "Only the Spec Writer edits docs/ everywhere", docs/specs/plan-chains.md): the tool configuration of every role changes in exactly three places
-// against base 9689364: the chief_delegate `kind` clause, the chief_complete `skipReview` clause, and Chief's core-rule Tests/Skips lines. This is an independent base-to-head
+// against base 9689364: the chief_delegate `kind` clause, the chief_complete `skipReview` clause, and Chief's core-rule Tests/Skips lines; plus the one #213 delta: a plain
+// Chief gains chief_attach right after chief_coordinate (exact definition, one more claude-code preload `max_results`). This is an independent base-to-head
 // comparison: base is test/fixtures/tool-config-9689364.txt, captured by running test/toolConfigFixture.ts unchanged on base 9689364 (the older oracle against the frozen
 // tool-config-7178582.txt is red on base itself, for earlier plans' wording, so it cannot prove this). The frozen fixture is only hash-checked here, never regenerated.
 const dir = dirname(fileURLToPath(import.meta.url));
@@ -37,9 +38,13 @@ describe("tool config: base 9689364 to head", () => {
     expect(createHash("sha256").update(await fixture("tool-config-7178582.txt")).digest("hex")).toBe(FROZEN_SHA256);
   });
 
-  test("head equals base apart from the three listed edits (passes)", async () => {
+  test("head equals base apart from the three listed edits and the #213 chief_attach delta (passes)", async () => {
     const { base, head } = await load();
     expect(() => compareToolConfig(base, head)).not.toThrow();
+    // The #213 delta is really there: the comparison is not vacuous for it, and compareToolConfig leaves head untouched.
+    expect(base.catalog["chief_attach"]).toBeUndefined();
+    expect(head.catalog["chief_attach"]).toEqual(ATTACH_DEFINITION);
+    expect(chiefEntries(head).every((entry) => entry.tools[entry.tools.indexOf("chief_coordinate") + 1] === "chief_attach")).toBe(true);
     // The three edits are really there: the comparison is not vacuous.
     expect(head.catalog["chief_delegate"]!.inputSchema.properties.kind!.description).not.toBe(base.catalog["chief_delegate"]!.inputSchema.properties.kind!.description);
     expect(head.catalog["chief_complete"]!.inputSchema.properties.skipReview!.description).not.toBe(base.catalog["chief_complete"]!.inputSchema.properties.skipReview!.description);
@@ -113,6 +118,29 @@ describe("tool config: base 9689364 to head", () => {
     test("a non-Chief role's instructions changed", async () => {
       const run = await mutated((head) => { const entry = head.entries.find((candidate) => candidate.key.includes("| worker |"))!; entry.instructions += "\n- extra"; });
       expect(run).toThrow("instructions");
+    });
+    test("chief_attach moved to the end of a plain Chief's tools", async () => {
+      const run = await mutated((head) => { const entry = chiefEntries(head)[0]!; entry.tools = [...entry.tools.filter((name) => name !== "chief_attach"), "chief_attach"]; });
+      expect(run).toThrow("chief_attach not right after chief_coordinate");
+    });
+    test("chief_attach added to a worker", async () => {
+      const run = await mutated((head) => { head.entries.find((candidate) => candidate.key.includes("| worker |"))!.tools.push("chief_attach"); });
+      expect(run).toThrow("chief_attach outside a plain Chief");
+    });
+    test("the chief_attach description changed by one character", async () => {
+      const run = await mutated((head) => { head.catalog["chief_attach"]!.description = head.catalog["chief_attach"]!.description.replace("1-20", "1-21"); });
+      expect(run).toThrow("chief_attach definition");
+    });
+    test("the chief_attach schema limit changed", async () => {
+      const run = await mutated((head) => { (head.catalog["chief_attach"]!.inputSchema.properties["threadIds"] as any).maxItems = 21; });
+      expect(run).toThrow("chief_attach definition");
+    });
+    test("a claude-code Chief's preload max_results raised by 2 instead of 1", async () => {
+      const run = await mutated((head) => {
+        const entry = chiefEntries(head).find((candidate) => candidate.key.includes("| claude-code |"))!;
+        entry.instructions = entry.instructions!.replace(/max_results (\d+)/, (_all, n) => `max_results ${Number(n) + 1}`);
+      });
+      expect(run).toThrow("preload max_results is not base + 1");
     });
     test("a tool dropped from a role", async () => {
       const run = await mutated((head) => { head.entries[0]!.tools = head.entries[0]!.tools.slice(1); });

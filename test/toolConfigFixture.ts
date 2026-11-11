@@ -1,5 +1,6 @@
 import { configurationContext, setup, start } from "./harness";
 import { GAPS_PROPERTY, FOCUS_PROPERTY, withPlanFlags } from "./reviewerToolDelta";
+import { ATTACH_DEFINITION } from "./specLaneWording";
 
 // The tool-config capture of toolCallStability.test.ts (lines 20-69, same cases, same normalization), reused to snapshot another commit.
 // test/fixtures/tool-config-9689364.txt was captured by running it unchanged on base 9689364; tool-config-7178582.txt stays frozen.
@@ -65,10 +66,17 @@ const SKIP_NEW = "Refused, like override, for an implementation-lane Spec Writer
 export const TESTS_DOCS_LINE = "- Tests, docs: only a tester writes or runs tests (a plan's test wave, or chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).";
 const SKIPS_OLD_PHRASE = "Guidance, not a rule: small";
 
-/** Throws unless `head` equals `base` apart from: the chief_delegate `kind` clause, the chief_complete `skipReview` clause, and in Chief's core rules the Tests line (now Tests, docs)
- * and the Skips line (the phrase swap only). Chief instructions must EXACTLY equal the base text rebuilt uncapped, edited, then capped at the SDK limit; everything else must be identical. */
-export function compareToolConfig(base: ToolConfig, head: ToolConfig) {
+/** Throws unless `head` equals `base` apart from: the chief_delegate `kind` clause, the chief_complete `skipReview` clause, in Chief's core rules the Tests line (now Tests, docs)
+ * and the Skips line (the phrase swap only), and (#213) the chief_attach tool of a plain Chief (exact definition, right after chief_coordinate, and one more `max_results` in the
+ * claude-code preload line). Chief instructions must EXACTLY equal the base text rebuilt uncapped, edited, then capped at the SDK limit; everything else must be identical.
+ * `head` is cloned, never mutated. */
+export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
   const fail = (what: string): never => { throw new Error(`tool config differs from base outside the allowed edits: ${what}`); };
+  const head = structuredClone(original);
+  // The #213 delta, asserted exactly and then removed, so everything else still compares against base byte for byte.
+  if ("chief_attach" in base.catalog) fail("base already has chief_attach");
+  if (JSON.stringify(head.catalog["chief_attach"]) !== JSON.stringify(ATTACH_DEFINITION)) fail("chief_attach definition");
+  delete head.catalog["chief_attach"];
   const names = Object.keys(base.catalog);
   if (Object.keys(head.catalog).join() !== names.join()) fail("tool names or order");
   for (const name of names) {
@@ -95,6 +103,21 @@ export function compareToolConfig(base: ToolConfig, head: ToolConfig) {
   if (head.entries.length !== base.entries.length) fail("entry count");
   head.entries.forEach((entry, index) => {
     const old = base.entries[index]!;
+    const plainChief = entry.key.includes("| chief |");
+    if (plainChief) {
+      if (entry.tools[entry.tools.indexOf("chief_coordinate") + 1] !== "chief_attach") fail(`${old.key}: chief_attach not right after chief_coordinate`);
+      entry.tools = entry.tools.filter((name) => name !== "chief_attach");
+      if (entry.key.includes("| claude-code |")) {
+        // The preload line asks for one more tool; the digit count is unchanged, so the SDK cap cuts at the same byte.
+        const lines = entry.instructions?.split("\n") ?? [];
+        const at = lines.findIndex((line) => line.includes("ToolSearch"));
+        const [was, now] = [`max_results ${old.tools.length}`, `max_results ${old.tools.length + 1}`];
+        if (at < 0 || lines.some((line, i) => i > at && line.includes("ToolSearch")) || !lines[at]!.endsWith(` ${now}`)) fail(`${old.key}: preload max_results is not base + 1`);
+        if (was.length !== now.length) fail(`${old.key}: preload digit count changed`);
+        lines[at] = `${lines[at]!.slice(0, -now.length)}${was}`;
+        entry.instructions = lines.join("\n");
+      }
+    } else if (entry.tools.includes("chief_attach")) fail(`${old.key}: chief_attach outside a plain Chief`);
     if (entry.key !== old.key || JSON.stringify(entry.tools) !== JSON.stringify(old.tools) || JSON.stringify(entry.skills) !== JSON.stringify(old.skills)) fail(`${old.key}: key, tools or skills`);
     if (entry.instructions === old.instructions) return;
     if (!entry.key.includes("| chief |") || !entry.instructions || !old.instructions) fail(`${old.key}: instructions`);

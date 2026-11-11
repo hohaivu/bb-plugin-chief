@@ -73,3 +73,14 @@ export function acceptRetestDelta(now: any, was: any, name: string) {
   delete now.inputSchema.properties.retestSkipped;
   now.description = was.description;
 }
+
+// #213: a plain, unlinked Chief gains chief_attach right after chief_coordinate. The full definition, asserted exactly by every tool-config oracle before it removes the tool.
+export const ATTACH_DEFINITION = {
+  description: "Coordinator only: link existing Chief threads as your children, in any project. Give the thread ids the owner names (1-20). One result line per id; a bad id never blocks the others. An id that is not a Chief row needs `bb chief adopt --thread <id>` first.",
+  inputSchema: {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    type: "object",
+    properties: { threadIds: { minItems: 1, maxItems: 20, type: "array", items: { type: "string", minLength: 1 } } },
+    required: ["threadIds"],
+  },
+};
