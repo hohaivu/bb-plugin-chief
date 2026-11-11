@@ -40,6 +40,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Fix**: the newest code row of a chain that Chief created after the rejection.
 - **Spec Writers of this task**: the Spec Writers in the `replaces:` chain of a task row, plus the side-lane writers on the waves of its chain. `taskWriters` returns them.
 - **Retest debt**: the duty to rerun the tests after a fix. A chain owes it when a fix exists and nothing discharges it.
+- **Evidence-only tester**: a Tester that Chief delegates with `evidenceOnly: true`. It runs commands that already exist, compares the results, writes no test, and makes no commit.
 
 ## Ownership and Entry Points
 
@@ -161,6 +162,51 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
 - `admitDelegation` permits a tester wave to start fresh on a new branch when the tested worker completed. Reason: post-merge testing verifies code after branch deletion.
 - `admitDelegation` permits a fresh plan wave 1 delegation to replace a blocked row of another plan. The rule applies to each lane. Reason: re-planning allows recovery on the blocked worktree or side worktree.
+
+### Evidence-Only Tester Brief
+
+An evidence-only tester runs the commands that the mission names, on the commits that the mission names. It returns exit statuses and a base-to-head comparison.
+
+- `chief_delegate` accepts the optional input `evidenceOnly: true`. The CLI flag is `--evidence-only`. Reason: Chief needs one explicit way to ask for run evidence instead of tests.
+- `startWorker` refuses `evidenceOnly: true` when the kind that `admitDelegation` resolves is not `tester`. Reason: workers never run tests, and a run of suites on base and head is test running.
+  - The refusal text names `kind: tester`.
+  - The refusal happens before `managedSpawn.prepare`.
+  - Nothing launches, no row is written, and the prior row is not completed or superseded.
+- The flag is not stored on the row and `replaces:` does not carry it. A successor of an evidence-only tester gets a normal brief, unless Chief passes the flag again. Reason: each hand-off states its own mode, and no migration is needed.
+- Without the flag, `workerBrief` returns the same `prompt`, `brief`, and `reviewerBrief` as before. The same holds when the flag is `false` or the kind is not `tester`. Reason: normal briefs must not change.
+- The evidence brief starts with `You are the managed tester for`. Reason: the agent must know its role before it reads the other lines.
+- The evidence brief omits these items. Reason: a tester that writes no test needs none of them, and the brief stays short.
+  - `## Source of truth for test cases`
+  - The `## Spec` block, with its merge-base checks and baseline line.
+  - `## Contracts to verify`
+  - `## Verify command`
+  - `## Test work`
+  - The push workflow, the previous-worker line, and the issue and pull request lines.
+  - The summary text of the predecessor. The brief gives the report file path, or `bb chief inspect <thread id>`, and the blocker when one exists.
+- The first line of `## Wave` in an evidence brief names the wave number and total, and drops `Implement only this wave's plan file.`. Reason: the tester implements no plan file.
+- `## Git workflow` renders only when the call has a branch. It has one line: fetch the task branch, then fast-forward to it, and report blocked on a failure. Reason: the tester reads the folded docs and code of the task.
+- `## Evidence work` orders the tester to follow these rules. Reason: a run is evidence only when the commit, the state, and the exit status are known.
+  - Write no test. This brief overrides the `chief-role-tester` skill.
+  - Commit nothing, push nothing, and edit no tracked file.
+  - Never use stash, autostash, or another worktree.
+  - Record `git rev-parse HEAD` as `Head commit` before any run.
+  - Run base commits with `git switch --detach <base>` on a clean tree. Afterwards, `git switch -` returns to the head and HEAD must equal `Head commit`.
+  - After each switch, reinstall dependencies when the lockfile differs, and reset any database or state that the suites write.
+  - Run each command alone, and record `echo exit=$?` right after it. Use `set -o pipefail` before a pipe. Record the pass count of each file.
+  - A ready report lists base and head side by side for each command, with commit, exit status, and pass counts. It explains every difference. Reason: an unexplained difference is a regression.
+  - Before the report, HEAD equals `Head commit` and `git status --porcelain` prints nothing.
+  - A blocked report names the command, its exit status, and an output excerpt. It recommends `kind: tester` for a wrong test and `kind: worker` for product code.
+- When Chief gives no constraints, each blocking finding that has a structured `fix` becomes one constraint. Reason: the fix is the constraint, and Chief need not restate it.
+  - `Constraints` lists the fix as `<file>:<line>: <fix>`, and not `None stated.`.
+  - The fix text and the finding message each appear once in the prompt. The finding then omits its `(fix: …)` suffix.
+  - `reviewerBrief` carries the same `Constraints`.
+  - Constraints that Chief gives win. The fixes then stay with their findings.
+  - A nit fix never moves.
+- The findings section keeps one guidance line instead of four. The line orders the tester to verify each finding first, and to list a finding that does not hold under `## Disputed findings`. Reason: the evidence brief must stay short.
+- The line `Read the verdict file in full.` appears only when the call attaches a verdict file path. An evidence tester without findings gets no findings section and no verdict line. Reason: the line must not point to a file that does not exist.
+- A plan-linked evidence brief keeps the `## Deviations from plan` line. Reason: report intake refuses a plan-linked ready report without that heading.
+- The example brief of 13,996 bytes renders at 5,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. Reason: a clipped obligation can hide a required step.
+- A ready evidence-only tester discharges retest debt like any ready Tester. Reason: its run repeats the tests.
 
 ### Spec Writer Side Lane
 
