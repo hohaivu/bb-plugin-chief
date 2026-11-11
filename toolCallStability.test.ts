@@ -295,13 +295,17 @@ describe("tool-call stability", () => {
 
   // Contract: env contribution, this plugin only. The host merges contributions from other plugins (account-pool also
   // contributes ENABLE_TOOL_SEARCH and wins when it is first); this test proves only what Chief itself contributes.
-  // Regression: contributing for unmanaged threads, for another provider, or not for a managed role.
-  test("Chief's own ENABLE_TOOL_SEARCH contribution: claude-code, managed rows only (not the effective merged environment)", async () => {
+  // Chief rows (plain and child) keep deferral off; every other managed row contributes nothing so tool search stays on.
+  // Regression: contributing for a non-Chief row, for unmanaged threads or another provider, dropping Chief's own `false`, or ever forcing `true`.
+  test("Chief's own ENABLE_TOOL_SEARCH contribution: claude-code, Chief rows only (not the effective merged environment)", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const opts = ctxOf(state, chief.threadId);
     const worker = await delegate(state, chief.threadId);
+    const tester = await delegate(state, chief.threadId, "Tests for totals", { replaces: worker.threadId, kind: "tester" });
+    const designer = await delegate(state, chief.threadId, "Design totals", { kind: "designer" });
+    const specWriter = await delegate(state, chief.threadId, "Spec totals", { kind: "spec-writer" });
     await state.harness.behavior.runCli(["plan", "--title", "Rework", "--mission", "Propose"], opts);
     await state.harness.behavior.runCli(["consult", "--title", "Rework", "--mission", "Explore"], opts);
     await state.harness.behavior.callAgentTool("chief_review", { branch: "feature/x" }, opts);
@@ -309,28 +313,22 @@ describe("tool-call stability", () => {
     state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, providerId: "codex" });
     state.setThreadExecution({ model: "gpt-6-astra" });
     await state.harness.behavior.callAgentTool("chief_research", { mode: "survey", question: "Who calls this?", items: ["a.ts"] }, opts);
-    const managed = (await status(state)).threads.map((row) => row.threadId);
-    expect([...new Set((await status(state)).threads.map((row) => row.role))].sort()).toEqual(["advisor", "chief", "planner", "researcher", "reviewer", "worker"]);
+    const spawned = await state.harness.behavior.callAgentTool("chief_spawn", { request: "Do the task", context: "Goal and evidence" }, opts);
+    const child = /in thread (thr_\w+)/.exec(String(spawned))![1]!;
+    const rows = (await status(state)).threads;
+    expect([...new Set(rows.map((row) => row.role))].sort()).toEqual(["advisor", "chief", "planner", "researcher", "reviewer", "worker"]);
     const env = (providerId: string, threadId: string) => state.harness.behavior.resolveProviderEnv(providerId, { threadId, projectId: "proj_1", hostId: "host_1" });
-    for (const threadId of managed) {
-      expect(await env("claude-code", threadId), threadId).toEqual([expect.objectContaining({ name: "ENABLE_TOOL_SEARCH", value: "false" })]);
-      expect(await env("claude-code", threadId)).toHaveLength(1);
+    const chiefIds = new Set([chief.threadId, child]);
+    expect(rows.filter((row) => row.role === "chief").map((row) => row.threadId).sort()).toEqual([...chiefIds].sort());
+    for (const id of [worker.threadId, tester.threadId, designer.threadId, specWriter.threadId]) expect(rows.map((row) => row.threadId)).toContain(id);
+    for (const { threadId } of rows) {
+      const claude = await env("claude-code", threadId);
+      if (chiefIds.has(threadId)) expect(claude, threadId).toEqual([expect.objectContaining({ name: "ENABLE_TOOL_SEARCH", value: "false" })]);
+      else expect(claude, threadId).toEqual([]);
+      expect(claude.some((entry) => entry.value === "true"), threadId).toBe(false);
       expect(await env("codex", threadId), threadId).toEqual([]);
     }
-    expect(managed).toContain(worker.threadId);
     expect(await env("claude-code", "thr_other")).toEqual([]);
-  });
-
-  // Contract: README documents the env contribution as best-effort with both gaps (precedence and first session) and
-  // names the preload line as the fallback. Guards the documented trade-off, not the surrounding prose.
-  test("README documents the ENABLE_TOOL_SEARCH contribution as best-effort, with the precedence gap and the first-session gap", async () => {
-    const readme = await readFile(join(dirname(fileURLToPath(import.meta.url)), "README.md"), "utf8");
-    const paragraph = readme.split("\n").find((line) => line.includes("ENABLE_TOOL_SEARCH"))!;
-    expect(paragraph).toBeDefined();
-    expect(paragraph).toMatch(/best-effort/i);
-    expect(paragraph).toMatch(/another plugin's provider-env value[^.]*may win/);
-    expect(paragraph).toMatch(/first session can start before Chief records the thread/);
-    expect(paragraph).toMatch(/preload instruction line is the fallback/);
   });
 
   // Contract: title default on the tool path. Each tool names its thread differently; the default line is the same.
