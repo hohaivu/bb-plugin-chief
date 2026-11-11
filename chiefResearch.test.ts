@@ -569,21 +569,23 @@ describe("chief_research", () => {
     expect(off).not.toContain("do not rerun the same fan-out");
   });
 
-  // The SDK cuts configure() instructions at 4096 chars (the testing host slices the same way), and chief.md may be up to 32,000; the project name is also unbounded input.
-  test.each([[5_000, 4], [32_000, 4], [5_000, 5_000]])("a %i-char chief.md and a %i-char project name only trim project rules: Chief's own instructions stay inside the 4096-char cut", async (size, nameLength) => {
+  // The SDK cuts configure() instructions at 32768 chars (the testing host slices the same way), and chief.md may be up to 32,000; the project name is also unbounded input.
+  test.each([[5_000, 4], [32_000, 4], [5_000, 5_000]])("a %i-char chief.md and a %i-char project name only trim project rules: Chief's own instructions stay inside the 32768-char cut", async (size, nameLength) => {
     const marker = "# Project rules marker";
     const state = await setup({ rules: `${marker}\n${"- Project rule text.\n".repeat(Math.ceil(size / 21))}`.slice(0, size) });
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const threadId = await roleThread(state, "chief");
     const { instructions } = await state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId, "proj_1", "N".repeat(nameLength)));
-    expect(instructions!.length).toBe(4096);
+    // Only the 32,000-char chief.md reaches the SDK cap, so it still exercises the cut; the 5,000-char cases fit uncut.
+    if (size === 32_000) expect(instructions!.length).toBe(32768);
+    else expect(instructions!.length).toBeLessThanOrEqual(32768);
     const coreEnd = instructions!.indexOf("chief_escalate with the thread and the full request");
     expect(coreEnd).toBeGreaterThan(-1);
     for (const part of [
       "# Chief core rules (always apply)", "Call chief_roster at the start of every turn", "never poll managed threads",
       "chief_plan first", "delegate every wave it lists right away",
       "chief_research is optional.", "or the doubtful evidence to chief_review.",
-      "Guidance, not a rule", "Chief never edits code",
+      "Small, low-risk changes suit a skip.", "Chief never edits code",
     ]) expect(instructions).toContain(part);
     expect(instructions!.indexOf(marker)).toBeGreaterThan(coreEnd);
   });

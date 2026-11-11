@@ -61,14 +61,14 @@ The domain exposes four entry points in `server.ts`:
 - `bb.agents.configure` returns empty tool and skill lists when thread state is complete, archived, or deleted. Reason: finished threads require no tools.
 - `bb.agents.configure` returns empty tool and skill lists when the thread lacks a role. Reason: unmanaged threads require no Chief capabilities.
 - `bb.agents.configure` trusts seeded role metadata only when `origin.pluginId` matches the Chief plugin identifier. Reason: external callers must not forge internal managed roles.
-- `bb.agents.configure` places project rules at the end of Chief instructions. Reason: variable project rules may exceed the 4096-character limit without truncating core rules.
+- `bb.agents.configure` places project rules at the end of Chief instructions. Reason: variable project rules may exceed the 32,768-character limit without truncating core rules.
 
 ### Schema Preload Line
 
 - With provider `claude-code`, `bb.agents.configure` adds one schema-preload instruction line. Reason: agents must load schemas before calling deferred tools.
 - `bb.agents.configure` derives the preload line directly from the returned tools array. Reason: prompt instructions must match the registered tools.
 - For managed roles, the preload line lists tools in exact array order with the `mcp__bb-bridge__` prefix. Reason: Claude Code selects MCP tools by their fully qualified names.
-- For managed roles, `bb.agents.configure` places the preload line third in instructions, before research, project rules, and lessons. Reason: lessons can push later lines past the 4096-character instruction limit.
+- For managed roles, `bb.agents.configure` places the preload line third in instructions, before research, project rules, and lessons. Reason: lessons can push later lines past the 32,768-character instruction limit.
 - For the Chief role, the preload line requests `query "+chief"` with `max_results` equal to the tool count. Reason: full tool names exceed Chief's instruction character budget.
 - The Chief tool list depends on the row. A plain, unlinked Chief gets the base list plus `chief_coordinate`. A child Chief gets the base list. A Coordinator gets `chief_roster`, `chief_spawn` and `chief_attach`. See `coordinator.md`.
 - The Chief `max_results` follows the tool count of the row. A plain, unlinked Chief has one more than base. A Coordinator has 3. Reason: the preload line must match the registered tools.
@@ -113,7 +113,7 @@ The domain exposes four entry points in `server.ts`:
 - For non-Claude providers, tool selection, names, and ordering remain identical to base behavior. Reason: provider changes must not alter tool catalogs.
 - Parameter schemas alter input schemas only by removing `title` from required properties and updating its description. Reason: validation rules must stay strict for all other fields. The two optional parameters above, `projectId` and `threadId`, are the only other schema changes.
 - Only threads with verified plugin origin metadata receive seeded roles during initial configuration. Reason: untrusted metadata must not grant elevated capabilities.
-- Chief instructions place the preload line and core rules before the 4096-character truncation boundary. Reason: truncation must never discard critical operational rules.
+- Chief instructions place the preload line and core rules before the 32,768-character truncation boundary. Reason: truncation must never discard critical operational rules.
 
 ## Trade-offs
 

@@ -139,3 +139,30 @@ describe("acceptCoreRuleTrim: the Skips line", () => {
     expect(() => accept(head)).toThrow();
   });
 });
+
+describe("acceptCoreRuleTrim: the Review, Fresh worker and Tests lines accept only the exact authorized edit", () => {
+  const REVIEW = "- Review: only you start reviews, with chief_review, when a worker's ready alert says to; a plan gets one review of every branch after every wave is ready. chief_complete marks the PR ready itself (never run gh pr ready or glab mr update --ready) and needs the newest review to approve its current head, or skipReview. You mark ready a PR no worker owns, only on its branch reviewer's approve.";
+  const FRESH = "- Fresh worker: a worker that has reported is never reused. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR; a plan chain has exactly one of each, so its next wave is a replaces: too); review and complete the successor.";
+  const TESTS = "- Tests: workers and designers never write or run tests; a tester (kind: tester) does, as a plan's test wave or via chief_delegate (replaces: the worker, kind: tester). Spec waves: see the chief skill.";
+  const REVIEW_HEAD = REVIEW.replace("when a worker's ready alert says to", "when a ready alert says to");
+  const FRESH_HEAD = FRESH.replace("(same worktree, branch, PR; a plan chain has exactly one of each, so its next wave is a replaces: too)", "(same worktree, branch, PR; so is a plan chain's next wave)");
+  const TESTS_HEAD = "- Tests, docs: only a tester writes or runs tests (a plan's test wave, or chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).";
+  test.each([["Review", REVIEW, REVIEW_HEAD], ["Fresh worker", FRESH, FRESH_HEAD], ["Tests, docs", TESTS, TESTS_HEAD]])("%s: the exact authorized edit is accepted and the base line comes back", (_name, base, head) => {
+    expect(acceptCoreRuleTrim(head, base)).toBe(base);
+  });
+  test.each([
+    ["Review: an appended sentence", REVIEW, `${REVIEW_HEAD} Never review.`],
+    ["Review: an inserted clause", REVIEW, REVIEW_HEAD.replace("only you start reviews", "you never start reviews")],
+    ["Review: a changed approval requirement", REVIEW, REVIEW_HEAD.replace("only on its branch reviewer's approve", "on any approve")],
+    ["Review: a dropped sentence", REVIEW, REVIEW_HEAD.replace(" You mark ready a PR no worker owns, only on its branch reviewer's approve.", "")],
+    ["Review: the base wording kept", REVIEW, `${REVIEW} Never review.`],
+    ["Fresh worker: an appended sentence", FRESH, `${FRESH_HEAD} Reuse workers.`],
+    ["Fresh worker: a changed rule", FRESH, FRESH_HEAD.replace("is never reused", "may be reused")],
+    ["Fresh worker: a dropped clause", FRESH, FRESH_HEAD.replace("; review and complete the successor", "")],
+    ["Fresh worker: the trim without the new words", FRESH, FRESH_HEAD.replace("so is a plan chain's next wave", "so is a plan chain's next wave, optionally")],
+    ["Tests, docs: an appended sentence", TESTS, `${TESTS_HEAD} Chief may write tests.`],
+    ["Tests, docs: a changed owner", TESTS, TESTS_HEAD.replace("only a tester writes", "any worker writes")],
+  ])("rejects %s", (_name, base, head) => {
+    expect(() => acceptCoreRuleTrim(head, base)).toThrow("must differ from base only by replacing");
+  });
+});

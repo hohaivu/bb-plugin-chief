@@ -118,7 +118,7 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - The Chief tools are `chief_consult`, `chief_spawn`, `chief_forge_init`, `chief_delegate`, `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_skip_tests`, `chief_skip_specs`, `chief_escalate` and `chief_sync`.
 - The list adds `chief_plan` when planning is on, and `chief_research` when research is on.
 - The skills are `["chief"]`.
-- The instructions hold the greeting, then the preload line for `claude-code`, then the Chief rules. The project rules come last. Reason: the SDK cuts instructions at 4096 characters.
+- The instructions hold the greeting, then the preload line for `claude-code`, then the Chief rules. The project rules come last. Reason: the SDK cuts instructions at 32,768 characters.
 - The preload line uses `query "+chief"` with `max_results` equal to the tool count.
 
 ## Contracts
@@ -228,7 +228,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - They say that the Coordinator shares facts with a child only through `bb thread tell`, and ends its turn after it acts. It never polls children.
 - The project rules appear last, and only when a project `chief.md` exists. The built-in rules never appear. Reason: they tell a Chief to continue and complete managed work.
 - A child Chief gets one more instruction line before the rules. It names the Coordinator and tells the child to call `chief_escalate` before each Need you. It tells the child to omit `threadId` when no managed thread concerns the request.
-- The instructions fit the 4096-character cut, with the rules last.
+- The instructions fit the 32,768-character cut, with the rules last.
 - Every other instruction of a plain Chief equals the base text.
 
 ### COORD-10 Migrations
