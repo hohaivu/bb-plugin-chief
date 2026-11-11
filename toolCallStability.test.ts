@@ -7,7 +7,7 @@ import plugin from "./server";
 import { completeWorker, configurationContext, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
+import { acceptCoreRuleTrim, acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -88,7 +88,8 @@ describe("tool-call stability", () => {
   // Contract: non-Claude preservation and Claude preservation, against base 7178582 through resolveAgentConfiguration.
   // Allowed differences: (a) title leaves `required` and gets a new description on chief_delegate/plan/consult/spawn;
   // (b) claude-code: the one preload line; (c) everything else, including every codex instruction, is identical; (e) chief_escalate
-  // gains the optional boolean `merge` (tracker spec), the only schema change of that feature.
+  // gains the optional boolean `merge` (tracker spec), the only schema change of that feature; (g) Chief's four trimmed core rules (acceptCoreRuleTrim);
+  // (h) the SDK instruction cap moved from 4096 to 32768 (SDK 0.6.132), so a base text cut at 4096 is a prefix of the head text.
   // Regression: any stray change to tool selection or order, to a tool schema, to codex instructions or to claude instructions.
   test("tool-config oracle: head equals base 7178582 apart from the title schema, chief_escalate's optional merge field and the claude-code preload line", async () => {
     const base = JSON.parse(await readFile(snapshotPath, "utf8")) as Fixture;
@@ -155,25 +156,37 @@ describe("tool-call stability", () => {
     }
 
     let cut = 0;
+    const OLD_CAP = 4096;
+    const NEW_CAP = 32768;
     now.entries.forEach((entry, index) => {
       const old = base.entries[index]!;
-      // Only an uncut text is rewritten: a text the SDK cut at 4096 must keep its own planning line, so a cut that eats Chief's rules still fails.
-      if (entry.instructions && old.instructions && entry.instructions.length < 4096) entry.instructions = acceptPlanningLine(entry.instructions, old.instructions);
       expect(entry.tools, entry.key).toEqual(old.tools);
       expect(entry.skills, entry.key).toEqual(old.skills);
       expect(preloadLine(old), entry.key).toEqual([]);
-      if (!entry.key.includes("| claude-code |")) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
-      if (!entry.tools.length) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
-      expect(preloadLine(entry), entry.key).toHaveLength(1);
-      // Allowed differences (d) and (f): the base snapshot predates chief_sync; a plain Chief's preload asks for chief_sync and chief_coordinate on top of it.
-      if (entry.key.includes("| chief |")) expect(preloadLine(entry)[0], entry.key).toMatch(new RegExp(`max_results ${old.tools.length + 2}$`));
-      const without = entry.instructions!.split("\n").filter((line) => !line.includes("ToolSearch")).join("\n");
-      if (entry.instructions!.length < 4096) expect(without, entry.key).toBe(old.instructions);
-      else { cut += 1; expect(old.instructions!.startsWith(without), entry.key).toBe(true); }
+      // Allowed differences (g) and (h): the core-rule trims and the planning line are undone with their own wording checks, so any other byte still fails.
+      const accepted = (text: string) => (entry.key.includes("| chief |") && old.instructions ? acceptPlanningLine(acceptCoreRuleTrim(text, old.instructions), old.instructions) : text);
+      const withoutPreload = (text: string) => text.split("\n").filter((line) => !line.includes("ToolSearch")).join("\n");
+      const preloaded = entry.key.includes("| claude-code |") && entry.tools.length > 0;
+      if (preloaded) {
+        expect(preloadLine(entry), entry.key).toHaveLength(1);
+        // Allowed differences (d) and (f): the base snapshot predates chief_sync; a plain Chief's preload asks for chief_sync and chief_coordinate on top of it.
+        if (entry.key.includes("| chief |")) expect(preloadLine(entry)[0], entry.key).toMatch(new RegExp(`max_results ${old.tools.length + 2}$`));
+      }
+      if (!entry.instructions || !old.instructions) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
+      const restored = accepted(preloaded ? withoutPreload(entry.instructions) : entry.instructions);
+      if (old.instructions.length < OLD_CAP) expect(restored, entry.key).toBe(old.instructions);
+      else {
+        // The base text was cut at the old cap and the head text at the new one: the base is a prefix of the head, so a cut that eats Chief's rules still fails.
+        cut += 1;
+        expect(old.instructions.length, entry.key).toBe(OLD_CAP);
+        expect(entry.instructions.length, entry.key).toBe(NEW_CAP);
+        expect(restored.startsWith(old.instructions), entry.key).toBe(true);
+      }
     });
     // Only Chief's worst case reaches the cut, and it does so for every planner and research combination.
     expect(cut).toBeGreaterThan(0);
-    expect(now.entries.filter((entry) => (entry.instructions ?? "").length === 4096).every((entry) => entry.key.startsWith("worst case | chief"))).toBe(true);
+    expect(now.entries.filter((entry) => (entry.instructions ?? "").length === NEW_CAP).every((entry) => entry.key.startsWith("worst case | chief"))).toBe(true);
+    expect(now.entries.every((entry) => (entry.instructions ?? "").length <= NEW_CAP)).toBe(true);
   });
 
   // Contract: no drift. The expected line is rebuilt from each entry's own configured tool names.
@@ -268,9 +281,9 @@ describe("tool-call stability", () => {
     expect(roleless.instructions ?? "").not.toContain("ToolSearch");
   });
 
-  // Contract: Chief budget on claude-code. Mirrors the 4096-char test above with the same worst-case inputs.
+  // Contract: Chief budget on claude-code. Same worst-case inputs as the oracle above, against the SDK cap of 32768.
   // Regression: the preload line pushes a core rule past the cut, or pushes project rules ahead of the core.
-  test.each([[5_000, 4], [32_000, 4], [5_000, 5_000]])("claude-code: a %i-char chief.md and a %i-char project name keep the preload line and Chief's core rules inside the 4096-char cut", async (size, nameLength) => {
+  test.each([[5_000, 4], [32_000, 4], [5_000, 5_000]])("claude-code: a %i-char chief.md and a %i-char project name keep the preload line and Chief's core rules inside the 32768-char cut", async (size, nameLength) => {
     const marker = "# Project rules marker";
     const state = await setup({ rules: `${marker}\n${"- Project rule text.\n".repeat(Math.ceil(size / 21))}`.slice(0, size) });
     await state.harness.behavior.setSettings({ plannerEnabled: true });
@@ -279,7 +292,9 @@ describe("tool-call stability", () => {
     const { instructions, tools } = await state.harness.behavior.resolveAgentConfiguration(claudeContext(chief.threadId, "N".repeat(nameLength)));
     expect(tools.map((tool) => tool.name)).toContain("chief_plan");
     expect(tools.map((tool) => tool.name)).toContain("chief_research");
-    expect(instructions!.length).toBe(4096);
+    // Only the 32,000-char chief.md reaches the SDK cap, so it still exercises the cut; the 5,000-char cases fit uncut.
+    if (size === 32_000) expect(instructions!.length).toBe(32768);
+    else expect(instructions!.length).toBeLessThanOrEqual(32768);
     const coreEnd = instructions!.indexOf("chief_escalate with the thread and the full request");
     expect(coreEnd).toBeGreaterThan(-1);
     expect(instructions!.indexOf(`max_results ${tools.length}`)).toBeGreaterThan(-1);
@@ -288,7 +303,7 @@ describe("tool-call stability", () => {
       "# Chief core rules (always apply)", "Call chief_roster at the start of every turn", "never poll managed threads",
       "chief_plan first", "delegate every wave it lists right away",
       "chief_research is optional.", "or the doubtful evidence to chief_review.",
-      "Guidance, not a rule", "Chief never edits code",
+      "Small, low-risk changes suit a skip.", "Chief never edits code",
     ]) expect(instructions).toContain(part);
     expect(instructions!.indexOf(marker)).toBeGreaterThan(coreEnd);
   });

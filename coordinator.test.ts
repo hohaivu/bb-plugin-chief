@@ -1029,14 +1029,15 @@ describe("Coordinator", () => {
     const MARKER = "# Project rules marker";
     const GREETING = "You are the registered Coordinator for Asha: you supervise child Chiefs in any project, not managed threads.";
 
-    test.each([["short chief.md", `${MARKER}\n- Keep rules small.`], ["32,000-char chief.md", `${MARKER}\n${"- Project rule text.\n".repeat(1_600)}`.slice(0, 32_000)]])(
-      "a Coordinator gets the Coordinator rules with a %s last, within the 4096-char cut, and no Chief rules", async (_label, rules) => {
+    test.each([["short chief.md", `${MARKER}\n- Keep rules small.`, false], ["32,000-char chief.md", `${MARKER}\n${"- Project rule text.\n".repeat(1_600)}`.slice(0, 32_000), true]])(
+      "a Coordinator gets the Coordinator rules with a %s last, within the 32768-char cut, and no Chief rules", async (_label, rules, reachesCap) => {
         const state = await setup({ rules });
         const coord = await coordinator(state);
         const { tools, skills, instructions } = await configure(state, coord);
         expect(tools.map((tool) => tool.name).sort()).toEqual(["chief_attach", "chief_roster", "chief_spawn"]);
         expect(skills).toEqual([]);
-        expect(instructions.length).toBeLessThanOrEqual(4096);
+        expect(instructions.length).toBeLessThanOrEqual(32768);
+        if (reachesCap) expect(instructions.length).toBe(32768);
         expect(instructions.startsWith(`${GREETING}\n`)).toBe(true);
         expect(instructions).toContain("Call chief_roster at the start of every turn: its Children block is your work list.");
         expect(instructions).not.toContain("# Chief core rules");
@@ -1078,8 +1079,9 @@ describe("Coordinator", () => {
       if (provider === "claude-code") expect(preload(childConfig)).toContain(`max_results ${childConfig.tools.length}`);
     });
 
-    // The SDK cuts instructions at 4096 chars: the core rules (the last, mandatory one is the Need-you escalation) go before the project rules, so they must end inside the cut even for the longest supported inputs.
-    test("claude-code, planning and research on, linked child, 14-char Coordinator id, 40-char project name: the core rules, Need-you rule included, end inside the 4096 cut", async () => {
+    // The SDK cuts instructions at 32768 chars; the core rules (the last, mandatory one is the Need-you escalation) go before the project rules, so they must end inside the cut even for the longest supported inputs.
+    // The 4096 bound below is Chief's own budget for the core rules (keeps the rules small), not the SDK cut.
+    test("claude-code, planning and research on, linked child, 14-char Coordinator id, 40-char project name: the core rules, Need-you rule included, end inside the 4096-char core-rules budget", async () => {
       const state = await setup();
       const coord = await coordinator(state);
       const child = (await spawnChild(state, coord)).id;

@@ -9,7 +9,7 @@ afterEach(disposeAll);
 
 // Contracts C12 and C13 (plan wave 1, "Only the Spec Writer edits docs/ everywhere"), read through Chief's real configuration.
 // C12: Chief's core rules state the docs rule in the Tests/docs line, and the block is not longer than before in any of its four `child` variants
-//      (the SDK cuts instructions at 4096 chars; the rules before the project rules must not grow).
+//      (the SDK cuts instructions at 32768 chars; 4096 is the core-rules budget, so the rules before the project rules must not grow).
 // C13: the two tool descriptions that changed say the new thing: the delegate `kind` text routes a docs change to a Spec Writer on every non-design wave,
 //      and the `skipReview` text names the docs/ refusal and the skipped-check reply.
 describe("docs ownership in Chief's configuration", () => {
