@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { PLAN_FIXTURE, TEST_WAVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, planFile, setup, start, status, wave } from "./test/harness";
+import { PLAN_FIXTURE, REVIEWER_NATIVE_LINE, TEST_WAVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, planFile, setup, start, status, wave } from "./test/harness";
+import { NATIVE_NO_RESHAPE_LINE } from "./test/reviewWave1";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -370,10 +371,10 @@ describe("Chief backend", () => {
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
-      { path: path1, contracts: "- Totals stay non-negative", title: "Plan" },
-      { path: path2, contracts: "- Wave 2 keeps its invariant", title: "Wave 2" },
-      { path: path3, contracts: "- Wave 3 keeps its invariant", title: "Wave 3" },
-      { path: path4, contracts: "- Wave 4 keeps its invariant", test: true, title: "Wave 4" },
+      { path: path1, contracts: "- Totals stay non-negative", feature: false, reshape: false, title: "Plan" },
+      { path: path2, contracts: "- Wave 2 keeps its invariant", feature: false, reshape: false, title: "Wave 2" },
+      { path: path3, contracts: "- Wave 3 keeps its invariant", feature: false, reshape: false, title: "Wave 3" },
+      { path: path4, contracts: "- Wave 4 keeps its invariant", test: true, feature: false, reshape: false, title: "Wave 4" },
     ]);
   });
 
@@ -409,9 +410,9 @@ describe("Chief backend", () => {
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
-      { path: path1, contracts: "- Totals stay non-negative", title: "Plan" },
-      { path: path2, contracts: "- Wave 2 keeps its invariant", title: "Wave 2" },
-      { path: path3, contracts: "- Wave 3 keeps its invariant", test: true, title: "Wave 3" },
+      { path: path1, contracts: "- Totals stay non-negative", feature: false, reshape: false, title: "Plan" },
+      { path: path2, contracts: "- Wave 2 keeps its invariant", feature: false, reshape: false, title: "Wave 2" },
+      { path: path3, contracts: "- Wave 3 keeps its invariant", test: true, feature: false, reshape: false, title: "Wave 3" },
     ]);
   });
 
@@ -539,6 +540,67 @@ describe("Chief backend", () => {
       await report;
       expect(state.sent).toHaveLength(sentBefore + 1);
     }
+  });
+
+  // Contract (wave 1, flag storage): an array plan stores each wave's feature and reshape as exact booleans (false by default); a raw string plan never reaches storage.
+  // Catches: storing both flags false for every wave (a reported feature plan then loses its native-design check), swapping the two flags, or storing keys on a string plan.
+  const plannerOf = async (state: Awaited<ReturnType<typeof setup>>, chiefId: string) => {
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], { threadId: chiefId, projectId: "proj_1" });
+    return (await status(state)).threads.find((row) => row.role === "planner")!;
+  };
+  const persistedWaves = (state: Awaited<ReturnType<typeof setup>>, plannerId: string) =>
+    JSON.parse((state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(plannerId) as { plan_waves: string }).plan_waves);
+
+  test("an array plan persists feature and reshape as booleans per wave, defaulting to false", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await plannerOf(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Four waves",
+      plan: [{ body: PLAN_FIXTURE, feature: true }, { body: wave(2), reshape: true }, { body: wave(3), feature: true, reshape: true }, TEST_WAVE(4)],
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+    expect(persistedWaves(state, planner.threadId)).toEqual([
+      { path: planFile(state, planner.threadId, 1), contracts: "- Totals stay non-negative", feature: true, reshape: false, title: "Plan" },
+      { path: planFile(state, planner.threadId, 2), contracts: "- Wave 2 keeps its invariant", feature: false, reshape: true, title: "Wave 2" },
+      { path: planFile(state, planner.threadId, 3), contracts: "- Wave 3 keeps its invariant", feature: true, reshape: true, title: "Wave 3" },
+      { path: planFile(state, planner.threadId, 4), contracts: "- Wave 4 keeps its invariant", test: true, feature: false, reshape: false, title: "Wave 4" },
+    ]);
+  });
+
+  // A raw string plan is refused at intake (it needs two waves), so the only string form that reaches storage is a JSON-encoded array: it keeps the flags too.
+  test("a JSON-encoded array plan persists the same flags, and a raw string plan is refused", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await plannerOf(state, chief.threadId);
+    const opts = { threadId: planner.threadId, projectId: "proj_1" };
+    await expect(state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "One wave", plan: PLAN_FIXTURE }, opts)).rejects.toThrow(/plan needs at least two waves/);
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Two waves", plan: JSON.stringify([{ body: PLAN_FIXTURE, feature: true, reshape: true }, TEST_WAVE(2)]) }, opts);
+    expect(persistedWaves(state, planner.threadId)).toMatchObject([{ feature: true, reshape: true }, { feature: false, reshape: false, test: true }]);
+  });
+
+  // Contract (wave 1): the stored flags reach the reviewer: native-design line only for a feature wave, its reshape sentences only with a reshape wave, absent for explicit false.
+  // The plan goes through the real report intake, the worker through delegation, and the prompt is the one chief_review launched.
+  test.each([
+    ["feature only", { feature: true }, NATIVE_NO_RESHAPE_LINE],
+    ["feature and reshape", { feature: true, reshape: true }, REVIEWER_NATIVE_LINE],
+    ["no flag on the wave (explicit false)", {}, null],
+  ])("a plan wave with %s gives the reviewer the matching native-design line", async (_label, flags, line) => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    const planner = await plannerOf(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Two waves", plan: [{ body: PLAN_FIXTURE, ...flags }, TEST_WAVE(2)] }, { threadId: planner.threadId, projectId: "proj_1" });
+    const delegated = await state.harness.behavior.runCli(["delegate", "--title", "Fix checkout totals", "--mission", "Do it", "--plan-thread", planner.threadId, "--wave", "1", "--json"], opts);
+    const worker = JSON.parse(delegated.stdout!) as { threadId: string };
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done\n\n## Deviations from plan\nNone" }, { threadId: worker.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: "docs only" }, opts);
+    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+    const prompt = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!.prompt as string;
+    if (line) {
+      expect(prompt.split(line).length - 1).toBe(1);
+      expect(prompt.split("Native-design check, for feature work only").length - 1).toBe(1);
+    } else expect(prompt).not.toContain("Native-design check");
   });
 
   test("a single-wave reviewer gets the Contracts to verify list even when the brief is clipped", async () => {

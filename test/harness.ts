@@ -118,6 +118,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   const catalogReads: (string | undefined)[] = [];
   const tabsStore = new Map<string, { revision: number; tabs: any[] }>();
   let tabsUpdateFailures = options.failTabsUpdates ?? 0;
+  let failedWrites: RegExp | null = null;
   let tabsGets = 0;
   const tabsUpdates: Array<{ threadId: string; expectedRevision: number; tabs: any[] }> = [];
   const archivedEnvs: string[] = [];
@@ -154,7 +155,10 @@ export async function setup(options: { /** projects.get rejects these ids, as th
       // Thread storage sits on host_storage, not this machine: a plan must be written through it.
       files: {
         write: async ({ hostId, path, content }: { hostId?: string; path: string; content: string }) => {
-          if (hostId !== "host_storage") throw new Error(`wrote ${path} to host ${hostId}`);
+          if (failedWrites?.test(path)) throw new Error(`write refused for ${path}`);
+          // A reviewer's attempt folder (review-<report>/<attempt>/) is written on the host the reviewer runs on, here host_1; every other file goes to host_storage.
+          const attemptFolder = /\/review-\d+\/[0-9a-f]{8}\//.test(path);
+          if (hostId !== "host_storage" && !(attemptFolder && hostId === "host_1")) throw new Error(`wrote ${path} to host ${hostId}`);
           await mkdir(dirname(path), { recursive: true });
           await writeFile(path, content);
           return {};
@@ -324,6 +328,8 @@ export async function setup(options: { /** projects.get rejects these ids, as th
     tabsUpdates,
     seedTabs(threadId: string, tabs: any[]) { tabsStore.set(threadId, { revision: 7, tabs }); },
     failTabsUpdates(count: number) { tabsUpdateFailures = count; },
+    /** Every file write to a path matching `pattern` fails until it is set to null. */
+    failWritesMatching(pattern: RegExp | null) { failedWrites = pattern; },
     setPatch(next: string) { patch = next; },
     seedQueuedMessage(threadId: string, text: string) {
       const existing = queuedMessagesStore.get(threadId) ?? [];
@@ -411,7 +417,13 @@ export async function chiefReview(state: Awaited<ReturnType<typeof setup>>, chie
 
 // A reviewer's ready report must carry findings: [] for an approve and a blocking entry for request_changes.
 /** The review-context.md a reviewer reads: the brief, the worker's report and any earlier review travel there, not in the prompt. */
-export const reviewContextOf = (state: { storageRoot: string }, reviewerThreadId: string) => readFile(join(state.storageRoot, reviewerThreadId, "review-context.md"), "utf8");
+export const reviewContextOf = async (state: { spawned: { prompt?: string }[] }, reviewerThreadId: string) => {
+  // The reviewer's prompt names the absolute path the context was written to before the launch (thr_<n> is the n-th spawn).
+  const prompt = state.spawned[Number(reviewerThreadId.slice("thr_".length)) - 1]?.prompt ?? "";
+  const path = /Read `([^`]+review-context\.md)` in full before reviewing/.exec(prompt)?.[1];
+  if (!path) throw new Error(`the prompt of ${reviewerThreadId} names no review-context.md`);
+  return readFile(path, "utf8");
+};
 export const latestReviewContext = async (state: Awaited<ReturnType<typeof setup>>) =>
   reviewContextOf(state, (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId);
 /** The Pending line a ready, unplanned worker shows until Chief starts its review; the roster and the lifecycle alert carry it word for word. */

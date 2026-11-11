@@ -3,7 +3,17 @@
 //   (a) the `## Docs ownership` paragraph on a review prompt (text from the plan, written here as an independent contract),
 //   (b) review gate item (4) now pointing at it,
 //   (c) the docs rule moved from the `## Spec` block into the `## Working contract`, and the Spec Writer's trailer and adoption lines.
-export const OWNERSHIP_PARAGRAPH = (ids = "none") => `Only a Spec Writer changes docs/. The Spec Writers of this task: ${ids}. A docs/ commit is in scope only when its Chief-Spec-Writer trailer names one of them, or it lies inside one of their reported ranges (Base commit..Head commit, or Fold base..Fold head). Check with: git log --no-merges --format='%H %(trailers:key=Chief-Spec-Writer,valueonly)' <base>..<head> -- docs/. Any other docs/ commit is an ownership violation and is blocking. Exception: a later Spec Writer of this task lists that commit under "## Adopted docs commits" in its report, and the final docs/ content is correct. Then name it as a non-blocking note. A missing trailer means unknown ownership, not proof that a non-writer made the commit. The repair is never a worker change: it is a Spec Writer (kind: spec-writer).`;
+// The 19babad paragraph, with the two named edits of the reviewer-prompt wave (plan step 5f): the empty-range sentence, and the own-range violation sentence.
+const BASE_OWNERSHIP_PARAGRAPH = (ids: string) => `Only a Spec Writer changes docs/. The Spec Writers of this task: ${ids}. A docs/ commit is in scope only when its Chief-Spec-Writer trailer names one of them, or it lies inside one of their reported ranges (Base commit..Head commit, or Fold base..Fold head). Check with: git log --no-merges --format='%H %(trailers:key=Chief-Spec-Writer,valueonly)' <base>..<head> -- docs/. Any other docs/ commit is an ownership violation and is blocking. Exception: a later Spec Writer of this task lists that commit under "## Adopted docs commits" in its report, and the final docs/ content is correct. Then name it as a non-blocking note. A missing trailer means unknown ownership, not proof that a non-writer made the commit. The repair is never a worker change: it is a Spec Writer (kind: spec-writer).`;
+const RANGE_OLD = "Fold base..Fold head). Check with:";
+const RANGE_NEW = "Fold base..Fold head; `Fold: none` with equal Fold base and Fold head is an empty scope: nothing to check, never fall back to its Base commit). Check with:";
+const VIOLATION_OLD = "A missing trailer means unknown ownership, not proof that a non-writer made the commit. The repair";
+const VIOLATION_NEW = "A missing trailer means unknown ownership, not proof that a non-writer made the commit. A docs/ path in a worker's, designer's or tester's own range is a violation. The repair";
+const edit = (text: string, from: string, to: string) => {
+  if (text.split(from).length !== 2) throw new Error(`expected exactly one ${JSON.stringify(from)}`);
+  return text.replace(from, () => to);
+};
+export const OWNERSHIP_PARAGRAPH = (ids = "none") => edit(edit(BASE_OWNERSHIP_PARAGRAPH(ids), RANGE_OLD, RANGE_NEW), VIOLATION_OLD, VIOLATION_NEW);
 export const OWNERSHIP_BLOCK = (ids = "none") => `\n\n## Docs ownership\n${OWNERSHIP_PARAGRAPH(ids)}`;
 export const DOCS_RULE_NEW = "- Never change docs/: only a Spec Writer does, on every wave and on unplanned work. When the task needs a docs/ change, do not make it: list it under \"## Docs needed\" in your ready result and its summary. Chief routes it to a Spec Writer.";
 export const DOCS_RULE_OLD = "- Never change docs/: only a Spec Writer does.";

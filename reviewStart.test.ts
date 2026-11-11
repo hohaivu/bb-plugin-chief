@@ -1,14 +1,17 @@
 import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow } from "./src/types";
-import { acceptOwnershipDeep } from "./test/docsOwnership";
+import { REVIEWER_NATIVE_LINE, replaceText } from "./test/harness";
+import { groupedSubject, NATIVE_NO_RESHAPE_LINE, NATIVE_RESHAPE_PAREN, NATIVE_RESHAPE_TAIL, TEST_AUDIT_LINE, wave1Prompt } from "./test/reviewWave1";
 import { createReviewLedger } from "./src/review/reviewLedger";
 import { createReviewStart, type PinnedHead } from "./src/review/reviewStart";
+import type { PlanWave } from "./src/plan/waveSchedule";
 import { createThreadStore } from "./src/db/threadStore";
 
 // Contract: the Review attempt module (reviewStart.ts) at its own interface. Its faults, its frozen identity and its
@@ -43,10 +46,10 @@ function deferred<T>() {
 }
 
 let worlds = 0;
-type Options = { projectPath?: string | null; heads?: Record<string, PinnedHead | null>; engine?: () => unknown };
+type Options = { projectPath?: string | null; heads?: Record<string, PinnedHead | null>; engine?: () => unknown; waves?: PlanWave[]; gitEnv?: NodeJS.ProcessEnv };
 
 /** A standalone review attempt over real SQLite and the real ThreadStore; only the host, the forge and spawn are doubles. */
-function world({ projectPath = null, heads = {}, engine }: Options = {}) {
+function world({ projectPath = null, heads = {}, engine, waves = [], gitEnv }: Options = {}) {
   const { bb, harness } = createFakePluginHost({ pluginId: `review-start-${++worlds}` });
   disposals.push(() => harness.lifecycle.dispose());
   const db = bb.storage.database();
@@ -101,10 +104,10 @@ function world({ projectPath = null, heads = {}, engine }: Options = {}) {
       reviewRefusal: () => null,
       retestDebts: () => ({ owed: [], waived: [] }),
       reviewTargetsFor: (worker) => covers ? [worker, ...covers.filter((id) => id !== worker.thread_id).map((id) => store.get(id)!)] : [worker],
-      planWavesFor: () => [],
+      planWavesFor: () => waves,
     },
     controlsThread: (row, chiefId) => row.chief_thread_id === chiefId,
-    host: host as any, forge, git: { env: () => process.env },
+    host: host as any, forge, git: { env: () => gitEnv ?? process.env },
     // Default: the shipped default setting. Written as a plain object so this file also runs unchanged against the base commit.
     engine: (engine ?? (async () => ({ mode: "reviewer", prAgentDir: "/unused" }))) as any,
   });
@@ -115,14 +118,15 @@ function world({ projectPath = null, heads = {}, engine }: Options = {}) {
     planWaves: null, regression: 0, fails: null, findings: null, now: Date.now(),
   });
   /** A worker at `reports` reports (report_seq = reports), through the store's own reservation. */
-  const worker = (id: string, over: { prUrl?: string; branch?: string; reports?: number } = {}) => {
-    store.insert({ threadId: id, role: "worker", projectId: "proj", chiefThreadId: "chief", title: `Task ${id}`, state: "ready", status: "idle", prUrl: over.prUrl, branch: over.branch });
+  const worker = (id: string, over: { prUrl?: string; branch?: string; reports?: number; kind?: string; planWave?: number } = {}) => {
+    store.insert({ threadId: id, role: "worker", projectId: "proj", chiefThreadId: "chief", title: `Task ${id}`, state: "ready", status: "idle", prUrl: over.prUrl, branch: over.branch, kind: over.kind, ...(over.planWave ? { planThreadId: "P", planWave: over.planWave } : {}) });
     for (let n = 0; n < (over.reports ?? 1); n++) nextReport(id);
   };
   const row = (id: string) => db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(id) as any;
   const targetRows = (reviewerId: string) =>
     db.prepare(`SELECT worker_thread_id, report_seq, head_sha, pr_url, branch FROM review_targets WHERE reviewer_thread_id=? ORDER BY worker_thread_id`).all(reviewerId) as any[];
-  const contexts = () => host.writeFile.mock.calls.filter(([, relPath]) => relPath === "review-context.md").map(([, , content]) => content);
+  /** review-context.md is written before the launch, to the attempt folder on the reviewer's host (host.writeArtifact), never to the reviewer's storage. */
+  const contexts = () => host.writeArtifact.mock.calls.filter(([, , name]) => name.endsWith("/review-context.md")).map(([, , , content]) => content);
   return {
     db, store, ledger, review, chief, managedSpawn, launches, events, forge, host, worker, nextReport, row, targetRows, contexts,
     covering: (ids: string[]) => { covers = ids; },
@@ -145,13 +149,25 @@ describe("identity: every target's report and head come from one capture", () =>
     expect(out.reply).toContain("One review covers the whole plan: W1, W2, each pull request pinned to its own head commit where the forge answered.");
     expect(w.launches[0]!.args.environment).toEqual({ type: "host", hostId: "host_proj", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/one-head" } } });
     const prompt: string = w.launches[0]!.args.prompt;
-    expect(prompt).toContain(`- worker W1 “Task W1”: ${pr(1)} (branch feature/one-head, targeting main), pinned to ${SHA_B}: \`git fetch origin feature/one-head && git checkout --detach ${SHA_B}\`, then review \`git diff origin/main...${SHA_B}\``);
-    expect(prompt).toContain(`- worker W2 “Task W2”: branch feature/two (${pr(2)}), head not readable, not pinned: \`git fetch origin feature/two\`, then review \`git diff <the project's default branch>...origin/feature/two\`; the verdict binds to its report 5`);
+    // Plan step 1c: one line per pull request, naming its workers; an unpinned target keeps today's wording and its report binding.
+    const lineOf = (start: string) => prompt.split("\n").filter((line) => line.startsWith(start));
+    const [pinnedLine] = lineOf(`- ${pr(1)} (branch feature/one-head, targeting main), pinned to ${SHA_B}: `);
+    expect(lineOf(`- ${pr(1)} `)).toHaveLength(1);
+    expect(pinnedLine).toContain(`\`git fetch origin feature/one-head && git checkout --detach ${SHA_B}\`, then review \`git diff origin/main...${SHA_B}\``);
+    expect(pinnedLine).toMatch(/ Workers: worker W1 “Task W1”\.$/);
+    const [unpinnedLine] = lineOf("- branch feature/two ");
+    expect(lineOf("- branch ")).toHaveLength(1);
+    expect(unpinnedLine).toContain(`(${pr(2)}), head not readable, not pinned: \`git fetch origin feature/two\`, then review \`git diff <the project's default branch>...origin/feature/two\``);
+    expect(unpinnedLine).toContain("worker W2 “Task W2”");
+    expect(unpinnedLine).toContain("the verdict binds to its report 5");
+    expect(prompt).toContain("1 pull request and 1 branch without a pinned pull request, started");
     // The context names the pinned head's branch for W1 (not the row's) and the row's branch for the unpinned W2.
     const [context] = w.contexts();
     expect(context).toContain("### feature/one-head (worker W1)");
     expect(context).toContain("### feature/two (worker W2)");
-    expect(w.host.writeFile).toHaveBeenCalledWith("R1", "review-context.md", expect.any(String));
+    // review-context.md is written before the launch to the attempt folder on the reviewer's host, keyed by the initiating worker's report 2.
+    expect(w.host.writeArtifact).toHaveBeenCalledWith("W1", "proj", expect.stringMatching(/^review-2\/[0-9a-f]{8}\/review-context\.md$/), expect.any(String), "host_proj");
+    expect(w.host.writeFile).not.toHaveBeenCalled();
     expect(w.targetRows("R1")).toEqual([
       { worker_thread_id: "W1", report_seq: 2, head_sha: SHA_B, pr_url: pr(1), branch: "feature/one-row" },
       { worker_thread_id: "W2", report_seq: 5, head_sha: null, pr_url: pr(2), branch: "feature/two" },
@@ -256,56 +272,112 @@ describe("ancestry: a failed host check means the whole pull request", () => {
   });
 });
 
-describe("review-context.md: a failed write never undoes the launch", () => {
+describe("review-context.md: written before the launch; a failed write inlines the context and never undoes the launch", () => {
   const withHead = () => {
     const w = world({ heads: { [pr(1)]: headOf("feature/one") } });
-    w.worker("W1", { prUrl: pr(1) });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
     return w;
   };
-  const MESSAGE = (error: string) => `Could not write review-context.md for reviewer R1 after 3 attempts: ${error}. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.`;
+  const failContext = (w: ReturnType<typeof world>, fail: () => Promise<string> = () => Promise.reject(new Error("disk full"))) => w.host.writeArtifact.mockImplementation(fail as any);
+  const FOLDER = /^review-1\/([0-9a-f]{8})\/review-context\.md$/;
+  const MESSAGE = (name: string, error: string) => `Could not write ${name} for the review of W1 after 3 attempts: ${error}. The context is inlined into the reviewer prompt instead.`;
   const REPLY = `${pinnedReply("Task W1", "R1", SHA_B)} Impact slice skipped: W1: ${NO_CHECKOUT}.`;
+  const nameOf = (w: ReturnType<typeof world>) => w.host.writeArtifact.mock.calls[0]![2];
 
-  test("3 attempts on a 1 s and 2 s backoff, then one Chief alert with the exact key and message; the reply is unchanged", async () => {
+  test("the context is written, and the prompt names the returned absolute path, before the reviewer is launched", async () => {
     const w = withHead();
-    w.host.writeFile.mockImplementation(() => Promise.reject(new Error("disk full")));
+
+    await w.review.startReview(w.chief, "W1");
+
+    expect(w.events).toEqual([`artifact:${nameOf(w)}`, "launch"]);
+    expect(nameOf(w)).toMatch(FOLDER);
+    const path = `/data/host_proj/chief/proj/W1/${nameOf(w)}`;
+    const prompt: string = w.launches[0]!.args.prompt;
+    expect(prompt).toContain(`Read \`${path}\` in full before reviewing: it holds the reports, plan files and pointers this brief names.`);
+    expect(prompt).not.toContain("## review-context.md");
+    expect(w.host.alertChief).not.toHaveBeenCalled();
+    // The path the prompt names is the one the host returned: a prompt can never name a file that was not written.
+    w.host.writeArtifact.mockClear();
+    const other = world({ heads: { [pr(1)]: headOf("feature/one") } });
+    other.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    other.host.writeArtifact.mockImplementation(async () => "/elsewhere/returned/review-context.md");
+    await other.review.startReview(other.chief, "W1");
+    expect(other.launches[0]!.args.prompt).toContain("Read `/elsewhere/returned/review-context.md` in full before reviewing");
+  });
+
+  test("3 attempts on a 1 s and 2 s backoff before the launch, then one Chief alert; the launch still happens with the context inlined; the reply is unchanged", async () => {
+    const w = withHead();
+    failContext(w);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
     const run = w.review.startReview(w.chief, "W1");
     await vi.advanceTimersByTimeAsync(0);
-    expect(w.host.writeFile).toHaveBeenCalledTimes(1);
+    expect(w.host.writeArtifact).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(999);
-    expect(w.host.writeFile).toHaveBeenCalledTimes(1);
+    expect(w.host.writeArtifact).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(w.host.writeFile).toHaveBeenCalledTimes(2);
+    expect(w.host.writeArtifact).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1_999);
-    expect(w.host.writeFile).toHaveBeenCalledTimes(2);
+    expect(w.host.writeArtifact).toHaveBeenCalledTimes(2);
+    // The reviewer does not start while a context write is still being retried.
+    expect(w.managedSpawn.launch).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     const out = await run;
 
-    expect(w.host.writeFile).toHaveBeenCalledTimes(3);
+    expect(w.host.writeArtifact).toHaveBeenCalledTimes(3);
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
     expect(w.host.alertChief).toHaveBeenCalledTimes(1);
+    const name = nameOf(w);
+    expect(name).toMatch(FOLDER);
+    expect(new Set(w.host.writeArtifact.mock.calls.map(([, , written]) => written))).toEqual(new Set([name]));
     const [alertRow, key, message] = w.host.alertChief.mock.calls[0]!;
-    expect(alertRow.thread_id).toBe("R1");
-    expect(key).toBe("review-context:R1");
-    expect(message).toBe(MESSAGE("Error: disk full"));
+    expect(alertRow.thread_id).toBe("W1"); // the reviewer's row does not exist before the launch: the worker's names the same Chief
+    expect(alertRow.chief_thread_id).toBe("chief");
+    expect(key).toBe(`${name.replace(/\.md$/, "")}:W1`);
+    expect(message).toBe(MESSAGE(name, "Error: disk full"));
     expect(w.host.logError).not.toHaveBeenCalled();
     expect(out.reply).toBe(REPLY);
-    // The reviewer launched and is recorded before the write is tried.
     expect(w.targetRows("R1")).toHaveLength(1);
+    // The prompt inlines the very text that failed to be written, once, under its own heading, and names no file.
+    const prompt: string = w.launches[0]!.args.prompt;
+    const [written] = w.host.writeArtifact.mock.calls.map(([, , , content]) => content as string);
+    expect(prompt.endsWith(`\n\n## review-context.md\n${written!.replace(/\n$/, "")}`)).toBe(true);
+    expect(prompt.split("## review-context.md\n")).toHaveLength(2);
+    expect(prompt).not.toContain("in full before reviewing: it holds");
   });
 
   test("a write that throws synchronously is a failed attempt", async () => {
     const w = withHead();
-    w.host.writeFile.mockImplementation(() => { throw new Error("sync disk"); });
+    failContext(w, () => { throw new Error("sync disk"); });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
     const run = w.review.startReview(w.chief, "W1");
     await vi.advanceTimersByTimeAsync(3_000);
     const out = await run;
 
-    expect(w.host.writeFile).toHaveBeenCalledTimes(3);
-    expect(w.host.alertChief.mock.calls[0]![2]).toBe(MESSAGE("Error: sync disk"));
+    expect(w.host.writeArtifact).toHaveBeenCalledTimes(3);
+    expect(w.host.alertChief.mock.calls[0]![2]).toBe(MESSAGE(nameOf(w), "Error: sync disk"));
     expect(out.reply).toBe(REPLY);
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
+  });
+
+  test("one failed attempt that then succeeds writes once, sends no alert, and names the path", async () => {
+    const w = withHead();
+    let calls = 0;
+    w.host.writeArtifact.mockImplementation(async (threadId, projectId, name, _content, hostId) => {
+      if (++calls === 1) throw new Error("blip");
+      return `/data/${hostId}/chief/${projectId}/${threadId}/${name}`;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    const run = w.review.startReview(w.chief, "W1");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await run;
+
+    expect(w.host.writeArtifact).toHaveBeenCalledTimes(2);
+    expect(w.host.alertChief).not.toHaveBeenCalled();
+    expect(w.launches[0]!.args.prompt).toContain(`Read \`/data/host_proj/chief/proj/W1/${nameOf(w)}\` in full before reviewing`);
+    expect(w.launches[0]!.args.prompt).not.toContain("## review-context.md");
   });
 
   test.each([
@@ -313,7 +385,7 @@ describe("review-context.md: a failed write never undoes the launch", () => {
     ["throws synchronously", () => { throw new Error("chief down"); }],
   ])("a Chief alert that %s is logged with the original message, never thrown", async (_name, fail) => {
     const w = withHead();
-    w.host.writeFile.mockImplementation(() => Promise.reject(new Error("disk full")));
+    failContext(w);
     w.host.alertChief.mockImplementation(fail as any);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
@@ -323,8 +395,20 @@ describe("review-context.md: a failed write never undoes the launch", () => {
 
     expect(w.host.alertChief).toHaveBeenCalledTimes(1);
     expect(w.host.logError).toHaveBeenCalledTimes(1);
-    expect(w.host.logError).toHaveBeenCalledWith(`${MESSAGE("Error: disk full")} The Chief alert also failed: Error: chief down`);
+    expect(w.host.logError).toHaveBeenCalledWith(`${MESSAGE(nameOf(w), "Error: disk full")} The Chief alert also failed: Error: chief down`);
     expect(out.reply).toBe(REPLY);
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
+  });
+
+  test("a branch review has no context: nothing is written, and the prompt has no read line and no inline section", async () => {
+    const w = world({ projectPath: "/checkout", heads: { [pr(9)]: headOf("feature/from-head") } });
+
+    await w.review.startBranchReview(w.chief, { pullRequest: pr(9) });
+
+    expect(w.host.writeArtifact).not.toHaveBeenCalled();
+    expect(w.host.writeFile).not.toHaveBeenCalled();
+    expect(w.launches[0]!.args.prompt).not.toContain("in full before reviewing: it holds");
+    expect(w.launches[0]!.args.prompt).not.toContain("## review-context.md");
   });
 });
 
@@ -554,6 +638,8 @@ const observed = (w: ReturnType<typeof world>, out: unknown) => ({
   out,
   launches: w.launches.map((launch) => ({ id: launch.id, args: launch.args })),
   writes: w.host.writeFile.mock.calls.map(([threadId, relPath, content]) => ({ threadId, relPath, content })),
+  // Wave 1 moves review-context.md here (the attempt folder on the reviewer's host); the 9cf75e3 capture has no such key.
+  artifacts: w.host.writeArtifact.mock.calls.map(([threadId, projectId, name, content, hostId]) => ({ threadId, projectId, name, content, hostId })),
   alerts: w.host.alertChief.mock.calls.map(([row, key, message]) => ({ thread: (row as ManagedRow).thread_id, key, message })),
   logs: w.host.logError.mock.calls.map(([message]) => message),
 });
@@ -581,7 +667,9 @@ async function scenarios(engine?: () => unknown) {
   {
     const w = world({ engine, heads: { [pr(1)]: headOf("feature/one") } });
     w.worker("W1", { prUrl: pr(1) });
+    // Both seams fail: base wrote the context to the reviewer's storage (writeFile), wave 1 writes it to the attempt folder (writeArtifact).
     w.host.writeFile.mockImplementation(() => Promise.reject(new Error("disk full")));
+    w.host.writeArtifact.mockImplementation(() => Promise.reject(new Error("disk full")));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const run = w.review.startReview(w.chief, "W1");
     await vi.advanceTimersByTimeAsync(3_000);
@@ -602,6 +690,57 @@ async function scenarios(engine?: () => unknown) {
 const ORACLE_FILE = join(import.meta.dirname, "test", "fixtures", "review-engine-9cf75e3.json");
 const READ_FAILURE = "Could not read the review engine setting, using reviewer:";
 
+// The 9cf75e3 capture is the base. The expected head scenario is that capture with wave 1's named edits (test/reviewWave1.ts: each copied from
+// the plan, with an exact count) and the plan's context move: review-context.md goes from the reviewer's storage to the attempt folder on the
+// reviewer's host, written before the launch, with the alert re-keyed and re-worded for the worker's review. No byte comes from head output.
+const SCENARIO_SEAMS: Record<string, { seq: number; host: string; many: boolean; failed: boolean }> = {
+  "single pinned": { seq: 1, host: "host_proj", many: false, failed: false },
+  "single unpinned": { seq: 1, host: "host_env", many: false, failed: false },
+  "plan review, mixed pinning": { seq: 2, host: "host_proj", many: true, failed: false },
+  "review-context.md write fails": { seq: 1, host: "host_proj", many: false, failed: true },
+};
+const ATTEMPT_ID = /review-(\d+)\/[0-9a-f]{8}\//g;
+/** The attempt id is a fresh random value per start: every other byte of a path stays. */
+const withoutAttemptId = <T,>(value: T): T => {
+  if (typeof value === "string") return value.replace(ATTEMPT_ID, "review-$1/<attempt>/") as T;
+  if (Array.isArray(value)) return value.map((entry) => withoutAttemptId(entry)) as T;
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withoutAttemptId(entry)])) as T;
+  return value;
+};
+function oracleOnHead(oracle: Record<string, any>) {
+  return Object.fromEntries(Object.entries(oracle).map(([name, base]) => {
+    const seam = SCENARIO_SEAMS[name];
+    const contextWrites = (base.writes as { relPath: string; content: string }[]).filter((write) => write.relPath === "review-context.md");
+    const baseContext = contextWrites.length ? contextWrites[0]!.content.replace(/\n$/, "") : "";
+    const file = seam ? `review-${seam.seq}/<attempt>/review-context.md` : "";
+    const launches = (base.launches as { id: string; args: { prompt: string } }[]).map((launch) => {
+      // The 9cf75e3 prompt already carries the native line, reshape variant: an unplanned worker review and a branch review drop its two reshape parts.
+      const baseNative = replaceText(replaceText(launch.args.prompt, NATIVE_RESHAPE_PAREN, "", 1), NATIVE_RESHAPE_TAIL, "", 1);
+      let prompt = wave1Prompt(baseNative, baseContext, {
+        native: "none",
+        testAudit: true, // every slice is skipped (no checkout): the changed paths are unknown, so the rule stays
+        contextPath: seam && !seam.failed ? `/data/${seam.host}/chief/proj/W1/${file}` : null,
+        many: seam?.many,
+        ownership: seam ? "none" : null, // worker and plan prompts: the slice is skipped, so the docs history is unknown and no Spec Writer exists; a branch prompt has none
+      });
+      if (seam?.many) prompt = groupedSubject(prompt);
+      if (seam?.failed) prompt = `${prompt}\n\n## review-context.md\n${baseContext}`;
+      return { ...launch, args: { ...launch.args, prompt } };
+    });
+    return [name, {
+      ...base,
+      launches,
+      writes: (base.writes as { relPath: string }[]).filter((write) => write.relPath !== "review-context.md"),
+      artifacts: contextWrites.map((write) => ({ threadId: "W1", projectId: "proj", name: file, content: write.content, hostId: seam!.host })),
+      alerts: (base.alerts as unknown[]).map(() => ({
+        thread: "W1", key: `review-${seam!.seq}/<attempt>/review-context:W1`,
+        message: `Could not write ${file} for the review of W1 after 3 attempts: Error: disk full. The context is inlined into the reviewer prompt instead.`,
+      })),
+    }];
+  }));
+}
+const headScenarios = async (engine?: () => unknown) => withoutAttemptId(await scenarios(engine));
+
 describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
   // Run at the base commit (where no engine exists) with ORACLE_ONLY=capture ORACLE_OUT=<file>; the committed file is that run's output.
   test.runIf(process.env.ORACLE_OUT)("base oracle capture", async () => {
@@ -610,7 +749,7 @@ describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
 
   test.skipIf(process.env.ORACLE_OUT)("the default engine value is the base behaviour", async () => {
     const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    expect(acceptOwnershipDeep(await scenarios())).toEqual(oracle);
+    expect(await headScenarios()).toEqual(oracleOnHead(oracle));
   });
 
   test.skipIf(process.env.ORACLE_OUT).each([
@@ -618,25 +757,25 @@ describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
   ])("%s runs as the base did", async (_name, stored) => {
     const { reviewEngine } = await import("./src/review/prAgent");
     const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    expect(acceptOwnershipDeep(await scenarios(async () => reviewEngine({ reviewEngine: stored })))).toEqual(oracle);
+    expect(await headScenarios(async () => reviewEngine({ reviewEngine: stored }))).toEqual(oracleOnHead(oracle));
   });
 
   test.skipIf(process.env.ORACLE_OUT)("a setting read that rejects runs as the base did, with one log line per worker review", async () => {
-    const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    const got = acceptOwnershipDeep(await scenarios(() => Promise.reject(new Error("settings down"))));
+    const expected = oracleOnHead(JSON.parse(await readFile(ORACLE_FILE, "utf8")));
+    const got = await headScenarios(() => Promise.reject(new Error("settings down")));
     for (const [name, one] of Object.entries(got)) {
       const failures = one.logs.filter((message: string) => message.startsWith(READ_FAILURE));
       expect(failures, name).toHaveLength(name.startsWith("branch review") ? 0 : 1);
       for (const failure of failures) expect(failure).toContain("settings down");
-      expect({ ...one, logs: one.logs.filter((message: string) => !message.startsWith(READ_FAILURE)) }, name).toEqual(oracle[name]);
+      expect({ ...one, logs: one.logs.filter((message: string) => !message.startsWith(READ_FAILURE)) }, name).toEqual(expected[name]);
     }
   });
 
   test.skipIf(process.env.ORACLE_OUT)("a setting read that throws synchronously runs as the base did", async () => {
-    const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    const got = acceptOwnershipDeep(await scenarios(() => { throw new Error("settings sync"); }));
+    const expected = oracleOnHead(JSON.parse(await readFile(ORACLE_FILE, "utf8")));
+    const got = await headScenarios(() => { throw new Error("settings sync"); });
     expect(got["single pinned"]!.logs.filter((message: string) => message.startsWith(READ_FAILURE))).toHaveLength(1);
-    expect(got["single pinned"]!.launches).toEqual(oracle["single pinned"].launches);
+    expect(got["single pinned"]!.launches).toEqual(expected["single pinned"]!.launches);
   });
 });
 
@@ -644,10 +783,14 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
   const DIR = "/opt/my pr-agent";
   const engineOf = (mode: "pr-agent" | "both") => async () => ({ mode, prAgentDir: DIR });
   const writesOf = (w: ReturnType<typeof world>) => w.host.writeFile.mock.calls.map(([, relPath]) => relPath);
-  const fileOf = (w: ReturnType<typeof world>, name: string) => w.host.writeFile.mock.calls.find(([, relPath]) => relPath === name)?.[2] as string | undefined;
+  /** Wave 1: review-context.md is an attempt-folder artifact on the reviewer's host, so the reviewer's own storage gets no write at all. */
+  const CONTEXT = "review-context.md";
+  /** A fresh attempt id per start: the same bytes of two starts differ only in it. */
+  const sameAttempt = (text: string) => text.replace(/review-(\d+)\/[0-9a-f]{8}\//g, "review-$1/<attempt>/");
   /** Engine files go to Chief's data folder under `review-<report number>/<attempt id>/`; the names are given relative to that folder. */
   const ATTEMPT = /^review-\d+\/[0-9a-f]{8}\//;
-  const artifactsOf = (w: ReturnType<typeof world>) => w.host.writeArtifact.mock.calls.map(([, , name]) => name.replace(ATTEMPT, ""));
+  /** The engine files only: the context artifact every start writes is asserted on its own. */
+  const artifactsOf = (w: ReturnType<typeof world>) => w.host.writeArtifact.mock.calls.map(([, , name]) => name.replace(ATTEMPT, "")).filter((name) => name !== CONTEXT);
   const artifactOf = (w: ReturnType<typeof world>, name: string) => w.host.writeArtifact.mock.calls.find(([, , written]) => written.endsWith(`/${name}`))?.[3] as string | undefined;
   /** The attempt folder a start wrote its files to (`review-<n>/<id>`), taken from the writes; every write of one start must share it. */
   const folderOfStart = (calls: Array<[string, string, string, string, string?]>) => {
@@ -666,7 +809,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     const w = world({ heads });
     build(w);
     await w.review.startReview(w.chief, "W1");
-    return { prompt: w.launches[0]!.args.prompt as string, context: fileOf(w, "review-context.md") };
+    return { prompt: sameAttempt(w.launches[0]!.args.prompt as string), context: w.contexts()[0] };
   }
   const pinnedOne = (w: ReturnType<typeof world>) => w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
   const heads1 = { [pr(1)]: headOf("feature/one") };
@@ -679,7 +822,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     await w.review.startReview(w.chief, "W1");
 
     const prompt: string = w.launches[0]!.args.prompt;
-    expect(prompt.startsWith(`${base.prompt}\n## Review engine: pr-agent\n`)).toBe(true);
+    expect(sameAttempt(prompt).startsWith(`${base.prompt}\n## Review engine: pr-agent\n`)).toBe(true);
     expect(prompt).toContain(`- worker W1 (branch feature/one): ${pr(1)} pinned to ${SHA_B} → pr-agent`);
     const FOLDER = folderOf(w);
     expect(prompt).toContain(`bash "${FOLDER}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
@@ -687,12 +830,11 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     expect(prompt).not.toContain("$BB_THREAD_STORAGE/pr-agent-review.sh");
     expect(artifactsOf(w)).toEqual(["pr-agent-review.sh"]);
     expect(w.host.writeArtifact.mock.calls[0]!.slice(0, 2)).toEqual(["W1", "proj"]);
-    expect(writesOf(w)).toEqual(["review-context.md"]);
-    expect(fileOf(w, "review-context.md")).toBe(base.context);
+    expect(writesOf(w)).toEqual([]);
+    expect(w.contexts()).toEqual([base.context]);
     const script = artifactOf(w, "pr-agent-review.sh")!;
     expect(script.startsWith("#!")).toBe(true);
     expect(script).toContain(DIR);
-    expect(w.host.writeFile.mock.calls.every(([threadId]) => threadId === "R1")).toBe(true);
     expect(w.host.alertChief).not.toHaveBeenCalled();
   });
 
@@ -704,8 +846,8 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     await w.review.startReview(w.chief, "W1");
 
     expect(artifactsOf(w)).toEqual(["pr-agent-review.sh", "review-helper.md"]);
-    expect(writesOf(w)).toEqual(["review-context.md"]);
-    const helper = artifactOf(w, "review-helper.md")!;
+    expect(writesOf(w)).toEqual([]);
+    const helper = sameAttempt(artifactOf(w, "review-helper.md")!);
     expect(helper).toContain(`\n\n${base.prompt}\n\n## review-context.md\n${base.context}\n`.trimEnd());
     expect(helper).not.toContain("## Review engine");
     expect(helper).not.toContain("pr-agent-review.sh\" ");
@@ -728,7 +870,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     for (const command of commands) expect(command).not.toContain("$BB_THREAD_STORAGE");
   });
 
-  test.each(["pr-agent", "both"] as const)("%s: the engine files are written before the reviewer is spawned, review-context.md after", async (mode) => {
+  test.each(["pr-agent", "both"] as const)("%s: the context and the engine files are written, in that order, before the reviewer is spawned", async (mode) => {
     const w = world({ heads: heads1, engine: engineOf(mode) });
     pinnedOne(w);
 
@@ -736,10 +878,10 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
     const folder = folderOfStart(w.host.writeArtifact.mock.calls as any);
     expect(w.events).toEqual([
+      `artifact:${folder}/review-context.md`,
       `artifact:${folder}/pr-agent-review.sh`,
       ...(mode === "both" ? [`artifact:${folder}/review-helper.md`] : []),
       "launch",
-      "storage:review-context.md",
     ]);
   });
 
@@ -751,7 +893,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
     const folder = folderOfStart(w.host.writeArtifact.mock.calls as any);
     expect(folder).toMatch(/^review-3\//);
-    expect(w.host.writeArtifact.mock.calls.map(([, , name]) => name)).toEqual([`${folder}/pr-agent-review.sh`]);
+    expect(w.host.writeArtifact.mock.calls.map(([, , name]) => name)).toEqual([`${folder}/review-context.md`, `${folder}/pr-agent-review.sh`]);
     expect(w.launches[0]!.args.prompt).toContain(`bash "/data/host_proj/chief/proj/W1/${folder}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
   });
 
@@ -798,8 +940,8 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     expect(prompt).toContain("no pinned pull request head");
     expect(prompt).not.toContain("pr-agent-review.sh");
     expect(prompt).not.toContain("bb thread spawn");
-    expect(writesOf(w)).toEqual(["review-context.md"]);
-    expect(w.host.writeArtifact).not.toHaveBeenCalled();
+    expect(writesOf(w)).toEqual([]);
+    expect(artifactsOf(w)).toEqual([]);
   });
 
   test("an engine read that rejects is the reviewer-mode prompt and files, and one log line", async () => {
@@ -809,9 +951,9 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
     await w.review.startReview(w.chief, "W1");
 
-    expect(w.launches[0]!.args.prompt).toBe(base.prompt);
-    expect(writesOf(w)).toEqual(["review-context.md"]);
-    expect(w.host.writeArtifact).not.toHaveBeenCalled();
+    expect(sameAttempt(w.launches[0]!.args.prompt)).toBe(base.prompt);
+    expect(artifactsOf(w)).toEqual([]);
+    expect(w.contexts()).toHaveLength(1);
     expect(w.host.logError).toHaveBeenCalledTimes(1);
   });
 
@@ -858,8 +1000,8 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
       expect(out).toMatchObject({ threadId: "R1", created: true });
       expect(attempts(w, "pr-agent-review.sh")).toBe(3);
-      expect(w.host.writeFile.mock.calls.filter(([, relPath]) => relPath === "review-context.md")).toHaveLength(1);
-      expect(w.launches[0]!.args.prompt).toBe(base.prompt);
+      expect(attempts(w, "review-context.md")).toBe(1);
+      expect(sameAttempt(w.launches[0]!.args.prompt)).toBe(base.prompt);
       expect(w.host.alertChief).toHaveBeenCalledTimes(1);
       const [alertRow, key, message] = w.host.alertChief.mock.calls[0]!;
       expect(alertRow.chief_thread_id).toBe("chief");
@@ -936,8 +1078,12 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       const { w, out } = await failing("pr-agent", ["review-context.md", "pr-agent-review.sh"]);
 
       expect(out).toMatchObject({ threadId: "R1" });
-      expect(w.host.alertChief.mock.calls.map(([, key]) => key)).toEqual([expect.stringMatching(/pr-agent-review:W1$/), "review-context:R1"]);
-      expect(w.host.alertChief.mock.calls[1]![2]).toBe("Could not write review-context.md for reviewer R1 after 3 attempts: Error: disk full. The reviewer will report blocked on the missing file; stop it (chief_stop) or nudge it with the context.");
+      const folder = folderOfStart(w.host.writeArtifact.mock.calls as any);
+      expect(w.host.alertChief.mock.calls.map(([, key]) => key)).toEqual([`${folder}/review-context:W1`, expect.stringMatching(/pr-agent-review:W1$/)]);
+      expect(w.host.alertChief.mock.calls[0]![2]).toBe(`Could not write ${folder}/review-context.md for the review of W1 after 3 attempts: Error: disk full. The context is inlined into the reviewer prompt instead.`);
+      expect(w.host.alertChief.mock.calls[0]![0].thread_id).toBe("W1");
+      expect(w.launches[0]!.args.prompt).toContain(`\n\n## review-context.md\n`);
+      expect(w.launches[0]!.args.prompt).not.toContain("in full before reviewing: it holds");
     });
   });
 
@@ -988,7 +1134,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       });
 
       const first = folderOfStart(firstWrites);
-      expect(firstWrites.map(([, , name]) => name.replace(ATTEMPT, ""))).toEqual(["pr-agent-review.sh", "review-helper.md"]);
+      expect(firstWrites.map(([, , name]) => name.replace(ATTEMPT, ""))).toEqual(["review-context.md", "pr-agent-review.sh", "review-helper.md"]);
       expect(secondWrites.filter(([, , name]) => name.endsWith("review-helper.md"))).toHaveLength(3);
       const prompt: string = w.launches[1]!.args.prompt;
       expect(prompt).not.toContain("bb thread spawn");
@@ -1011,7 +1157,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
       await w.review.startReview(w.chief, "W1");
 
-      expect(hostsOf(w)).toEqual(["host_reviewer", "host_reviewer"]);
+      expect(hostsOf(w)).toEqual(["host_reviewer", "host_reviewer", "host_reviewer"]);
       const prompt: string = w.launches[0]!.args.prompt;
       const folder = folderOf(w, "host_reviewer");
       expect(executedLines(prompt)).toEqual([
@@ -1033,9 +1179,366 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
 
       await w.review.startReview(w.chief, "W1");
 
-      expect(hostsOf(w)).toEqual(["host_proj", "host_rev"]);
+      expect(hostsOf(w)).toEqual(["host_proj", "host_proj", "host_rev", "host_rev"]);
       expect(w.launches[1]!.args.prompt).toContain(`bash "/data/host_rev/chief/proj/W1/review-2/`);
       expect(w.launches[1]!.args.prompt).not.toContain("/data/host_proj/");
     });
+  });
+});
+
+// Wave 1 contracts (plan-1.md "Contracts to verify") through startReview: the doubles are the forge, the host and spawn; the project checkout is a real
+// temporary Git repository wherever a slice is read, and the only thing stubbed inside Git is a lookup the test asks to fail (a `git` shim on PATH).
+const REAL_GIT = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+const GIT_ENV: NodeJS.ProcessEnv = {
+  ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
+};
+const hasLine = (text: string, line: string) => text.split("\n").includes(line);
+const auditRenders = (prompt: string) => hasLine(prompt, TEST_AUDIT_LINE);
+const docsRenders = (prompt: string) => hasLine(prompt, "## Docs ownership");
+const nativeOf = (prompt: string) => hasLine(prompt, REVIEWER_NATIVE_LINE) ? "full" : hasLine(prompt, NATIVE_NO_RESHAPE_LINE) ? "no-reshape" : prompt.includes("Native-design check") ? "garbled" : "none";
+
+type RepoApi = { dir: string; git: (...args: string[]) => string; put: (path: string, content: string | Buffer) => void; commit: (message: string) => string };
+/** `main` holds src/app.ts and `baseFiles`; origin/main points at it; `onFeature` makes the commits of branch `feature`. */
+async function repoWith(baseFiles: Record<string, string | Buffer>, onFeature: (repo: RepoApi) => void) {
+  const dir = mkdtempSync(join(tmpdir(), "review-start-wave1-"));
+  disposals.push(() => rm(dir, { recursive: true, force: true }));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, env: GIT_ENV, encoding: "utf8" }).trim();
+  const put = (path: string, content: string | Buffer) => { mkdirSync(dirname(join(dir, path)), { recursive: true }); writeFileSync(join(dir, path), content); };
+  const commit = (message: string) => { git("add", "-A"); git("commit", "-q", "-m", message); return git("rev-parse", "HEAD"); };
+  git("init", "-q", "-b", "main");
+  git("config", "core.fileMode", "true");
+  git("config", "commit.gpgsign", "false");
+  put("src/app.ts", "export const app = 1;\n");
+  for (const [path, content] of Object.entries(baseFiles)) put(path, content);
+  const base = commit("base");
+  git("update-ref", "refs/remotes/origin/main", "HEAD");
+  git("checkout", "-q", "-b", "feature");
+  onFeature({ dir, git, put, commit });
+  return { dir, git, base, sha: git("rev-parse", "HEAD") };
+}
+
+/** A `git` that fails the path listing (`diff --name-only`) or the docs history (`log --no-merges`) and runs the real one otherwise. */
+function failingGit(fail: "names" | "history" | "both"): NodeJS.ProcessEnv {
+  const bin = mkdtempSync(join(tmpdir(), "review-start-shim-"));
+  disposals.push(() => rm(bin, { recursive: true, force: true }));
+  const script = join(bin, "git");
+  writeFileSync(script, [
+    "#!/bin/sh",
+    "for arg in \"$@\"; do",
+    "  case \"$arg\" in",
+    "    --no-renames) [ \"$1\" = diff ] && case \" $* \" in *' --name-only '*) [ \"$CHIEF_FAIL\" = names ] || [ \"$CHIEF_FAIL\" = both ] && { echo 'names lookup failed' >&2; exit 2; } ;; esac ;;",
+    "    --no-merges) [ \"$CHIEF_FAIL\" = history ] || [ \"$CHIEF_FAIL\" = both ] && { echo 'history lookup failed' >&2; exit 2; } ;;",
+    "  esac",
+    "done",
+    "exec \"$REAL_GIT\" \"$@\"",
+    "",
+  ].join("\n"));
+  chmodSync(script, 0o755);
+  return { ...GIT_ENV, PATH: `${bin}:${process.env.PATH}`, REAL_GIT, CHIEF_FAIL: fail };
+}
+
+/** Starts the review of W1 (pull request 1, head `repo.sha`) and returns what the reviewer was launched with. */
+async function reviewOf(repo: { dir: string; sha: string } | null, over: { waves?: PlanWave[]; kind?: string; planWave?: number; env?: NodeJS.ProcessEnv; skip?: string } = {}) {
+  const w = world({ projectPath: repo?.dir ?? null, heads: { [pr(1)]: headOf("feature/one", repo?.sha) }, waves: over.waves, gitEnv: over.env });
+  if (over.skip) w.host.checkoutSkip.mockResolvedValue(over.skip);
+  w.worker("W1", { prUrl: pr(1), branch: "feature/one", kind: over.kind, planWave: over.planWave });
+  const out = await w.review.startReview(w.chief, "W1");
+  return { w, out, prompt: w.launches[0]!.args.prompt as string, context: w.contexts()[0] as string | undefined };
+}
+
+describe("rule blocks follow the slice's changed paths (Git listings of a real repository)", () => {
+  // Contract: the test audit renders when some changed path looks like test code, and not otherwise; `## Docs ownership` renders on a docs/ history or path, and not otherwise.
+  // Regression: collecting paths from the text diff headers (a binary or mode-only change names none), reading the quoted form of a non-ASCII path, matching the
+  // wrong case ("Latest.swift" is not "Test."), and gating docs on the net diff alone.
+  test.each<[string, boolean]>([
+    ["src/app.test.ts", true], ["tests/é.ts", true], ["Sources/FooTests.swift", true], ["Sources/FooTest.java", true], ["lib/foo_spec.rb", true], ["test_util.py", true],
+    ["app/src/androidTest/Foo.kt", true], ["e2e/login.ts", true], ["src/__tests__/a.ts", true],
+    ["src/Latest.swift", false], ["src/contest.ts", false], ["src/testing/util.ts", false], ["src/testimony.ts", false], ["src/é.ts", false],
+  ])("a feature commit adding %s: test audit %s, Docs ownership absent", async (path, audit) => {
+    const repo = await repoWith({}, (r) => { r.put(path, "export const x = 1;\n"); r.commit("add"); });
+
+    const { prompt } = await reviewOf(repo);
+
+    expect(auditRenders(prompt)).toBe(audit);
+    expect(docsRenders(prompt)).toBe(false);
+  });
+
+  test("a binary-only test fixture and a mode-only change of a test script both turn the test audit on", async () => {
+    const binary = await repoWith({}, (r) => { r.put("tests/snapshot.bin", Buffer.from([0, 1, 2, 0, 255, 0])); r.commit("add"); });
+    expect(auditRenders((await reviewOf(binary)).prompt)).toBe(true);
+    const mode = await repoWith({ "tests/run.sh": "#!/bin/sh\necho hi\n" }, (r) => { chmodSync(join(r.dir, "tests/run.sh"), 0o755); r.commit("chmod"); });
+    const { prompt } = await reviewOf(mode);
+    expect(auditRenders(prompt)).toBe(true);
+    expect(docsRenders(prompt)).toBe(false);
+  });
+
+  test("no path touches tests or docs: neither block renders, and the rest of the prompt is the same", async () => {
+    const quiet = await repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("edit"); });
+    const { prompt } = await reviewOf(quiet);
+    expect(auditRenders(prompt)).toBe(false);
+    expect(docsRenders(prompt)).toBe(false);
+    expect(prompt).toContain("(the bug-fix regression check still applies)");
+  });
+
+  // Contract (b): the binary-only, mode-only and add-then-revert docs cases render `## Docs ownership` through startReview, not only in the slice.
+  test.each<[string, Record<string, string>, (r: RepoApi) => void]>([
+    ["a binary-only docs file", {}, (r) => { r.put("docs/image.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 0, 255])); r.commit("add image"); }],
+    ["a mode-only docs change", { "docs/run.sh": "#!/bin/sh\necho hi\n" }, (r) => { chmodSync(join(r.dir, "docs/run.sh"), 0o755); r.commit("chmod"); }],
+    ["a non-ASCII docs path", {}, (r) => { r.put("docs/é.md", "# é\n"); r.commit("add"); }],
+    ["a docs file added and then removed (the net diff has no docs path)", {}, (r) => {
+      r.put("src/app.ts", "export const app = 2;\n"); r.put("docs/spec.md", "# Spec\n"); r.commit("add docs");
+      r.git("rm", "-q", "docs/spec.md"); r.commit("revert docs");
+    }],
+  ])("%s: Docs ownership renders, and the test audit does not", async (_name, base, change) => {
+    const repo = await repoWith(base, change);
+
+    const { prompt } = await reviewOf(repo);
+
+    expect(docsRenders(prompt)).toBe(true);
+    expect(auditRenders(prompt)).toBe(false);
+  });
+
+  test("the add-then-revert docs history leaves no docs path in the slice's net diff", async () => {
+    const repo = await repoWith({}, (r) => {
+      r.put("src/app.ts", "export const app = 2;\n"); r.put("docs/spec.md", "# Spec\n"); r.commit("add docs");
+      r.git("rm", "-q", "docs/spec.md"); r.commit("revert docs");
+    });
+    expect(repo.git("diff", "--name-only", "origin/main", "feature")).toBe("src/app.ts");
+    expect(docsRenders((await reviewOf(repo)).prompt)).toBe(true);
+  });
+
+  // Contract: an unknown listing keeps the rule. A failed lookup is null, never `[]` or `false`; a skipped slice is unknown as well.
+  // Regression: a failure that returns `[]` drops the test audit, one that returns `false` drops Docs ownership.
+  test.each<["names" | "history" | "both", boolean, boolean]>([
+    ["names", true, false], ["history", false, true], ["both", true, true],
+  ])("a failed %s lookup: test audit %s, Docs ownership %s", async (fail, audit, docs) => {
+    const repo = await repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("edit"); });
+
+    const { prompt } = await reviewOf(repo, { env: failingGit(fail) });
+
+    expect(auditRenders(prompt)).toBe(audit);
+    expect(docsRenders(prompt)).toBe(docs);
+  });
+
+  test.each([["a slice the host skips", { skip: "host down" }], ["a project with no local checkout", { checkout: false }]])("%s: both blocks render", async (_name, how) => {
+    const repo = await repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("edit"); });
+
+    const { prompt, out } = await reviewOf("checkout" in how ? null : repo, { skip: "skip" in how ? how.skip : undefined });
+
+    expect(out.reply).toContain("Impact slice skipped");
+    expect(auditRenders(prompt)).toBe(true);
+    expect(docsRenders(prompt)).toBe(true);
+  });
+
+  test("a tester's own review renders the test audit even when its paths are not tests, and still no Docs ownership", async () => {
+    const repo = await repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("edit"); });
+    const { prompt } = await reviewOf(repo, { kind: "tester" });
+    expect(auditRenders(prompt)).toBe(true);
+    expect(docsRenders(prompt)).toBe(false);
+  });
+});
+
+describe("plan wave flags choose the native-design check", () => {
+  const plan = (...waves: Array<Omit<PlanWave, "path">>): PlanWave[] => waves.map((wave, index) => ({ path: `/p/plan-${index + 1}.md`, ...wave }));
+  const nativeFor = async (waves: PlanWave[]) => nativeOf((await reviewOf(null, { waves, planWave: waves.length ? 1 : undefined })).prompt);
+
+  // Contract: `feature && reshape` is the base line; `feature && !reshape` loses the two reshape parts; `!feature` renders none. A legacy wave (no `feature` key)
+  // counts as a feature and a reshape; a test or design wave never counts as a legacy implementation wave.
+  // Regression: treating a missing key as false drops the check on every plan made before the flag; treating the test wave as an implementation wave adds the reshape sentences.
+  test.each<[string, Array<Omit<PlanWave, "path">>, string]>([
+    ["a legacy plan, no feature key anywhere", [{}, { test: true, dependsOn: [1] }], "full"],
+    ["feature: true and reshape: true", [{ feature: true, reshape: true }, { test: true, dependsOn: [1] }], "full"],
+    ["feature: true only: the two reshape parts go", [{ feature: true, reshape: false }, { test: true, dependsOn: [1] }], "no-reshape"],
+    ["feature: true without a reshape key, a test wave with no keys (it is not a legacy implementation wave)", [{ feature: true }, { test: true, dependsOn: [1] }], "no-reshape"],
+    ["feature: false only: none renders", [{ feature: false, reshape: false }, { test: true, dependsOn: [1] }], "none"],
+    ["feature: false and reshape: true: none renders", [{ feature: false, reshape: true }, { test: true, dependsOn: [1] }], "none"],
+    ["a design wave with no keys before a feature wave", [{ design: true }, { feature: true, dependsOn: [1] }, { test: true, dependsOn: [2] }], "no-reshape"],
+    ["one feature wave among feature: false waves", [{ feature: false }, { feature: true, dependsOn: [1] }, { test: true, dependsOn: [2] }], "no-reshape"],
+    ["a reshape wave and a feature wave in one chain", [{ feature: false, reshape: true }, { feature: true, dependsOn: [1] }, { test: true, dependsOn: [2] }], "full"],
+    ["a legacy wave next to feature: false waves", [{ feature: false, reshape: false }, { dependsOn: [1] }, { test: true, dependsOn: [2] }], "full"],
+    ["unplanned work (no plan waves)", [], "no-reshape"],
+  ])("%s -> %s", async (_name, waves, expected) => {
+    expect(await nativeFor(plan(...waves))).toBe(expected);
+  });
+
+  test("a plan review of two workers renders the same split", async () => {
+    const waves = plan({ feature: false }, { test: true, dependsOn: [1] });
+    const w = world({ waves, heads: { [pr(1)]: headOf("feature/one"), [pr(2)]: headOf("feature/two", SHA_A) } });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one", planWave: 1 });
+    w.worker("W2", { prUrl: pr(2), branch: "feature/two", planWave: 2 });
+    w.covering(["W1", "W2"]);
+    await w.review.startReview(w.chief, "W1");
+    expect(nativeOf(w.launches[0]!.args.prompt)).toBe("none");
+  });
+});
+
+describe("one target per pull request through startReview", () => {
+  // Contract: the forge head is read once per distinct pull request; every worker of it carries the same pinned head; the ledger still has one row per worker.
+  // Regression: one forge read per worker; a line per worker; a header that counts workers.
+  test("two pull requests with four workers: two forge reads, two target lines, four ledger rows, 2 pull requests", async () => {
+    const w = world({ heads: { [pr(1)]: headOf("feature/one"), [pr(2)]: headOf("feature/two", SHA_A) } });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    w.worker("W2", { prUrl: pr(1), branch: "feature/one-tests", kind: "tester" });
+    w.worker("W3", { prUrl: pr(2), branch: "feature/two" });
+    w.worker("W4", { prUrl: pr(2), branch: "feature/two-tests", kind: "tester" });
+    w.covering(["W1", "W2", "W3", "W4"]);
+
+    await w.review.startReview(w.chief, "W1");
+
+    expect(w.forge.head.mock.calls.map(([url]) => url)).toEqual([pr(1), pr(2)]);
+    const prompt: string = w.launches[0]!.args.prompt;
+    const lines = prompt.split("\n").filter((line) => line.startsWith("- https://"));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("Workers: worker W1 “Task W1”; tester W2 “Task W2”.");
+    expect(lines[1]).toContain("Workers: worker W3 “Task W3”; tester W4 “Task W4”.");
+    expect(prompt).toContain("the whole plan: 2 pull requests, started");
+    expect(w.targetRows("R1").map((row) => [row.worker_thread_id, row.head_sha])).toEqual([["W1", SHA_B], ["W2", SHA_B], ["W3", SHA_A], ["W4", SHA_A]]);
+  });
+
+  test("a pull request and an unpinned branch with two workers: one line each, header counts them apart", async () => {
+    const w = world({ heads: { [pr(1)]: headOf("feature/one") } });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    w.worker("W2", { prUrl: pr(1), branch: "feature/one" });
+    w.worker("W3", { branch: "feature/loose", reports: 2 });
+    w.worker("W4", { branch: "feature/loose", reports: 3 });
+    w.covering(["W1", "W2", "W3", "W4"]);
+
+    await w.review.startReview(w.chief, "W1");
+
+    const prompt: string = w.launches[0]!.args.prompt;
+    const lines = prompt.split("\n").filter((line) => line.startsWith("- https://") || line.startsWith("- branch "));
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("worker W3 “Task W3” (the verdict binds to its report 2); worker W4 “Task W4” (the verdict binds to its report 3).");
+    expect(prompt).toContain("the whole plan: 1 pull request and 1 branch without a pinned pull request, started");
+    expect(w.forge.head).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("re-review scope per pull request through startReview", () => {
+  const verdict = (w: ReturnType<typeof world>, workerId: string, sha: string | null) =>
+    w.db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES ('R0', ?, 'request_changes', 1, 1, ?, 1)`).run(workerId, sha);
+  /** Base B on main; feature commits C1 and C2, the pull request's head. */
+  const history = () => repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("c1"); r.put("src/app.ts", "export const app = 3;\n"); r.commit("c2"); });
+  const twoWorkers = async (engine?: () => unknown) => {
+    const repo = await history();
+    const c1 = repo.git("rev-parse", "HEAD~1");
+    const w = world({ projectPath: repo.dir, heads: { [pr(1)]: headOf("feature/one", repo.sha) }, engine });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    w.worker("W2", { prUrl: pr(1), branch: "feature/one", kind: "tester" });
+    w.covering(["W1", "W2"]);
+    return { w, repo, c1 };
+  };
+  const WHOLE = "whole pull request (its targets name different previous reviewed heads)";
+  const lineOf = (prompt: string) => prompt.split("\n").filter((line) => line.startsWith("- https://"));
+
+  // Contract: the targets of one pull request share one `since`: when they agree it is kept, when they disagree (or one has no previous verdict) none keeps it,
+  // and the brief line, the Re-review scope section, the engine's Targets lines and the reply scope note say the same.
+  // Regression: keeping the first target's since when another names a different head; a scope note that still says "changes since" for a dropped range.
+  test("both workers' previous verdicts name the same head: the range is kept, in the line, the section and the reply", async () => {
+    const { w, repo } = await twoWorkers();
+    verdict(w, "W1", repo.base); verdict(w, "W2", repo.base);
+
+    const out = await w.review.startReview(w.chief, "W1");
+
+    const prompt: string = w.launches[0]!.args.prompt;
+    expect(lineOf(prompt)).toHaveLength(1);
+    expect(lineOf(prompt)[0]).toContain(`then review only the changes since the previous review: \`git diff ${repo.base}..${repo.sha}\``);
+    expect(prompt.split("## Re-review scope")).toHaveLength(2);
+    expect(out.reply).toContain(`Review scope: W1: changes since ${repo.base.slice(0, 12)}; W2: changes since ${repo.base.slice(0, 12)}.`);
+  });
+
+  test.each([
+    ["two different previous heads", async (w: ReturnType<typeof world>, repo: any, c1: string) => { verdict(w, "W1", repo.base); verdict(w, "W2", c1); }],
+    ["one worker with no previous verdict", async (w: ReturnType<typeof world>, repo: any) => { verdict(w, "W1", repo.base); }],
+    ["a previous verdict that recorded no head", async (w: ReturnType<typeof world>, repo: any) => { verdict(w, "W1", repo.base); verdict(w, "W2", null); }],
+  ])("%s: no worker keeps a range, the line reviews the whole pull request, and the reply names the pull request once", async (_name, setup) => {
+    const { w, repo, c1 } = await twoWorkers();
+    await setup(w, repo, c1);
+
+    const out = await w.review.startReview(w.chief, "W1");
+
+    const prompt: string = w.launches[0]!.args.prompt;
+    expect(lineOf(prompt)[0]).toContain(`then review \`git diff origin/main...${repo.sha}\`.`);
+    expect(prompt).not.toContain("changes since the previous review");
+    expect(prompt).not.toContain("## Re-review scope");
+    expect(out.reply.split(`${pr(1)}: ${WHOLE}`)).toHaveLength(2);
+    expect(out.reply).not.toContain("changes since");
+  });
+
+  test("no previous verdict at all: no scope note and no section", async () => {
+    const { w } = await twoWorkers();
+    const out = await w.review.startReview(w.chief, "W1");
+    expect(out.reply).not.toContain("Review scope");
+    expect(w.launches[0]!.args.prompt).not.toContain("## Re-review scope");
+  });
+
+  test("two pull requests: the one whose workers agree keeps its range, the one that disagrees is reviewed whole", async () => {
+    const repo = await history();
+    const c1 = repo.git("rev-parse", "HEAD~1");
+    const w = world({ projectPath: repo.dir, heads: { [pr(1)]: headOf("feature/one", repo.sha), [pr(2)]: headOf("feature/two", repo.sha) } });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    w.worker("W2", { prUrl: pr(1), branch: "feature/one" });
+    w.worker("W3", { prUrl: pr(2), branch: "feature/two" });
+    w.worker("W4", { prUrl: pr(2), branch: "feature/two" });
+    w.covering(["W1", "W2", "W3", "W4"]);
+    verdict(w, "W1", repo.base); verdict(w, "W2", repo.base); verdict(w, "W3", repo.base); verdict(w, "W4", c1);
+
+    const out = await w.review.startReview(w.chief, "W1");
+
+    const [first, second] = lineOf(w.launches[0]!.args.prompt);
+    expect(first).toContain(`git diff ${repo.base}..${repo.sha}`);
+    expect(second).toContain(`then review \`git diff origin/main...${repo.sha}\`.`);
+    expect(out.reply).toContain(`Review scope: W1: changes since ${repo.base.slice(0, 12)}; W2: changes since ${repo.base.slice(0, 12)}; ${pr(2)}: ${WHOLE}.`);
+  });
+
+  test("the pr-agent Targets lines carry the range when the workers agree and none when they disagree", async () => {
+    const engine = async () => ({ mode: "pr-agent", prAgentDir: "/unused" });
+    const agree = await twoWorkers(engine);
+    verdict(agree.w, "W1", agree.repo.base); verdict(agree.w, "W2", agree.repo.base);
+    await agree.w.review.startReview(agree.w.chief, "W1");
+    const agreed: string = agree.w.launches[0]!.args.prompt;
+    expect(agreed.split(`re-review since ${agree.repo.base}`)).toHaveLength(3);
+
+    const split = await twoWorkers(engine);
+    verdict(split.w, "W1", split.repo.base); verdict(split.w, "W2", split.c1);
+    await split.w.review.startReview(split.w.chief, "W1");
+    expect(split.w.launches[0]!.args.prompt).not.toContain("re-review since");
+  });
+});
+
+describe("acceptedGaps through the review starters", () => {
+  const GAPS = "No device run: Chief accepts the simulator evidence.";
+  const block = ["## Accepted gaps (Manual Verification)", GAPS];
+
+  test("a worker review: absent renders nothing, present renders one block right after the focus line", async () => {
+    const w = world({ heads: { [pr(1)]: headOf("feature/one") } });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    await w.review.startReview(w.chief, "W1", "the discount path");
+    const absent: string = w.launches[0]!.args.prompt;
+    expect(absent).not.toContain("Accepted gaps");
+
+    const given = world({ heads: { [pr(1)]: headOf("feature/one") } });
+    given.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    await given.review.startReview(given.chief, "W1", "the discount path", undefined, GAPS);
+    const prompt: string = given.launches[0]!.args.prompt;
+    const lines = prompt.split("\n");
+    const at = lines.indexOf("Review focus: the discount path");
+    expect(lines.slice(at + 1, at + 3)).toEqual(block);
+    expect(prompt.split("## Accepted gaps (Manual Verification)")).toHaveLength(2);
+    // Nothing else of the prompt moved: dropping the block gives the prompt without gaps (the attempt folder differs by its id).
+    const same = (text: string) => text.replace(/review-(\d+)\/[0-9a-f]{8}\//g, "review-$1/<attempt>/");
+    expect(same(prompt.split("\n").filter((_, index) => index < at + 1 || index >= at + 4).join("\n"))).toBe(same(absent.replace("Review focus: the discount path\n", "Review focus: the discount path\n")));
+  });
+
+  test("a branch review carries the same block, and no block without it", async () => {
+    const w = world();
+    await w.review.startBranchReview(w.chief, { branch: "feature/x" }, "the discount path", GAPS);
+    const lines = (w.launches[0]!.args.prompt as string).split("\n");
+    expect(lines.slice(lines.indexOf("Review focus: the discount path") + 1).slice(0, 2)).toEqual(block);
+
+    const plain = world();
+    await plain.review.startBranchReview(plain.chief, { branch: "feature/y" }, "the discount path");
+    expect(plain.launches[0]!.args.prompt).not.toContain("Accepted gaps");
   });
 });

@@ -650,9 +650,10 @@ describe("helperPrompt()", () => {
     expect(helper).not.toContain("## Review engine");
   });
 
-  test("tells the helper the inline context replaces the file read and its missing-file rule", () => {
+  test("tells the helper the inline context replaces the file read", () => {
     const helper = helperPrompt(prompt, context);
-    expect(helper).toContain("it replaces the brief's instruction to read `$BB_THREAD_STORAGE/review-context.md` and its missing-file rule");
+    expect(helper).toContain("it replaces the brief's instruction to read review-context.md. Ignore");
+    expect(helper).not.toContain("missing-file rule");
   });
 
   test("forbids chief_report and names the two endings: the verdict object and the blocked object", () => {

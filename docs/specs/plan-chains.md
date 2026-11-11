@@ -7,6 +7,10 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 ## Domain Terms
 
 - **Plan wave**: an ordered unit of implementation, design, or testing in a plan.
+- **Wave dependency**: the optional `dependsOn` field of a plan wave. It is an array of integers with at most one entry. `[k]` means that the wave builds on wave `k` and continues on its branch. `[]` means that the wave is independent and starts its own branch and pull request. An omitted field means that the wave depends on the previous wave. Wave 1 has no parent dependency.
+- **Wave flags**: the optional booleans of a plan wave: `design`, `test`, `spec`, `feature` and `reshape`.
+- **Feature wave**: an implementation wave with `feature: true`. It adds new behaviour. Its review runs the native-design check. A wave that is neither `test` nor `design` is an implementation wave.
+- **Reshape wave**: an implementation wave with `reshape: true`. It is the make-native wave of a big feature. `feature` and `reshape` never mark a test wave or a design wave.
 - **Chain**: an ordered sequence of waves from a head wave to a tip wave.
 - **Chain head**: a plan wave with no parent dependency.
 - **Chain tip**: a plan wave that has no successor wave.
@@ -22,6 +26,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Chain owner**: the latest implementation-lane row of a chain. A live row wins over a finished row.
 - **Pending writer**: a spec wave that has no Spec Writer row, or whose latest Spec Writer row is not ready, not idle after a ready report, and not complete.
 - **Legacy plan**: an earlier plan where each wave received an independent branch.
+- **Legacy wave**: a stored wave without a `feature` key. Its review keeps the native-design check and the reshape sentences.
 - **Pinned review**: a review round bound to a specific pull request commit SHA.
 - **Unpinned review**: a review round without a readable commit SHA.
 - **Cleanup claim**: a persistent record in `cleanup_environment_claims` that assigns an environment action to one thread.

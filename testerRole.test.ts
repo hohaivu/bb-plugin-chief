@@ -6,7 +6,7 @@ import { MIGRATIONS } from "./src/db/migrations";
 import { checkPlan } from "./src/report/reportIntake";
 import { managedSkills } from "./src/core/roles";
 import { READY, type State, ctxOf, delegateWave, fixedAfterRejection, followRoute, plan, planWave, planWaves, readyIdle, readyImpl, refusal, report, reviewed, review, reviewerCount, rerunRoute, rowOf, setLive, tick, tool, twoRejectedChains, unplannedFix, unplannedRoute, wavePaths, withTester, workerOn } from "./test/testerHelpers";
-import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, disposals, disposeAll, legacyWave, setup, start, status, wave } from "./test/harness";
+import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, disposals, disposeAll, legacyWave, reviewContextOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -643,7 +643,7 @@ describe("tester role", () => {
 
     await tool(state, "chief_review", { workerThreadId: t2b }, chief.threadId);
     const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
-    const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+    const context = await reviewContextOf(state, reviewer.threadId);
     const pointer = (kind: string, id: string) => {
       const file = rowOf(state, id).report_path as string | null;
       return `- ${kind} ${id}: ${file ? `Full report: ${file}; ` : ""}bb chief inspect ${id}`;
@@ -693,7 +693,7 @@ describe("tester role", () => {
     await readyIdle(state, tester.threadId, "Tested");
     await tool(state, "chief_review", { workerThreadId: tester.threadId }, chief.threadId);
     const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
-    const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+    const context = await reviewContextOf(state, reviewer.threadId);
     expect(context).toContain([
       "## Earlier workers on this branch",
       `- worker ${worker.threadId}: Full report: ${rowOf(state, worker.threadId).report_path}; bb chief inspect ${worker.threadId}`,
@@ -837,7 +837,7 @@ describe("tester role", () => {
     expect(rowOf(state, fixA).retest_skipped).toBe(stored);
     expect(rowOf(state, fixB).retest_skipped).toBe(stored);
     const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
-    const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+    const context = await reviewContextOf(state, reviewer.threadId);
     expect(context).toContain(`## Waived test waves\nRetest after fix ${fixA} waived by Chief: ${stored}\nRetest after fix ${fixB} waived by Chief: ${stored}`);
     expect(state.spawned.at(-1).prompt).toContain("(chief_review retestSkipped)");
     const roster = String(await tool(state, "chief_roster", {}, chief.threadId));
@@ -854,7 +854,7 @@ describe("tester role", () => {
     expect(rowOf(state, fix).retest_skipped).toBeNull();
     await review(state, chief, fix, { retestSkipped: "R".repeat(500) });
     const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
-    const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+    const context = await reviewContextOf(state, reviewer.threadId);
     expect(context).toContain(`Retest after fix ${fix} waived by Chief: ${"R".repeat(500)}`);
   });
 

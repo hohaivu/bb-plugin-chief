@@ -7,7 +7,8 @@ const reviewParams = z.object({
     "A pull request to review when no managed worker owns it: a number, an owner/repo#123 reference, or a PR URL. Resolved to its head branch with gh or glab, falling back to the raw value as a branch name.",
   ),
   branch: z.string().trim().min(1).max(300).optional().describe("A branch to review when no managed worker owns it."),
-  focus: z.string().trim().max(4_000).optional(),
+  focus: z.string().trim().max(4_000).optional().describe("What the reviewer should check. Never ask the reviewer to judge whether a verification gap blocks: decide it before the review. Pass a gap you accept in acceptedGaps; otherwise get the evidence first (for example a tester rerun)."),
+  acceptedGaps: z.string().trim().min(1).max(1_000).optional().describe("Verification gaps you accepted before this review, with your reason: the reviewer lists them under Manual Verification and never rejects on them alone."),
   retestSkipped: z.string().trim().min(1).max(500).optional().describe("Why to review without the tester rerun(s) a fix after a rejection owes; waives every rerun the refusal lists. Only with workerThreadId."),
 }).refine((value) => [value.workerThreadId, value.pullRequest, value.branch].filter((v) => v !== undefined).length === 1, {
   message: "Give exactly one of workerThreadId, pullRequest, or branch.",
@@ -28,10 +29,10 @@ export function registerReviewTool(ctx: Ctx) {
       if (params.workerThreadId) {
         await ctx.controlledTarget(params.workerThreadId, caller);
         ctx.touchCallerChief(caller);
-        return (await ctx.startReview(caller, params.workerThreadId, params.focus, params.retestSkipped)).reply;
+        return (await ctx.startReview(caller, params.workerThreadId, params.focus, params.retestSkipped, params.acceptedGaps)).reply;
       }
       ctx.touchCallerChief(caller);
-      return (await ctx.startBranchReview(caller, { branch: params.branch, pullRequest: params.pullRequest }, params.focus)).reply;
+      return (await ctx.startBranchReview(caller, { branch: params.branch, pullRequest: params.pullRequest }, params.focus, params.acceptedGaps)).reply;
     },
   });}
 
