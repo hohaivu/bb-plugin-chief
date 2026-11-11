@@ -7,8 +7,10 @@ import { promisify } from "node:util";
 // Node built-ins only and erasable types only, so `node` can import this file directly.
 const execFileAsync = promisify(execFile);
 
-/** `entries` counts the `path:line` pointers in `lines`; the other lines are header and notes. */
-export type ImpactSlice = { lines: string[]; entries: number; guidelines: string[] } | { skipped: string };
+/** `entries` counts the `path:line` pointers in `lines`; the other lines are header and notes.
+ * `changed`: every path of `git diff --name-only -z --no-renames <merge-base> <sha>` (raw, text, binary and mode-only); `docsHistory`: some non-merge commit in
+ * `<merge-base>..<sha>` touches docs/. Each is null when its lookup failed (unknown), never `[]` or `false`. */
+export type ImpactSlice = { lines: string[]; entries: number; guidelines: string[]; changed: string[] | null; docsHistory: boolean | null } | { skipped: string };
 export type ImpactSliceSuccess = Exclude<ImpactSlice, { skipped: string }>;
 
 /** git with a 10 s timeout and 2 attempts, each bounded by the absolute `deadline`; past it, throws `deadline`.
@@ -180,6 +182,10 @@ export async function computeImpactSlice(opts: {
     const base = await resolve(opts.baseRef, opts.baseRef.replace(/^origin\//, ""));
     if (!base) return { skipped: `commit ${opts.baseRef} not found locally` };
     const mb = (await git(["merge-base", base, sha])).trim();
+    // A failed lookup is unknown (null), never empty; only the deadline aborts the slice.
+    const lookup = <T>(args: string[], read: (out: string) => T) => git(args).then(read, (error: Error): null => { if (error.message === "deadline") throw error; return null; });
+    const paths = await lookup(["diff", "--name-only", "-z", "--no-renames", mb, sha], (out) => out.split("\0").filter(Boolean));
+    const docsHistory = await lookup(["log", "--no-merges", "--format=%H", "-n", "1", `${mb}..${sha}`, "--", "docs/"], (out) => out.trim() !== "");
     attrDir = await mkdtemp(join(tmpdir(), "chief-slice-"));
     const attributes = join(attrDir, "attributes");
     await writeFile(attributes, DRIVERS.map(([glob, driver]) => `${glob} diff=${driver}`).join("\n") + "\n");
@@ -228,7 +234,7 @@ export async function computeImpactSlice(opts: {
     void guidelineLines(gitWithin(opts.cwd, opts.env, Math.min(deadline, Date.now() + GUIDELINE_BUDGET_MS), stopGuidelines.signal), sha, changed)
       .then((lines) => { guidelines = lines; }, () => undefined);
     const ready = (slice: { lines: string[]; entries: number }): ImpactSliceSuccess => {
-      const success = { ...slice, guidelines: [...guidelines ?? [GUIDELINE_PENDING]] };
+      const success = { ...slice, guidelines: [...guidelines ?? [GUIDELINE_PENDING]], changed: paths, docsHistory };
       // A throwing callback must not downgrade the finished slice.
       try { opts.onReady?.(success); } catch { /* the slice is still returned */ }
       return success;

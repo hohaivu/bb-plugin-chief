@@ -40,7 +40,7 @@ export interface ReportIntakeAdapters {
 
 export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 
-type WaveInput = { body: string; dependsOn?: number[]; design?: boolean; test?: boolean; spec?: boolean };
+type WaveInput = { body: string; dependsOn?: number[]; design?: boolean; test?: boolean; spec?: boolean; feature?: boolean; reshape?: boolean };
 
 /** One Markdown bullet per finding of the given severity, never clipped. */
 export function findingLines(list: ReportFinding[], severity: ReportFinding["severity"]) {
@@ -194,7 +194,7 @@ export function checkPlan(plan: string | unknown[]): string[] {
       bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false); tests.push(false);
       return;
     }
-    const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown; test?: unknown; spec?: unknown };
+    const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown; test?: unknown; spec?: unknown; feature?: unknown; reshape?: unknown };
     const name = multi ? `plan wave ${n} body` : "plan";
     const body = typeof wave.body === "string" ? wave.body.trim() : undefined;
     bodies.push(body);
@@ -216,6 +216,13 @@ export function checkPlan(plan: string | unknown[]): string[] {
       errors.push(`plan wave ${n} is spec: true and ${wave.test === true ? "test" : "design"}: true; spec marks an implementation wave only.`);
     } else if (wave.spec === true && body && !/^[ \t]*#{1,6}[ \t]+spec delta/im.test(body)) {
       errors.push(`plan wave ${n} is spec: true but lacks a "## Spec delta" Markdown heading naming the docs the Spec Writer changes; add one, or drop spec.`);
+    }
+    for (const flag of ["feature", "reshape"] as const) {
+      if (wave[flag] !== undefined && typeof wave[flag] !== "boolean") {
+        errors.push(`plan wave ${n} ${flag} is ${JSON.stringify(wave[flag])} (${typeof wave[flag]}); allowed true or false. Send a boolean, or drop ${flag}.`);
+      } else if (wave[flag] === true && (wave.test === true || wave.design === true)) {
+        errors.push(`plan wave ${n} is ${flag}: true and ${wave.test === true ? "test" : "design"}: true; feature and reshape mark an implementation wave only.`);
+      }
     }
     if (body && hasSpecBaseline(body) && wave.spec !== true) {
       errors.push(`plan wave ${n} has a "## Spec baseline" heading but is not spec: true; a baseline belongs to the spec wave that creates a new docs/specs file. Mark the wave spec: true, or drop the heading.`);
@@ -454,7 +461,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     // The launch row may have landed while the lookup awaited; keep it, as a recovery candidate has no PR or branch.
     if (found.pending && !store.get(threadId)) store.insert(found.pending);
     const row = store.get(threadId)!;
-    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, test?, spec?}[], with bodies not yet trimmed if JSON-decoded.
+    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, test?, spec?, feature?, reshape?}[], with bodies not yet trimmed if JSON-decoded.
     const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
     const verdict = params.state === "ready" ? params.verdict ?? null : null;
@@ -467,6 +474,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.test ? { test: true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.spec ? { spec: true } : {}),
+        ...(typeof planInput !== "string" ? { feature: planInput[index]!.feature === true, reshape: planInput[index]!.reshape === true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.spec && hasSpecBaseline(planInput[index]!.body) ? { baseline: true } : {}) }))
       : null;
     // Best-effort mirror into Chief's storage: inline-vis resolves paths against the rendering thread.

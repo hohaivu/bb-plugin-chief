@@ -265,7 +265,7 @@ export function helperPrompt(reviewerPrompt: string, context: string | null): st
   const header = [
     "You are a review helper for a Chief reviewer: you do the direct review of every target below in this checkout and hand the result back to it. Do not call chief_report or any chief_* tool, spawn threads, run pr-agent, or edit, commit or push files.",
     "Wherever the brief below says to send chief_report, end your turn with a final response whose last block is a fenced `json` object `{\"verdict\", \"findings\", \"result\", \"regression\"?}` under the same verdict and finding rules. Wherever it says to report blocked, end with a fenced `json` object `{\"blocked\": \"<reason>\"}`.",
-    "The review context is inline below under `## review-context.md`: it replaces the brief's instruction to read `$BB_THREAD_STORAGE/review-context.md` and its missing-file rule (your storage has no such file). Ignore the brief's summary and lesson fields.",
+    "The review context is inline below under `## review-context.md`: it replaces the brief's instruction to read review-context.md. Ignore the brief's summary and lesson fields.",
   ];
   return [...header, "", reviewerPrompt, ...(context ? ["", "## review-context.md", context] : [])].join("\n");
 }

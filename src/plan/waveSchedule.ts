@@ -3,7 +3,7 @@
  * specsSkipped: Chief's reason for going without that Spec Writer (chief_skip_specs, until a Spec Writer was delegated on the wave).
  * testsSkipped: Chief's recorded reason for going without this test wave (chief_skip_tests). absent is never persisted:
  * planWavesFor sets it on a waived wave no worker was ever delegated on, and the graph helpers then skip that wave. */
-export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean; test?: boolean; testsSkipped?: string; spec?: boolean; baseline?: boolean; specsSkipped?: string; title?: string; absent?: boolean };
+export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean; test?: boolean; testsSkipped?: string; spec?: boolean; baseline?: boolean; specsSkipped?: string; feature?: boolean; reshape?: boolean; title?: string; absent?: boolean };
 
 /** The first heading, else the first non-empty line, of a wave body: what the wave is about, for the tracking issue's schedule. */
 export function waveTitle(body: string): string | undefined {
