@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { PLAN_LINE_NEW, PLAN_LINE_OLD } from "./test/reviewWave1";
 import { readFile } from "node:fs/promises";
 import { NO_DEVIATIONS, PLAN_FIXTURE, REQUEST_CHANGES, TEST_WAVE, approvePlan, completeWorker, delegate, disposeAll, legacyWave, planFile, planTwoWaves, setup, start, status, waiveTests, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -356,8 +357,8 @@ describe("Chief backend", () => {
     } as any, { threadId: planner.threadId, projectId: "proj_1" });
     const row = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as any;
     expect(JSON.parse(row.plan_waves)).toEqual([
-      { path: planFile(state, planner.threadId, 1), contracts: "- Totals stay non-negative", title: "Plan" },
-      { path: planFile(state, planner.threadId, 2), contracts: "- Wave 2 keeps its invariant", test: true, title: "Wave 2" },
+      { path: planFile(state, planner.threadId, 1), contracts: "- Totals stay non-negative", feature: false, reshape: false, title: "Plan" },
+      { path: planFile(state, planner.threadId, 2), contracts: "- Wave 2 keeps its invariant", test: true, feature: false, reshape: false, title: "Wave 2" },
     ]);
   });
 
@@ -506,7 +507,8 @@ describe("Chief backend", () => {
       "chief_review", { workerThreadId: worker3.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
     );
     const reviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!;
-    expect(reviewSpawn.prompt).toContain("Review the whole branch against its base against the plan wave files in review-context.md.");
+    expect(reviewSpawn.prompt).toContain(PLAN_LINE_NEW(false));
+    expect(reviewSpawn.prompt).not.toContain(PLAN_LINE_OLD.whole);
     expect(reviewSpawn.prompt).toContain("## Contracts to verify\nWave 1 of 4:\n- Totals stay non-negative\nWave 2 of 4:\n- Wave 2 keeps its invariant\nWave 3 of 4:\n- Wave 3 keeps its invariant");
     expect(reviewSpawn.prompt).toContain("An unmet item means request_changes");
 
@@ -631,7 +633,8 @@ describe("Chief backend", () => {
 
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: w1.threadId }, opts);
     const reviewSpawn = state.spawned.filter((entry: any) => entry.title === "Review · Wave 1 work").at(-1)!;
-    expect(reviewSpawn.prompt).toContain("Review each branch against its base against the plan wave files in review-context.md");
+    expect(reviewSpawn.prompt).toContain(PLAN_LINE_NEW(false));
+    expect(reviewSpawn.prompt).not.toContain(PLAN_LINE_OLD.wholeMany);
 
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Both branches fine", verdict: "approve", findings: [] }, { threadId: reviewer.threadId, projectId: "proj_1" });

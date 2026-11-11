@@ -370,10 +370,10 @@ describe("Chief backend", () => {
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
-      { path: path1, contracts: "- Totals stay non-negative", title: "Plan" },
-      { path: path2, contracts: "- Wave 2 keeps its invariant", title: "Wave 2" },
-      { path: path3, contracts: "- Wave 3 keeps its invariant", title: "Wave 3" },
-      { path: path4, contracts: "- Wave 4 keeps its invariant", test: true, title: "Wave 4" },
+      { path: path1, contracts: "- Totals stay non-negative", feature: false, reshape: false, title: "Plan" },
+      { path: path2, contracts: "- Wave 2 keeps its invariant", feature: false, reshape: false, title: "Wave 2" },
+      { path: path3, contracts: "- Wave 3 keeps its invariant", feature: false, reshape: false, title: "Wave 3" },
+      { path: path4, contracts: "- Wave 4 keeps its invariant", test: true, feature: false, reshape: false, title: "Wave 4" },
     ]);
   });
 
@@ -409,9 +409,9 @@ describe("Chief backend", () => {
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
-      { path: path1, contracts: "- Totals stay non-negative", title: "Plan" },
-      { path: path2, contracts: "- Wave 2 keeps its invariant", title: "Wave 2" },
-      { path: path3, contracts: "- Wave 3 keeps its invariant", test: true, title: "Wave 3" },
+      { path: path1, contracts: "- Totals stay non-negative", feature: false, reshape: false, title: "Plan" },
+      { path: path2, contracts: "- Wave 2 keeps its invariant", feature: false, reshape: false, title: "Wave 2" },
+      { path: path3, contracts: "- Wave 3 keeps its invariant", test: true, feature: false, reshape: false, title: "Wave 3" },
     ]);
   });
 
