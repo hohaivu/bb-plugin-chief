@@ -1,9 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { delegate, disposeAll, setup, start, status } from "./test/harness";
+import { delegate, reviewContextOf, disposeAll, setup, start, status } from "./test/harness";
 import { type State, delegateWave, plan, readyIdle, rowOf, tool, workerOn } from "./test/testerHelpers";
 import { fullChain, writerOn } from "./test/specWriterHelpers";
 import { OWNERSHIP_PARAGRAPH } from "./test/docsOwnership";
@@ -18,7 +16,7 @@ afterEach(disposeAll);
 const reviewOf = async (state: State, chiefThreadId: string, workerThreadId: string) => {
   await tool(state, "chief_review", { workerThreadId }, chiefThreadId);
   const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
-  return { prompt: state.spawned.at(-1).prompt as string, context: await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8") };
+  return { prompt: state.spawned.at(-1).prompt as string, context: await reviewContextOf(state, reviewer.threadId) };
 };
 const earlierRows = (context: string) => context.split("\n").filter((line) => /^- (worker|tester|spec-writer|designer) thr_/.test(line));
 const ownership = (prompt: string) => prompt.split("\n## Docs ownership\n")[1]!.split("\n")[0]!;
@@ -28,12 +26,14 @@ describe("review prompt: Docs ownership", () => {
   test("a spec chain names its side-lane writer, points gate item (4) at it and indexes it in review-context", async () => {
     const state = await setup();
     const { chief, tester, writer } = await fullChain(state);
-    const { prompt } = await reviewOf(state, chief.threadId, tester);
+    const { prompt, context } = await reviewOf(state, chief.threadId, tester);
     expect(paragraphs(prompt)).toBe(1);
     expect(ownership(prompt)).toBe(OWNERSHIP_PARAGRAPH(writer));
     expect(prompt).toContain("(4) a docs/ ownership violation (see Docs ownership)");
     expect(prompt).not.toContain("(4) a docs/ change in a worker's, designer's or tester's own commit range");
-    expect(prompt).toContain("- The Spec Writers of this task and where to read their reports.");
+    expect(prompt).not.toContain("## Context\n");
+    expect(context).toContain(`## The report of worker ${writer}`);
+    expect(context).toContain(`- wave 1 Spec Writer ${writer}: bb chief inspect ${writer}`);
   });
 
   test("unplanned work with no Spec Writer says none, and has no spec gate item (4) and no writer index line", async () => {

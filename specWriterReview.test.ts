@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
-import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_NEW_DESIGN_BULLET, PLANNER_OLD_COMPLEX_TAIL, PLANNER_OLD_DESIGN_BULLET, PLANNER_RESHAPE_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
+import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_NEW_DESIGN_BULLET, PLANNER_OLD_COMPLEX_TAIL, PLANNER_OLD_DESIGN_BULLET, PLANNER_RESHAPE_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { dropDocsLines } from "./test/docsOwnership";
@@ -18,7 +18,7 @@ describe("tester role", () => {
     const reviewPrompt = async (state: State, chiefThreadId: string, workerThreadId: string) => {
       await tool(state, "chief_review", { workerThreadId }, chiefThreadId);
       const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!;
-      const context = await readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+      const context = await reviewContextOf(state, reviewer.threadId);
       return { prompt: state.spawned.at(-1).prompt as string, context };
     };
     /** Wave 1 (spec: true) bypassed before any row; its worker and wave 2's tester ready: the whole plan is reviewable. */

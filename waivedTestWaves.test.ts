@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
-import { PLAN_FIXTURE, delegate, disposeAll, setup, snapshotText, start, status, wave, withReviewerLine } from "./test/harness";
+import { PLAN_FIXTURE, delegate, disposeAll, setup, reviewContextOf, snapshotText, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { acceptOwnership } from "./test/docsOwnership";
@@ -172,7 +172,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
   const reviewerSpawn = (state: State) => state.spawned.filter((entry) => String(entry.title).startsWith("Review · ")).at(-1)!.prompt as string;
   const reviewContext = async (state: State) => {
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-    return readFile(join(state.storageRoot, reviewer.threadId, "review-context.md"), "utf8");
+    return reviewContextOf(state, reviewer.threadId);
   };
   const WAIVER_REASON = "R".repeat(500);
   const RULE = "are authorized omissions: their absence is not scope drift";

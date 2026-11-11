@@ -7,6 +7,7 @@ import { APPROVE, HEAD_SHA, TEST_WAVE, approvePlan, disposeAll, execFileMock, re
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { acceptOwnership, dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
+import { reviewAttemptExpected } from "./test/reviewWave1";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -76,7 +77,9 @@ describe("tester role", () => {
           for (const dir of local?.dirs ?? []) out = out.replaceAll(dir, "<repo>");
           // git's own stderr after the failed ancestry check varies by version; the prefix bytes stay.
           // The write error's own text comes from the fake host (its unstubbed files.remove); the sentence around it stays.
-          out = out.replace(/after 3 attempts: .*?\. The reviewer will/, "after 3 attempts: <error>. The reviewer will");
+          out = out.replace(/after 3 attempts: .*?\. The (reviewer will|context is inlined)/, "after 3 attempts: <error>. The $1");
+          // The attempt folder id is random per run.
+          out = out.replace(/(review-\d+)\/[0-9a-f]{8}\//g, "$1/<attempt>/");
           out = out.replace(/(--is-ancestor [0-9a-f]{40} [0-9a-f]{40}) fatal:[^)]*/g, "$1 <git-error>");
           out = out.replace(/thr_\d+/g, (id) => {
             const label = names.get(id);
@@ -349,8 +352,8 @@ describe("tester role", () => {
       await run("review-context.md write failure", async (k) => {
         const chief = await k.chief();
         const w1 = await k.worker("W1", chief);
-        // A directory where the file goes makes every atomic rename fail: three attempts (1 s, 2 s backoff), then the alert.
-        await mkdir(join(k.state.storageRoot, `thr_${k.state.spawned.length + 1}`, "review-context.md"), { recursive: true });
+        // Every write of the context file fails: three attempts (1 s, 2 s backoff), then the alert, and the launch still happens.
+        k.state.failWritesMatching(/review-context\.md/);
         await k.attempt("review, the context write fails", k.review(chief, { workerThreadId: w1 }), { reviewers: ["R1"], fake: true });
       });
       await run("supersede and streak", async (k) => {
@@ -464,8 +467,8 @@ describe("tester role", () => {
     // Plan chains changed one thing of the base snapshot: a pinned reviewer's fetch line now also checks the pinned commit out detached (`git fetch origin <branch> && git checkout --detach <sha>`).
     test("review attempt oracle", async () => {
       const head = await reviewAttemptFixture();
-      // The make-native reviewer line follows each of the 31 reviewer prompts' "Classify the change" line; the rest is base's bytes.
-      expect(dropDocsLines(dropSkippedNote(acceptOwnership(head)))).toBe(dropDocsLines(withReviewerLine(await snapshotText("review-attempt-cf92d9c.txt"), 31)));
+      // Expected = the 19babad transcript with wave 1's named edits per prompt (test/reviewWave1.ts); only the pinned `## Docs ownership` block comes off the head side.
+      expect(dropDocsLines(dropSkippedNote(acceptOwnership(head)))).toBe(dropDocsLines(reviewAttemptExpected(await snapshotText("review-attempt-cf92d9c.txt"))));
     }, 300_000);
 
     // A host lookup that never answers no longer holds chief_review (#177): the ancestry check's 20 s deadline covers the
@@ -515,8 +518,9 @@ describe("tester role", () => {
         await step(28); // inside the slice's 30 s deadline (49 s in total): still no reviewer
         expect({ lookups, settled, spawned: state.spawned.length, reviewers: reviewers() }).toEqual({ lookups: 2, settled: false, spawned: 3, reviewers: { n: 1 } });
         await step(2); // the slice's deadline passed at 50 s: the review launches with no host answer
-        expect({ lookups, spawned: state.spawned.length, reviewers: reviewers() }).toEqual({ lookups: 2, spawned: 4, reviewers: { n: 2 } });
+        // The context file is written to disk before the launch now, so the launch settles over real I/O turns, not a fixed number of fake seconds.
         const reply = await call;
+        expect({ lookups, spawned: state.spawned.length, reviewers: reviewers() }).toEqual({ lookups: 2, spawned: 4, reviewers: { n: 2 } });
         expect(reply).toContain(`Impact slice skipped: ${w1}: deadline (30 s) passed.`);
         expect(reply).toContain(`Review scope: ${w1}: whole pull request (deadline (20 s) passed).`);
         const context = await reviewContextOf(state, nextReviewer);
