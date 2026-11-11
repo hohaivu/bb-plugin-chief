@@ -6,7 +6,7 @@ import { spawnMetadataSchema } from "../tools/shapes";
 import { BUILT_IN_RULES } from "./prompts";
 import type { Ctx } from "./context";
 
-/** Sent to Chief on every turn before the project's rules (chief.md or BUILT_IN_RULES), so an override cannot push them past the SDK's 4096-char cut. The single statement of each rule; other prompts point here. */
+/** Sent to Chief on every turn before the project's rules (chief.md or BUILT_IN_RULES), so an override cannot push them past the SDK's 32768-char cut (PLUGIN_DYNAMIC_INSTRUCTIONS_MAX_CHARS). The single statement of each rule; other prompts point here. */
 const chiefCoreRules = (child: string) => `# Chief core rules (always apply)
 
 - Evidence: Chief never edits code and never runs anything in a worktree: every change, commit and push is a worker's. Evidence is reports, alerts, recorded commands, chief_inspect output and verdicts; an unstated cause, doubtful evidence, a disputed claim or a broad scan goes to a child thread (${child}), never to Chief reading code.
@@ -48,7 +48,7 @@ const COORDINATOR_INSTRUCTIONS = [
 
 /** Claude Code defers MCP tools until ToolSearch loads them; an agent that calls one first guesses its arguments and is refused. */
 function toolSchemaLine(tools: string[], compact: boolean) {
-  // shortcut: Chief's full select: list (~610 chars) does not fit its 4096-char cut, so Chief gets the keyword form; switch back if Chief's instructions shrink.
+  // shortcut: Chief gets the keyword form, chosen when the SDK cut was 4096; the cut is now 32768, so the full select: list would fit; switch if keyword loading proves unreliable.
   const call = compact ? `query "+chief", max_results ${tools.length}` : `select:${tools.map((name) => `mcp__bb-bridge__${name}`).join(",")}`;
   return `If your chief_* tools are deferred (listed by name only), load their schemas before calling any, once per session and again after compaction, with one ToolSearch call: ${call}`;
 }
@@ -98,7 +98,7 @@ export function registerHost(ctx: Ctx) {
           ...(claudeCode ? [toolSchemaLine(tools, true)] : []),
           ...(child ? [`Coordinator ${row!.coordinator_thread_id} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`] : []),
           "",
-          // The SDK cuts instructions at 4096 chars, so the variable project rules come last. The built-in rules tell a Chief to continue and complete managed work, so a Coordinator gets only a project chief.md.
+          // The SDK cuts instructions at 32768 chars, so the variable project rules come last. The built-in rules tell a Chief to continue and complete managed work, so a Coordinator gets only a project chief.md.
           ...(coordinator ? [COORDINATOR_INSTRUCTIONS, ...(rules === BUILT_IN_RULES ? [] : ["", rules])] : [
             ROSTER_CHIEF_INSTRUCTIONS,
             WAIT_CHIEF_INSTRUCTIONS,
