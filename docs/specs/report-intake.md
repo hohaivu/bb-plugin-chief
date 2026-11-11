@@ -92,7 +92,7 @@ The transaction runs these steps in order:
 | Role and state | Stored in addition to the common columns |
 | --- | --- |
 | Any ready report | `verdict` (null when the report sends none). Other states store a null verdict. |
-| Planner ready with a plan | `plan_waves`: path, contracts, title, and the flags `dependsOn`, `design`, `test`, `spec`, `baseline` for each wave. |
+| Planner ready with a plan | `plan_waves`: path, contracts, title, and the flags `dependsOn`, `design`, `test`, `spec`, `baseline`, `feature`, `reshape` for each wave. An array plan stores `feature` and `reshape` as booleans on every wave. A string plan stores neither. `checkReport` refuses a non-boolean flag, and refuses `feature` or `reshape` true together with `test` or `design` true. |
 | Worker or reviewer with `fails` | The merged `fails` JSON. A report without `fails` keeps the stored value. |
 | Reviewer | `findings` JSON. Every reviewer report replaces it. A report without findings clears it. |
 | Ready with `regression` true and verdict `request_changes` | `regression` is 1. |

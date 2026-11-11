@@ -8,13 +8,16 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 
 - **Engine**: the setting `reviewEngine`. Its values are `reviewer`, `pr-agent`, and `both`.
 - **Target**: one worker that a review covers. A target is pinned when the forge reports a head commit for its pull request. Otherwise it is not pinned.
+- **Target line**: one line of a plan review subject. It covers one pull request (pinned targets) or one branch (unpinned targets), and names every worker of that group.
+- **Re-review range**: the `since` commit of a target, the newest earlier verdict head. A pull request has one range, or none.
+- **Accepted gap**: a verification gap that Chief accepted before the review and passed in `acceptedGaps`.
 - **Outcome**: the one result an engine gives for a target: definitive, needs_review, failure, or not pinned.
-- **Wrapper**: the script `pr-agent-review.sh` in the engine folder. It runs pr-agent and prints a translated result.
+- **Wrapper**: the script `pr-agent-review.sh` in the attempt folder. It runs pr-agent and prints a translated result.
 - **Helper**: a plain BB child thread named `Review helper`. It does the direct review in `both` mode.
 - **Direct review**: the plain review in which the reviewer reads the code.
 - **Fallback**: a direct review that replaces a failed or inconclusive engine step.
 - **Reviewer storage**: `$BB_THREAD_STORAGE` of the reviewer thread.
-- **Engine folder**: `<BB data dir>/chief/<projectId>/<worker id>/review-<report number>/<attempt id>/`, Chief's data folder for the reviewed worker, on the host the reviewer runs on. The attempt id is a fresh 8-character id for each review start, so a repeat review never reads another attempt's files. The code writes the wrapper and the helper prompt here before the reviewer is spawned, and the section names the absolute path, as that host returned it, in every command.
+- **Attempt folder**: `<BB data dir>/chief/<projectId>/<worker id>/review-<report number>/<attempt id>/`, Chief's data folder for the reviewed worker, on the host the reviewer runs on. The attempt id is a fresh 8-character id for each review start, so a repeat review never reads another attempt's files. The code writes `review-context.md`, the wrapper and the helper prompt here before the reviewer is spawned. The prompt and the engine section name the absolute path, as that host returned it.
 
 ## Ownership and Entry Points
 
@@ -24,6 +27,9 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 | `prAgentScript(dir)` | `src/review/prAgent.ts` | Returns the wrapper text, which includes the translation step. |
 | `prAgentSection(mode, targets, dir)` | `src/review/prAgent.ts` | Returns the prompt lines that name the engine rules. |
 | `helperPrompt(reviewerPrompt, context)` | `src/review/prAgent.ts` | Returns the helper prompt. |
+| `reviewContext(input)` | `src/review/reviewStart.ts` | Returns the context text. It is a pure function. |
+| `computeImpactSlice` | `src/review/impactSlice.ts` | Returns the impact slice, the changed paths (`changed`) and the docs history (`docsHistory`). |
+| `reviewParams` | `src/tools/review.ts` | Defines the `chief_review` inputs, `focus` and `acceptedGaps` included. |
 | `startReview` | `src/review/reviewStart.ts` | Reads the engine once at review start. It appends the section and writes the files. |
 | `bb.settings.define` | `server.ts` | Defines `reviewEngine` and `prAgentDir`. |
 
@@ -43,7 +49,10 @@ Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` 
 - The first rule is `REVIEW_ONLY`: the reviewer does not create, modify, delete, commit, or push tracked files. A repair goes back to the worker.
 - The read rule says: review by reading the code. The reviewer never runs builds, linters, typecheckers, or tests. Reason: the worker owns the lint, build, and Verify evidence, and the tester owns the test evidence.
 - The prompt then lists the evidence rules, the do-not-report list, the guideline-file rule, the test audit, and the rules for classifying findings. The verdict is `request_changes` only when a blocking finding exists.
+- The native-design check, the test audit and `## Docs ownership` are conditional blocks. See Conditional blocks.
+- Each rule appears once in the prompt. Reason: a repeated rule adds length and can drift.
 - Every per-run line sits under the heading `## This review`: the subject, the line that names the Chief thread for `chief_report`, an optional focus, and the provenance lines.
+- When Chief passes `acceptedGaps`, the prompt adds `## Accepted gaps (Manual Verification)` after the focus line. It holds the text and this rule: the reviewer lists each gap under Manual Verification and never makes a finding of a listed gap alone. Without `acceptedGaps`, the prompt is unchanged.
 - A pinned review says: inspect the pinned pull request commit. An unpinned review says: inspect the worktree and the evidence.
 
 ### Brief
@@ -52,10 +61,61 @@ Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` 
 
 - A single-worker review names the pull request and its pinned head, with the `git fetch` and `git checkout --detach` command.
 - A plan review (more than one target) says: give one verdict for all targets, and name the branch of each finding.
-- A pinned target line names the pull request, branch, base, and pinned sha. A target with a re-review range reviews only `git diff <since>..<sha>`.
-- A target without a readable head is listed as not pinned, with its branch. Its verdict binds to its report number.
+- A plan review has one target line for each pull request. Each line names the pull request, branch, base, one pinned sha and one scope, then lists every worker of that pull request with its kind. Reason: one pull request at one commit has one diff scope.
+- The kinds are `worker`, `tester`, `designer`, `Spec Writer` and `side-lane Spec Writer`.
+- A target with a re-review range reviews only `git diff <since>..<sha>`.
+- Targets without a readable head have one line for each branch. The line says the pull request is not pinned. Its verdict binds to the report number of each worker.
+- The subject header counts target lines: `N pull requests` when all are pinned, `N branches` when none is, and `N pull requests and M branches without a pinned pull request` for a mix. It never calls an unpinned group a pull request.
 - The context holds the worker brief, the recorded commands, the report pointers, the earlier workers, the previous review, the plan files, the waivers, the impact slice, and the guideline files.
-- When the context is not empty, the prompt ends its summary with this rule: read `$BB_THREAD_STORAGE/review-context.md` in full. If it is missing, wait 10 seconds and read again. If it is still missing, report blocked and name the file.
+- The prompt has no `## Context` list.
+- When the context is not empty and its file is written, the prompt has one line: read the absolute path of `review-context.md` in full. The prompt has no wait rule.
+- When the context file is not written, the prompt ends with `## review-context.md` and the context inline.
+- An empty context writes no file and renders no read line.
+- The worker-reported contract rule renders only when the prompt lists contract items.
+
+### Conditional blocks
+
+`startReview` computes four flags. Each flag decides whether one block renders. A block that renders keeps its base wording, with the exception that the native-design check has two forms.
+
+| Block | Renders when | Reason |
+| --- | --- | --- |
+| Native-design check | A reviewed implementation wave has `feature` not false. Also for an unplanned worker review, a branch review, and a legacy wave without the `feature` key. | The check judges new behaviour only. |
+| Reshape sentences of the native-design check | A reviewed wave has `reshape` true, or a reviewed implementation wave lacks the `feature` key. Never for an unplanned worker review or a branch review. | Only a reshape wave judges the feature and its reshape together. |
+| Test audit | A changed path is a test path, a tester worked on the review, or the changed paths are unknown. Always for a branch review. | The audit has nothing to check without tests. |
+| `## Docs ownership` | A reviewed target range has a docs/ commit, the net diff touches docs/, a spec gate or a Spec Writer exists, or the docs history is unknown. Never for a branch review. | The rule is per commit, so a net diff cannot show that it does not apply. |
+
+- Without the reshape sentences, the native-design check loses two parts: the parenthesis `(a reshape wave's contracts do)` and the last sentence about judging a reshape commit with its feature.
+- A reviewed wave is an implementation wave when it is neither `test` nor `design`.
+- A test path has a segment such as `test`, `tests`, `spec` or `e2e`, or a basename such as `foo.test.ts` or `FooTests.swift`. Reason: this is a path heuristic. The tester signal and the unknown fallback cover a layout that it misses.
+- Unknown paths or unknown history keep the block. Reason: a failed lookup must never remove a rule.
+
+### Contract items the reviewer cannot check
+
+A contract item is worker-reported when the reviewer cannot check it at the pinned commit. Three kinds exist: an unresolved `<…>` placeholder, a fact about the worker's process, and a command that needs another repository's checkout.
+
+- The reviewer confirms the item from the worker's report and marks it worker-reported.
+- The item is unmet only when the report or the code contradicts it.
+- Planner guidance forbids such items. Reason: an item that nobody can check forces a false approve or a false reject.
+
+### Known gaps
+
+Chief decides every known verification gap before the review. The reviewer never rules on one.
+
+- `focus` says what to check. It never asks the reviewer to judge whether a gap blocks.
+- `acceptedGaps` holds the gaps that Chief accepts, with the reason. It has at most 1,000 characters. It works for worker, pull request and branch targets.
+- `acceptedGaps` never bypasses the `retestSkipped` admission check.
+- Reason: the reviewer may not run tests, so only Chief can accept a gap.
+
+### Impact slice
+
+`computeImpactSlice` returns the impact slice of one target. It runs two Git listings right after it finds the merge base. Every success path carries both values, the early return for no symbols included. The slice lines, entries, guidelines and budgets stay the same.
+
+| Field | Source | Failed lookup |
+| --- | --- | --- |
+| `changed` | `git diff --name-only -z --no-renames <merge-base> <sha>`, split on the null byte. It lists text, binary and mode-only changes as raw paths. | `null` |
+| `docsHistory` | `git log --no-merges -n 1 <merge-base>..<sha> -- docs/` prints a commit. | `null` |
+
+Each lookup has its own failure handling, and a failure leaves the rest of the slice unchanged. Reason: the conditional blocks need the full path list and the full commit history, not the text diff.
 
 ### Starting a review
 
@@ -63,14 +123,16 @@ Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` 
 
 1. It checks the worker and the Chief that owns it. A second call for the same worker or plan joins the first call.
 2. It returns the open reviewer when that reviewer is still busy.
-3. It reads the forge head of every target that has a pull request. A target without a head and without a branch makes the review fail. This check applies to targets other than the named worker.
+3. It reads the forge head of every distinct pull request one time. All targets of one pull request share the same pinned head. A target without a head and without a branch makes the review fail. This check applies to targets other than the named worker.
 4. A named worker without a head must have a live environment. Otherwise the review fails.
-5. It computes the re-review range of each target from the newest verdict head. Any doubt reviews the whole change.
-6. It reads the impact slices. They never refuse a review.
+5. It computes the re-review range of each target from the newest verdict head. Any doubt reviews the whole change. Then it normalises the range for each pull request: when all targets share one range, the pull request keeps it. When they differ, no target keeps a range, and the reply says `<pr url>: whole pull request (its targets name different previous reviewed heads)`. Reason: the brief, the re-review section, the pr-agent `Targets:` lines and the reply must agree.
+6. It reads the impact slices. They never refuse a review. Each success carries the changed paths and the docs history.
 7. It chooses the environment. A pinned review may reuse the worktree of the newest earlier pinned reviewer, never the environment of a target worker. Otherwise a pinned review gets a managed worktree on the head branch. An unpinned review reuses the environment of the worker.
-8. It builds the brief and launches the reviewer with its ledger targets.
-9. After the launch it writes `review-context.md`. It makes 3 attempts with 1 s then 2 s of backoff. The file content is the context plus a newline.
-10. When all 3 attempts fail, it sends one Chief alert with the key `review-context:<reviewer id>`. When the alert fails, it logs the failure. The write never throws and never undoes the launch. Reason: the reviewer is already running.
+8. It writes `review-context.md` to the attempt folder, before the launch. It makes 3 attempts with 1 s then 2 s of backoff. The file content is the context plus a newline. An empty context writes no file.
+9. It builds the brief and launches the reviewer with its ledger targets. The prompt names the absolute path that the write returned.
+10. When all 3 attempts fail, it sends one Chief alert with the key `review-<report number>/<attempt id>/review-context:<worker id>`. The launch still happens, and the prompt carries the context inline under `## review-context.md`. When the alert fails, it logs the failure. The write never throws.
+
+Reason: the reviewer cannot start before its context file exists, so the prompt needs no wait rule. A launched reviewer never has a prompt that names a context file that was not written.
 
 ### Branch review
 
@@ -79,6 +141,7 @@ Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` 
 - It refuses a branch that a live managed worker owns, and names that worker.
 - It joins an existing open review of the same branch.
 - It launches a reviewer on a managed worktree of the branch. It writes no context file.
+- It accepts `acceptedGaps`. It renders the native-design check without the reshape sentences, and renders the test audit. It renders no `## Docs ownership`.
 
 ### Settings
 
@@ -104,10 +167,10 @@ A reviewer's ready report carries `findings`. Each finding has `file` (1 to 300 
 1. `startReview` builds the brief as in the plain review.
 2. In `reviewer` mode, the prompt and the files stay as in the plain review.
 3. In another mode, the prompt is the plain prompt plus the engine section. The section lists every target once.
-4. After the launch, the code writes `review-context.md`, as before.
-5. Before the launch, when some target is pinned, the code writes `pr-agent-review.sh` to the engine folder. In `both` mode it also writes `review-helper.md` there. If the wrapper cannot be written, the prompt has no engine section and the reviewer does a direct review. If the helper prompt cannot be written, the section has no helper lines and no helper spawn command: the reviewer does the direct half itself, a direct review of every target (definitive pr-agent outcomes included) combined with the pr-agent outcomes, and the result line says `direct half: reviewer (helper prompt not written)`.
-6. A write of either new file follows the same 3 attempts. After 3 failures one Chief alert names the file. The alert key is `review-<report number>/<attempt id>/<file name without extension>:<worker id>`, for example `review-3/1a2b3c4d/pr-agent-review:<worker id>`. The text says the reviewer falls back to a direct review. The launch stays.
-7. The reviewer runs the wrapper once for each distinct `<url> <sha>` pair. It then gives each target one outcome.
+4. Before the launch, the code writes `review-context.md` to the attempt folder, as in Starting a review.
+5. Before the launch, when some target is pinned, the code writes `pr-agent-review.sh` to the attempt folder. In `both` mode it also writes `review-helper.md` there. If the wrapper cannot be written, the prompt has no engine section and the reviewer does a direct review. If the helper prompt cannot be written, the section has no helper lines and no helper spawn command: the reviewer does the direct half itself, a direct review of every target (definitive pr-agent outcomes included) combined with the pr-agent outcomes, and the result line says `direct half: reviewer (helper prompt not written)`.
+6. A write of either of these files follows the same 3 attempts. After 3 failures one Chief alert names the file. The alert key is `review-<report number>/<attempt id>/<file name without extension>:<worker id>`, for example `review-3/1a2b3c4d/pr-agent-review:<worker id>`. The text says the reviewer falls back to a direct review. The launch stays.
+7. The reviewer runs the wrapper once for each distinct `<url> <sha>` pair. The `Targets:` lines show the normalised re-review range. It then gives each target one outcome.
 8. The reviewer sends one `chief_report`.
 
 ### Outcomes
@@ -168,7 +231,7 @@ A finding has `file` (the trimmed `relevant_file`, at most 300), `message` (`<is
 
 The helper is a plain child thread. It has no managed role.
 
-1. The reviewer checks that `review-helper.md` exists. It waits 10 seconds once, then treats a missing file as a failed direct half.
+1. The reviewer checks that `review-helper.md` exists. It waits 10 seconds once, then treats a missing file as a failed direct half. This wait does not apply to `review-context.md`.
 2. The reviewer spawns the helper with `--lifecycle-owner-thread` set to its own thread and `--parent-notifications off`.
 3. The helper reviews every target in the shared checkout. It ends with a fenced `json` block: `verdict`, `findings`, `result`, and optional `regression`. It calls no `chief_*` tool.
 4. The reviewer waits for the helper after the wrapper runs. The wait is 540 s and runs at most twice.
@@ -177,7 +240,7 @@ The helper is a plain child thread. It has no managed role.
 7. A failed direct half means the reviewer reviews every target itself, after the stop is confirmed.
 8. After `chief_report` is accepted, the reviewer archives the helper. A failed archive appears in its final message.
 
-`review-helper.md` holds a header, the plain prompt byte for byte, and the context under `## review-context.md`. The header replaces the context-file read rule and the `chief_report` and blocked rules. It never holds the engine section.
+`review-helper.md` holds a header, the plain prompt byte for byte, and the context under `## review-context.md`. The header replaces the instruction to read `review-context.md` and the `chief_report` and blocked rules. It never mentions a missing-file rule. It never holds the engine section. When the plain prompt already carries the context inline, the file does not hold the context a second time.
 
 ## Contracts and Invariants
 
@@ -196,7 +259,13 @@ The helper is a plain child thread. It has no managed role.
 | In `both` mode the reviewer does not change the shared checkout while the helper can run. It stops the helper and confirms the stop first. | One checkout serves two agents. |
 | An unconfirmable stop is the only blocked path of the engine section. The report names the helper id. | The reviewer cannot use the checkout safely. |
 | The reviewer archives the helper only after `chief_report` is accepted. A cleanup failure never undoes the report. | Required result comes before optional cleanup. |
-| A failed write of a new file never throws and never undoes the launch. | The reviewer already runs and falls back. |
+| A failed write of a new file never throws and never undoes the launch. | The reviewer falls back to a direct review or to the inline context. |
+| The code reads the forge head one time for each distinct pull request in a review start. | All targets of one pull request must share one pinned commit. |
+| All targets of one pull request have the same re-review range, or none. | The brief, the re-review section, the `Targets:` lines and the reply must agree. |
+| `review-context.md` is written before the launch. | A launched reviewer never names a file that does not exist. |
+| `changed` equals the set of `git diff --name-only -z --no-renames <merge-base> <sha>`. A failed lookup gives `null`, never `[]`. | The conditional blocks need a complete path list, binary and mode-only paths included. |
+| `docsHistory` is true when some non-merge commit in `<merge-base>..<sha>` touches docs/, a reverted change included. A failed lookup gives `null`, never `false`. | The ownership rule is per commit. |
+| Unknown paths or unknown docs history keep the test audit and `## Docs ownership`. | A failed lookup never removes a rule. |
 | The engine changes no ledger, verdict storage, approve gate, reject ladder, or lesson rule. The engine appears only in the result text. | The engine is a way to form a verdict, not a new owner. |
 
 ## Related Decisions
