@@ -123,6 +123,14 @@ describe("tool config: base 9689364 to head", () => {
       const run = await mutated((head) => { const entry = chiefEntries(head)[0]!; entry.tools = [...entry.tools.filter((name) => name !== "chief_attach"), "chief_attach"]; });
       expect(run).toThrow("chief_attach not right after chief_coordinate");
     });
+    test("a duplicate chief_attach appended to a plain Chief's tools (codex)", async () => {
+      const run = await mutated((head) => { chiefEntries(head).find((candidate) => candidate.key.includes("| codex |"))!.tools.push("chief_attach"); });
+      expect(run).toThrow("key, tools or skills");
+    });
+    test("a duplicate chief_attach right after the first one in a plain Chief's tools", async () => {
+      const run = await mutated((head) => { const entry = chiefEntries(head)[0]!; entry.tools.splice(entry.tools.indexOf("chief_attach"), 0, "chief_attach"); });
+      expect(run).toThrow("key, tools or skills");
+    });
     test("chief_attach added to a worker", async () => {
       const run = await mutated((head) => { head.entries.find((candidate) => candidate.key.includes("| worker |"))!.tools.push("chief_attach"); });
       expect(run).toThrow("chief_attach outside a plain Chief");

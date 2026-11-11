@@ -123,7 +123,9 @@ describe("tool-call stability", () => {
       expect(entry.tools[entry.tools.indexOf("chief_spawn") + 1], entry.key).toBe("chief_coordinate");
       expect(entry.tools[entry.tools.indexOf("chief_coordinate") + 1], entry.key).toBe("chief_attach");
       expect(entry.skills, entry.key).toEqual(["chief", "coordinator"]);
-      entry.tools = entry.tools.filter((name) => name !== "chief_coordinate" && name !== "chief_attach");
+      // Remove only the one checked chief_attach; a duplicate stays and fails the exact tools comparison against base.
+      entry.tools.splice(entry.tools.indexOf("chief_coordinate") + 1, 1);
+      entry.tools = entry.tools.filter((name) => name !== "chief_coordinate");
       entry.skills = ["chief"];
     }
     const projectId = now.catalog["chief_spawn"]!.inputSchema.properties.projectId as { type?: string; description?: string };

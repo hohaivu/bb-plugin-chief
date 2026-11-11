@@ -983,7 +983,9 @@ describe("Coordinator", () => {
       expect(names[names.indexOf("chief_coordinate") + 1]).toBe("chief_attach");
       const attach = now.tools.find((tool) => tool.name === "chief_attach")!;
       expect({ description: attach.description, inputSchema: attach.inputSchema }).toEqual(ATTACH_DEFINITION);
-      now.tools = now.tools.filter((tool) => tool.name !== "chief_coordinate" && tool.name !== "chief_attach");
+      // Remove only the one checked chief_attach; a duplicate stays and fails the exact tools equality below.
+      now.tools.splice(names.indexOf("chief_coordinate") + 1, 1);
+      now.tools = now.tools.filter((tool) => tool.name !== "chief_coordinate");
       expect(now.skills).toEqual([...was.skills, "coordinator"]);
       now.skills = was.skills;
       // chief_spawn gains the optional projectId; chief_escalate's threadId becomes optional with one more sentence.

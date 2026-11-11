@@ -106,7 +106,8 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
     const plainChief = entry.key.includes("| chief |");
     if (plainChief) {
       if (entry.tools[entry.tools.indexOf("chief_coordinate") + 1] !== "chief_attach") fail(`${old.key}: chief_attach not right after chief_coordinate`);
-      entry.tools = entry.tools.filter((name) => name !== "chief_attach");
+      // Only the one checked insertion is removed; a duplicate stays and fails the exact tools comparison below.
+      entry.tools.splice(entry.tools.indexOf("chief_coordinate") + 1, 1);
       if (entry.key.includes("| claude-code |")) {
         // The preload line asks for one more tool; the digit count is unchanged, so the SDK cap cuts at the same byte.
         const lines = entry.instructions?.split("\n") ?? [];
