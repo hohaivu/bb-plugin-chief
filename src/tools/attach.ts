@@ -10,7 +10,7 @@ export function registerAttachTool(ctx: Ctx) {
     parameters: z.object({ threadIds: z.array(z.string().trim().min(1)).min(1).max(20) }),
     async execute({ threadIds }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
-      if (!ctx.isCoordinator(caller) || !ctx.isActiveChief(caller)) throw new Error("chief_attach is for a Coordinator only: a Chief becomes one with chief_coordinate.");
+      if (!ctx.isCoordinator(caller) || !ctx.isActiveChief(caller)) throw new Error("chief_attach is for a Coordinator only: run /coordinator first (a child Chief cannot become one).");
       const own = "is already your child";
       const lines = [...new Set(threadIds)].map((id) => {
         const refusal = () => {
