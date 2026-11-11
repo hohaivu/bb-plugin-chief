@@ -7,7 +7,8 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 ## Domain Terms
 
 - **Plan wave**: an ordered unit of implementation, design, or testing in a plan.
-- **Wave flags**: the optional booleans of a plan wave: `dependsOn`, `design`, `test`, `spec`, `feature` and `reshape`.
+- **Wave dependency**: the optional `dependsOn` field of a plan wave. It is an array of integers with at most one entry. `[k]` means that the wave builds on wave `k` and continues on its branch. `[]` means that the wave is independent and starts its own branch and pull request. An omitted field means that the wave depends on the previous wave. Wave 1 has no parent dependency.
+- **Wave flags**: the optional booleans of a plan wave: `design`, `test`, `spec`, `feature` and `reshape`.
 - **Feature wave**: an implementation wave with `feature: true`. It adds new behaviour. Its review runs the native-design check. A wave that is neither `test` nor `design` is an implementation wave.
 - **Reshape wave**: an implementation wave with `reshape: true`. It is the make-native wave of a big feature. `feature` and `reshape` never mark a test wave or a design wave.
 - **Chain**: an ordered sequence of waves from a head wave to a tip wave.
