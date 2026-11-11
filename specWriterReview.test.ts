@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
-import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_NEW_DESIGN_BULLET, PLANNER_OLD_COMPLEX_TAIL, PLANNER_OLD_DESIGN_BULLET, PLANNER_RESHAPE_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
+import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_OLD_COMPLEX_TAIL, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { dropDocsLines } from "./test/docsOwnership";
@@ -251,7 +251,8 @@ describe("tester role", () => {
       await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chief.threadId));
       const planPrompt = state.spawned.at(-1).prompt as string;
       expect(planPrompt).toContain("`{body, dependsOn, design?, test?, spec?, feature?, reshape?}`");
-      expect(planPrompt).toContain("mark the implementation wave that makes the change `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full). Test waves are never `spec: true`.");
+      expect(planPrompt).toContain("mark the implementation wave that makes the change `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full).");
+      expect(planPrompt).not.toContain("Test waves are never");
       expect(planPrompt).not.toContain("mark its test wave `spec: true`");
       expect(planPrompt).not.toContain("before the wave's worker runs");
 
@@ -349,38 +350,55 @@ describe("tester role", () => {
       expect(gateOf(entries.find(([name]) => name === "reviewer prompt")![1])).toHaveLength(6);
     });
 
-    // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief.
-    // Regression: the baseline rule lands in the planner brief instead of the read-only skill.
-    // Plan chains changed one bullet of both prompts (the `dependsOn: []` sentence now says an independent wave runs as its own chain); the rest is base's bytes.
-    // The design-wave plan replaces the design bullet in both briefs and the last sentence of the `complex` bullet, which only the plain brief has.
+    // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief,
+    // after only the counted substitutions below (2 = plain and revision; the `complex` bullet is plain-only). Any other drift fails.
+    // Regression: a rule dropped from, duplicated in, or moved within the Working contract; a trigger line that loses its skill name.
+    // Expected new lines are literals written from wave 1's plan (Steps 1.3 to 1.11), never imported from src.
+    const PLANNER_READ_ONLY_LINE = "- Remain read-only: do not create, modify, or delete any file the repository tracks, and do not commit or push. A worker implements the plan in its own worktree.";
+    const PLANNER_REPORT_LINE = "- Report with chief_report state ready and the plan in its `plan` field, never as a file write: an array of `{body, dependsOn, design?, test?, spec?, feature?, reshape?}`, one entry per wave in order. Mark every implementation wave that adds new behaviour `feature: true`, and the reshape wave `reshape: true`; the reviewer runs the native-design check only for them. Chief receives each wave as its own file. The `result` is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline, under 800 characters. Leave `summary` unset.";
+    const PLANNER_DEPENDS_LINE = "- Split the work into at most 8 waves, each a self-contained plan one worker finishes; one implementation wave by default. `dependsOn` per wave: omitted = builds on the previous wave; `[k]` (1-based) = builds on wave k's implementation or branch; `[]` = independent, its own chain. A head wave and every wave that builds on it share one branch, pull request and worktree. Prefer independent chains to long ones: one failure blocks the rest of its chain. A wave that needs only another wave's interface (types, API, schema, CLI shape) may take `[]` when (a) it builds and verifies from the default base without a declaration another wave adds (the interface is already on the base, or each wave codes against a local stub the merge order resolves; name which) and (b) each shared file or declaration has one owning wave, named in the plan. Then write that interface into both waves' `## Contracts to verify`; otherwise chain it. Waves have no phases, except that a `spec: true` implementation wave has a Spec Writer that runs in parallel with its worker.";
+    const PLANNER_DESIGN_TRIGGER = "- UI whose look no approved design or explicit visual spec fixes (pure-UI work too) gets a design-only wave marked `design: true` before the wave that builds it: follow the Design wave section of the `chief-role-read-only` skill. Other work has no design wave.";
+    const PLANNER_RESHAPE_TRIGGER = "- Big feature (new behaviour, not a bug fix, refactor, migration or docs- or test-only change, whose implementation touches 3+ modules or 10+ files): put one reshape wave between the chain's last feature implementation wave and its test wave, and follow the Reshape wave section of the `chief-role-read-only` skill. Never add a reshape wave to a bug fix, a refactor or a smaller feature.";
+    /** `base` with every line that starts with `prefix` replaced by `to` (a removed line when `to` is null); fails unless exactly `count` lines match. */
+    const replaceLine = (base: string, prefix: string, to: string | null, count: number) => {
+      let hits = 0;
+      const out = base.split("\n").flatMap((l) => l.startsWith(prefix) ? (hits += 1, to === null ? [] : [to]) : [l]).join("\n");
+      expect(hits, prefix).toBe(count);
+      return out;
+    };
+    const plannerExpected = (base: string) => {
+      let out = replaceLine(base, "- Remain read-only: ", PLANNER_READ_ONLY_LINE, 2);
+      out = replaceLine(out, "- Report with chief_report state ready. Its result", PLANNER_REPORT_LINE, 2);
+      out = replaceLine(out, "- Split the work into at most", PLANNER_DEPENDS_LINE, 2);
+      out = replaceLine(out, "- When the task mixes UI that no approved design", null, 2);
+      out = replaceText(out, "(dependsOn the chain's last implementation wave), delegated", "(dependsOn the chain's last implementation wave; never `spec: true`), delegated", 2);
+      out = spliceAfter(out, PLANNER_ANCHOR, `${PLANNER_DESIGN_TRIGGER}\n${PLANNER_RESHAPE_TRIGGER}`, 2);
+      out = replaceText(out, "who commits the docs before the wave's worker runs. Test waves are never `spec: true`. List",
+        "who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full). List", 2);
+      out = replaceLine(out, "- Submit the plan through chief_report's `plan` field", null, 2);
+      out = replaceText(out, "The worker and the reviewer both receive this exact list.",
+        "The worker and the reviewer both receive this exact list. Write each item so a reviewer can check it by reading the pinned pull request commit and the reports. Name a commit by a fixed sha or by where the reviewer finds it (\"the Head commit wave 1's worker report names\"), never a `<…>` placeholder. Leave out facts about the worker's process (its HEAD before the first edit, force pushes, branches or pull requests it did not create): put those in the wave's steps. Never need another repository's checkout: pin that content by commit and quote it in the plan.", 2);
+      return replaceText(out, PLANNER_OLD_COMPLEX_TAIL, PLANNER_NEW_COMPLEX_TAIL, 1);
+    };
     test("the planner prompt equals base 6d288a2's for a plain and a revision brief", async () => {
       const state = await setup();
-      // Plain and revision briefs each gain the reshape rule right after the test-wave line (2 anchors) and get the new design bullet (2);
-      // the plain brief alone gets the new `complex` sentence (1; a revision has no `complex` bullet); nothing else moves.
-      const base = await oracleFile("planner-6d288a2.txt");
-      const expected = replaceText(
-        replaceText(spliceAfter(base, PLANNER_ANCHOR, PLANNER_RESHAPE_LINE, 2), PLANNER_OLD_DESIGN_BULLET, PLANNER_NEW_DESIGN_BULLET, 2),
-        PLANNER_OLD_COMPLEX_TAIL, PLANNER_NEW_COMPLEX_TAIL, 1);
-      // Wave 2 of the parallel Spec Writer plan rewrote two sentences in both briefs (2 each): the spec-flag sentence and the `dependsOn` phases sentence; the rest is base's bytes.
-      const OLD_SPEC = "who commits the docs before the wave's worker runs. Test waves";
-      const NEW_SPEC = "who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full). Test waves";
-      const OLD_PHASES = "except that a `spec: true` implementation wave runs its Spec Writer before its worker.";
-      // Wave 1 of the reviewer-prompt plan (step 5b, 6b): the Contracts bullet gains the checkable-contract sentence (2), the plan-field bullet lists the two
-      // flags and gains the marking sentence (2 each), the reshape bullet gains "Mark it `reshape: true`." (2).
-      const CHECKABLE = " Write each item so a reviewer can check it by reading the pinned pull request commit and the reports. Name a commit by a fixed sha or by where the reviewer finds it (\"the Head commit wave 1's worker report names\"), never a `<…>` placeholder. Leave out facts about the worker's process (its HEAD before the first edit, force pushes, branches or pull requests it did not create): put those in the wave's steps. Never need another repository's checkout: pin that content by commit and quote it in the plan.";
-      const MARK = " Mark every implementation wave that adds new behaviour `feature: true`, and the reshape wave `reshape: true`; the reviewer runs the native-design check only for them.";
-      const endOfBullet = (text: string, start: string, add: string) => {
-        const lines = text.split("\n");
-        expect(lines.filter((line) => line.startsWith(start))).toHaveLength(2);
-        return lines.map((line) => (line.startsWith(start) ? `${line}${add}` : line)).join("\n");
-      };
-      const NEW_PHASES = "except that a `spec: true` implementation wave has a Spec Writer that runs in parallel with its worker.";
-      let wave1 = replaceText(replaceText(expected, OLD_SPEC, NEW_SPEC, 2), OLD_PHASES, NEW_PHASES, 2);
-      wave1 = endOfBullet(wave1, "- Give every wave a `## Contracts to verify` Markdown heading", CHECKABLE);
-      wave1 = endOfBullet(wave1, PLANNER_RESHAPE_LINE, " Mark it `reshape: true`.");
-      wave1 = replaceText(wave1, "`{body, dependsOn, design?, test?, spec?}`", "`{body, dependsOn, design?, test?, spec?, feature?, reshape?}`", 2);
-      wave1 = endOfBullet(wave1, "- Submit the plan through chief_report's `plan` field", MARK);
-      expect(await plannerFixture(state)).toBe(wave1);
+      expect(await plannerFixture(state)).toBe(plannerExpected(await oracleFile("planner-6d288a2.txt")));
+    });
+
+    // Contract (planner invariants): in the plain and the revision prompt the plan field is named once, the design and reshape rule
+    // bodies stay out (the skill holds them), and both triggers name the skill. Regression: the plan-field rule is restated, a rule
+    // body returns to the prompt, or a trigger loses its skill name. The prompt is rendered output, not a prose file.
+    test("a planner prompt names the plan field once, holds both triggers and none of the design or reshape bodies", async () => {
+      const state = await setup();
+      const prompts = (await plannerFixture(state)).split(/^=== .* ===\n/m).filter(Boolean);
+      expect(prompts).toHaveLength(2);
+      for (const prompt of prompts) {
+        expect(prompt.match(/plan`? field/g)).toHaveLength(1);
+        expect(prompt.match(/never `spec: true`/g)).toHaveLength(1);
+        for (const gone of ["Test waves are never", "Like the test wave", "make-native", "Pareto", "learn each touched area", "Designer draws the artboards"]) expect(prompt, gone).not.toContain(gone);
+        for (const trigger of [PLANNER_DESIGN_TRIGGER, PLANNER_RESHAPE_TRIGGER]) expect(prompt).toContain(`${trigger}\n`);
+        expect(prompt.match(/`chief-role-read-only`/g)).toHaveLength(2);
+      }
     });
 
     // Contract (mixed chain, existing-only first): wave 1's Spec Writer and worker prompts are base 6d288a2's bytes although wave 2 has
