@@ -115,8 +115,9 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 ### Chief configuration (`bb.agents.configure`, Chief branch)
 
 - A row in state `complete`, `archived` or `deleted` gets no tools and no skills.
-- The Chief tools are `chief_consult`, `chief_spawn`, `chief_forge_init`, `chief_delegate`, `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_skip_tests`, `chief_skip_specs`, `chief_escalate` and `chief_sync`.
+- The base list is `chief_consult`, `chief_spawn`, `chief_forge_init`, `chief_delegate`, `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_skip_tests`, `chief_skip_specs`, `chief_escalate` and `chief_sync`.
 - The list adds `chief_plan` when planning is on, and `chief_research` when research is on.
+- A plain Chief also gets `chief_coordinate` and `chief_attach`. A plain Chief has 19 tools with planning and research on. A child Chief has 17. A Coordinator has 3.
 - The skills are `["chief"]`.
 - The instructions hold the greeting, then the preload line for `claude-code`, then the Chief rules. The project rules come last. Reason: the SDK cuts instructions at 32,768 characters.
 - The preload line uses `query "+chief"` with `max_results` equal to the tool count.
@@ -159,6 +160,7 @@ Each contract has an identifier. Tests and reviews cite it.
 ### COORD-4 Attach
 
 - `chief_attach` takes 1 to 20 thread ids. Only an active Coordinator may call it.
+- Every plain Chief has the tool, so a Chief that `chief_coordinate` upgrades can attach without a restart. The handler refuses any caller that is not an active Coordinator. Reason: BB applies tools only when it builds a session.
 - It returns one result line for each id. A bad id never blocks the other ids.
 - The projects of the Chiefs do not matter. Reason: the owner decided that children live in any project.
 - It refuses an id that is the caller, is not a Chief row, is complete, archived or deleted, is a Coordinator, or belongs to another Coordinator.
@@ -218,8 +220,8 @@ Each contract has an identifier. Tests and reviews cite it.
 | Row | Tools | Skills | Preload `max_results` |
 | --- | --- | --- | --- |
 | Coordinator | `chief_roster`, `chief_spawn`, `chief_attach` | none | 3 |
-| Plain Chief | The base list plus `chief_coordinate` | `chief`, `coordinator` | Tool count |
-| Child Chief | The base list | `chief` | Tool count |
+| Plain Chief | The base list plus `chief_coordinate` and `chief_attach` | `chief`, `coordinator` | Tool count (19 with planning and research on) |
+| Child Chief | The base list | `chief` | Tool count (17 with planning and research on) |
 
 - The Coordinator greeting says that the Coordinator supervises child Chiefs in any project, not managed threads.
 - The Coordinator instructions replace the Chief rules. They say that the Coordinator never edits code, never plans, delegates, reviews or completes, and attaches only Chiefs that the owner names.
