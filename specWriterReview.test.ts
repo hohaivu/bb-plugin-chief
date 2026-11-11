@@ -8,7 +8,7 @@ import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, 
 import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_OLD_COMPLEX_TAIL, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { dropDocsLines } from "./test/docsOwnership";
+import { DOCS_RULE_OLD, dropDocsLines } from "./test/docsOwnership";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -232,14 +232,43 @@ describe("tester role", () => {
     };
     // </brief-oracle-fixture>
 
-    test("worker, designer and tester prompts equal base 8250f0c's apart from the tester Head commit line", async () => {
+    // Worker and designer briefs equal base 8250f0c with no new edit. A tester brief is the base text plus the named edits of the
+    // tester brief trim, each with its exact count; the replacement text is the plan's contract, not a copy of head output.
+    const briefSections = (text: string) => Object.fromEntries(text.split(/^=== (.+) ===\n/m).slice(1).reduce<string[][]>((pairs, part, i) => (i % 2 ? pairs[pairs.length - 1]!.push(part) : pairs.push([part]), pairs), []));
+    const TESTER_VERIFY_BASE = "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.\nIf this command runs the whole test suite and this brief does not say the owner asked for that, do not run it: list it as \"not run: full suite not asked for\" under Automated Verification.";
+    const TESTER_VERIFY_TRIMMED = "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure that also occurs at your Base commit is a baseline: list it and do not fix it. Any other failure in product code follows the product-code rule in `## Test work`. If this command runs the whole test suite, run it only when your mission or `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".";
+    const REFACTOR_ORACLE_LINE = "- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, compare old and new behaviour through tests on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression.\n";
+    const REPLAN_LINE = "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".";
+    const NO_HEAD = "Its report names no Head commit: read the full report.";
+    const trimmedTester = (base: string, planned: boolean) => {
+      let text = replaceText(base, "Keep scope narrow and verify the user journey or closest executable seam.", "Keep scope narrow.", 1);
+      text = replaceText(text, REFACTOR_ORACLE_LINE, "", 1);
+      text = replaceText(text, REPLAN_LINE, DOCS_RULE_OLD, 1);
+      if (!planned) {
+        text = replaceText(text, "- Regression passes\n\n## Constraints\n- None stated.\n\n## Source of truth", "- Regression passes\n\n## Source of truth", 1);
+        return replaceText(text, "## Predecessor's last report\nDone\nFull report:", `## Predecessor's last report\n${NO_HEAD}\nFull report:`, 1);
+      }
+      text = replaceText(text, "## Success criteria\n- None stated.\n\n## Constraints\n- None stated.\n\n## Context", "## Context", 1);
+      text = replaceText(text, "plan-1.md\n- Totals stay non-negative\n", "plan-1.md\n", 1);
+      text = replaceText(text, "plan-2.md\n- Wave 2 keeps its invariant\n\n## Contracts", "plan-2.md\n\n## Contracts", 1);
+      text = replaceText(text, TESTER_VERIFY_BASE, TESTER_VERIFY_TRIMMED, 1);
+      return replaceText(text, "## Predecessor's last report\nDone.\n\n## Deviations from plan\nNone\n\n## Working contract", `## Predecessor's last report\n${NO_HEAD}\n\n## Working contract`, 1);
+    };
+
+    test("worker and designer prompts equal base 8250f0c; tester prompts equal it plus the tester brief trim edits", async () => {
       const state = await setup();
-      const head = await briefFixture(state);
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "briefs-base-8250f0c.txt"), "utf8");
+      const head = briefSections(await briefFixture(state));
+      const base = briefSections(await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "briefs-base-8250f0c.txt"), "utf8"));
+      expect(Object.keys(head)).toEqual(Object.keys(base));
       const headCommit = "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.";
-      const lines = head.split("\n");
-      expect(lines.filter((line) => line === headCommit)).toHaveLength(2);
-      expect(dropDocsLines(lines.filter((line) => line !== headCommit).join("\n"))).toBe(dropDocsLines(oracle));
+      for (const name of ["worker, unplanned", "designer, unplanned", "worker, planned"]) {
+        expect(dropDocsLines(head[name]!), name).toBe(dropDocsLines(base[name]!));
+      }
+      for (const [name, planned] of [["tester, unplanned", false], ["tester, planned", true]] as const) {
+        const lines = head[name]!.split("\n");
+        expect(lines.filter((line) => line === headCommit), name).toHaveLength(1);
+        expect(lines.filter((line) => line !== headCommit).join("\n"), name).toBe(trimmedTester(base[name]!, planned));
+      }
     });
 
     // Contract 17 (planner and advisor briefs): they change on purpose, so assert the changed lines only. The planner is told the

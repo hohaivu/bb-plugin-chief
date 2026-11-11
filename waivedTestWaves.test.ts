@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
-import { PLAN_FIXTURE, delegate, disposeAll, setup, reviewContextOf, snapshotText, start, status, wave } from "./test/harness";
+import { PLAN_FIXTURE, delegate, disposeAll, replaceText, setup, reviewContextOf, snapshotText, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { wave1Prompt } from "./test/reviewWave1";
@@ -245,7 +245,8 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
       ownership: "none", // the slice is skipped, so the docs history is unknown; a tester is no Spec Writer
     });
     expect(portable(prompt)).toBe(expected);
-    await expect(portable(context)).toMatchFileSnapshot("./test/fixtures/review-no-waiver.context.txt");
+    // The context quotes the tester's brief; wave 1 drops its empty `## Success criteria` / `## Constraints` sections ("None stated.") — one named edit on the retained base context.
+    expect(portable(context)).toBe(replaceText(baseContext, "## Success criteria\n- None stated.\n\n## Constraints\n- None stated.\n\n", "", 1));
   });
 
   // Contract: reviewBrief without waiverLines (an older caller) renders what it rendered before, and an empty list changes nothing.

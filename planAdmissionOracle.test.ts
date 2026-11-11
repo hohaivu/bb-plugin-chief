@@ -38,6 +38,51 @@ describe("tester role", () => {
       .replace(/^Before you read any file, sync this checkout with .*\n/gm, "")
       .replace(/^- Before you derive tests, for each Spec Writer listed above .*\n/gm, "")
       .replace(/`git fetch origin ([^`\s]+)` then `git rebase --no-autostash origin\/\1` on a clean tree and push again/g, "`git fetch origin $1`, rebase onto origin/$1 and push again");
+    // The tester brief trim (plan thr_a3j8vkfcav wave 1) changed tester briefs only. Each edit below is applied to the base text of the tester
+    // briefs alone (a brief that holds the tester skill line) and its total count over the whole fixture is pinned. Worker, designer and Spec Writer
+    // briefs stay the base's bytes. The sentence that replaces a tester's docs line is pinned by docsOwnershipBrief.test.ts (dropDocsLines hides it here).
+    const TESTER_BRIEF = "- Follow the `chief-role-tester` skill";
+    const NO_HEAD = "Its report names no Head commit: read the full report.";
+    const trimTesterBriefs = (base: string) => {
+      const counts: Record<string, number> = {};
+      const edit = (text: string, key: string, from: string, to: string) => {
+        counts[key] = (counts[key] ?? 0) + text.split(from).length - 1;
+        return text.split(from).join(to);
+      };
+      const line = (start: string) => base.split("\n").find((entry) => entry.startsWith(start))!;
+      const refactorLine = line("- When this task is a refactor or migration meant to keep behaviour");
+      const replanLine = line("- If this work cannot be finished in this thread");
+      const baseCommit = "- When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report.\n";
+      const out = base.split(/(?=^You are the managed worker for )/m).map((brief) => {
+        if (!brief.includes(TESTER_BRIEF)) return brief;
+        // The empty sections go from the top of the brief; the head worker's brief quoted under the source heading keeps its own.
+        const cut = brief.indexOf("## Source of truth for test cases\n");
+        let top = cut < 0 ? brief : brief.slice(0, cut);
+        let rest = cut < 0 ? "" : brief.slice(cut);
+        top = edit(top, "empty success criteria", "## Success criteria\n- None stated.\n\n", "");
+        top = edit(top, "empty constraints", "## Constraints\n- None stated.\n\n", "");
+        let text = top + rest;
+        const sources = text.match(/Wave \d+ of \d+: \S+plan-\d+\.md\n- [^\n]+\n/g) ?? [];
+        counts["source contract lines"] = (counts["source contract lines"] ?? 0) + sources.length;
+        for (const source of sources) text = text.replace(source, source.slice(0, source.indexOf("\n") + 1));
+        text = edit(text, "scope sentence", "Keep scope narrow and verify the user journey or closest executable seam.", "Keep scope narrow.");
+        text = edit(text, "refactor oracle line", `${refactorLine}\n`, "");
+        text = edit(text, "re-plan line", `${replanLine}\n`, "");
+        text = edit(text, "spec bullet", "- Code that contradicts the docs: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: worker)`. Docs that are wrong",
+          "- Code that contradicts the docs is product code that is wrong: follow the product-code rule in `## Test work`. Docs that are wrong");
+        for (const report of ["Done.\n\n## Deviations from plan\nNone\n", "Done.\n\n## Deviations from plan\nNone (re-reported)\n"]) {
+          text = edit(text, "predecessor report", `## Predecessor's last report\n${report}`, `## Predecessor's last report\n${NO_HEAD}\n`);
+        }
+        // A branch is named by the Git workflow section, and the Base commit line then lives in the sync sentence only.
+        if (text.includes("## Git workflow\nYour worktree is based on ")) text = edit(text, "base commit line", baseCommit, "");
+        return text;
+      });
+      expect(counts).toEqual({
+        "empty success criteria": 13, "empty constraints": 13, "source contract lines": 24, "scope sentence": 13, "refactor oracle line": 13,
+        "re-plan line": 13, "spec bullet": 1, "predecessor report": 11, "base commit line": 2,
+      });
+      return out.join("");
+    };
     const admissionFixture = async () => {
       const blocks: string[] = [];
       const newestId = (state: State) => (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker' ORDER BY rowid DESC`).get() as any).thread_id as string;
@@ -599,7 +644,7 @@ describe("tester role", () => {
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "plan-admission-c8a0d76.txt"), "utf8");
       const kept = (text: string) => text.split(/^(?==== )/m).filter((block) => !REPLACED_BY_PARALLEL_LANE(block.slice(4, block.indexOf(" ===\n"))));
       expect(kept(oracle).length).toBeGreaterThan(30);
-      expect(dropDocsLines(dropSkippedNote(acceptDesignRefusal(acceptOwnership(kept(asBase(head)).join("")))))).toBe(dropDocsLines(kept(oracle).join("")));
+      expect(dropDocsLines(dropSkippedNote(acceptDesignRefusal(acceptOwnership(kept(asBase(head)).join("")))))).toBe(dropDocsLines(trimTesterBriefs(kept(oracle).join(""))));
     });
   });
 });

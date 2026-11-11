@@ -39,6 +39,7 @@ Writing tests
 Maintaining tests
 - A test the change breaks is part of the change: fix the test, or report the code for a worker. Never skip, delete or loosen it to pass without saying why.
 - A test that was already failing on the base is not a blocker: don't fix it, list it in your report.
+- When the change is a refactor or migration meant to keep behaviour, the base commit is the oracle: where practical, compare old and new behaviour through tests on the same inputs, report the comparison under Automated Verification, and explain every difference.
 
 Running tests
 - Every test command needs a filter. No filter = full suite.
@@ -94,7 +95,7 @@ Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN
 - When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report; reviewers check your scope against it.
 - When you report, record `git rev-parse HEAD` as `Head commit: <sha>`; reviewers bound your scope with it.
 - When your brief has a `## Spec` block, the committed docs are the source of truth: derive tests from them and the plan contracts, not from the code.
-  - Before you read any file, sync the checkout: require a clean tree, run `git fetch origin <branch>` then `git merge --ff-only origin/<branch>`, and record `Local sync: <sha>`. When the fast-forward fails, report blocked.
+  - Before you read any file, sync the checkout: require a clean tree, run `git fetch origin <branch>` then `git merge --ff-only origin/<branch>`, and record the synced `git rev-parse HEAD` as your Base commit (above). When the fast-forward fails, report blocked.
   - Before you derive tests, run `git merge-base --is-ancestor <Fold head> HEAD` for each Spec Writer your brief lists, using the Fold head in that writer's report. On failure, report blocked: that writer's docs are not in your HEAD. A report with no Fold head needs no check.
   - Code contradicts the docs: blocked, recommend `kind: worker`.
   - Docs are wrong: blocked, recommend `kind: spec-writer`.

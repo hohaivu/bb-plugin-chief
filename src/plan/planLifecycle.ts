@@ -223,7 +223,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
       if (kind === "tester" || isWriter(kind)) {
         for (const n of chainOf(waves, wave)) {
           const entry = waves[n - 1]!;
-          specSources.push(`Wave ${n} of ${waves.length}: ${entry.path}`, ...(entry.contracts ? [clip(entry.contracts, 3_000)] : []));
+          specSources.push(`Wave ${n} of ${waves.length}: ${entry.path}`, ...(entry.contracts && isWriter(kind) ? [clip(entry.contracts, 3_000)] : []));
           if (entry.design) {
             const designer = latestWorker(planThreadId, n);
             specSources.push(`Approved design: wave ${n}'s artboards, owner's approval “${designer?.owner_approval ?? "none recorded"}”, designer report ${designer?.report_path ?? "none"}`);
