@@ -1,5 +1,6 @@
 import { expect } from "vitest";
 import { REVIEWER_NATIVE_LINE, replaceText, spliceAfter, REVIEWER_ANCHOR } from "./harness";
+import { OWNERSHIP_PARAGRAPH } from "./docsOwnership";
 
 // Wave 1 of the reviewer-prompt plan edits the review prompt that 19babad rendered. Every oracle that compares a prompt against a base
 // fixture applies exactly these named edits to the base text, each with an exact count; the new texts are copied from wave 1's plan
@@ -67,7 +68,28 @@ export type Wave1Edits = {
   contextPath: string | null;
   /** The prompt reviews more than one target. */
   many?: boolean;
+  /**
+   * The `## Docs ownership` block the base rendered unconditionally but its transcript fixtures predate: the Spec Writer ids it names ("none" for no writer),
+   * inserted exactly once; null when this scenario's fixed inputs give no reason for it (no skipped slice, no docs/ path or history, no writer, no spec gate).
+   */
+  ownership?: string | null;
 };
+
+// Where the base put `## Docs ownership` (19babad, reviewStart.ts reviewerPrompt provenance): after the role lines, before everything below. The first
+// line of any of these sections, in the text after the other named edits, is where the block goes.
+const AFTER_OWNERSHIP = [(line: string) => line.startsWith("Read every worker report review-context.md names"), (line: string) => line === "## Re-review scope",
+  (line: string) => line.startsWith("Check each finding of the previous review"), (line: string) => line.startsWith("Read each plan wave file in review-context.md"),
+  (line: string) => WAIVER_LINE_STARTS.some((start) => line.startsWith(start))];
+/** Forward edit: inserts the base's ownership block (paragraph = base text + the plan's two named edits) before the first following section; exactly one insertion. */
+function insertOwnership(text: string, ids: string) {
+  expect(text).not.toContain("## Docs ownership");
+  expect(text).not.toContain("(4) a docs/"); // a spec-gate prompt needs the gate's own edits; no fixture here has one
+  const lines = text.split("\n");
+  const at = lines.findIndex((line) => AFTER_OWNERSHIP.some((is) => is(line)));
+  if (at < 0) throw new Error("no section follows the ownership block in this prompt: name its marker in AFTER_OWNERSHIP");
+  lines.splice(lines[at - 1] === "" ? at - 1 : at, 0, "", "## Docs ownership", OWNERSHIP_PARAGRAPH(ids));
+  return lines.join("\n");
+}
 
 /**
  * One base prompt (rendered at 19babad, native line not yet spliced in: the base fixtures predate it) with wave 1's named edits applied.
@@ -108,7 +130,7 @@ export function wave1Prompt(basePrompt: string, baseContext: string, edits: Wave
     lines.splice(at < 0 ? lines.length : at, 0, REPORTS_NEW);
     text = lines.join("\n");
   }
-  return text;
+  return edits.ownership ? insertOwnership(text, edits.ownership) : text;
 }
 
 /** Step 1c on a base plan-review subject whose groups each hold one worker: one line per group, the header counting groups, every worker named on its line. */
@@ -136,7 +158,8 @@ const ALERT_OLD = /^Could not write review-context\.md for reviewer (\S+) after 
 /**
  * The review-attempt base transcript (rendered at 19babad) with wave 1's named edits applied to every reviewer prompt.
  * The test-audit rule drops when the context's impact slice read every changed path (not skipped): the scenario commits touch only lib.ts and main.ts, no test path.
- * The `## Docs ownership` block is not here: the caller reverse-removes it from the head text through its pinned paragraph.
+ * Every worker and plan prompt gains the `## Docs ownership` block (the base rendered it unconditionally; these fixtures predate it) because its context's slice is skipped, so the docs history is unknown;
+ * the scenarios have no Spec Writer, so it names "none". A branch prompt has no block.
  */
 export function reviewAttemptExpected(base: string) {
   const lines = base.split("\n");
@@ -164,11 +187,13 @@ export function reviewAttemptExpected(base: string) {
     const branch = workerId === "null";
     const planned = context.includes("## Plan:");
     const failed = block.includes("review-context.md write failure");
+    const skipped = (context.split("## Impact slice")[1] ?? "Skipped:").includes("Skipped:");
     const edits: Wave1Edits = {
       native: branch ? "noReshape" : planned ? "none" : "noReshape",
-      testAudit: (context.split("## Impact slice")[1] ?? "Skipped:").includes("Skipped:"),
+      testAudit: skipped,
       contextPath: failed || branch ? null : `<storage>/chief/proj_1/${workerId}/review-${seq}/<attempt>/review-context.md`,
       many: prompt.includes("Independently review the whole plan"),
+      ownership: !branch && skipped ? "none" : null,
     };
     let next = wave1Prompt(prompt, branch ? "" : failed ? firstContext : context, edits);
     if (edits.many) next = groupedSubject(next);

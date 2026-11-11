@@ -7,7 +7,6 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow } from "./src/types";
-import { acceptOwnershipDeep } from "./test/docsOwnership";
 import { REVIEWER_NATIVE_LINE, replaceText } from "./test/harness";
 import { groupedSubject, NATIVE_NO_RESHAPE_LINE, NATIVE_RESHAPE_PAREN, NATIVE_RESHAPE_TAIL, TEST_AUDIT_LINE, wave1Prompt } from "./test/reviewWave1";
 import { createReviewLedger } from "./src/review/reviewLedger";
@@ -722,6 +721,7 @@ function oracleOnHead(oracle: Record<string, any>) {
         testAudit: true, // every slice is skipped (no checkout): the changed paths are unknown, so the rule stays
         contextPath: seam && !seam.failed ? `/data/${seam.host}/chief/proj/W1/${file}` : null,
         many: seam?.many,
+        ownership: seam ? "none" : null, // worker and plan prompts: the slice is skipped, so the docs history is unknown and no Spec Writer exists; a branch prompt has none
       });
       if (seam?.many) prompt = groupedSubject(prompt);
       if (seam?.failed) prompt = `${prompt}\n\n## review-context.md\n${baseContext}`;
@@ -739,7 +739,7 @@ function oracleOnHead(oracle: Record<string, any>) {
     }];
   }));
 }
-const headScenarios = async (engine?: () => unknown) => withoutAttemptId(acceptOwnershipDeep(await scenarios(engine)));
+const headScenarios = async (engine?: () => unknown) => withoutAttemptId(await scenarios(engine));
 
 describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
   // Run at the base commit (where no engine exists) with ORACLE_ONLY=capture ORACLE_OUT=<file>; the committed file is that run's output.

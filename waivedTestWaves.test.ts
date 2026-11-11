@@ -5,7 +5,6 @@ import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { PLAN_FIXTURE, delegate, disposeAll, setup, reviewContextOf, snapshotText, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { acceptOwnership } from "./test/docsOwnership";
 import { wave1Prompt } from "./test/reviewWave1";
 
 provideSdk(sdkTesting);
@@ -243,8 +242,9 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     const baseContext = await snapshotText("review-no-waiver.context.txt");
     const expected = wave1Prompt(await snapshotText("review-no-waiver.prompt.txt"), baseContext, {
       native: "none", testAudit: true, contextPath: `<storage>/chief/proj_1/${tester}/review-1/<attempt>/review-context.md`,
+      ownership: "none", // the slice is skipped, so the docs history is unknown; a tester is no Spec Writer
     });
-    expect(acceptOwnership(portable(prompt))).toBe(expected);
+    expect(portable(prompt)).toBe(expected);
     await expect(portable(context)).toMatchFileSnapshot("./test/fixtures/review-no-waiver.context.txt");
   });
 
@@ -265,10 +265,10 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     };
     const omitted = reviewBrief(input);
     expect(reviewBrief({ ...input, waiverLines: [] })).toEqual(omitted);
-    // No contextPath: the prompt inlines the context. Defaults: native line without the reshape parts, test audit kept.
+    // No contextPath: the prompt inlines the context. Defaults: native line without the reshape parts, test audit kept, and no slice entry: the docs history is unknown, so the ownership block stays.
     const baseContext = await snapshotText("review-brief-no-waiverlines.context.txt");
-    const expected = `${wave1Prompt(await snapshotText("review-brief-no-waiverlines.prompt.txt"), baseContext, { native: "noReshape", testAudit: true, contextPath: null })}\n\n## review-context.md\n${baseContext}`;
-    expect(acceptOwnership(omitted.prompt)).toBe(expected);
+    const expected = `${wave1Prompt(await snapshotText("review-brief-no-waiverlines.prompt.txt"), baseContext, { native: "noReshape", testAudit: true, contextPath: null, ownership: "none" })}\n\n## review-context.md\n${baseContext}`;
+    expect(omitted.prompt).toBe(expected);
     await expect(omitted.context).toMatchFileSnapshot("./test/fixtures/review-brief-no-waiverlines.context.txt");
   });
 

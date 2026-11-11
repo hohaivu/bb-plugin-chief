@@ -6,7 +6,7 @@ import { READY, plan, planWave, readyIdle, report, reviewed, rowOf, setLive, too
 import { APPROVE, HEAD_SHA, TEST_WAVE, approvePlan, disposeAll, execFileMock, reviewContextOf, setup, snapshotText, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { acceptOwnership, dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
+import { dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
 import { reviewAttemptExpected } from "./test/reviewWave1";
 
 provideSdk(sdkTesting);
@@ -467,8 +467,8 @@ describe("tester role", () => {
     // Plan chains changed one thing of the base snapshot: a pinned reviewer's fetch line now also checks the pinned commit out detached (`git fetch origin <branch> && git checkout --detach <sha>`).
     test("review attempt oracle", async () => {
       const head = await reviewAttemptFixture();
-      // Expected = the 19babad transcript with wave 1's named edits per prompt (test/reviewWave1.ts); only the pinned `## Docs ownership` block comes off the head side.
-      expect(dropDocsLines(dropSkippedNote(acceptOwnership(head)))).toBe(dropDocsLines(reviewAttemptExpected(await snapshotText("review-attempt-cf92d9c.txt"))));
+      // Expected = the 19babad transcript with wave 1's named edits per prompt, the `## Docs ownership` block included, each inserted once (test/reviewWave1.ts).
+      expect(dropDocsLines(dropSkippedNote(head))).toBe(dropDocsLines(reviewAttemptExpected(await snapshotText("review-attempt-cf92d9c.txt"))));
     }, 300_000);
 
     // A host lookup that never answers no longer holds chief_review (#177): the ancestry check's 20 s deadline covers the
