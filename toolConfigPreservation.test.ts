@@ -7,7 +7,7 @@ import { disposeAll } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { type ToolConfig, compareToolConfig, toolConfigFixture } from "./test/toolConfigFixture";
-import { ATTACH_DEFINITION, acceptCoreRuleTrim } from "./test/specLaneWording";
+import { ATTACH_DEFINITION, EVIDENCE_ONLY_PROPERTY, acceptCoreRuleTrim } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -45,6 +45,9 @@ describe("tool config: base 9689364 to head", () => {
     expect(base.catalog["chief_attach"]).toBeUndefined();
     expect(head.catalog["chief_attach"]).toEqual(ATTACH_DEFINITION);
     expect(chiefEntries(head).every((entry) => entry.tools[entry.tools.indexOf("chief_coordinate") + 1] === "chief_attach")).toBe(true);
+    // The #214 delta is really there too: exactly one optional boolean on chief_delegate, absent from base.
+    expect(base.catalog["chief_delegate"]!.inputSchema.properties["evidenceOnly"]).toBeUndefined();
+    expect(head.catalog["chief_delegate"]!.inputSchema.properties["evidenceOnly"]).toEqual(EVIDENCE_ONLY_PROPERTY);
     // The three edits are really there: the comparison is not vacuous.
     expect(head.catalog["chief_delegate"]!.inputSchema.properties.kind!.description).not.toBe(base.catalog["chief_delegate"]!.inputSchema.properties.kind!.description);
     expect(head.catalog["chief_complete"]!.inputSchema.properties.skipReview!.description).not.toBe(base.catalog["chief_complete"]!.inputSchema.properties.skipReview!.description);
@@ -130,6 +133,27 @@ describe("tool config: base 9689364 to head", () => {
     test("a duplicate chief_attach right after the first one in a plain Chief's tools", async () => {
       const run = await mutated((head) => { const entry = chiefEntries(head)[0]!; entry.tools.splice(entry.tools.indexOf("chief_attach"), 0, "chief_attach"); });
       expect(run).toThrow("key, tools or skills");
+    });
+    const delegate = (head: ToolConfig) => head.catalog["chief_delegate"]!.inputSchema as { required?: string[]; properties: Record<string, any> };
+    test("chief_delegate.evidenceOnly missing", async () => {
+      const run = await mutated((head) => { delete delegate(head).properties["evidenceOnly"]; });
+      expect(run).toThrow("chief_delegate.evidenceOnly");
+    });
+    test("chief_delegate.evidenceOnly description changed", async () => {
+      const run = await mutated((head) => { delegate(head).properties["evidenceOnly"].description += " Extra."; });
+      expect(run).toThrow("chief_delegate.evidenceOnly");
+    });
+    test("chief_delegate.evidenceOnly made required", async () => {
+      const run = await mutated((head) => { delegate(head).required = [...(delegate(head).required ?? []), "evidenceOnly"]; });
+      expect(run).toThrow("chief_delegate.evidenceOnly");
+    });
+    test("an unexpected second optional property on chief_delegate", async () => {
+      const run = await mutated((head) => { delegate(head).properties["dryRun"] = { type: "boolean", description: "Unexpected." }; });
+      expect(run).toThrow("chief_delegate (description or schema)");
+    });
+    test("chief_delegate.evidenceOnly copied onto another tool", async () => {
+      const run = await mutated((head) => { (head.catalog["chief_plan"]!.inputSchema.properties as Record<string, unknown>)["evidenceOnly"] = EVIDENCE_ONLY_PROPERTY; });
+      expect(run).toThrow("chief_plan (description or schema)");
     });
     test("chief_attach added to a worker", async () => {
       const run = await mutated((head) => { head.entries.find((candidate) => candidate.key.includes("| worker |"))!.tools.push("chief_attach"); });

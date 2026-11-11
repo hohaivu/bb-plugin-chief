@@ -7,7 +7,7 @@ import plugin from "./server";
 import { completeWorker, configurationContext, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
+import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 
 provideSdk(sdkTesting);
@@ -152,6 +152,8 @@ describe("tool-call stability", () => {
       acceptSpecLaneWording(definition, base.catalog[name], name);
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
       acceptRetestDelta(definition, base.catalog[name], name);
+      // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.
+      acceptEvidenceOnlyDelta(definition, name);
       if (!titleTools.includes(name)) { expect(definition, name).toEqual(base.catalog[name]); continue; }
       const old = structuredClone(base.catalog[name]!);
       const next = structuredClone(definition);

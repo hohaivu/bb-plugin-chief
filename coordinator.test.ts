@@ -7,7 +7,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { MIGRATIONS } from "./src/db/migrations";
 import { loadBaseBuild } from "./scripts/loadBaseBuild";
-import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
+import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -1006,6 +1006,8 @@ describe("Coordinator", () => {
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
       for (const tool of now.tools) acceptReviewerToolDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       for (const tool of now.tools) acceptRetestDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
+      // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.
+      for (const tool of now.tools) acceptEvidenceOnlyDelta(tool, tool.name);
       expect(now.tools).toEqual(was.tools);
       // Instructions: only the preload line's max_results moves by two (claude-code: chief_coordinate and chief_attach); codex is byte-identical.
       now.instructions = acceptCoreRuleTrim(acceptPlanningLine(now.instructions, was.instructions), was.instructions);
