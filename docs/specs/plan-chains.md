@@ -224,7 +224,7 @@ Only a Spec Writer changes `docs/`. The sections above define the lanes. This se
 - A Spec Writer brief lists each wave of the chain under `## Read-only context`, with the plan path and its contracts clipped at 3,000 characters. Reason: the writer reads the contracts of the chain as source text.
 - A planned tester brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Source of truth for test cases`. It lists the approved-design line when one exists. It lists no contract text. Reason: the tester reads the plan files, and its own contracts appear once.
 - An unplanned tester brief keeps the head brief as its source of truth, clipped in the middle at 4,000 characters. Reason: no plan file exists.
-- `admitDelegation` admits and refuses the same calls for a tester as for every other kind. Only the source list of a tester changes. Reason: the change affects text, not admission.
+- For each kind, `admitDelegation` accepts and refuses exactly the same requests as before the brief change. Only the contents of the tester source list change. Reason: the change affects text, not admission.
 
 A tester brief has these rules:
 
