@@ -94,7 +94,7 @@ describe("evidence-only tester brief", () => {
   });
 
   // Contract: with no Chief constraints, a blocking finding's fix is the constraint, and each finding text appears once.
-  // Regression: the fix stays in the finding only (Constraints "None stated"), or is repeated in both places.
+  // Regression: the fix stays in the finding only (Constraints omitted), or is repeated in both places. An empty tester Constraints section is omitted (plan-chains.md Tester Brief), never "None stated.".
   describe("constraints from blocking fixes", () => {
     const nit = { file: "totals.ts", severity: "nit", message: "Rename total", fix: "Call it sum" } as const;
     const second = { file: "a.ts", severity: "blocking", message: "Second failure", fix: "Repair second" } as const;
@@ -114,15 +114,18 @@ describe("evidence-only tester brief", () => {
 
     test("a nit's fix never moves", () => {
       const { prompt, reviewerBrief } = evidence({ structured: [nit] });
-      expect(section(prompt, "Constraints")).toBe("- None stated.");
-      expect(reviewerBrief).toContain("## Constraints\n- None stated.");
+      expect(prompt).not.toContain("## Constraints");
+      expect(reviewerBrief).not.toContain("## Constraints");
+      expect(prompt).not.toContain("None stated.");
       expect(count(prompt, "Call it sum")).toBe(1);
       expect(prompt).toContain("Optional nits:");
     });
 
-    test("a blocking finding without a fix leaves Constraints at None stated", () => {
+    test("a blocking finding without a fix leaves Constraints omitted", () => {
       const { prompt } = evidence({ structured: [{ ...BLOCKING, fix: undefined }] });
-      expect(prompt).toContain("## Constraints\n- None stated.");
+      expect(prompt).not.toContain("## Constraints");
+      expect(prompt).not.toContain("None stated.");
+      expect(count(prompt, MESSAGE)).toBe(1);
     });
 
     test("constraints Chief gave win: fixes stay with their findings", () => {
