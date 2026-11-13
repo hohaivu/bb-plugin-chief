@@ -654,7 +654,12 @@ describe("tester role", () => {
         return replaceText(text.replace(/^Full report: <storage>\/chief\/proj_1\/thr_\d+\/report-1\.md\n(?=\n## Working contract)/gm, ""), "designer report <storage>/chief/proj_1/thr_3/report-1.md", "designer report none", 1);
       };
       const ownWave = (text: string) => replaceText(text, "The contracts below belong to the worker and the tester: never", "The contracts below are your wave's; they belong to the worker and the tester: never", 3);
-      expect(maskSlimSections(headText)).toBe(maskSlimSections(ownWave(filesGone(dropDocsLines(trimTesterBriefs(kept(oracle).join("")))))));
+      // The Spec Writer works from the wave's Spec delta (plan thr_sivum8pdaa wave 1): the `## Spec work` Inputs line of every kept Spec Writer brief
+      // swaps its code-reading allowance for a check-only rule. Only that sentence changes; every other byte, including worker, designer, tester and
+      // evidence-only briefs and the Baseline line, stays the base's.
+      const deltaInputs = (text: string) => replaceText(text, "You may read the code entry points and guideline files those domains need, read-only.",
+        "Read code only to check a name or path the delta states; a gap goes under `## Open questions`.", 4);
+      expect(maskSlimSections(headText)).toBe(maskSlimSections(deltaInputs(ownWave(filesGone(dropDocsLines(trimTesterBriefs(kept(oracle).join(""))))))));
     });
   });
 });
