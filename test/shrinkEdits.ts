@@ -112,3 +112,10 @@ export const withHostCompaction = (instructions: string) => {
   if (parts.length > 2) throw new Error("the compaction sentence appears more than once");
   return parts.join(COMPACTION_HEAD);
 };
+
+// (f) Wave 2 moved the static Working contract, Git workflow and Fold rules, and wave 1 the Contracts to verify items, out of the rendered brief (into the
+// role skills and the plan file). A transcript oracle on base briefs cannot hold those sections byte for byte any more: they are blanked on BOTH sides, so every
+// other byte of every brief (mission, context, wave, source of truth, spec, verify command, report sections) still has to match. Those four sections have
+// their own tests against the new text (test/loadLine.ts and the brief tests). A section runs from its heading to the next blank line.
+const SLIM_SECTIONS = /^## (Working contract|Git workflow|Fold|Contracts to verify)\n[^\n]+(?:\n[^\n]+)*/gm;
+export const maskSlimSections = (text: string) => text.replace(SLIM_SECTIONS, (_all, heading: string) => `## ${heading}\n<slim>`);
