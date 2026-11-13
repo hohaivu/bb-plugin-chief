@@ -126,6 +126,10 @@ flowchart LR
   Threads -- "chief_report" --> Roster
   Roster -. "failures, review outcomes, nudges" .-> Ledger["Event ledger chief_events"]
   Ledger -. "scrubbed, only with a DSN" .-> Sentry["Sentry (optional)"]
+  Ledger -. "daily report, 08:00" .-> Chief
+  Threads -. "plan complete: retro grades threads and handoffs" .-> Retro["Retro grader"]
+  Retro -. "retro alert, proposed lessons" .-> Chief
+  Chief -- "bb chief lesson accept or retire" --> Retro
 ```
 
 | Tool | Use |
@@ -137,7 +141,10 @@ flowchart LR
 | `chief_stop` | Interrupts a stuck thread. It keeps the worktree, branch and history. |
 | `chief_coordinate` | Upgrades a Chief to a Coordinator. It wakes only on a child's Need you or done. |
 | Tracker | Mirrors each plan or unplanned worker to a task. The owner's answer on the task reaches Chief once, as an alert. |
-| Event ledger | Records each failure, review outcome and nudge once in `chief_events`. With a Sentry DSN, it also sends scrubbed failure and review events to Sentry. Without a DSN, it makes no network call. |
+| Event ledger | Records each failure, review outcome and nudge once in `chief_events`. With a Sentry DSN, it also sends scrubbed failure and review events to Sentry. Without a DSN, it makes no network call. A daily report at 08:00 summarizes failures from the ledger, the logs, the provider files and Sentry. |
+| Completion evidence | Stores the PR, the final diff and the exact brief of each worker when it completes, before cleanup can clear them. |
+| Retro grader | When a plan completes, a read-only judge scores its threads and the Chief handoffs against versioned rubrics. It writes `retro.md` and alerts Chief. |
+| Lessons | A reviewer, an advisor or the retro can propose a lesson. Only a lesson that Chief accepts with `bb chief lesson accept <id> --reason` reaches a prompt. |
 
 ## Gates
 
