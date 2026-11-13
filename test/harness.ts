@@ -99,6 +99,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   let sendFailures = 0;
   let callerPermissionMode = "auto";
   let threadExecution: { model?: string } | null | undefined = null;
+  let executionLookupFails = false;
   let projectDefaults: { providerId: string; model: string } | null = null;
   let projectDefaultsReads = 0;
   let getFailures = new Map<string, number>();
@@ -194,7 +195,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
       },
       threads: {
         events: { list: async ({ threadId }: { threadId: string }) => eventsStore.get(threadId) ?? [] },
-        defaultExecutionOptions: async () => threadExecution === undefined ? null : ({ permissionMode: callerPermissionMode, ...(threadExecution ?? {}) }),
+        defaultExecutionOptions: async () => executionLookupFails ? Promise.reject(new Error("execution options unavailable")) : threadExecution === undefined ? null : ({ permissionMode: callerPermissionMode, ...(threadExecution ?? {}) }),
         spawn: async (args: any) => {
           spawned.push(args);
           spawnIndex += 1;
@@ -315,6 +316,8 @@ export async function setup(options: { /** projects.get rejects these ids, as th
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
     setCallerPermissionMode(mode: string) { callerPermissionMode = mode; },
+    /** Makes every threads.defaultExecutionOptions lookup reject. */
+    failExecutionLookups() { executionLookupFails = true; },
     /** undefined makes defaultExecutionOptions resolve null. */
     setThreadExecution(next: { model?: string } | null | undefined) { threadExecution = next; },
     setProjectDefaults(next: { providerId: string; model: string } | null) { projectDefaults = next; },
