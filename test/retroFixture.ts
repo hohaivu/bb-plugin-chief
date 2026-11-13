@@ -20,13 +20,13 @@ export const userSays = (seq: number, text: string, createdAt?: number) => ev(se
 export const blockedReport = (seq: number, question: string) => ev(seq, { type: "toolCall", tool: "chief_report", status: "completed", arguments: { state: "blocked", result: question }, result: "ok" });
 
 /** Chief, a one-wave plan whose planner is complete, and one complete worker on it. Seeds the rows the way a finished plan leaves them. */
-export async function completedPlan(state: State, options: { mission?: string; before?: (ids: { chief: string; planner: string; worker: string }) => void | Promise<void> } = {}) {
+export async function completedPlan(state: State, options: { mission?: string; /** The worker's task branch, so its completion snapshot can read a diff. */ branch?: string; before?: (ids: { chief: string; planner: string; worker: string }) => void | Promise<void> } = {}) {
   // The fake host has no files.read: read from the temp storage root the fake files.write wrote to.
   state.harness.sdk.stub("files.read", async ({ path }: { path: string }) => ({ content: await readFile(path, "utf8") }));
   await state.harness.behavior.setSettings({ retroJudge: true });
   const chief = (await start(state)).threadId;
   const planner = (await plan(state, chief)).threadId;
-  const spawned = await state.harness.behavior.runCli(["delegate", "--title", "Fix totals", "--mission", options.mission ?? "Correct and verify totals", "--criteria", "Regression passes", "--unplanned-reason", "Bounded test fixture", "--json"], { threadId: chief, projectId: "proj_1" });
+  const spawned = await state.harness.behavior.runCli(["delegate", "--title", "Fix totals", "--mission", options.mission ?? "Correct and verify totals", "--criteria", "Regression passes", "--unplanned-reason", "Bounded test fixture", ...(options.branch ? ["--branch", options.branch] : []), "--json"], { threadId: chief, projectId: "proj_1" });
   const worker = (JSON.parse(spawned.stdout!) as { threadId: string }).threadId;
   setLive(state, worker, "idle");
   await report(state, worker, { state: "ready", result: "Done.\n\n## Deviations from plan\nNone" });
