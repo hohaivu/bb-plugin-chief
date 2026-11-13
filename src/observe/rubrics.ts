@@ -136,6 +136,8 @@ export function renderRubric(rubric: Rubric): string {
 
 /** skill-doctor's 0.5 + 0.5·s: a raw score of 0 still reads as half credit. */
 export const curve = (score: number) => 0.5 + 0.5 * score;
+/** A raw score below this fails the thread; exactly this does not. */
+export const FAIL_BELOW = 0.5;
 
 export interface ScoreInput { scorer: string; score: number | null; label?: string }
 export type ThreadStatus = "pass" | "fail" | "insufficient";
@@ -149,7 +151,7 @@ export interface Aggregate {
 }
 
 /** One thread. `applicable` names the rubrics that must be present (default: those given). A dimension labelled not_applicable leaves the set;
- * insufficient_evidence or a missing dimension keeps it, so the thread cannot pass. A raw score below 0.5 fails; exactly 0.5 does not. */
+ * insufficient_evidence or a missing dimension keeps it, so the thread cannot pass. A raw score below FAIL_BELOW fails. */
 export function aggregate(scores: readonly ScoreInput[], applicable?: readonly string[]): Aggregate {
   const byScorer = new Map(scores.map((entry) => [entry.scorer, entry]));
   const required = (applicable ?? scores.map((entry) => entry.scorer)).filter((name) => byScorer.get(name)?.label !== NOT_APPLICABLE);
@@ -165,7 +167,7 @@ export function aggregate(scores: readonly ScoreInput[], applicable?: readonly s
     weighted += weight * curved[name]!;
     weights += weight;
   }
-  const failed = Object.values(raw).some((score) => score < 0.5);
+  const failed = Object.values(raw).some((score) => score < FAIL_BELOW);
   const overall = weights > 0 ? weighted / weights : null;
   const status: ThreadStatus = failed ? "fail" : missing || !Object.keys(raw).length ? "insufficient" : "pass";
   return { status, overall, failed, raw, curved };

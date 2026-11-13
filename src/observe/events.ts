@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { parseDsn, createSentry } from "./sentry";
+import { createSentry, secretsOf } from "./sentry";
 import { scrub } from "./scrub";
 import pkg from "../../package.json";
 import type { Ctx } from "../runtime/context";
@@ -19,15 +19,14 @@ const WARNING = new Set(["request_changes", "plan_review_changes", "review_skipp
 const newEventId = () => randomBytes(16).toString("hex");
 
 /** One local ledger of failures, review outcomes and nudges (chief_events), mirrored to Sentry when a DSN is set.
- * Must be created with the original bb: its warn feeds Sentry, so the wrapped log would recurse. */
+ * Must be created with the original bb: its warn feeds Sentry, so the wrapped log would recurse. It also returns that wrapped bb: assign it over ctx.bb so every module built after it reports its warnings. */
 export function createObserve(ctx: Ctx) {
-  const { bb, db, settings, store } = ctx;
-  let config: { dsn?: string; token?: string } = {};
-  const read = (values: { sentryDsn?: string; sentryAuthToken?: string }) => { config = { dsn: values.sentryDsn, token: values.sentryAuthToken }; };
-  void settings.get().then(read, () => {});
-  settings.onChange((next) => read(next));
-  const secrets = () => [config.dsn, config.token, config.dsn ? parseDsn(config.dsn)?.publicKey : undefined].filter((value): value is string => !!value);
-  const sentry = createSentry({ dsn: () => config.dsn, secrets, release: pkg.version, warn: (message) => bb.log.warn(message) });
+  const { bb, db, settings } = ctx;
+  let values: { sentryDsn?: string; sentryAuthToken?: string } = {};
+  void settings.get().then((next) => { values = next; }, () => {});
+  settings.onChange((next) => { values = next; });
+  const secrets = () => secretsOf(values);
+  const sentry = createSentry({ dsn: () => values.sentryDsn, secrets, release: pkg.version, warn: (message) => bb.log.warn(message) });
   const insert = db.prepare(`INSERT INTO chief_events (event_id, at, project_id, thread_id, role, plan_thread_id, plan_wave, kind, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const receipt = db.prepare<[string]>(`SELECT 1 FROM chief_events WHERE event_id=?`);
 
@@ -51,16 +50,12 @@ export function createObserve(ctx: Ctx) {
     });
   }
 
-  /** A failed chief_* call: the tool name and the first line of its message only, never its params or result. */
-  function toolError(tool: string, threadId: string | undefined, projectId: string | undefined, error: unknown) {
-    const row = (threadId ? store.get(threadId) : undefined) ?? { thread_id: threadId, project_id: projectId };
-    const message = error instanceof Error ? error.message : String(error);
-    event("tool_error", row, `${tool}: ${message.split("\n")[0]}`, { tool });
-  }
-
   /** Plugin warnings go straight to Sentry: not ledgered, so no receipt. */
   function warn(message: string) {
     sentry.send({ eventId: newEventId(), level: "warning", kind: "plugin_warn", message, tags: {} });
   }
-  return { observe: { event, toolError, warn } };
+  // A Proxy keeps the SDK object's own `this`; only log.warn differs.
+  const log = { debug: (message: string) => bb.log.debug(message), info: (message: string) => bb.log.info(message), error: (message: string) => bb.log.error(message), warn: (message: string) => { bb.log.warn(message); warn(message); } };
+  const observed = new Proxy(bb, { get: (target, prop) => { const value = prop === "log" ? log : Reflect.get(target, prop, target); return typeof value === "function" ? value.bind(target) : value; } });
+  return { observe: { event, warn }, bb: observed };
 }

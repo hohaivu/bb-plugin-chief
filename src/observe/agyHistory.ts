@@ -1,4 +1,6 @@
 import { access } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { clip } from "../core/text";
 import { execFileAsync } from "../runtime/exec";
@@ -8,6 +10,12 @@ export interface AgyStep { idx: number; stepType: number; status: number; texts:
 export type AgyRead =
   | { status: "ok"; steps: AgyStep[] }
   | { status: "skipped" | "unavailable" | "missing"; note: string; steps: [] };
+
+/** How many of a conversation's newest steps the report and the retro read. */
+export const RECENT_STEPS = 2_000;
+export const agyDbPath = (providerThreadId: string) => join(homedir(), ".gemini", "antigravity-acp", "conversations", `${providerThreadId}.db`);
+/** agy step statuses 6 and 7 are failures. */
+export const failedStatus = (status: number) => status === 6 || status === 7;
 
 const MAX_DEPTH = 8;
 const MIN_TEXT = 4;
@@ -103,7 +111,7 @@ export async function readAgySteps(dbPath: string, limit: number, newest = false
   if (newest) rows.reverse();
   const steps = rows.map((row): AgyStep => {
     const step: AgyStep = { idx: row.idx, stepType: row.step_type, status: row.status, texts: row.p ? decodeFields(Buffer.from(row.p, "hex")) : [] };
-    if (row.status === 6 || row.status === 7) {
+    if (failedStatus(row.status)) {
       const raw = row.e ? Buffer.from(row.e, "hex") : null;
       const error = raw && (decodeFields(raw).map((field) => field.text).join(" | ") || textOf(raw));
       if (error) step.error = clip(error, 300);

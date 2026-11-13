@@ -55,10 +55,7 @@ export type { ManagedRow, ManagedThread, FailEntry, ReportFinding, ReportParams,
 export default async function plugin(bb: BbPluginApi) {
   const ctx = { bb, state: createState() } as Ctx;
   Object.assign(ctx, createCore(ctx));
-  Object.assign(ctx, createObserve(ctx)); // with the original bb: its own warn feeds Sentry
-  // Every module built after this sees a bb whose log.warn also reports to Sentry; a Proxy keeps the SDK object's own `this`.
-  const log = { debug: (m: string) => bb.log.debug(m), info: (m: string) => bb.log.info(m), error: (m: string) => bb.log.error(m), warn: (m: string) => { bb.log.warn(m); ctx.observe.warn(m); } };
-  ctx.bb = new Proxy(bb, { get: (target, prop) => { const value = prop === "log" ? log : Reflect.get(target, prop, target); return typeof value === "function" ? value.bind(target) : value; } });
+  Object.assign(ctx, createObserve(ctx)); // also replaces ctx.bb: its log.warn feeds Sentry for every module built after this
   Object.assign(ctx, createSweep(ctx));
   Object.assign(ctx, createSettingsRuntime(ctx));
   Object.assign(ctx, createChiefs(ctx));

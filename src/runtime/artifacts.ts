@@ -69,23 +69,13 @@ export function createArtifacts(ctx: Ctx) {
     return path;
   }
 
-  /** The artifact's path when it exists, else null. Never throws. */
-  async function existingArtifact(threadId: string, projectId: string, name: string) {
-    try {
-      const { hostId, dir } = await artifactDir(threadId, projectId);
-      const path = join(dir, name);
-      return await bb.sdk.files.read({ hostId, path }).then(() => path, () => null);
-    } catch {
-      return null;
-    }
-  }
-
-  /** The artifact's text, or null when it is missing or unreadable. Never throws. */
+  /** The artifact's path and text, or null when it is missing or unreadable. Never throws. */
   async function readArtifact(threadId: string, projectId: string, name: string) {
     try {
       const { hostId, dir } = await artifactDir(threadId, projectId);
-      const file = await bb.sdk.files.read({ hostId, path: join(dir, name) });
-      return typeof file === "string" ? file : (file as { content?: string }).content ?? null;
+      const path = join(dir, name);
+      const file = await bb.sdk.files.read({ hostId, path });
+      return { path, text: typeof file === "string" ? file : (file as { content?: string }).content ?? "" };
     } catch {
       return null;
     }
@@ -97,6 +87,6 @@ export function createArtifacts(ctx: Ctx) {
     await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
     await writeArtifact(threadId, projectId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief artifact: ${String(error)}`));
   }
-  return { existingArtifact, persistBrief, readArtifact, writeArtifact, writePlan, writeStorageFile };
+  return { persistBrief, readArtifact, writeArtifact, writePlan, writeStorageFile };
 }
 

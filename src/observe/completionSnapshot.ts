@@ -73,7 +73,7 @@ export function createCompletionSnapshot(ctx: Ctx) {
           record.state = found.truncated ? "truncated" : "ok";
           if (found.truncated) record.note = `diff clipped to ${MAX_DIFF_CHARS} characters`;
         } finally {
-          record.briefPath = await ctx.existingArtifact(row.thread_id, row.project_id, "brief.md");
+          record.briefPath = (await ctx.readArtifact(row.thread_id, row.project_id, "brief.md"))?.path ?? null;
         }
       }, DEADLINE_MS);
     } catch (error) {

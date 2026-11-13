@@ -7,8 +7,8 @@ import { clip } from "../core/text";
 import { type ManagedRow } from "../types";
 import { bounded } from "../runtime/exec";
 import type { Ctx } from "../runtime/context";
-import { readAgySteps } from "./agyHistory";
-import { parseDsn } from "./sentry";
+import { agyDbPath, failedStatus, readAgySteps, RECENT_STEPS } from "./agyHistory";
+import { secretsOf } from "./sentry";
 import { normalize, scrub } from "./scrub";
 
 /** Read-only evidence adapters for the daily report. Nothing here writes, renames or deletes: files are only stat-ed and streamed, SQLite is opened only through readAgySteps (-readonly, mode=ro). */
@@ -82,7 +82,7 @@ async function eachJsonLine(file: string, visit: (obj: Record<string, any>, raw:
   }
 }
 
-const textOfContent = (content: unknown): string => typeof content === "string" ? content
+export const textOfContent = (content: unknown): string => typeof content === "string" ? content
   : Array.isArray(content) ? content.map((part) => typeof part === "string" ? part : typeof part?.text === "string" ? part.text : "").filter(Boolean).join(" ")
   : content == null ? "" : JSON.stringify(content);
 
@@ -93,32 +93,46 @@ const chiefEvents: Adapter = async (env) => {
 };
 
 const THREAD_EVENT_TYPES = ["provider/error", "system/error", "provider/warning", "system/provider-turn-watchdog", "thread/compacted"] as const;
-type LooseEvent = { type: string; seq: number | string; createdAt: number; data: Record<string, any> };
+export type LooseEvent = { type: string; seq: number | string; createdAt: number; data: Record<string, any> };
+
+export const EVENT_PAGE = 100;
+/** The one way the report and the retro read a thread's events: a single bounded events.list call. */
+export const listEvents = (bb: Ctx["bb"], threadId: string, types: readonly string[], query: Record<string, string> = {}) =>
+  bounded(() => bb.sdk.threads.events.list({ threadId, types: [...types], ...query } as never), 15_000) as unknown as Promise<LooseEvent[]>;
+
+/** Newest first: the events in [since, until), at most `max`, scanning at most `pages` pages and stopping at the first event before `since`. Throws when a call fails. */
+export async function recentEvents(bb: Ctx["bb"], threadId: string, types: readonly string[], window: { since: number; until?: number; max?: number; pages?: number }) {
+  const { since, until = Infinity, max = Infinity, pages = Infinity } = window;
+  const found: LooseEvent[] = [];
+  let beforeSeq: string | undefined;
+  for (let page = 0; page < pages && found.length < max; page++) {
+    const batch = await listEvents(bb, threadId, types, { order: "desc", limit: String(EVENT_PAGE), ...(beforeSeq ? { beforeSeq } : {}) });
+    for (const event of batch) {
+      if (event.createdAt < since) return found;
+      if (event.createdAt < until && found.length < max) found.push(event);
+    }
+    if (batch.length < EVENT_PAGE) break;
+    beforeSeq = String(batch.at(-1)!.seq);
+  }
+  return found;
+}
+
+/** The provider's own id for a thread (its newest thread/identity event), or null. Throws when the call fails. */
+export async function providerThreadId(bb: Ctx["bb"], threadId: string): Promise<string | null> {
+  const [identity] = await listEvents(bb, threadId, ["thread/identity"], { order: "desc", limit: "1" });
+  return identity?.data.providerThreadId ?? null;
+}
 
 const bbThreads: Adapter = async (env) => {
   const { bb } = env.ctx;
-  /** Newest first, at most `maxEvents`, stopping at the first event before the window. */
-  async function recent(threadId: string, types: readonly string[], maxEvents: number) {
-    const found: LooseEvent[] = [];
-    let beforeSeq: string | undefined;
-    while (found.length < maxEvents) {
-      const page = (await bounded(() => bb.sdk.threads.events.list({ threadId, types: [...types] as never, order: "desc", limit: "100", ...(beforeSeq ? { beforeSeq } : {}) }), 15_000)) as unknown as LooseEvent[];
-      for (const event of page) {
-        if (event.createdAt < env.since) return found;
-        if (event.createdAt < env.until && found.length < maxEvents) found.push(event);
-      }
-      if (page.length < 100) break;
-      beforeSeq = String(page.at(-1)!.seq);
-    }
-    return found;
-  }
   const raws: Raw[] = [];
   let failed = 0;
   for (let start = 0; start < env.threads.length; start += 5) {
     await Promise.all(env.threads.slice(start, start + 5).map(async (thread) => {
       try {
         // 300 events at most per thread: 100 of the failure types, 200 of the item events (most of them are not failures).
-        const [problems, items] = await Promise.all([recent(thread.thread_id, THREAD_EVENT_TYPES, 100), recent(thread.thread_id, ["item/completed"], 200)]);
+        const window = { since: env.since, until: env.until };
+        const [problems, items] = await Promise.all([recentEvents(bb, thread.thread_id, THREAD_EVENT_TYPES, { ...window, max: 100 }), recentEvents(bb, thread.thread_id, ["item/completed"], { ...window, max: 200 })]);
         const byKind = new Map<string, { at: number; text: string }[]>();
         const add = (kind: string, at: number, text: string) => byKind.set(kind, [...(byKind.get(kind) ?? []), { at, text }]);
         for (const event of problems) {
@@ -277,18 +291,18 @@ const pi = providerAdapter("pi",
 
 const agy = providerAdapter("agy",
   async (_env, id) => {
-    const file = join(homedir(), ".gemini", "antigravity-acp", "conversations", `${id}.db`);
+    const file = agyDbPath(id);
     return await stat(file).then(() => true, () => false) ? file : null;
   },
   async (_env, thread, file): Promise<Parsed> => {
-    const history = await readAgySteps(file, 2_000, true);
+    const history = await readAgySteps(file, RECENT_STEPS, true);
     if (history.status === "skipped" || history.status === "unavailable") return { raws: [], problem: { status: history.status, note: history.note } };
     if (history.status === "missing") return { raws: [], problem: { status: "unavailable", note: history.note } };
-    const failed = history.steps.filter((step) => step.status === 6 || step.status === 7);
+    const failed = history.steps.filter((step) => failedStatus(step.status));
     const at = Date.now();
     const errors = failed.reverse().map((step) => ({ at, text: `step_type ${step.stepType}: ${step.error ?? "(no readable error text)"}` }));
-    // Steps carry no timestamp: the file's mtime gate is the only window, so the counts cover the newest 2000 steps.
-    return { raws: [{ at, threadId: thread.thread_id, kind: "steps", count: history.steps.length, text: "agy steps (newest 2000, not time-filtered)", key: "steps" }, ...excerpts(thread.thread_id, "agy_error", errors)] };
+    // Steps carry no timestamp: the file's mtime gate is the only window, so the counts cover the newest steps.
+    return { raws: [{ at, threadId: thread.thread_id, kind: "steps", count: history.steps.length, text: `agy steps (newest ${RECENT_STEPS}, not time-filtered)`, key: "steps" }, ...excerpts(thread.thread_id, "agy_error", errors)] };
   });
 
 /** Unresolved Sentry issues for a query, or null when the token, org or project setting is unset (then nothing is fetched). */
@@ -307,7 +321,7 @@ async function fetchIssues(ctx: Ctx, query: string): Promise<SentryIssue[] | nul
   }));
 }
 
-/** Unresolved issues seen in the last `days` days that carry tag=value, or null when the Sentry settings are unset. Wave 3 reads it. */
+/** Unresolved issues seen in the last `days` days that carry tag=value, or null when the Sentry settings are unset. The retro reads it. */
 export const sentryIssuesForTag = (ctx: Ctx, tag: string, value: string, days: number) =>
   fetchIssues(ctx, `is:unresolved ${tag}:"${value.replace(/"/g, "")}" lastSeen:-${Math.max(1, Math.floor(days))}d`);
 
@@ -324,11 +338,7 @@ const sentry: Adapter = async (env) => {
 export const ADAPTERS: Record<string, Adapter> = { chiefEvents, bbThreads, bbLogs, claudeCode, pi, agy, sentry };
 
 /** The Sentry DSN, its public key and the read token: what no report line may hold. */
-export async function configuredSecrets(ctx: Ctx): Promise<string[]> {
-  const values = await ctx.settings.get().catch(() => null);
-  const dsn = values?.sentryDsn;
-  return [dsn, values?.sentryAuthToken, dsn ? parseDsn(dsn)?.publicKey : undefined].filter((value): value is string => !!value);
-}
+export const configuredSecrets = async (ctx: Ctx): Promise<string[]> => secretsOf(await ctx.settings.get().catch(() => ({})));
 
 /** Runs every adapter on its own: a throw (or a 2-minute overrun) makes that one section "error" and never touches the others. */
 export async function collectSources(ctx: Ctx, since: number, until: number, adapters: Record<string, Adapter> = ADAPTERS): Promise<Section[]> {
@@ -340,8 +350,7 @@ export async function collectSources(ctx: Ctx, since: number, until: number, ada
     threads: ctx.store.all().filter((row) => row.updated_at >= since),
     providerId: (threadId) => {
       if (!identities.has(threadId)) {
-        identities.set(threadId, bounded(() => ctx.bb.sdk.threads.events.list({ threadId, types: ["thread/identity"], order: "desc", limit: "1" }), 15_000)
-          .then((events) => (events[0] as unknown as LooseEvent | undefined)?.data.providerThreadId ?? null, () => null));
+        identities.set(threadId, providerThreadId(ctx.bb, threadId).catch(() => null));
       }
       return identities.get(threadId)!;
     },

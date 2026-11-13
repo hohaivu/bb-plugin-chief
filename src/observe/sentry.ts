@@ -22,6 +22,10 @@ export function parseDsn(dsn: string) {
   }
 }
 
+/** What no outbound text may hold: the DSN, its public key and the read token. */
+export const secretsOf = (values: { sentryDsn?: string; sentryAuthToken?: string }) =>
+  [values.sentryDsn, values.sentryAuthToken, values.sentryDsn ? parseDsn(values.sentryDsn)?.publicKey : undefined].filter((value): value is string => !!value);
+
 /** A direct envelope POST, no SDK. `warn` must be the original bb.log.warn: a failed send reports through it, never through the observed one. */
 export function createSentry(options: { dsn: () => string | undefined; secrets: () => string[]; release: string; warn: (message: string) => void }) {
   const { dsn, secrets, release, warn } = options;

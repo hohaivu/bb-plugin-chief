@@ -1,6 +1,6 @@
 import { clip } from "../core/text";
 import type { Ctx } from "../runtime/context";
-import { curve, INSUFFICIENT, NOT_APPLICABLE, RUBRIC_VERSION } from "./rubrics";
+import { curve, FAIL_BELOW, INSUFFICIENT, NOT_APPLICABLE, RUBRIC_VERSION } from "./rubrics";
 import { normalize, scrub } from "./scrub";
 import { ACTIVITY_KINDS, ADAPTERS, type Adapter, collectSources, configuredSecrets, type Item, type Section } from "./sources";
 
@@ -12,6 +12,12 @@ const TRIAGE = "Triage: read the report, then plan any fix as normal work (chief
 interface Block { title: string; lines: string[]; cut: number }
 export interface DailyCounts { newSentry: number; patterns: number; blocked: number; stalls: number; reviewRounds: number; proposedLessons: number }
 
+/** thread -> whether any scored dimension failed. */
+const failedByThread = (rows: { thread_id: string; score: number | null }[]) => {
+  const failed = new Map<string, boolean>();
+  for (const row of rows) if (row.score !== null) failed.set(row.thread_id, (failed.get(row.thread_id) ?? false) || row.score < FAIL_BELOW);
+  return failed;
+};
 const pad = (value: number) => String(value).padStart(2, "0");
 /** The server-local date, the one the 08:00 schedule runs on. */
 export const localDate = (at: number) => { const d = new Date(at); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
@@ -106,7 +112,7 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
       const [version, wk, scorer] = key.split("\u0000");
       const scored = rows.filter((row) => row.score !== null);
       const mean = scored.length ? scored.reduce((total, row) => total + row.score!, 0) / scored.length : null;
-      return `| ${version} | ${wk} | ${scorer} | ${mean === null ? "-" : mean.toFixed(3)} | ${mean === null ? "-" : curve(mean).toFixed(3)} | ${scored.length} | ${scored.filter((row) => row.score! >= 0.5).length} | ${scored.filter((row) => row.score! < 0.5).length} | ${rows.filter((row) => row.label === INSUFFICIENT).length} |`;
+      return `| ${version} | ${wk} | ${scorer} | ${mean === null ? "-" : mean.toFixed(3)} | ${mean === null ? "-" : curve(mean).toFixed(3)} | ${scored.length} | ${scored.filter((row) => row.score! >= FAIL_BELOW).length} | ${scored.filter((row) => row.score! < FAIL_BELOW).length} | ${rows.filter((row) => row.label === INSUFFICIENT).length} |`;
     })] : []);
 
   const comm = scores.filter((row) => row.scorer === "communication" && row.at >= until - 7 * DAY_MS);
@@ -119,8 +125,7 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
     `Attributed by the judge (not observed): ${["briefGapBlock", "askedTwice", "unclearBriefRounds", "userWordsLost"].map((name) => `${name} ${signalCount(name)}`).join(", ")}.`] : []);
 
   // Calibration: worker threads judged at the current version vs the first bound reviewer verdict. Communication is never calibrated.
-  const judged = new Map<string, boolean>(); // worker thread -> failed on non-communication dimensions
-  for (const row of scores.filter((entry) => entry.role === "worker" && entry.rubric_version === RUBRIC_VERSION && entry.scorer !== "communication" && entry.score !== null)) judged.set(row.thread_id, (judged.get(row.thread_id) ?? false) || row.score! < 0.5);
+  const judged = failedByThread(scores.filter((entry) => entry.role === "worker" && entry.rubric_version === RUBRIC_VERSION && entry.scorer !== "communication"));
   const matrix = { pass: { approve: 0, request_changes: 0 }, fail: { approve: 0, request_changes: 0 } };
   let bound = 0, unbound = 0;
   for (const [threadId, failed] of judged) {
@@ -139,7 +144,7 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
       `Disagreement rate ${Math.round(100 * disagree / bound)}% (${disagree}/${bound}).`]),
   ] : []);
 
-  const failed24 = scores.filter((row) => row.at >= until - DAY_MS && row.score !== null && row.score < 0.5 && row.scorer !== "communication");
+  const failed24 = scores.filter((row) => row.at >= until - DAY_MS && row.score !== null && row.score < FAIL_BELOW && row.scorer !== "communication");
   block("Failed threads (24 h)", failed24.map((row) => `- ${row.thread_id} ${row.role}: ${row.scorer} ${row.label} (${row.score}) — ${clip(row.reason.replace(/\s+/g, " "), 300)}`));
 
   interface LessonRow { id: number; status: string; surface: string | null; text: string; plan_thread_id: string | null; at: number; decided_at: number | null }
@@ -148,8 +153,7 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
   const recurringSurface = new Set([...new Set(proposed.map((lesson) => lesson.surface ?? "other"))].filter((surface) => new Set(proposed.filter((lesson) => (lesson.surface ?? "other") === surface && lesson.at >= until - 14 * DAY_MS && lesson.plan_thread_id).map((lesson) => lesson.plan_thread_id)).size >= 2));
   const decided = db.prepare(`SELECT id, decided_at FROM chief_lessons WHERE status='accepted' AND decided_at >= ?`).all(until - 30 * DAY_MS) as { id: number; decided_at: number }[];
   const passRate = (from: number, to: number) => {
-    const status = new Map<string, boolean>();
-    for (const row of db.prepare(`SELECT thread_id, score FROM chief_scores WHERE at >= ? AND at < ? AND scorer != 'communication' AND score IS NOT NULL AND rubric_version=?`).all(from, to, RUBRIC_VERSION) as { thread_id: string; score: number }[]) status.set(row.thread_id, (status.get(row.thread_id) ?? false) || row.score < 0.5);
+    const status = failedByThread(db.prepare(`SELECT thread_id, score FROM chief_scores WHERE at >= ? AND at < ? AND scorer != 'communication' AND score IS NOT NULL AND rubric_version=?`).all(from, to, RUBRIC_VERSION) as { thread_id: string; score: number }[]);
     const n = status.size;
     return { n, rate: n ? [...status.values()].filter((failedThread) => !failedThread).length / n : 0 };
   };

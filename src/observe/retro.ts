@@ -1,16 +1,13 @@
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { z } from "zod";
 import { clip } from "../core/text";
 import { READ_ONLY } from "../core/roles";
-import { bounded } from "../runtime/exec";
 import type { ManagedRow } from "../types";
 import type { Ctx } from "../runtime/context";
-import { readAgySteps } from "./agyHistory";
+import { agyDbPath, failedStatus, readAgySteps, RECENT_STEPS } from "./agyHistory";
 import { type Aggregate, aggregate, applicableRubrics, INSUFFICIENT, lessonRole, NOT_APPLICABLE, renderRubric, RUBRIC_VERSION, rubricByName, RUBRICS, type ScoreInput, SURFACES, type ThreadStatus } from "./rubrics";
 import { normalize, scrub } from "./scrub";
-import { configuredSecrets, sentryIssuesForTag } from "./sources";
+import { configuredSecrets, EVENT_PAGE, listEvents, type LooseEvent as Loose, providerThreadId, recentEvents, sentryIssuesForTag, textOfContent as textOf } from "./sources";
 
 /** Bounds from the plan: 3 attempts, 10 minutes between them, 2 h for one run, 2 starts per tick, 8 judged threads plus one communication call. */
 const MAX_ATTEMPTS = 3;
@@ -21,10 +18,8 @@ const MAX_THREADS = 8;
 const FILE_CHARS = 120_000;
 const HEAD_EVENTS = 400;
 const TAIL_EVENTS = 1_200;
-const PAGE = 100;
 const MAX_HEAD_PAGES = 30;
 const MAX_TAIL_PAGES = 12;
-const EVENT_CALL_MS = 15_000;
 const RUNNING_RUN = new Set(["queued", "running"]);
 
 /** Inline workflow source. It reads only `args` (each job is a finished prompt), so no value is ever interpolated into it. */
@@ -222,7 +217,6 @@ interface RetroRow {
   plan_thread_id: string; project_id: string; chief_thread_id: string; state: string; run_id: string | null; attempts: number;
   next_at: number; started_at: number | null; last_error: string | null; path: string | null; rubric_version: string; at: number; updated_at: number;
 }
-type Loose = { type: string; seq: number | string; createdAt: number; data: Record<string, any> };
 interface ThreadRead {
   lines: string[];
   refs: number[];
@@ -234,9 +228,6 @@ interface ThreadRead {
 
 const LOST = new Error("another collector finished this retro first");
 const oneLine = (text: string) => text.replace(/\s*\n\s*/g, " ⏎ ");
-const textOf = (value: unknown): string => typeof value === "string" ? value
-  : Array.isArray(value) ? value.map((part) => typeof part === "string" ? part : typeof part?.text === "string" ? part.text : "").filter(Boolean).join(" ")
-  : value == null ? "" : JSON.stringify(value);
 const cell = (value: unknown) => String(value ?? "").replace(/\|/g, "/").replace(/\s*\n\s*/g, " ");
 
 /** The longest head and tail of `lines` that fit `limit` characters, with a marker for the cut. */
@@ -255,15 +246,14 @@ export function createRetro(ctx: Ctx) {
   const { bb, db, store } = ctx;
 
   async function readEvents(threadId: string): Promise<{ events: Loose[] } | { error: string }> {
-    const list = (order: "asc" | "desc", cursor: Record<string, string>) =>
-      bounded(() => bb.sdk.threads.events.list({ threadId, types: ["item/completed"], order, limit: String(PAGE), ...cursor } as never), EVENT_CALL_MS) as unknown as Promise<Loose[]>;
+    const list = (order: "asc" | "desc", cursor: Record<string, string>) => listEvents(bb, threadId, ["item/completed"], { order, limit: String(EVENT_PAGE), ...cursor });
     try {
       const head: Loose[] = [];
       let after: string | undefined;
       for (let page = 0; page < MAX_HEAD_PAGES; page++) {
         const batch = await list("asc", after ? { afterSeq: after } : {});
         head.push(...batch);
-        if (batch.length < PAGE) return { events: head };
+        if (batch.length < EVENT_PAGE) return { events: head };
         after = String(batch.at(-1)!.seq);
       }
       // More than 3,000 events: the middle is unread, the newest 1,200 keep the end of the thread whole.
@@ -272,7 +262,7 @@ export function createRetro(ctx: Ctx) {
       for (let page = 0; page < MAX_TAIL_PAGES; page++) {
         const batch = await list("desc", before ? { beforeSeq: before } : {});
         tail.push(...batch);
-        if (batch.length < PAGE) break;
+        if (batch.length < EVENT_PAGE) break;
         before = String(batch.at(-1)!.seq);
       }
       const seen = new Set(head.map((event) => Number(event.seq)));
@@ -329,19 +319,9 @@ export function createRetro(ctx: Ctx) {
 
   /** Chief's own events between the planner's start and completion that carry a handoff: the user's words, chief_* calls and `bb thread tell` naming a plan thread. */
   async function readChiefWindow(chief: string, from: number, to: number, ids: string[], secrets: string[]): Promise<{ lines: string[]; refs: number[]; unavailable: string | null }> {
-    const found: Loose[] = [];
+    let found: Loose[];
     try {
-      let before: string | undefined;
-      for (let page = 0; page < MAX_HEAD_PAGES; page++) {
-        const batch = await bounded(() => bb.sdk.threads.events.list({ threadId: chief, types: ["item/completed"], order: "desc", limit: String(PAGE), ...(before ? { beforeSeq: before } : {}) } as never), EVENT_CALL_MS) as unknown as Loose[];
-        let reached = false;
-        for (const event of batch) {
-          if (event.createdAt < from) { reached = true; break; }
-          if (event.createdAt <= to) found.push(event);
-        }
-        if (reached || batch.length < PAGE) break;
-        before = String(batch.at(-1)!.seq);
-      }
+      found = await recentEvents(bb, chief, ["item/completed"], { since: from, until: to + 1, pages: MAX_HEAD_PAGES });
     } catch (error) {
       return { lines: [`[events unavailable: ${clip(String(error), 200)}]`], refs: [], unavailable: clip(error instanceof Error ? error.message : String(error), 200) };
     }
@@ -367,12 +347,11 @@ export function createRetro(ctx: Ctx) {
     try {
       const live = await bb.sdk.threads.get({ threadId: row.thread_id });
       if (live.providerId !== "agy") return `provider: ${live.providerId ?? "unknown"} (no step summary)`;
-      const identity = (await bounded(() => bb.sdk.threads.events.list({ threadId: row.thread_id, types: ["thread/identity"], order: "desc", limit: "1" }), EVENT_CALL_MS) as unknown as Loose[])[0];
-      const id = identity?.data.providerThreadId;
+      const id = await providerThreadId(bb, row.thread_id);
       if (!id) return "provider: agy (no conversation id)";
-      const history = await readAgySteps(join(homedir(), ".gemini", "antigravity-acp", "conversations", `${id}.db`), 2_000, true);
+      const history = await readAgySteps(agyDbPath(id), RECENT_STEPS, true);
       if (history.status !== "ok") return `provider: agy (${history.note})`;
-      return `provider: agy, ${history.steps.length} newest steps, ${history.steps.filter((step) => step.status === 6 || step.status === 7).length} failed`;
+      return `provider: agy, ${history.steps.length} newest steps, ${history.steps.filter((step) => failedStatus(step.status)).length} failed`;
     } catch {
       return "provider: unavailable";
     }
@@ -411,10 +390,10 @@ export function createRetro(ctx: Ctx) {
     for (const row of chosen) {
       const read = await readThread(row.thread_id, secrets);
       reads.set(row.thread_id, read);
-      const brief = await ctx.readArtifact(row.thread_id, row.project_id, "brief.md");
+      const brief = (await ctx.readArtifact(row.thread_id, row.project_id, "brief.md"))?.text || null;
       briefs.set(row.thread_id, brief);
       const completion = db.prepare(`SELECT pr_url, head_sha, diff_state, diff_note FROM chief_completions WHERE thread_id=?`).get(row.thread_id) as { pr_url: string | null; head_sha: string | null; diff_state: string; diff_note: string | null } | undefined;
-      const diff = completion ? await ctx.readArtifact(row.thread_id, row.project_id, "completion.diff") : null;
+      const diff = completion ? (await ctx.readArtifact(row.thread_id, row.project_id, "completion.diff"))?.text || null : null;
       const stat = diff ? `${(diff.match(/^diff --git /gm) ?? []).length} files, +${(diff.match(/^\+(?!\+\+)/gm) ?? []).length} -${(diff.match(/^-(?!--)/gm) ?? []).length}` : null;
       const observed = db.prepare(`SELECT kind, detail, at FROM chief_events WHERE thread_id=? ORDER BY at`).all(row.thread_id) as { kind: string; detail: string | null; at: number }[];
       const applicable = applicableRubrics(row.role === "worker" ? row.kind : null);
@@ -592,7 +571,7 @@ export function createRetro(ctx: Ctx) {
   /** Validates, writes retro.md, then stores scores, proposed lessons, the done state and the alert in one transaction. Safe to run twice on one run. */
   async function collect(row: RetroRow, run: { result?: unknown; resultOmitted?: boolean }) {
     const target = { threadId: row.chief_thread_id, projectId: row.project_id };
-    const manifestText = await ctx.readArtifact(row.chief_thread_id, row.project_id, `retro/${row.plan_thread_id}/manifest.json`);
+    const manifestText = (await ctx.readArtifact(row.chief_thread_id, row.project_id, `retro/${row.plan_thread_id}/manifest.json`))?.text;
     let manifest: Manifest | null = null;
     try { manifest = manifestText ? JSON.parse(manifestText) as Manifest : null; } catch { manifest = null; }
     if (!manifest) return settle(row, "the bundle manifest is missing or unreadable, so the result cannot be validated", Date.now());

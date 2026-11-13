@@ -58,7 +58,7 @@ export function createLifecycle(ctx: Ctx) {
       ?? (current.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or timeout it reports. Nothing to review or complete." : null)
       ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     warn: (message) => bb.log.warn(message),
-    event: (...args) => ctx.observe.event(...args),
+    event: ctx.observe.event,
   });
 
   function stateFromLive(row: ManagedRow, status: string) {

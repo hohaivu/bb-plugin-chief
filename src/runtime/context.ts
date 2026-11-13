@@ -182,7 +182,6 @@ export interface Ctx {
   forgeComments: ReturnType<typeof createForgeWiring>["forgeComments"];
   forgeText: ReturnType<typeof createForgeWiring>["forgeText"];
   trackerSync: ReturnType<typeof createForgeWiring>["trackerSync"];
-  existingArtifact: ReturnType<typeof createArtifacts>["existingArtifact"];
   readArtifact: ReturnType<typeof createArtifacts>["readArtifact"];
   persistBrief: ReturnType<typeof createArtifacts>["persistBrief"];
   writeArtifact: ReturnType<typeof createArtifacts>["writeArtifact"];
