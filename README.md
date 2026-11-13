@@ -31,7 +31,7 @@ Put `chief.md` at the project root. Chief reads it through BB's project file API
 
 Every managed thread loads the shared `chief-worker` skill (brief, scope, `chief_report`, the report contract reviewers check) plus its role's skill: `chief-role-worker` (workers; designers also get `chief-role-designer`, testers `chief-role-tester`, Spec Writers `chief-role-spec-writer`), `chief-role-reviewer`, or `chief-role-read-only` (planners and advisors); researchers get the core only.
 
-For Chief threads on Claude Code, Chief contributes `ENABLE_TOOL_SEARCH=false` so that MCP tool schemas load up front. Full schemas cost about 18k+ tokens per request, so managed worker-side threads (planners, workers, testers, designers, Spec Writers, researchers) keep Claude Code's tool search: deferred tools are listed by name and load on demand, and the schema-preload line loads their `chief_*` tools. The Chief contribution is best-effort: another plugin's provider-env value for the same name (such as account-pool's) may win, and a thread's first session can start before Chief records the thread. In those cases the schema-preload instruction line is the fallback.
+On Claude Code, Chief and every managed thread keep Claude Code's tool search: deferred tools are listed by name and load on demand, which saves about 18k+ tokens per request. Each thread's instructions carry an exact `select:` preload line that loads its `chief_*` tools with one ToolSearch call. Chief contributes no provider env for any thread, so tool search stays on unless another plugin or the user's settings turn it off.
 
 ## Configuration
 
@@ -208,9 +208,10 @@ so the Pending block — not memory — is what it works from.
 Chief's own todos — including queued work nobody has delegated yet — live in the Pending block as
 `todo #N` lines: `chief_roster` with `todo: { text, after? }` adds one, `todo: { id, text?, after?, state? }`
 changes or closes it (`done`/`dropped`); Chief is told to use them instead of Memory files, TodoWrite,
-or Task tools. Each todo records the Chief thread that added it. Every Chief still sees all the
-project's open todos, but others' (`(Chief thr_…)`, `(ended Chief thr_…)`) and legacy unowned ones
-(`(unowned)`) are tagged and listed after its own, under an "Other Chiefs' todos" header; editing one
+or Task tools. Each todo records the Chief thread that added it. Every Chief still sees the
+project's open todos, but others' and legacy unowned ones show as one count line after its own;
+`chief_roster includeOthers: true` lists them, tagged (`(Chief thr_…)`, `(ended Chief thr_…)`,
+`(unowned)`) under an "Other Chiefs' todos" header. Editing one
 owned by another live Chief works but starts with a warning. When a Chief is superseded (replacement,
 orphan sweep, `bb chief adopt`) its todos move to the successor.
 Open todos with an `after:` condition show in Pending as one count line; `chief_roster includeWaiting: true` lists them.

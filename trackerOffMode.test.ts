@@ -1,4 +1,5 @@
 import { ATTACH_DEFINITION, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
+import { acceptRosterOthersDelta } from "./test/toolConfigFixture";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
@@ -150,6 +151,8 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       for (const tool of shown) acceptRetestDelta(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.
       for (const tool of shown) acceptEvidenceOnlyDelta(tool, tool.name);
+      // "Chief keeps tool search": chief_roster gains includeOthers and one description clause; asserted, then restored.
+      for (const tool of shown) acceptRosterOthersDelta(tool, tool.name);
       expect(shown, `${name}: tool schemas`).toEqual(baseSchemas);
     }
   });

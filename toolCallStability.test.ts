@@ -9,6 +9,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
+import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, chiefPreloadTail } from "./test/toolConfigFixture";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -138,6 +139,15 @@ describe("tool-call stability", () => {
     escalate.inputSchema.required = base.catalog["chief_escalate"]!.inputSchema.required;
     expect(escalate.description.endsWith(ESCALATE_SENTENCE)).toBe(true);
     escalate.description = escalate.description.slice(0, -ESCALATE_SENTENCE.length);
+    // Allowed difference (j), "Chief keeps tool search" (work-list spec): chief_roster gains the optional boolean includeOthers and one description clause; asserted exactly, then undone.
+    const roster = now.catalog["chief_roster"]!;
+    const baseRoster = base.catalog["chief_roster"]!;
+    expect(roster.inputSchema.properties["includeOthers"]).toEqual(INCLUDE_OTHERS_PROPERTY);
+    expect(roster.inputSchema.required ?? []).not.toContain("includeOthers");
+    delete roster.inputSchema.properties["includeOthers"];
+    expect(baseRoster.description.split(ROSTER_OTHERS_OLD)).toHaveLength(2);
+    expect(roster.description).toBe(baseRoster.description.replace(ROSTER_OTHERS_OLD, ROSTER_OTHERS_NEW));
+    roster.description = baseRoster.description;
     expect(now.entries.map((entry) => entry.key)).toEqual(base.entries.map((entry) => entry.key));
     expect(Object.keys(now.catalog)).toEqual(Object.keys(base.catalog));
 
@@ -181,8 +191,8 @@ describe("tool-call stability", () => {
       const preloaded = entry.key.includes("| claude-code |") && entry.tools.length > 0;
       if (preloaded) {
         expect(preloadLine(entry), entry.key).toHaveLength(1);
-        // Allowed differences (d), (f) and (i): the base snapshot predates chief_sync; a plain Chief's preload asks for chief_sync, chief_coordinate and chief_attach on top of it.
-        if (entry.key.includes("| chief |")) expect(preloadLine(entry)[0], entry.key).toMatch(new RegExp(`max_results ${old.tools.length + 3}$`));
+        // Allowed difference (k): a plain Chief's preload is the exact select: list of every returned tool (chief_sync, chief_coordinate and chief_attach included) in the host's order.
+        if (entry.key.includes("| chief |")) expect(preloadLine(entry)[0]!.endsWith(`ToolSearch call: ${chiefPreloadTail(full.entries[index]!.tools)}`), entry.key).toBe(true);
       }
       if (!entry.instructions || !old.instructions) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
       const restored = accepted(preloaded ? withoutPreload(entry.instructions) : entry.instructions);
@@ -227,8 +237,14 @@ describe("tool-call stability", () => {
     for (const entry of entries) {
       const [line] = preloadLine(entry);
       expect(preloadLine(entry), entry.key).toHaveLength(1);
-      if (entry.key.includes("| chief |")) expect(line!.endsWith(`query "+chief", max_results ${entry.tools.length}`), entry.key).toBe(true);
-      else expect(line!.endsWith(`select:${entry.tools.map(prefix).join(",")}`), entry.key).toBe(true);
+      if (entry.key.includes("| chief |")) {
+        // Chief: the host's selected order (pinned), each name once, the same set as the returned tools; the SDK's registration order is not asserted.
+        const names = line!.split("ToolSearch call: select:")[1]!.split(",");
+        expect(new Set(names).size, entry.key).toBe(names.length);
+        expect([...names].sort(), entry.key).toEqual(entry.tools.map(prefix).sort());
+        expect(names, entry.key).toEqual(CHIEF_HOST_ORDER.filter((name) => entry.tools.includes(name)).map(prefix));
+        expect(line, entry.key).not.toMatch(/\+chief|max_results/);
+      } else expect(line!.endsWith(`select:${entry.tools.map(prefix).join(",")}`), entry.key).toBe(true);
     }
     // The toggles reach the tool list, so the comparison above is not vacuous.
     const chiefTools = entries.filter((entry) => entry.key.startsWith("short rules | chief")).map((entry) => entry.tools.length);
@@ -309,7 +325,8 @@ describe("tool-call stability", () => {
     else expect(instructions!.length).toBeLessThanOrEqual(32768);
     const coreEnd = instructions!.indexOf("chief_escalate with the thread and the full request");
     expect(coreEnd).toBeGreaterThan(-1);
-    expect(instructions!.indexOf(`max_results ${tools.length}`)).toBeGreaterThan(-1);
+    expect(instructions!.indexOf(`ToolSearch call: select:${CHIEF_HOST_ORDER.filter((name) => tools.some((tool) => tool.name === name)).map(prefix).join(",")}`)).toBeGreaterThan(-1);
+    expect(instructions).not.toMatch(/\+chief|max_results/);
     expect(instructions!.indexOf("ToolSearch")).toBeLessThan(instructions!.indexOf("Call chief_roster at the start of every turn"));
     for (const part of [
       "# Chief core rules (always apply)", "Call chief_roster at the start of every turn", "never poll managed threads",
@@ -320,11 +337,10 @@ describe("tool-call stability", () => {
     expect(instructions!.indexOf(marker)).toBeGreaterThan(coreEnd);
   });
 
-  // Contract: env contribution, this plugin only. The host merges contributions from other plugins (account-pool also
-  // contributes ENABLE_TOOL_SEARCH and wins when it is first); this test proves only what Chief itself contributes.
-  // Chief rows (plain and child) keep deferral off; every other managed row contributes nothing so tool search stays on.
-  // Regression: contributing for a non-Chief row, for unmanaged threads or another provider, dropping Chief's own `false`, or ever forcing `true`.
-  test("Chief's own ENABLE_TOOL_SEARCH contribution: claude-code, Chief rows only (not the effective merged environment)", async () => {
+  // Contract (docs/specs/tool-call-stability.md, "No Provider Environment"): the plugin registers no experimental_contributeEnv handler, so it contributes no provider
+  // environment for any thread. The host merges contributions from other plugins (account-pool contributes ENABLE_TOOL_SEARCH); this test proves only what this plugin contributes.
+  // Regression: a contribution again for a Chief row, a managed row, an unmanaged thread, a thread with no id, a thread still seeded before insertThread, or another provider; or ever forcing `true`.
+  test("the plugin contributes no provider environment for any role, unmanaged thread, missing thread id, seeded pre-insertThread thread or provider", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
@@ -348,14 +364,14 @@ describe("tool-call stability", () => {
     const chiefIds = new Set([chief.threadId, child]);
     expect(rows.filter((row) => row.role === "chief").map((row) => row.threadId).sort()).toEqual([...chiefIds].sort());
     for (const id of [worker.threadId, tester.threadId, designer.threadId, specWriter.threadId]) expect(rows.map((row) => row.threadId)).toContain(id);
-    for (const { threadId } of rows) {
-      const claude = await env("claude-code", threadId);
-      if (chiefIds.has(threadId)) expect(claude, threadId).toEqual([expect.objectContaining({ name: "ENABLE_TOOL_SEARCH", value: "false" })]);
-      else expect(claude, threadId).toEqual([]);
-      expect(claude.some((entry) => entry.value === "true"), threadId).toBe(false);
-      expect(await env("codex", threadId), threadId).toEqual([]);
+    // A thread seeded as a Chief by this plugin whose row insertThread has not written yet.
+    state.addLive("thr_seeded_chief", "proj_1", "Chief · seeded", "chief");
+    state.seedPluginMetadata("thr_seeded_chief", { role: "chief" });
+    expect(rows.map((row) => row.threadId)).not.toContain("thr_seeded_chief");
+    for (const threadId of [...rows.map((row) => row.threadId), "thr_seeded_chief", "thr_other"]) {
+      for (const providerId of ["claude-code", "codex", "other-provider"]) expect(await env(providerId, threadId), `${providerId} ${threadId}`).toEqual([]);
     }
-    expect(await env("claude-code", "thr_other")).toEqual([]);
+    for (const providerId of ["claude-code", "codex"]) expect(await state.harness.behavior.resolveProviderEnv(providerId, { projectId: "proj_1", hostId: "host_1" } as any), providerId).toEqual([]);
   });
 
   // Contract: title default on the tool path. Each tool names its thread differently; the default line is the same.

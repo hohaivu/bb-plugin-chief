@@ -154,14 +154,106 @@ describe("Chief backend", () => {
     expect(onlyWaiting.startsWith("Pending:\n- 2 waiting todos")).toBe(true);
   });
 
+  describe("other-Chief todo collapse", () => {
+    const HIDDEN = (n: number, ids: string) => `- ${n} other-Chief todo${n === 1 ? "" : "s"} (${ids}) hidden: not your work. chief_roster includeOthers: true lists them.`;
+    const scenario = async () => {
+      const state = await setup();
+      const a = await start(state);
+      const b = (await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string }).threadId;
+      // The Pending block alone: the roster text goes on with the thread table after it.
+      const roster = async (threadId: string, params: object = {}) => {
+        const lines = String(await state.harness.behavior.callAgentTool("chief_roster", params, { threadId, projectId: "proj_1" })).split("\n");
+        const end = lines.findIndex((line, index) => index > 0 && !/^(- |Other Chiefs' todos)/.test(line));
+        return lines.slice(0, end < 0 ? lines.length : end).join("\n");
+      };
+      return { state, a: a.threadId, b, roster };
+    };
+
+    test("another live Chief's todos, waiting ones included, fold into one count line; the viewer's own todos stay in full", async () => {
+      const { a, b, roster } = await scenario();
+      await roster(b, { todo: { text: "Mine" } });
+      await roster(a, { todo: { text: "Alpha" } });
+      await roster(a, { todo: { text: "Bravo", after: "user signs" } });
+      await roster(b, { todo: { text: "Own waiting", after: "PR #9 merges" } });
+      const text = await roster(b);
+      // #1 Mine (b), #2 Alpha (a), #3 Bravo waiting (a), #4 Own waiting (b)
+      expect(text).toBe(["Pending:", "- todo #1: Mine", "- 1 waiting todo (#4) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.", HIDDEN(2, "#2, #3")].join("\n"));
+      expect(text).not.toContain("Alpha");
+      expect(text).not.toContain("Bravo");
+      expect(text).not.toContain("Other Chiefs' todos");
+    });
+
+    test("an ended Chief's todo and an unowned todo fold into the same line; with no foreign todo there is no line", async () => {
+      const { state, a, b, roster } = await scenario();
+      expect(await roster(b)).toBe("Pending: none.");
+      await roster(a, { todo: { text: "Ended one" } });
+      await roster(a, { todo: { text: "Unowned one" } });
+      state.db.prepare("UPDATE chief_todos SET chief_thread_id=NULL WHERE id=2").run();
+      // Archiving Chief A hands its todos to the live Chief B, so give todo #1 back to the ended A afterwards.
+      state.live.set(a, { ...state.live.get(a)!, archivedAt: Date.now() });
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(a)! });
+      await state.supervisorCycle();
+      state.db.prepare("UPDATE chief_todos SET chief_thread_id=? WHERE id=1").run(a);
+      const text = await roster(b);
+      expect(text).toBe(`Pending:\n${HIDDEN(2, "#1, #2")}`);
+      const full = await roster(b, { includeOthers: true });
+      expect(full).toContain(`- todo #1 (ended Chief ${a}): Ended one`);
+      expect(full).toContain("- todo #2 (unowned): Unowned one");
+      expect(full).not.toContain("hidden: not your work");
+    });
+
+    test("includeOthers: true equals the uncollapsed output, with and without includeWaiting; false equals the default; closed todos are not counted", async () => {
+      const { a, b, roster } = await scenario();
+      await roster(a, { todo: { text: "Alpha" } });
+      await roster(a, { todo: { text: "Bravo", after: "user signs" } });
+      await roster(a, { todo: { text: "Gone" } });
+      await roster(a, { todo: { id: 3, state: "done" } });
+      await roster(b, { todo: { text: "Mine" } });
+      expect(await roster(b, { includeOthers: false })).toBe(await roster(b));
+      expect(await roster(b)).toContain(HIDDEN(2, "#1, #2"));
+      expect(await roster(b, { includeOthers: true })).toBe([
+        "Pending:", "- todo #4: Mine", "Other Chiefs' todos (not your work; act on one only when the user asks):", `- todo #1 (Chief ${a}): Alpha`, `- 1 waiting other-Chief todo (#2) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.`,
+      ].join("\n"));
+      expect(await roster(b, { includeOthers: true, includeWaiting: true })).toBe([
+        "Pending:", "- todo #4: Mine", "Other Chiefs' todos (not your work; act on one only when the user asks):", `- todo #1 (Chief ${a}): Alpha`, `- todo #2 (Chief ${a}) : Bravo (after: user signs)`.replace(") :", "):"),
+      ].join("\n"));
+      expect(await roster(b, { includeComplete: true })).toContain(HIDDEN(2, "#1, #2"));
+    });
+
+    test("bb chief status still lists every Chief's todo in full", async () => {
+      const { state, a, b, roster } = await scenario();
+      await roster(a, { todo: { text: "Alpha" } });
+      await roster(b, { todo: { text: "Bravo", after: "user signs" } });
+      const cli = (await state.harness.behavior.runCli(["status", "--project", "proj_1"])).stdout!;
+      expect(cli).toContain(`- todo #1 (Chief ${a}): Alpha`);
+      expect(cli).toContain(`- todo #2 (Chief ${b}): Bravo (after: user signs)`);
+      expect(cli).not.toContain("hidden: not your work");
+    });
+
+    test("the collapse line keeps the 6000-character roster cap: many foreign todos stay one short line", async () => {
+      const { a, b, roster } = await scenario();
+      for (let i = 0; i < 60; i += 1) await roster(a, { todo: { text: `Todo ${i} ${"x".repeat(200)}` } });
+      const text = await roster(b);
+      expect(text.length).toBeLessThan(1_000);
+      expect(text.split("\n").filter((line) => line.includes("other-Chief todos"))).toHaveLength(1);
+      expect((await roster(b, { includeOthers: true })).length).toBeLessThanOrEqual(6_000);
+      expect((await roster(b, { includeOthers: true })).length).toBeGreaterThan(1_000);
+    });
+  });
+
   test("chief todos are project-scoped and survive a replacement Chief", async () => {
     const state = await setup();
     const chief = await start(state);
     await state.harness.behavior.callAgentTool("chief_roster", { todo: { text: "Ship docs" } }, { threadId: chief.threadId, projectId: "proj_1" });
     const replacement = await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string };
+    const replacementOpts = { threadId: replacement.threadId, projectId: "proj_1" };
     expect(String(await state.harness.behavior.callAgentTool(
-      "chief_roster", {}, { threadId: replacement.threadId, projectId: "proj_1" },
+      "chief_roster", { includeOthers: true }, replacementOpts,
     ))).toContain(`Other Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief ${chief.threadId}): Ship docs`);
+    // By default the same todo is one count line, with neither its text nor the section header.
+    const collapsedDefault = String(await state.harness.behavior.callAgentTool("chief_roster", {}, replacementOpts));
+    expect(collapsedDefault.startsWith("Pending:\n- 1 other-Chief todo (#1) hidden: not your work. chief_roster includeOthers: true lists them.")).toBe(true);
+    expect(collapsedDefault).not.toContain("Ship docs");
 
     const other = await start(state, "proj_2");
     const otherOpts = { threadId: other.threadId, projectId: "proj_2" };

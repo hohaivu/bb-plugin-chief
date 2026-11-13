@@ -15,4 +15,4 @@ Chief contributed `ENABLE_TOOL_SEARCH=false` for every managed thread. Its value
 
 - Managed threads other than Chief save the token cost on every request.
 - A managed thread that ignores the preload line may call a deferred `chief_*` tool with a guessed argument.
-- A later change can restore deferral for Chief if it gets an exact `select:` line.
+- [Chief keeps tool search](2026-11-13-chief-keeps-tool-search.md) supersedes this decision for Chief rows.
