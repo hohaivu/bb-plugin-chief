@@ -380,6 +380,22 @@ describe("tester role", () => {
       expect(gateOf(entries.find(([name]) => name === "reviewer prompt")![1])).toHaveLength(6);
     });
 
+    // Contract (planner equivalence, base oracle): every byte of the plain and the revision planner prompt outside `## Working contract` equals the
+    // base fixture's (6d288a2; the main base 6534bea changed only Working contract lines of it): title, Problem, Context, the revision's plan files,
+    // advisor summary and revise rules. The only authorized change outside it is wave 1's reviser edit (advisor summary only without a report path),
+    // which the fixture's report-less advisor leaves as it was. Wave 2 replaced the Working contract, so that section is blanked on both sides and
+    // has its own test below. Regression: a Context, Problem or revision line lost, reordered or reworded. The fixture is retained base output.
+    const WORKING_CONTRACT_TO_END = /^## Working contract\n[\s\S]*?(?=^=== |(?![\s\S]))/gm;
+    test("the planner prompt outside the Working contract equals base's for a plain and a revision brief", async () => {
+      const state = await setup();
+      const base = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "planner-6d288a2.txt"), "utf8");
+      const blank = (text: string) => {
+        expect(text.match(WORKING_CONTRACT_TO_END)).toHaveLength(2);
+        return text.replace(WORKING_CONTRACT_TO_END, "## Working contract\n<slim>\n");
+      };
+      expect(blank(await plannerFixture(state))).toBe(blank(base));
+    });
+
     // Contract (planner brief, wave 2): in the plain and the revision prompt the Working contract is the load line, the read-only item and
     // the wave cap only, and the plan-field, design and reshape rule bodies stay out (the skill holds them). The revision brief names the
     // plan files and the advisor's summary. Regression: a rule body returns to the prompt; the load line is missing or names other skills.
