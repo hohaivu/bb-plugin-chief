@@ -72,3 +72,21 @@ export function shrinkReportPointers(base: string, expected: { dropped: number; 
   if (JSON.stringify(count) !== JSON.stringify(expected)) throw new Error(`report pointer edits ${JSON.stringify(count)} differ from the expected ${JSON.stringify(expected)}`);
   return out.join("\n");
 }
+
+// (d) A planner alert that shows the plan with inline-vis lines no longer lists the same wave paths as `Wave n of N: <path>` lines; the intro line gains
+// its "Plan files, wave 1 first. " lead. Applied to a base alert string: the lines between `Plan: N wave(s)` and the intro go (one per wave), the lead is added.
+export const INLINE_INTRO_BASE = "To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):";
+export const INLINE_INTRO_HEAD = `Plan files, wave 1 first. ${INLINE_INTRO_BASE}`;
+export function shrinkPlannerAlert(alert: string): string {
+  const lines = alert.split("\n");
+  const intro = lines.indexOf(INLINE_INTRO_BASE);
+  if (intro === -1) return alert;
+  const plan = lines.findIndex((line) => /^Plan: \d+ wave\(s\)$/.test(line));
+  const waves = lines.slice(plan + 1, intro);
+  if (plan === -1 || !waves.length || !waves.every((line, index) => new RegExp(`^Wave ${index + 1} of ${waves.length}: \\S+/plan-${index + 1}\\.md$`).test(line))) {
+    throw new Error("a planner alert with the inline intro lists its waves differently from the base shape");
+  }
+  return [...lines.slice(0, plan + 1), INLINE_INTRO_HEAD, ...lines.slice(intro + 1)].join("\n");
+}
+/** Applies `edit` to every string inside a JSON value. */
+export const mapStrings = <T>(value: T, edit: (text: string) => string): T => JSON.parse(JSON.stringify(value), (_key, entry) => (typeof entry === "string" ? edit(entry) : entry));
