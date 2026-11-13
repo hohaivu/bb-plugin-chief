@@ -232,6 +232,10 @@ An evidence-only tester runs the commands that the mission names, on the commits
 - `chief_skip_specs` is rejected after the wave has any `spec-writer` row. It works while only the worker exists. Reason: it only bypasses a Spec Writer that Chief never delegated.
 - A spec waiver waives the planned Spec delta only. It does not block an incidental docs correction. Reason: a waiver and a docs repair are different decisions.
 - A side-lane Spec Writer folds with a plain fast-forward push and never force-pushes. Reason: a force-push can erase the commits of the worker.
+- The Spec Writer takes its content from the `## Spec delta` of the wave only. It reads code only to check a name or path that the delta states. Reason: the planner already read the code, and a second read costs tokens and can give a second, conflicting reading.
+- The planner names the code path of each delta item as file and symbol. Reason: the writer does not read code to find it.
+- Before the fold, the Spec Writer may check each identifier that its docs name with `git grep` at HEAD. The writer lists a missing name under `## Unverified names` and does not wait for the worker. Reason: the writer runs in parallel, so the code of the worker may not exist yet.
+- The Spec Writer model is the per-machine `spec-writer` pick in Chief settings. Without a pick, it uses the Worker pick (`MODEL_FALLBACK` in `src/core/roles.ts`). Reason: a cheaper model can apply a precise delta.
 - An implementation-lane agent that reuses the chain worktree first requires a clean tree, fetches the task branch, and fast-forwards to it. It reports blocked when the fast-forward fails. Reason: the folded docs must be in the checkout before the agent reads files.
 - A Tester checks that the Fold head of each listed Spec Writer is an ancestor of its HEAD. Reason: the Tester must test against the folded docs.
 - The Reviewer scopes a side-lane writer by Fold base to Fold head. `Fold: none` means an empty scope. A docs commit inside a fold range is not drift in the range of a worker. Reason: the fold commits land in the task branch while the worker runs.
