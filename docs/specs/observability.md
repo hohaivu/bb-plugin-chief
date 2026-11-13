@@ -76,7 +76,7 @@ Reason for step 5: every tick before the send enters this block again. The prima
 
 | Kind | Detection point | Sent to Sentry |
 | --- | --- | --- |
-| `tool_error` | `registerChiefTool` in `src/tools/register.ts` | Yes |
+| `tool_error` | `registerChiefTool` in `src/tools/register.ts` | Yes, except for a failed `chief_report` |
 | `stall`, `hard_stall` | `recordFailure`, when its insert adds a row | Yes |
 | `provider_transient` | `recordFailure` for `provider`, when its insert adds a row | Yes |
 | `thread_failed` | The failed branch, when the alert key `error:<cycle>` is new | Yes |
@@ -105,6 +105,8 @@ Reason for step 5: every tick before the send enters this block again. The prima
 - A transient failure gives one `provider_transient` row for each thread and cycle.
 - Events from the report path run inside the report transaction. A rollback of the report removes their rows.
   Reason: the ledger never shows an event for a report that Chief did not accept.
+- A failed `chief_report` call records its `tool_error` in the ledger only. The error is never sent to Sentry.
+  Reason: the failed call rolled back its report, and a rolled-back report sends nothing on any later macrotask.
 - The migration is append only. No earlier entry of `MIGRATIONS` changes.
 - A reviewer `approve` writes no `request_changes` row.
 
@@ -158,6 +160,10 @@ Secret settings have no default. The code handles an undefined value. The plugin
 
 - A warning from the plugin through `ctx.bb.log.warn` also goes to Sentry as the kind `plugin_warn`, through `ctx.observe.warn`.
 - The ledger does not record a plugin warning. The throttle applies to it.
+- The warning goes to Sentry without content. The text from `Command failed:` onward becomes `[omitted]`. The text from the first `--script`, `--args` or `--prompt` onward also becomes `[omitted]`. The marker stays.
+  Reason: a failed `execFile` call echoes its command line, which holds a workflow script, a prompt and arguments. `scrub` removes secrets, not code.
+- The omission happens before Sentry builds the message and the fingerprint. Neither one holds the omitted text.
+- The full warning text stays in the local log.
 - The Sentry module uses the original warn. A failed send never feeds itself.
 
 ### Failed tool calls
@@ -302,15 +308,22 @@ Reason: a plan that completed before the plugin first ran with this feature gets
 | `running` | The run status cannot be read. | `running` with `last_error` |
 | `running` | The run failed, was stopped, or is older than 2 hours. The tick stops an old run first. | `pending` with `run_id=NULL` and `next_at=now+10 min`, or `failed` when `attempts >= 3` |
 | `running` | The run succeeded. | Collect, then `done` |
+| `running` | The run succeeded, collect failed (for example, a write error), and the run is older than 2 hours. The run is not stopped. | `pending` with `run_id=NULL` and `next_at=now+10 min`, or `failed` when `attempts >= 3` |
 
 - The primary key `plan_thread_id` makes the claim exclusive. Two overlapping ticks never create two rows or start two runs. A second tick on unchanged data inserts nothing.
 - Every retry is a new run with a new `run_id`.
+- A failed collect of a succeeded run leaves the row `running`. The next tick tries again, until the run is 2 hours old.
+  Reason: a persistent write error must not retry forever. After 2 hours the row uses the retry budget and ends in one `retro-failed` alert.
 - The state `failed` sends one alert with the key `retro-failed:<planId>`.
 - The row stores `rubric_version`, `attempts`, `next_at`, `started_at`, `last_error` and the `path` of `retro.md`.
 
 ### Evidence bundle
 
 The bundle is written as Chief artifacts `retro/<planId>/…` under the Chief thread. Each file has at most 120,000 characters. Every line is scrubbed.
+
+- The limit applies to the whole file. A thread file counts its metadata, brief, diff and ledger lines first. The event lines then use the remaining characters.
+  Reason: the brief, the diff and the ledger lines add to the event lines, and a limit on the event lines alone allowed a larger file.
+- The manifest refs come from the event lines that the file keeps.
 
 - The judged threads are the planner, the rows with the `plan_thread_id`, and their reviewers and advisors.
   - The judge scores at most 8 threads. Threads with a failure, a block, a nudge or a `request_changes` event come first. Then one thread for each role.
@@ -450,7 +463,10 @@ The daily report adds these sections. None of them averages scores across `rubri
 
 - The report joins the worker threads that the judge graded at the current version to `reviewer_verdicts` on `worker_thread_id`.
 - The verdict is the first row by `id` whose `head_sha` and `worker_report_seq` are both non-null. A row with a null in either column is counted as unbound and excluded.
-- The report shows a 2×2 table of the judge status (pass or fail, on the dimensions that are not communication) against the first verdict (`approve` or `request_changes`). It also shows the coverage (bound verdicts ÷ judged workers) and the rate of disagreement.
+- The status of each worker is the `aggregate` status of its applicable rubrics, without `communication`. A worker with a missing or `insufficient_evidence` dimension is `insufficient`.
+  Reason: a worker with one valid score and missing dimensions is not a pass, and a matrix that counts it as a pass claims agreement without evidence.
+- The report shows a 2×2 table of the judge status (pass or fail) against the first verdict (`approve` or `request_changes`). It also shows the coverage (bound verdicts ÷ judged workers) and the rate of disagreement.
+- Workers with the status `insufficient` are outside the matrix and outside the coverage count. The report gives their number on its own.
 - Below 10 bound pairs, the report prints `insufficient evidence (n=…)`.
   Reason: a small sample gives a misleading rate.
 
