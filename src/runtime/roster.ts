@@ -387,8 +387,9 @@ export function createRoster(ctx: Ctx) {
   /** A project's open todos as Pending lines — after thread lines, so clipping drops them first.
    * With `viewer`, the viewer's own todos come first and the rest follow under a header; without
    * one (operator shell) everything is one tagged list. With `collapseWaiting`, todos that wait
-   * on an `after:` condition fold into one count line per group. */
-  function todoLines(projectId: string | undefined, collapseWaiting = false, viewer?: string) {
+   * on an `after:` condition fold into one count line per group. With `viewer` and `collapseOthers`,
+   * every other Chief's, ended Chief's and unowned todo (waiting ones too) folds into one count line. */
+  function todoLines(projectId: string | undefined, collapseWaiting = false, viewer?: string, collapseOthers = false) {
     const todos = projectId ? (todosForProject.all(projectId) as TodoRow[]) : [];
     const group = (list: TodoRow[], noun: string) => {
       if (!collapseWaiting) return list.map((todo) => todoLine(todo, viewer));
@@ -399,9 +400,15 @@ export function createRoster(ctx: Ctx) {
       return lines;
     };
     if (!viewer) return group(todos, "todo");
-    const others = group(todos.filter((todo) => todo.chief_thread_id !== viewer), "other-Chief todo");
+    const foreign = todos.filter((todo) => todo.chief_thread_id !== viewer);
+    const own = group(todos.filter((todo) => todo.chief_thread_id === viewer), "todo");
+    if (collapseOthers) {
+      const n = foreign.length;
+      return n ? [...own, `- ${n} other-Chief todo${n === 1 ? "" : "s"} (#${foreign.map((todo) => todo.id).join(", #")}) hidden: not your work. chief_roster includeOthers: true lists them.`] : own;
+    }
+    const others = group(foreign, "other-Chief todo");
     return [
-      ...group(todos.filter((todo) => todo.chief_thread_id === viewer), "todo"),
+      ...own,
       ...(others.length ? ["Other Chiefs' todos (not your work; act on one only when the user asks):", ...others] : []),
     ];
   }
@@ -430,8 +437,8 @@ export function createRoster(ctx: Ctx) {
   }
 
   /** The Pending block exactly as chief_roster prints it. */
-  function pendingBlock(chiefThreadId: string, includeWaiting = false, limit = 6_000) {
-    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(store.get(chiefThreadId)?.project_id, !includeWaiting, chiefThreadId)), limit);
+  function pendingBlock(chiefThreadId: string, includeWaiting = false, limit = 6_000, includeOthers = false) {
+    return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(store.get(chiefThreadId)?.project_id, !includeWaiting, chiefThreadId, !includeOthers)), limit);
   }
   return { INACTIVE_CHIEF_STATES, belongsToChief, chiefStats, controlledTarget, controlsThread, isActiveChief, isCoordinator, isLinkedChild, pendingBlock, pendingLines, replacesCall, requireChiefCaller, rerouteSteps, resolveTarget, rosterFor, rosterForChief, rosterRowLines, statsText, taskReviews, todoLine, todoLines };
 }

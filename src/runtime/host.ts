@@ -47,10 +47,8 @@ const COORDINATOR_INSTRUCTIONS = [
 ].join("\n");
 
 /** Claude Code defers MCP tools until ToolSearch loads them; an agent that calls one first guesses its arguments and is refused. */
-function toolSchemaLine(tools: string[], compact: boolean) {
-  // shortcut: Chief gets the keyword form, chosen when the SDK cut was 4096; the cut is now 32768, so the full select: list would fit; switch if keyword loading proves unreliable.
-  const call = compact ? `query "+chief", max_results ${tools.length}` : `select:${tools.map((name) => `mcp__bb-bridge__${name}`).join(",")}`;
-  return `If your chief_* tools are deferred (listed by name only), load their schemas before calling any, once per session and again after compaction, with one ToolSearch call: ${call}`;
+function toolSchemaLine(tools: string[]) {
+  return `If your chief_* tools are deferred (listed by name only), load their schemas before calling any, once per session and again after compaction, with one ToolSearch call: select:${tools.map((name) => `mcp__bb-bridge__${name}`).join(",")}`;
 }
 
 export function registerHost(ctx: Ctx) {
@@ -98,7 +96,7 @@ export function registerHost(ctx: Ctx) {
           coordinator
             ? `You are the registered Coordinator for ${clip(context.project.name, 100)}: you supervise child Chiefs in any project, not managed threads.`
             : `You are the registered Chief supervisor for ${clip(context.project.name, 100)}. Use ordinary visible BB threads and drive managed work through completion.`,
-          ...(claudeCode ? [toolSchemaLine(tools, true)] : []),
+          ...(claudeCode ? [toolSchemaLine(tools)] : []),
           ...(child ? [`Coordinator ${row!.coordinator_thread_id} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`] : []),
           "",
           // The SDK cuts instructions at 32768 chars, so the variable project rules come last. The built-in rules tell a Chief to continue and complete managed work, so a Coordinator gets only a project chief.md.
@@ -131,7 +129,7 @@ export function registerHost(ctx: Ctx) {
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: follow the chief-worker skill's report contract; after reporting, end with one line.`,
         "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
-        ...(claudeCode ? [toolSchemaLine(tools, false)] : []),
+        ...(claudeCode ? [toolSchemaLine(tools)] : []),
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
         ...(lessons.length ? ["", clip(["## Lessons from earlier review rounds", ...lessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
@@ -139,11 +137,6 @@ export function registerHost(ctx: Ctx) {
       ].join("\n"),
     };
   });
-
-  // Chief rows only (Coordinators included): their keyword preload line is not exact. Managed roles keep tool search; their `select:` preload line loads their chief_* schemas, which saves ~18k+ tokens per request.
-  // Best-effort: another plugin's ENABLE_TOOL_SEARCH (account-pool) may win, and a session before insertThread gets none; the preload line is the fallback.
-  bb.providers.experimental_contributeEnv("claude-code", ({ threadId }) =>
-    threadId && store.get(threadId)?.role === "chief" ? [{ name: "ENABLE_TOOL_SEARCH", value: "false", reason: "Chief threads call chief_* tools before a deferred schema loads" }] : []);
 
   bb.rpc.register(rpcContract, {
     status: () => ({ sectionId: ctx.storedSectionId(), threads: store.all().map(ctx.toManaged) }),
