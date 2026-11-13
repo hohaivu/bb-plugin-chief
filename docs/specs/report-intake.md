@@ -185,9 +185,22 @@ Each contract carries its reason.
 - The best-effort mirror to Chief's storage also runs before the transaction. It stays there because this change does not change timing.
 - Both are exceptions to the rule that required state commits before optional work. Reason: the change moves code and keeps timing.
 
+### Alert content
+
+`reportAlert` decides which lines the alert shows. The report file keeps the full text.
+
+- A worker ready alert lists only the failed recorded commands. A failed command has an exit status that is not null and not 0. Reason: successful commands used about half of the alert.
+  - The header stays `Recorded (last N commands): K non-zero exit`. N counts all recorded commands.
+  - The alert lists no line for a command with exit 0 or a null exit.
+  - When the alert leaves out a recorded command, the alert counts as clipped. The intake writes `report-<seq>.md` with every command and adds the `Full report:` line. Reason: Chief reads the successful commands in the report file.
+- The Next line keeps up to 1,200 characters. A longer line is clipped and counts as clipped. Reason: the old limit of 400 cut the route in the middle of a sentence.
+- A planner ready alert lists each plan file one time. Reason: one path for each wave is enough, and the report file keeps both lists.
+  - When the mirror to Chief's storage worked, the alert shows the inline-vis lines, wave 1 first, and no `Wave n of N:` line.
+  - When the mirror failed, the alert shows the `Wave n of N: <path>` lines.
+
 ## Out of Scope
 
-- The alert layout budgets. `checkout-freshness.md` covers the stamp line.
+- The alert layout budgets, except the content rules in Alert content. `checkout-freshness.md` covers the stamp line.
 - The forge comment content builders, the alert outbox, and the artifact writer. They stay in `server.ts` as adapters.
 - The `configure` lesson read.
 - The `chief_report` input schema.

@@ -266,18 +266,20 @@ Only a Spec Writer changes `docs/`. The sections above define the lanes. This se
 
 `workerBrief` in `src/research/delegationBrief.ts` renders the brief of every kind. `admitDelegation` in `src/plan/planLifecycle.ts` fills the source list for the brief. The "prior row" is the row that a delegation replaces.
 
-- Every brief renders `## Contracts to verify` in full, with no 3,000-character cut. Reason: the brief says "Keep every item above", and a cut list drops items. The wave body limit of 64,000 characters bounds the size.
-- A Spec Writer brief lists each wave of the chain under `## Read-only context`, with the plan path and its contracts clipped at 3,000 characters. Reason: the writer reads the contracts of the chain as source text.
+- A worker or tester brief renders `## Contracts to verify` as a pointer to that section of its plan file. The pointer names the plan file path. The brief still orders the agent to keep every item and to confirm each one with evidence. It also says that the reviewer checks the same list. Reason: the brief already orders a full read of the plan file, so an inline copy doubled the text.
+- The reviewer brief keeps its full-plan read order and its inline contracts preview. Reason: the reviewer checks the contracts against the plan.
+- A Spec Writer brief and an evidence-only brief have no `## Contracts to verify`.
+- A Spec Writer brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Read-only context`. It lists the approved-design line when one exists. It adds the contracts of its own wave only, clipped at 3,000 characters. Reason: the contracts of the other waves belong to their workers and to the Tester. The writer can read each plan file.
 - A planned tester brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Source of truth for test cases`. It lists the approved-design line when one exists. It lists no contract text. Reason: the tester reads the plan files, and its own contracts appear once.
 - An unplanned tester brief keeps the head brief as its source of truth, clipped in the middle at 4,000 characters. Reason: no plan file exists.
-- For each kind, `admitDelegation` accepts and refuses exactly the same requests as before the brief change. Only the contents of the tester source list change. Reason: the change affects text, not admission.
+- For each kind, `admitDelegation` accepts and refuses exactly the same requests as before the brief change. Only the source list of a Spec Writer changes. Reason: the change affects text, not admission.
 
 A tester brief has these rules:
 
 - It omits `## Success criteria` and `## Constraints` when the list is empty. Other kinds always render both. Reason: an empty section adds only the text "None stated."
 - `## Verify command` keeps the command fence and has one rule. The tester lists the exit status under Automated Verification and never changes product code to make the command pass. Reason: the worker rule "Fix the work until it exits 0" contradicts the ban on product code.
 - A failure that also occurs at the Base commit is a baseline. The tester lists it and does not fix it. Reason: the tester must not change product code.
-- The tester runs a command for the whole suite only when its mission or `## Contracts to verify` asks for it. Otherwise it lists the command as "not run: full suite not asked for". Reason: the full suite runs on request only. A contract such as `npx vitest run` exit 0 counts as a request.
+- The tester runs a command for the whole suite only when its mission or the `## Contracts to verify` of its plan file asks for it. Otherwise it lists the command as "not run: full suite not asked for". Reason: the full suite runs on request only. A contract such as `npx vitest run` exit 0 counts as a request.
 - It tells the tester to record the synced `git rev-parse HEAD` as `Base commit` one time. With a branch, the sync sentence holds the instruction. Without a branch, `## Test work` holds it. A worker brief records it as `Local sync`. Reason: one commit needs one record.
 - `## Test work` holds the one procedure for a test that fails because product code is wrong. It recommends `chief_delegate (... kind: worker)`. The `## Spec` block points to that procedure for code that contradicts the docs. Reason: two procedures for one failure conflict.
 - The `## Spec` block keeps the route for wrong docs: report blocked and recommend `kind: spec-writer`. Reason: only a Spec Writer changes docs.
