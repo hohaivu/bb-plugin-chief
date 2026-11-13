@@ -24,6 +24,10 @@ export function createChiefs(ctx: Ctx) {
       "Call chief_roster for the current work list, then wait for work.",
       ...(handoff ? ["", handoffSection(handoff)] : []),
     ].join("\n");
+    // The new Chief runs in the spawning thread's permission mode; unknown (no caller, lookup fails) keeps the project default.
+    const permissionMode = handoff
+      ? (await bb.sdk.threads.defaultExecutionOptions({ threadId: handoff.fromChiefThreadId }).catch(() => null))?.permissionMode
+      : undefined;
     const thread = await bb.sdk.threads.spawn({
       projectId: target,
       environment: { type: "project-default" },
@@ -31,6 +35,7 @@ export function createChiefs(ctx: Ctx) {
       visibility: "visible",
       title,
       ...(await ctx.execution("chief", await ctx.projectHostId(target))),
+      ...(permissionMode ? { permissionMode } : {}),
       prompt,
       pluginMetadata: { role: "chief" },
     });
