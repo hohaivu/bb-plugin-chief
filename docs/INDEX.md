@@ -11,6 +11,7 @@
 | Work list | [work-list.md](specs/work-list.md) | `src/runtime/roster.ts` (`chief_roster` Pending block), `src/runtime/alerts.ts` (`chief_todos`), `src/runtime/cli.ts` (`bb chief status`), `src/runtime/chiefs.ts` (`handOver`, `unpinPendingTab`) | Chief's work list is the roster's Pending block; the Chief to-do side panel is removed. |
 | Coordinator | [coordinator.md](specs/coordinator.md) | `src/tools/coordinate.ts` (`chief_coordinate`), `src/tools/attach.ts` (`chief_attach`), `src/tools/spawn.ts` (`chief_spawn`), `src/tools/escalate.ts` (`chief_escalate`), `src/runtime/chiefs.ts` (`handOver`), `src/runtime/cli.ts` (adopt), `src/runtime/sweep.ts` (sweep), `src/runtime/settings.ts` (configure), `src/db/threadStore.ts` | A Chief upgraded one way to supervise child Chiefs in any project; it wakes only on a child's Need you or done. |
 | Tracker | [tracker.md](specs/tracker.md) | `src/tracker/tracker.ts`, `src/tracker/trackerSync.ts`, `src/tracker/trackerBbTasks.ts`, `src/runtime/core.ts` (settings `tracker`/`trackerProjects`), `src/runtime/delegation.ts` (`startPlan`, `startWorker`), `src/tools/escalate.ts` (`chief_escalate`), `src/runtime/lifecycle.ts` (supervisor), `src/report/reportIntake.ts` (`trackFiles`) | Optional mirror of Chief work to a task tracker behind a replaceable protocol; owner answers reach Chief once through the plugin. |
+| Observability | [observability.md](specs/observability.md) | `src/observe/events.ts` (`createObserve`), `src/observe/sentry.ts`, `src/observe/scrub.ts`, `src/tools/register.ts` (`registerChiefTool`), `src/runtime/alerts.ts` (`recordFailure`) | One local event ledger for failures, review outcomes and nudges; optional scrubbed Sentry mirror. |
 
 ## Active decisions
 
@@ -21,3 +22,4 @@
 - [Retest after a fix round gates the review](decisions/2026-11-10-retest-after-fix-round.md)
 - [Only a Spec Writer changes docs](decisions/2026-11-10-docs-owned-by-spec-writer.md)
 - [Managed threads keep tool search](decisions/2026-11-11-managed-threads-keep-tool-search.md)
+- [Sentry through a direct envelope, no SDK](decisions/2026-11-13-sentry-envelope-no-sdk.md)

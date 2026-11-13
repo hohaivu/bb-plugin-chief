@@ -124,6 +124,8 @@ flowchart LR
   Child -- "Need you or done" --> Coordinator
   Chief -. "chief_stop on a stuck thread" .-> Threads["Managed threads"]
   Threads -- "chief_report" --> Roster
+  Roster -. "failures, review outcomes, nudges" .-> Ledger["Event ledger chief_events"]
+  Ledger -. "scrubbed, only with a DSN" .-> Sentry["Sentry (optional)"]
 ```
 
 | Tool | Use |
@@ -135,6 +137,7 @@ flowchart LR
 | `chief_stop` | Interrupts a stuck thread. It keeps the worktree, branch and history. |
 | `chief_coordinate` | Upgrades a Chief to a Coordinator. It wakes only on a child's Need you or done. |
 | Tracker | Mirrors each plan or unplanned worker to a task. The owner's answer on the task reaches Chief once, as an alert. |
+| Event ledger | Records each failure, review outcome and nudge once in `chief_events`. With a Sentry DSN, it also sends scrubbed failure and review events to Sentry. Without a DSN, it makes no network call. |
 
 ## Gates
 
@@ -172,3 +175,4 @@ A fresh worker takes every follow-up through `replaces:`. A worker that already 
 - [Coordinator](specs/coordinator.md)
 - [Tracker](specs/tracker.md)
 - [Forge comments](specs/forge-comments.md)
+- [Observability](specs/observability.md)
