@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -322,5 +322,60 @@ describe("retro never edits Chief", () => {
     expect(added.length).toBeGreaterThan(0);
     const allowed = new RegExp(`^chief/proj_1/${chief}/(retro/${planner}/|reports/)`);
     expect(added.filter((path) => !allowed.test(path))).toEqual([]);
+  });
+});
+
+describe("retro retry over its own staged files", () => {
+  const stagedIn = async (dir: string) => (await readdir(dir, { recursive: true })).sort();
+
+  test("a retry re-stages its bundle over the first attempt, leaves another plan's files byte-for-byte, and starts a new run", async () => {
+    const { state, stubs, chief, planner, worker, tick } = await judged(() => null);
+    const retroDir = join(state.storageRoot, "chief/proj_1", chief, "retro");
+    await tick(); // attempt 1 stages retro/<planner>/
+    const firstManifest = await readFile(join(retroDir, planner, "manifest.json"), "utf8");
+    const other = join(retroDir, "thr_other_plan");
+    await mkdir(other, { recursive: true });
+    await writeFile(join(other, "manifest.json"), '{"planId":"thr_other_plan"}');
+    await writeFile(join(other, "thread-thr_x.md"), "Plan Q evidence\n\u00e9");
+    const untouched = async () => Promise.all((await stagedIn(other)).map(async (name) => [name, await readFile(join(other, name), "utf8")]));
+    const before = await untouched();
+
+    state.seedEvents(worker, [userSays(1, "Fix the totals")]); // the retry reads new evidence, so its manifest differs
+    stubs.status.mockResolvedValueOnce({ status: "failed", error: { message: "judge crashed" } });
+    stubs.run.mockResolvedValueOnce({ runId: "wfr_2" });
+    await tick(); // poll sees the failed run
+    dueNow(state, planner);
+    await tick(); // attempt 2 stages the same files again
+
+    expect(retroRow(state, planner)).toMatchObject({ state: "running", run_id: "wfr_2", attempts: 2, last_error: null });
+    expect(await untouched()).toEqual(before);
+    const secondManifest = await readFile(join(retroDir, planner, "manifest.json"), "utf8");
+    expect(secondManifest).not.toBe(firstManifest);
+    expect(JSON.parse(secondManifest).planId).toBe(planner);
+    expect((await stagedIn(join(retroDir, planner))).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+
+  test("a retry whose first launch failed still starts: the files from the failed attempt do not block it", async () => {
+    const { state, stubs, planner, tick } = await judged(() => null);
+    stubs.run.mockRejectedValueOnce(new Error("workflow service down")); // the bundle is staged before the launch fails
+    await tick();
+    expect(retroRow(state, planner).last_error).toContain("could not start: workflow service down");
+    dueNow(state, planner);
+    await tick();
+    expect(retroRow(state, planner)).toMatchObject({ state: "running", attempts: 2, last_error: null });
+  });
+
+  test("collecting a succeeded run again rewrites retro.md over the first copy", async () => {
+    const { state, planner, tick } = await judged((ids) => answer(ids));
+    await tick();
+    await tick();
+    const { path } = retroRow(state, planner);
+    await writeFile(path, "STALE");
+    state.db.prepare(`UPDATE chief_retros SET state='running' WHERE plan_thread_id=?`).run(planner);
+    await tick();
+    expect(retroRow(state, planner)).toMatchObject({ state: "done", last_error: null });
+    const text = await readFile(path, "utf8");
+    expect(text).not.toBe("STALE");
+    expect(text).toContain("| thread |");
   });
 });
