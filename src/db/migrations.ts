@@ -434,4 +434,6 @@ export const MIGRATIONS = [
     `ALTER TABLE chief_lessons ADD COLUMN decided_at INTEGER`,
     `ALTER TABLE chief_lessons ADD COLUMN decided_reason TEXT`,
     `CREATE UNIQUE INDEX chief_lessons_proposal ON chief_lessons(proposal_key)`,
+    // communication rows only: the plugin's observed counts and the judge's signals as JSON, so the daily report can total them without reopening retro.md.
+    `ALTER TABLE chief_scores ADD COLUMN detail TEXT`,
 ];

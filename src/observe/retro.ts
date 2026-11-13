@@ -611,13 +611,13 @@ export function createRetro(ctx: Ctx) {
     const insufficient = evaluation.threads.filter((outcome) => outcome.aggregate.status === "insufficient").length;
     const alert = `Retro for plan “${manifest.title}”: ${path}. ${failedThreads}/${evaluation.threads.length} threads failed, ${insufficient} insufficient. ${evaluation.lessons.length} proposed lessons (bb chief lessons --status proposed; accept or retire with a reason).`;
     const now = Date.now();
-    const upsert = db.prepare(`INSERT INTO chief_scores (thread_id, plan_thread_id, role, scorer, rubric_version, label, score, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(thread_id, scorer, rubric_version) DO UPDATE SET plan_thread_id=excluded.plan_thread_id, role=excluded.role, label=excluded.label, score=excluded.score, reason=excluded.reason`);
+    const upsert = db.prepare(`INSERT INTO chief_scores (thread_id, plan_thread_id, role, scorer, rubric_version, label, score, reason, at, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(thread_id, scorer, rubric_version) DO UPDATE SET plan_thread_id=excluded.plan_thread_id, role=excluded.role, label=excluded.label, score=excluded.score, reason=excluded.reason, detail=excluded.detail`);
     const lesson = db.prepare(`INSERT OR IGNORE INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role, status, surface, plan_thread_id, evidence, rubric_version, proposal_key) VALUES (?, ?, ?, NULL, ?, ?, 'proposed', ?, ?, ?, ?, ?)`);
     try {
       db.transaction(() => {
-        for (const outcome of evaluation.threads) for (const line of outcome.lines) upsert.run(outcome.threadId, row.plan_thread_id, outcome.role, line.scorer, manifest.version, line.label, line.score, clean(line.reason), now);
-        for (const handoff of evaluation.handoffs) upsert.run(handoff.threadId, row.plan_thread_id, handoff.role, handoff.line.scorer, manifest.version, handoff.line.label, handoff.line.score, clean(handoff.line.reason), now);
+        for (const outcome of evaluation.threads) for (const line of outcome.lines) upsert.run(outcome.threadId, row.plan_thread_id, outcome.role, line.scorer, manifest.version, line.label, line.score, clean(line.reason), now, null);
+        for (const handoff of evaluation.handoffs) upsert.run(handoff.threadId, row.plan_thread_id, handoff.role, handoff.line.scorer, manifest.version, handoff.line.label, handoff.line.score, clean(handoff.line.reason), now, JSON.stringify({ observed: handoff.observed, signals: handoff.signals }));
         for (const item of evaluation.lessons) {
           lesson.run(row.project_id, clean(clip(item.rule, 400)), item.sourceThread, now, lessonRole(item.surface), item.surface, row.plan_thread_id,
             clean(JSON.stringify({ refs: item.evidence, missingOrWrong: item.missingOrWrong, prevents: item.prevents, recurrence: item.recurrence })), manifest.version,

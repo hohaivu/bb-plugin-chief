@@ -1,5 +1,6 @@
 import { clip } from "../core/text";
 import type { Ctx } from "../runtime/context";
+import { curve, INSUFFICIENT, NOT_APPLICABLE, RUBRIC_VERSION } from "./rubrics";
 import { normalize, scrub } from "./scrub";
 import { ACTIVITY_KINDS, ADAPTERS, type Adapter, collectSources, configuredSecrets, type Item, type Section } from "./sources";
 
@@ -9,7 +10,7 @@ const DAY_MS = 86_400_000;
 const TRIAGE = "Triage: read the report, then plan any fix as normal work (chief_plan).";
 
 interface Block { title: string; lines: string[]; cut: number }
-export interface DailyCounts { newSentry: number; patterns: number; blocked: number; stalls: number; reviewRounds: number }
+export interface DailyCounts { newSentry: number; patterns: number; blocked: number; stalls: number; reviewRounds: number; proposedLessons: number }
 
 const pad = (value: number) => String(value).padStart(2, "0");
 /** The server-local date, the one the 08:00 schedule runs on. */
@@ -87,6 +88,83 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
     return `- ${threadId}${row ? ` ${row.role} “${clip(row.title, 80)}”` : ""}: ${[...kindsOf].map(([kind, n]) => `${kind}×${n}`).join(", ")}`;
   }));
 
+  // ---- retro sections: scores are never averaged across rubric_version ----
+  interface ScoreRow { thread_id: string; plan_thread_id: string; role: string; scorer: string; rubric_version: string; label: string; score: number | null; reason: string; at: number; detail: string | null }
+  const scores = db.prepare(`SELECT * FROM chief_scores WHERE at >= ? AND at < ?`).all(until - 28 * DAY_MS, until) as ScoreRow[];
+  const week = (at: number) => { // ISO week of the UTC date
+    const d = new Date(Date.UTC(new Date(at).getUTCFullYear(), new Date(at).getUTCMonth(), new Date(at).getUTCDate()));
+    d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+    return `${d.getUTCFullYear()}-W${pad(Math.ceil(((d.getTime() - Date.UTC(d.getUTCFullYear(), 0, 1)) / DAY_MS + 1) / 7))}`;
+  };
+  const groups = new Map<string, ScoreRow[]>();
+  for (const row of scores) if (row.label !== NOT_APPLICABLE) {
+    const key = `${row.rubric_version}\u0000${week(row.at)}\u0000${row.scorer}`;
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  block("Score trend (last 4 ISO weeks, per rubric version)", scores.length ? ["| rubric version | week | scorer | raw mean | curve(mean) | n | pass | fail | insufficient |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ...[...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, rows]) => {
+      const [version, wk, scorer] = key.split("\u0000");
+      const scored = rows.filter((row) => row.score !== null);
+      const mean = scored.length ? scored.reduce((total, row) => total + row.score!, 0) / scored.length : null;
+      return `| ${version} | ${wk} | ${scorer} | ${mean === null ? "-" : mean.toFixed(3)} | ${mean === null ? "-" : curve(mean).toFixed(3)} | ${scored.length} | ${scored.filter((row) => row.score! >= 0.5).length} | ${scored.filter((row) => row.score! < 0.5).length} | ${rows.filter((row) => row.label === INSUFFICIENT).length} |`;
+    })] : []);
+
+  const comm = scores.filter((row) => row.scorer === "communication" && row.at >= until - 7 * DAY_MS);
+  const details = comm.map((row) => { try { return JSON.parse(row.detail ?? "null") as { observed?: Record<string, number | null>; signals?: Record<string, boolean | null> } | null; } catch { return null; } });
+  const sumObserved = (name: string) => details.reduce((sum, detail) => sum + (detail?.observed?.[name] ?? 0), 0);
+  const mean = (name: string) => { const values = details.map((detail) => detail?.observed?.[name]).filter((value): value is number => typeof value === "number"); return values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : "-"; };
+  const signalCount = (name: string) => details.filter((detail) => detail?.signals?.[name] === true).length;
+  block("Communication (7 days)", comm.length ? [`${comm.length} handoffs judged: ${comm.filter((row) => row.label === INSUFFICIENT).length} insufficient evidence.`,
+    `Observed by the plugin: nudges ${sumObserved("nudges")}, blocks ${sumObserved("blocks")}, review rounds ${sumObserved("reviewRounds")}, mean brief ${mean("briefChars")} chars, mean ~${mean("estTokens")} tokens (estimate).`,
+    `Attributed by the judge (not observed): ${["briefGapBlock", "askedTwice", "unclearBriefRounds", "userWordsLost"].map((name) => `${name} ${signalCount(name)}`).join(", ")}.`] : []);
+
+  // Calibration: worker threads judged at the current version vs the first bound reviewer verdict. Communication is never calibrated.
+  const judged = new Map<string, boolean>(); // worker thread -> failed on non-communication dimensions
+  for (const row of scores.filter((entry) => entry.role === "worker" && entry.rubric_version === RUBRIC_VERSION && entry.scorer !== "communication" && entry.score !== null)) judged.set(row.thread_id, (judged.get(row.thread_id) ?? false) || row.score! < 0.5);
+  const matrix = { pass: { approve: 0, request_changes: 0 }, fail: { approve: 0, request_changes: 0 } };
+  let bound = 0, unbound = 0;
+  for (const [threadId, failed] of judged) {
+    const verdicts = db.prepare(`SELECT verdict, head_sha, worker_report_seq FROM reviewer_verdicts WHERE worker_thread_id=? ORDER BY id`).all(threadId) as { verdict: "approve" | "request_changes"; head_sha: string | null; worker_report_seq: number | null }[];
+    const first = verdicts.find((verdict) => verdict.head_sha !== null && verdict.worker_report_seq !== null);
+    if (!first) { if (verdicts.length) unbound += 1; continue; }
+    bound += 1;
+    matrix[failed ? "fail" : "pass"][first.verdict] += 1;
+  }
+  const disagree = matrix.pass.request_changes + matrix.fail.approve;
+  block("Calibration (judge vs first reviewer verdict, workers, non-communication)", judged.size ? [
+    `${judged.size} workers judged at ${RUBRIC_VERSION}; ${bound} with a bound verdict (coverage ${Math.round(100 * bound / judged.size)}%); ${unbound} unbound (null head_sha or worker_report_seq) excluded.`,
+    ...(bound < 10 ? [`insufficient evidence (n=${bound})`] : [
+      "| judge \\ first verdict | approve | request_changes |", "| --- | --- | --- |",
+      `| pass | ${matrix.pass.approve} | ${matrix.pass.request_changes} |`, `| fail | ${matrix.fail.approve} | ${matrix.fail.request_changes} |`,
+      `Disagreement rate ${Math.round(100 * disagree / bound)}% (${disagree}/${bound}).`]),
+  ] : []);
+
+  const failed24 = scores.filter((row) => row.at >= until - DAY_MS && row.score !== null && row.score < 0.5 && row.scorer !== "communication");
+  block("Failed threads (24 h)", failed24.map((row) => `- ${row.thread_id} ${row.role}: ${row.scorer} ${row.label} (${row.score}) — ${clip(row.reason.replace(/\s+/g, " "), 300)}`));
+
+  interface LessonRow { id: number; status: string; surface: string | null; text: string; plan_thread_id: string | null; at: number; decided_at: number | null }
+  const lessons = db.prepare(`SELECT id, status, surface, text, plan_thread_id, at, decided_at FROM chief_lessons WHERE surface IS NOT NULL OR status != 'accepted'`).all() as LessonRow[];
+  const proposed = lessons.filter((lesson) => lesson.status === "proposed");
+  const recurringSurface = new Set([...new Set(proposed.map((lesson) => lesson.surface ?? "other"))].filter((surface) => new Set(proposed.filter((lesson) => (lesson.surface ?? "other") === surface && lesson.at >= until - 14 * DAY_MS && lesson.plan_thread_id).map((lesson) => lesson.plan_thread_id)).size >= 2));
+  const decided = db.prepare(`SELECT id, decided_at FROM chief_lessons WHERE status='accepted' AND decided_at >= ?`).all(until - 30 * DAY_MS) as { id: number; decided_at: number }[];
+  const passRate = (from: number, to: number) => {
+    const status = new Map<string, boolean>();
+    for (const row of db.prepare(`SELECT thread_id, score FROM chief_scores WHERE at >= ? AND at < ? AND scorer != 'communication' AND score IS NOT NULL AND rubric_version=?`).all(from, to, RUBRIC_VERSION) as { thread_id: string; score: number }[]) status.set(row.thread_id, (status.get(row.thread_id) ?? false) || row.score < 0.5);
+    const n = status.size;
+    return { n, rate: n ? [...status.values()].filter((failedThread) => !failedThread).length / n : 0 };
+  };
+  block("Lessons", [
+    `${proposed.length} proposed awaiting a decision (bb chief lessons --status proposed; accept or retire with a reason); ${lessons.filter((lesson) => lesson.status === "accepted").length} accepted, ${lessons.filter((lesson) => lesson.status === "retired").length} retired (retro and gated lessons).`,
+    ...[...new Set(proposed.map((lesson) => lesson.surface ?? "other"))].sort((a, b) => Number(recurringSurface.has(b)) - Number(recurringSurface.has(a)) || a.localeCompare(b)).flatMap((surface) => [
+      `### ${surface}${recurringSurface.has(surface) ? " (recurring: 2+ plans in 14 days)" : ""}`,
+      ...proposed.filter((lesson) => (lesson.surface ?? "other") === surface).map((lesson) => `- #${lesson.id}: ${clip(lesson.text.replace(/\s+/g, " "), 200)}`)]),
+    ...decided.map((lesson) => {
+      const beforeRate = passRate(lesson.decided_at - 14 * DAY_MS, lesson.decided_at), afterRate = passRate(lesson.decided_at, Math.min(until, lesson.decided_at + 14 * DAY_MS));
+      return `- accepted #${lesson.id}: pass rate before→after ${beforeRate.n < 5 || afterRate.n < 5 ? `too few (n<5; before n=${beforeRate.n}, after n=${afterRate.n})` : `${Math.round(100 * beforeRate.rate)}% (n=${beforeRate.n}) → ${Math.round(100 * afterRate.rate)}% (n=${afterRate.n})`}`;
+    }),
+  ]);
+  const proposedCount = proposed.length;
+
   block("Logs", itemsOf("bbLogs").map(line));
 
   const render = () => [
@@ -104,7 +182,7 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
   }
   if (markdown.length > REPORT_MAX_CHARS) markdown = markdown.slice(0, REPORT_MAX_CHARS); // unreachable unless the fixed parts alone are too long
 
-  return { markdown, sections, counts: { newSentry: newIssues.length, patterns: recurring.length, blocked, stalls, reviewRounds: rounds2(roundsNow) } };
+  return { markdown, sections, counts: { newSentry: newIssues.length, patterns: recurring.length, blocked, stalls, reviewRounds: rounds2(roundsNow), proposedLessons: proposedCount } };
 }
 
 /** The 08:00 job. Never throws: a failure is logged and the next day runs again. Idempotent per date: one file path, one alert row (daily:<date>). */
@@ -123,7 +201,7 @@ export async function runDailyReport(ctx: Ctx, now = Date.now()): Promise<string
     const { markdown, counts } = await buildDailyReport(ctx, now - DAY_MS, now);
     const path = await ctx.writeStorageFile(chief.thread_id, `reports/daily-${date}.md`, markdown);
     await ctx.alertSelf(chief.thread_id, `daily:${date}`,
-      `Daily Chief report: ${path}\n${counts.newSentry} new Sentry issues, ${counts.patterns} recurring patterns, ${counts.blocked} blocked, ${counts.stalls} stalls, ${counts.reviewRounds} review rounds≥2.\nTriage it: read the report, then plan any fix as normal work (chief_plan).`);
+      `Daily Chief report: ${path}\n${counts.newSentry} new Sentry issues, ${counts.patterns} recurring patterns, ${counts.blocked} blocked, ${counts.stalls} stalls, ${counts.reviewRounds} review rounds≥2, ${counts.proposedLessons} proposed lessons awaiting decision.\nTriage it: read the report, then plan any fix as normal work (chief_plan).`);
     return path;
   } catch (error) {
     bb.log.warn(`Daily report failed: ${String(error)}`);
