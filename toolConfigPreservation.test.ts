@@ -253,6 +253,27 @@ describe("tool config: base 9689364 to head", () => {
         expect(await mutated((head) => { const entry = worker(head); entry.instructions = entry.instructions!.replace(/select:\S+/, "select:mcp__bb-bridge__chief_log"); })).toThrow(": instructions");
         expect(await mutated((head) => { const entry = worker(head); entry.instructions = entry.instructions!.replace(/select:\S+/, 'query "+chief", max_results 1'); })).toThrow(": instructions");
       });
+      // A head that wholly restores a Chief's base text must not pass through an unchanged-instructions shortcut: the old keyword preload, the old Tests/Skips lines and the old cap tail are all rejected.
+      test("a claude-code Chief's entire base instructions restored (short and capped cases)", async () => {
+        for (const label of ["short rules", "worst case"]) {
+          const key = `${label} | chief | claude-code | planner true | research true`;
+          const { base, head } = await load();
+          const entry = claudeChief(head, label);
+          const was = claudeChief(base, label).instructions!;
+          expect(was, label).toMatch(/query "\+chief", max_results \d+/);
+          expect(was, label).not.toBe(entry.instructions);
+          entry.instructions = was;
+          expect(() => compareToolConfig(base, head), label).toThrow(`${key}: instructions`);
+        }
+      });
+      test("a codex Chief's entire base instructions restored", async () => {
+        const { base, head } = await load();
+        const entry = chiefEntries(head).find((candidate) => candidate.key.includes("| codex |"))!;
+        const was = base.entries.find((candidate) => candidate.key === entry.key)!.instructions!;
+        expect(was).not.toBe(entry.instructions);
+        entry.instructions = was;
+        expect(() => compareToolConfig(base, head)).toThrow(`${entry.key}: instructions`);
+      });
       test("the claude-code worst case: the final tail byte changed, deleted, or one appended", async () => {
         const worst = (head: ToolConfig) => claudeChief(head, "worst case");
         const [changed, deleted, appended] = [
