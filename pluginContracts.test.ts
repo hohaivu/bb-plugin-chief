@@ -86,7 +86,8 @@ describe("Chief backend", () => {
   test("imports only public SDK surfaces", async () => {
     // sonner is a host-provided runtime slot; scripts/ is dev tooling the build does not ship.
     const result = await experimental_scanPublicSdkOnly(dirname(fileURLToPath(import.meta.url)), { allow: [/^vitest$/, /^react$/, /^sonner$/, /^@testing-library\/react$/] });
-    expect(result.violations.filter((v) => !v.file.startsWith("scripts/"))).toEqual([]);
+    // better-sqlite3 is a devDependency that test files use to build real db fixtures (agyHistory.test.ts); product code still may not import it.
+    expect(result.violations.filter((v) => !v.file.startsWith("scripts/") && !(v.specifier === "better-sqlite3" && /\.test\.tsx?$/.test(v.file)))).toEqual([]);
     expect(result.privateDependencies).toEqual([]);
   });
 

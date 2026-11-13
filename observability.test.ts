@@ -189,14 +189,16 @@ describe("ledger and Sentry through the real report transaction", () => {
     await expect(report(state, worker.threadId, { state: "blocked", blocker: "Need the staging key", recommendation: "Ask" })).rejects.toThrow();
     await flush();
     expect(events(state, "blocked")).toEqual([]);
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The failed chief_report call itself is a tool_error (spec: failed tool calls are mirrored); the rolled-back blocked event is not.
+    const sentKinds = () => fetchMock.mock.calls.map((call) => JSON.parse((call[1].body as string).split("\n")[2]!).tags.kind);
+    expect(sentKinds()).toEqual(["tool_error"]);
 
     state.db.exec("DROP TRIGGER fail_pending");
     await report(state, worker.threadId, { state: "blocked", blocker: "Need the staging key", recommendation: "Ask" });
     await flush();
     expect(events(state, "blocked")).toHaveLength(1);
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [header, , item] = (fetchMock.mock.calls[0]![1].body as string).split("\n").map((line) => JSON.parse(line));
+    expect(sentKinds()).toEqual(["tool_error", "blocked"]);
+    const [header, , item] = (fetchMock.mock.calls[1]![1].body as string).split("\n").map((line) => JSON.parse(line));
     expect(item.event_id).toBe(events(state, "blocked")[0]!.event_id);
     expect(header.event_id).toBe(item.event_id);
     expect(item.tags).toMatchObject({ kind: "blocked", role: "worker", thread_id: worker.threadId });

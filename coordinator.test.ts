@@ -58,7 +58,8 @@ describe("Coordinator", () => {
     test("the base statements are unchanged; the two Coordinator columns, then the retest_skipped column, are appended", () => {
       const prefix = MIGRATIONS.slice(0, BASE_MIGRATIONS.length);
       expect(createHash("sha256").update(JSON.stringify(prefix)).digest("hex")).toBe(BASE_MIGRATIONS.sha256);
-      expect(MIGRATIONS.slice(BASE_MIGRATIONS.length)).toEqual([
+      // Append only: later waves (observability) add entries after these three; only the first three are pinned here.
+      expect(MIGRATIONS.slice(BASE_MIGRATIONS.length, BASE_MIGRATIONS.length + 3)).toEqual([
         "ALTER TABLE managed_threads ADD COLUMN coordinator INTEGER",
         "ALTER TABLE managed_threads ADD COLUMN coordinator_thread_id TEXT",
         "ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT",
@@ -955,8 +956,9 @@ describe("Coordinator", () => {
     test("MIGRATIONS: the base array is an unchanged prefix of head, followed by the two Coordinator ALTERs and the retest_skipped ALTER", () => {
       requireBase();
       expect(head.migrations.slice(0, base.migrations.length)).toEqual(base.migrations);
-      const added = head.migrations.slice(base.migrations.length);
-      expect(added).toHaveLength(3);
+      // Append only: the observability waves add entries after these three.
+      const added = head.migrations.slice(base.migrations.length, base.migrations.length + 3);
+      expect(head.migrations.length).toBeGreaterThanOrEqual(base.migrations.length + 3);
       for (const statement of added.slice(0, 2)) expect(statement).toMatch(/^ALTER TABLE \w+ ADD COLUMN .*(coordinator)/is);
       expect(added[2]).toBe("ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT");
     });
