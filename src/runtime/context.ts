@@ -18,6 +18,7 @@ import type { createInspect } from "./inspect";
 import type { createResearchWiring } from "./researchWiring";
 import type { createToolRegistry } from "../tools/register";
 import type { createObserve } from "../observe/events";
+import type { createCompletionSnapshot } from "../observe/completionSnapshot";
 
 /** Mutable state the plugin closure kept in `let`s and Maps. One object per plugin invocation: read and write it as ctx.state.x, never through a copy. */
 export interface State {
@@ -99,6 +100,7 @@ export interface Ctx {
   upsertCooldown: ReturnType<typeof createCore>["upsertCooldown"];
   writerPending: ReturnType<typeof createCore>["writerPending"];
   observe: ReturnType<typeof createObserve>["observe"];
+  snapshotCompletion: ReturnType<typeof createCompletionSnapshot>["snapshotCompletion"];
   sweep: ReturnType<typeof createSweep>["sweep"];
   toManaged: ReturnType<typeof createSweep>["toManaged"];
   catalogReader: ReturnType<typeof createSettingsRuntime>["catalogReader"];
@@ -164,6 +166,7 @@ export interface Ctx {
   stopThread: ReturnType<typeof createCompletion>["stopThread"];
   alertChief: ReturnType<typeof createAlerts>["alertChief"];
   alertCoordinator: ReturnType<typeof createAlerts>["alertCoordinator"];
+  alertSelf: ReturnType<typeof createAlerts>["alertSelf"];
   deliverAlert: ReturnType<typeof createAlerts>["deliverAlert"];
   enqueueAlert: ReturnType<typeof createAlerts>["enqueueAlert"];
   recordFailure: ReturnType<typeof createAlerts>["recordFailure"];
@@ -175,6 +178,7 @@ export interface Ctx {
   forgeComments: ReturnType<typeof createForgeWiring>["forgeComments"];
   forgeText: ReturnType<typeof createForgeWiring>["forgeText"];
   trackerSync: ReturnType<typeof createForgeWiring>["trackerSync"];
+  existingArtifact: ReturnType<typeof createArtifacts>["existingArtifact"];
   persistBrief: ReturnType<typeof createArtifacts>["persistBrief"];
   writeArtifact: ReturnType<typeof createArtifacts>["writeArtifact"];
   writePlan: ReturnType<typeof createArtifacts>["writePlan"];

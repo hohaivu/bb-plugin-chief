@@ -2,6 +2,8 @@ import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import { createState, type Ctx } from "./src/runtime/context";
 import { createCore } from "./src/runtime/core";
 import { createObserve } from "./src/observe/events";
+import { createCompletionSnapshot } from "./src/observe/completionSnapshot";
+import { runDailyReport } from "./src/observe/report";
 import { createSweep } from "./src/runtime/sweep";
 import { createSettingsRuntime } from "./src/runtime/settings";
 import { createChiefs } from "./src/runtime/chiefs";
@@ -63,6 +65,7 @@ export default async function plugin(bb: BbPluginApi) {
   Object.assign(ctx, createNextAction(ctx));
   Object.assign(ctx, createCheckout(ctx));
   Object.assign(ctx, createCleanup(ctx));
+  Object.assign(ctx, createCompletionSnapshot(ctx));
   Object.assign(ctx, createCompletion(ctx));
   Object.assign(ctx, createAlerts(ctx));
   Object.assign(ctx, createForgeWiring(ctx));
@@ -94,6 +97,7 @@ export default async function plugin(bb: BbPluginApi) {
   registerReportTool(ctx);
   registerLogTool(ctx);
   registerResearchTool(ctx);
+  ctx.bb.background.schedule("daily-report", "0 8 * * *", async () => { await runDailyReport(ctx); });
   registerHost(ctx);
   registerCli(ctx);
   const { settings, store } = ctx;

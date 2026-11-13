@@ -118,6 +118,8 @@ export function createCompletion(ctx: Ctx) {
     }
     const replacement = result ? clip(result, MAX_RESULT_LENGTH) : null;
     // A replaced result drops the summary and report file that described the old one.
+    // Before the write that queues cleanup, so cleanup cannot run ahead of the evidence. Never throws, never refuses completion.
+    if (row.role === "worker") await ctx.snapshotCompletion(row);
     const now = Date.now();
     store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && ctx.state.cleanupActive ? now : null, reviewSkipped, testsSkipped: testsSkippedReason });
     const completed = store.get(threadId)!;

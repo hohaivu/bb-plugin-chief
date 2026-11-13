@@ -418,4 +418,6 @@ export const MIGRATIONS = [
     `CREATE INDEX chief_events_at ON chief_events (at)`,
     `CREATE INDEX chief_events_plan ON chief_events (plan_thread_id)`,
     `CREATE INDEX chief_events_thread_kind ON chief_events (thread_id, kind)`,
+    // One row per completed worker, written before the completion that queues cleanup: the evidence cleanup cannot clear. diff_state says whether completion.diff is whole, clipped or missing (diff_note says why).
+    `CREATE TABLE chief_completions (thread_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, plan_thread_id TEXT, pr_url TEXT, base TEXT, head_sha TEXT, diff_state TEXT NOT NULL CHECK(diff_state IN ('ok','truncated','unavailable')), diff_note TEXT, diff_path TEXT, brief_path TEXT, at INTEGER NOT NULL)`,
 ];

@@ -56,7 +56,7 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
   readRules: (projectId: string) => Promise<unknown>;
   lifecycleOwner: (chiefThreadId: string | null) => Promise<{ lifecycleOwnerThreadId?: string }>;
   insertThread: (input: Input) => void;
-  persistBrief: (threadId: string, prompt: string) => Promise<void>;
+  persistBrief: (threadId: string, projectId: string, prompt: string) => Promise<void>;
 }): ManagedSpawn<Input> {
   const { bb, db, spawnExecution, ensureSection, readRules, lifecycleOwner, insertThread, persistBrief } = deps;
 
@@ -101,7 +101,7 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
     } as unknown as Input);
     if (inTransaction) db.transaction(() => { insert(); inTransaction(thread.id); })();
     else insert();
-    await persistBrief(thread.id, prompt);
+    await persistBrief(thread.id, projectId, prompt);
     return thread;
   }
 

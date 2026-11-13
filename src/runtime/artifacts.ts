@@ -69,10 +69,23 @@ export function createArtifacts(ctx: Ctx) {
     return path;
   }
 
-  /** Best-effort: keeps the exact spawn prompt in the thread's own storage so it can re-read its brief after a compaction. Never throws. */
-  async function persistBrief(threadId: string, prompt: string) {
-    await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
+  /** The artifact's path when it exists, else null. Never throws. */
+  async function existingArtifact(threadId: string, projectId: string, name: string) {
+    try {
+      const { hostId, dir } = await artifactDir(threadId, projectId);
+      const path = join(dir, name);
+      return await bb.sdk.files.read({ hostId, path }).then(() => path, () => null);
+    } catch {
+      return null;
+    }
   }
-  return { persistBrief, writeArtifact, writePlan, writeStorageFile };
+
+  /** Best-effort: keeps the exact spawn prompt in the thread's own storage so it can re-read its brief after a compaction,
+   * and as the brief.md Chief artifact, which cleanup never clears. Each write fails alone and never throws. */
+  async function persistBrief(threadId: string, projectId: string, prompt: string) {
+    await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
+    await writeArtifact(threadId, projectId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief artifact: ${String(error)}`));
+  }
+  return { existingArtifact, persistBrief, writeArtifact, writePlan, writeStorageFile };
 }
 

@@ -92,7 +92,7 @@ export function createAlerts(ctx: Ctx) {
       try {
         await bounded(() => bb.sdk.threads.send({
           threadId: alert.target_thread_id,
-          senderThreadId: alert.source_thread_id,
+          ...(alert.source_thread_id !== alert.target_thread_id ? { senderThreadId: alert.source_thread_id } : {}),
           mode: "queue-if-active",
           input: [{ type: "text", text: clip(alert.message), mentions: [] }],
         }), ALERT_CALL_MS);
@@ -111,6 +111,13 @@ export function createAlerts(ctx: Ctx) {
     } finally {
       ctx.state.alertDeliveries.delete(key);
     }
+  }
+
+  /** An alert from a Chief to itself, once per key. Sent without a sender: a thread cannot message itself as its own sender. */
+  async function alertSelf(chiefThreadId: string, key: string, message: string) {
+    const dedupeKey = `${chiefThreadId}:${key}`;
+    insertAlert(chiefThreadId, chiefThreadId, dedupeKey, message);
+    return deliverAlert(dedupeKey);
   }
 
   async function alertChief(row: ManagedRow, key: string, message: string) {
@@ -160,6 +167,6 @@ export function createAlerts(ctx: Ctx) {
   async function retryAlerts() {
     for (const alert of pendingAlerts.all(Date.now() - 60_000) as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
-  return { alertChief, alertCoordinator, deliverAlert, enqueueAlert, recordFailure, retryAlerts, writeAlert };
+  return { alertChief, alertCoordinator, alertSelf, deliverAlert, enqueueAlert, recordFailure, retryAlerts, writeAlert };
 }
 
