@@ -4,6 +4,7 @@ import { createCore } from "./src/runtime/core";
 import { createObserve } from "./src/observe/events";
 import { createCompletionSnapshot } from "./src/observe/completionSnapshot";
 import { runDailyReport } from "./src/observe/report";
+import { createRetro } from "./src/observe/retro";
 import { createSweep } from "./src/runtime/sweep";
 import { createSettingsRuntime } from "./src/runtime/settings";
 import { createChiefs } from "./src/runtime/chiefs";
@@ -75,6 +76,7 @@ export default async function plugin(bb: BbPluginApi) {
   Object.assign(ctx, createRoster(ctx));
   Object.assign(ctx, createInspect(ctx));
   Object.assign(ctx, createResearchWiring(ctx));
+  Object.assign(ctx, createRetro(ctx));
   Object.assign(ctx, createToolRegistry(ctx));
   registerForgeInitTool(ctx);
   registerDelegateTool(ctx);
@@ -97,6 +99,7 @@ export default async function plugin(bb: BbPluginApi) {
   registerReportTool(ctx);
   registerLogTool(ctx);
   registerResearchTool(ctx);
+  ctx.bb.background.schedule("retro", "*/10 * * * *", async () => { await ctx.retroTick(Date.now()); });
   ctx.bb.background.schedule("daily-report", "0 8 * * *", async () => { await runDailyReport(ctx); });
   registerHost(ctx);
   registerCli(ctx);

@@ -167,6 +167,6 @@ export function createAlerts(ctx: Ctx) {
   async function retryAlerts() {
     for (const alert of pendingAlerts.all(Date.now() - 60_000) as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
-  return { alertChief, alertCoordinator, alertSelf, deliverAlert, enqueueAlert, recordFailure, retryAlerts, writeAlert };
+  return { alertChief, alertCoordinator, alertSelf, deliverAlert, enqueueAlert, insertAlert, recordFailure, retryAlerts, writeAlert };
 }
 

@@ -19,6 +19,7 @@ import type { createResearchWiring } from "./researchWiring";
 import type { createToolRegistry } from "../tools/register";
 import type { createObserve } from "../observe/events";
 import type { createCompletionSnapshot } from "../observe/completionSnapshot";
+import type { createRetro } from "../observe/retro";
 
 /** Mutable state the plugin closure kept in `let`s and Maps. One object per plugin invocation: read and write it as ctx.state.x, never through a copy. */
 export interface State {
@@ -32,6 +33,7 @@ export interface State {
   alertDeliveries: Map<string, Promise<boolean>>;
   sweeping: Promise<void> | null;
   sweepAgain: boolean;
+  retroing: Promise<void> | null;
   sectionEnsuring: Promise<string> | null;
   chiefStarts: Map<string, Promise<{ threadId: string; created: boolean }>>;
   // ponytail: one delegation at a time, so a second call on the same branch sees the first
@@ -50,6 +52,7 @@ export const createState = (): State => ({
   alertDeliveries: new Map(),
   sweeping: null,
   sweepAgain: false,
+  retroing: null,
   sectionEnsuring: null,
   chiefStarts: new Map(),
   delegating: Promise.resolve(),
@@ -167,6 +170,7 @@ export interface Ctx {
   alertChief: ReturnType<typeof createAlerts>["alertChief"];
   alertCoordinator: ReturnType<typeof createAlerts>["alertCoordinator"];
   alertSelf: ReturnType<typeof createAlerts>["alertSelf"];
+  insertAlert: ReturnType<typeof createAlerts>["insertAlert"];
   deliverAlert: ReturnType<typeof createAlerts>["deliverAlert"];
   enqueueAlert: ReturnType<typeof createAlerts>["enqueueAlert"];
   recordFailure: ReturnType<typeof createAlerts>["recordFailure"];
@@ -179,6 +183,7 @@ export interface Ctx {
   forgeText: ReturnType<typeof createForgeWiring>["forgeText"];
   trackerSync: ReturnType<typeof createForgeWiring>["trackerSync"];
   existingArtifact: ReturnType<typeof createArtifacts>["existingArtifact"];
+  readArtifact: ReturnType<typeof createArtifacts>["readArtifact"];
   persistBrief: ReturnType<typeof createArtifacts>["persistBrief"];
   writeArtifact: ReturnType<typeof createArtifacts>["writeArtifact"];
   writePlan: ReturnType<typeof createArtifacts>["writePlan"];
@@ -216,6 +221,9 @@ export interface Ctx {
   recordedCommands: ReturnType<typeof createInspect>["recordedCommands"];
   checkUnreported: ReturnType<typeof createResearchWiring>["checkUnreported"];
   research: ReturnType<typeof createResearchWiring>["research"];
+  runWorkflowCli: ReturnType<typeof createResearchWiring>["runWorkflowCli"];
+  retroTick: ReturnType<typeof createRetro>["retroTick"];
+  collectRetroBundle: ReturnType<typeof createRetro>["collectRetroBundle"];
   researchSleep: ReturnType<typeof createResearchWiring>["researchSleep"];
   registerChiefTool: ReturnType<typeof createToolRegistry>["registerChiefTool"];
   touchCallerChief: ReturnType<typeof createToolRegistry>["touchCallerChief"];

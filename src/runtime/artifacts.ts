@@ -80,12 +80,23 @@ export function createArtifacts(ctx: Ctx) {
     }
   }
 
+  /** The artifact's text, or null when it is missing or unreadable. Never throws. */
+  async function readArtifact(threadId: string, projectId: string, name: string) {
+    try {
+      const { hostId, dir } = await artifactDir(threadId, projectId);
+      const file = await bb.sdk.files.read({ hostId, path: join(dir, name) });
+      return typeof file === "string" ? file : (file as { content?: string }).content ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Best-effort: keeps the exact spawn prompt in the thread's own storage so it can re-read its brief after a compaction,
    * and as the brief.md Chief artifact, which cleanup never clears. Each write fails alone and never throws. */
   async function persistBrief(threadId: string, projectId: string, prompt: string) {
     await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
     await writeArtifact(threadId, projectId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief artifact: ${String(error)}`));
   }
-  return { existingArtifact, persistBrief, writeArtifact, writePlan, writeStorageFile };
+  return { existingArtifact, persistBrief, readArtifact, writeArtifact, writePlan, writeStorageFile };
 }
 
