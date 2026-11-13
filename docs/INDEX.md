@@ -25,3 +25,4 @@
 - [Chief keeps tool search](decisions/2026-11-13-chief-keeps-tool-search.md)
 - [Sentry through a direct envelope, no SDK](decisions/2026-11-13-sentry-envelope-no-sdk.md)
 - [One gated lesson store](decisions/2026-11-13-lesson-lifecycle-gate.md)
+- [Brief rules live in role skills](decisions/2026-11-13-brief-rules-in-role-skills.md)
