@@ -52,12 +52,12 @@ export function createObserve(ctx: Ctx) {
     });
   }
 
-  /** Plugin warnings go straight to Sentry: not ledgered, so no receipt. An execFile failure echoes its command line (a workflow script, prompt or args) and stderr: only the marker leaves the process, so neither the message nor the fingerprint carries them. */
-  function warn(message: string) {
-    sentry.send({ eventId: newEventId(), level: "warning", kind: "plugin_warn", message: message.replace(/(Command failed:|--(?:script|args|prompt)\b)[\s\S]*/, "$1 [omitted]"), tags: {} });
+  /** Plugin warnings go straight to Sentry: not ledgered, so no receipt. It takes no text: a warning can hold a script, prompt, code or stderr, so only the fixed code `plugin_warn` leaves the process, as message and fingerprint. The raw text stays in the local log. */
+  function warn() {
+    sentry.send({ eventId: newEventId(), level: "warning", kind: "plugin_warn", message: "plugin_warn", tags: {} });
   }
   // A Proxy keeps the SDK object's own `this`; only log.warn differs. `sdk` is callable but a namespace, not a method: binding it breaks it.
-  const log = { debug: (message: string) => bb.log.debug(message), info: (message: string) => bb.log.info(message), error: (message: string) => bb.log.error(message), warn: (message: string) => { bb.log.warn(message); warn(message); } };
+  const log = { debug: (message: string) => bb.log.debug(message), info: (message: string) => bb.log.info(message), error: (message: string) => bb.log.error(message), warn: (message: string) => { bb.log.warn(message); warn(); } };
   const observed = new Proxy(bb, { get: (target, prop) => { const value = prop === "log" ? log : Reflect.get(target, prop, target); return typeof value === "function" && prop !== "sdk" ? value.bind(target) : value; } });
   return { observe: { event, warn }, bb: observed };
 }
