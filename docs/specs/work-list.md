@@ -87,7 +87,7 @@ The work list is the one place where a Chief reads what is pending: the Pending 
 
 | Contract | Reason |
 | --- | --- |
-| The Pending block, the `todo #N` lines, the `after:` collapse line and the "Other Chiefs' todos" section of `chief_roster` equal base for the same state. | The roster is now the only work list. |
+| The Pending block, the `todo #N` lines and the `after:` collapse line of `chief_roster` equal base for the same state. With `includeOthers: true`, the "Other Chiefs' todos" section equals base too. | The roster is now the only work list. |
 | The text and JSON of `bb chief status` equal base for the same state. | The CLI reads the same state. |
 | `handOver` moves `chief_todos` and undelivered alerts as at base. | A successor must keep the open work. |
 | A Coordinator's roster renders a Children block. Each child entry holds that child's own Pending block. See `coordinator.md`. | A Coordinator owns no managed thread. It reads the work of its children. |
@@ -95,6 +95,21 @@ The work list is the one place where a Chief reads what is pending: the Pending 
 | `handOver` refuses to run when the previous or the next Chief is a Coordinator, and writes nothing. | A Coordinator never owns open work, todos or alerts of a superseded Chief. |
 | The sweep still runs on a store reload once `pendingReady` is set, and on `idle` and `failed` events. | The sweep completes absorbed rows. It does not depend on the panel. |
 | `pendingReady` stays, and gates the sweep only. | The sweep must not run before the plugin initialises its state. |
+
+## Other Chiefs' todos collapse
+
+A Chief reads its own work first. A fresh Chief spent about 3k tokens on the todos of other Chiefs in its first roster. The Pending block therefore shows them as one line.
+
+- A foreign todo is a todo of another live Chief, of an ended Chief, or of no Chief.
+- By default the Pending block shows the own todos as at base, with the own `after:` collapse line.
+- If foreign todos exist, one line follows the own todos: `- N other-Chief todo(s) (#ids) hidden: not your work. chief_roster includeOthers: true lists them.`
+- `N` counts every foreign todo. The id list holds every foreign id in ascending order. It includes waiting todos.
+- The block has no second waiting line for foreign todos. It has no "Other Chiefs' todos" header and no `(Chief …)`, `(ended Chief …)` or `(unowned)` todo line.
+- If no foreign todo exists, the line does not appear.
+- `chief_roster` accepts `includeOthers`. With `includeOthers: true`, the Pending block equals the output before this change, with and without `includeWaiting: true`.
+- Each Coordinator child block and the Coordinator's own block collapse the same way. `includeOthers: true` expands all of them.
+- The existing caps stay: `clipPendingBlock` still clips the Pending block, and the roster total is still clipped.
+- `bb chief status` lists every todo, as at base. Todo add, update and close, the cross-Chief edit warning and the `includeComplete` closed-todo lines do not change.
 
 ## Entry points
 

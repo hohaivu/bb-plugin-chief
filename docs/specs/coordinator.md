@@ -120,7 +120,7 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - A plain Chief also gets `chief_coordinate` and `chief_attach`. A plain Chief has 19 tools with planning and research on. A child Chief has 17. A Coordinator has 3.
 - The skills are `["chief"]`.
 - The instructions hold the greeting, then the preload line for `claude-code`, then the Chief rules. The project rules come last. Reason: the SDK cuts instructions at 32,768 characters.
-- The preload line uses `query "+chief"` with `max_results` equal to the tool count.
+- The preload line is `select:` followed by the exact `mcp__bb-bridge__` names of the row's tools, in the host's selected order.
 
 ## Contracts
 
@@ -213,11 +213,12 @@ Each contract has an identifier. Tests and reviews cite it.
 - The whole output keeps the existing 6000-character clip. Each child entry is clipped to share that space.
 - With no children, the roster says to attach Chiefs with `chief_attach` or to start one with `chief_spawn`.
 - The Coordinator's own todos follow the block.
+- Each child entry and the Coordinator's own block collapse the todos of other, ended or no Chiefs into one count line, as `work-list.md` states. `includeOthers: true` expands all of them. Reason: a Chief reads its own work first.
 - The roster of a plain Chief equals the base output for the same state.
 
 ### COORD-9 Configure
 
-| Row | Tools | Skills | Preload `max_results` |
+| Row | Tools | Skills | Preload names |
 | --- | --- | --- | --- |
 | Coordinator | `chief_roster`, `chief_spawn`, `chief_attach` | none | 3 |
 | Plain Chief | The base list plus `chief_coordinate` and `chief_attach` | `chief`, `coordinator` | Tool count (19 with planning and research on) |
