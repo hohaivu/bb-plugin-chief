@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { disposeAll } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { type ToolConfig, compareToolConfig, toolConfigFixture } from "./test/toolConfigFixture";
+import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, type ToolConfig, compareToolConfig, toolConfigFixture } from "./test/toolConfigFixture";
 import { ATTACH_DEFINITION, EVIDENCE_ONLY_PROPERTY, acceptCoreRuleTrim } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
@@ -15,7 +15,9 @@ afterEach(disposeAll);
 
 // Contract C13 (plan wave 1 "Only the Spec Writer edits docs/ everywhere", docs/specs/plan-chains.md): the tool configuration of every role changes in exactly three places
 // against base 9689364: the chief_delegate `kind` clause, the chief_complete `skipReview` clause, and Chief's core-rule Tests/Skips lines; plus the one #213 delta: a plain
-// Chief gains chief_attach right after chief_coordinate (exact definition, one more claude-code preload `max_results`). This is an independent base-to-head
+// Chief gains chief_attach right after chief_coordinate (exact definition). Delta of the "Chief keeps tool search" change (docs/specs/tool-call-stability.md, work-list.md): chief_roster gains
+// the one optional boolean `includeOthers` plus one description clause, and a plain Chief's claude-code preload line `query "+chief", max_results N` becomes `select:` plus every returned tool in
+// the host's pinned order (CHIEF_HOST_ORDER), applied to the uncapped base BEFORE the 32768 cap and compared for exact equality; managed-role and codex preload text stays byte-identical. This is an independent base-to-head
 // comparison: base is test/fixtures/tool-config-9689364.txt, captured by running test/toolConfigFixture.ts unchanged on base 9689364 (the older oracle against the frozen
 // tool-config-7178582.txt is red on base itself, for earlier plans' wording, so it cannot prove this). The frozen fixture is only hash-checked here, never regenerated.
 const dir = dirname(fileURLToPath(import.meta.url));
@@ -30,6 +32,13 @@ describe("tool config: base 9689364 to head", () => {
     return () => compareToolConfig(base, head);
   };
   const chiefEntries = (head: ToolConfig) => head.entries.filter((entry) => entry.key.includes("| chief |"));
+  const claudeChief = (head: ToolConfig, label = "short rules") => head.entries.find((entry) => entry.key === `${label} | chief | claude-code | planner true | research true`)!;
+  const PRELOAD = "ToolSearch call: ";
+  const preloadNames = (entry: ToolConfig["entries"][number]) => entry.instructions!.split("\n").find((line) => line.includes("ToolSearch"))!.split(`${PRELOAD}select:`)[1]!.split(",").map((name) => name.replace("mcp__bb-bridge__", ""));
+  const editPreload = (entry: ToolConfig["entries"][number], change: (names: string[]) => string[]) => {
+    const names = preloadNames(entry);
+    entry.instructions = entry.instructions!.replace(`select:${names.map((name) => `mcp__bb-bridge__${name}`).join(",")}`, `select:${change(names).map((name) => `mcp__bb-bridge__${name}`).join(",")}`);
+  };
   const editLine = (head: ToolConfig, prefix: string, change: (line: string) => string) => {
     for (const entry of chiefEntries(head)) entry.instructions = entry.instructions!.split("\n").map((line) => line.startsWith(prefix) ? change(line) : line).join("\n");
   };
@@ -48,6 +57,20 @@ describe("tool config: base 9689364 to head", () => {
     // The #214 delta is really there too: exactly one optional boolean on chief_delegate, absent from base.
     expect(base.catalog["chief_delegate"]!.inputSchema.properties["evidenceOnly"]).toBeUndefined();
     expect(head.catalog["chief_delegate"]!.inputSchema.properties["evidenceOnly"]).toEqual(EVIDENCE_ONLY_PROPERTY);
+    // The "Chief keeps tool search" delta is really there: includeOthers is new and optional, and every claude-code Chief preload line is now the exact select: list.
+    expect(base.catalog["chief_roster"]!.inputSchema.properties["includeOthers"]).toBeUndefined();
+    expect(head.catalog["chief_roster"]!.inputSchema.properties["includeOthers"]).toEqual(INCLUDE_OTHERS_PROPERTY);
+    expect(head.catalog["chief_roster"]!.inputSchema.required ?? []).not.toContain("includeOthers");
+    expect(head.catalog["chief_roster"]!.description).not.toBe(base.catalog["chief_roster"]!.description);
+    const claudeChiefs = chiefEntries(head).filter((entry) => entry.key.includes("| claude-code |"));
+    expect(claudeChiefs.length).toBe(4 * 2);
+    for (const entry of claudeChiefs) {
+      const names = preloadNames(entry);
+      expect(names, entry.key).toEqual(CHIEF_HOST_ORDER.filter((name) => entry.tools.includes(name)));
+      expect([...names].sort(), entry.key).toEqual([...entry.tools].sort());
+      expect(entry.instructions, entry.key).not.toMatch(/\+chief|max_results/);
+    }
+    for (const entry of chiefEntries(head).filter((candidate) => candidate.key.includes("| codex |"))) expect(entry.instructions, entry.key).not.toContain("ToolSearch");
     // The three edits are really there: the comparison is not vacuous.
     expect(head.catalog["chief_delegate"]!.inputSchema.properties.kind!.description).not.toBe(base.catalog["chief_delegate"]!.inputSchema.properties.kind!.description);
     expect(head.catalog["chief_complete"]!.inputSchema.properties.skipReview!.description).not.toBe(base.catalog["chief_complete"]!.inputSchema.properties.skipReview!.description);
@@ -167,12 +190,83 @@ describe("tool config: base 9689364 to head", () => {
       const run = await mutated((head) => { (head.catalog["chief_attach"]!.inputSchema.properties["threadIds"] as any).maxItems = 21; });
       expect(run).toThrow("chief_attach definition");
     });
-    test("a claude-code Chief's preload max_results raised by 2 instead of 1", async () => {
-      const run = await mutated((head) => {
-        const entry = chiefEntries(head).find((candidate) => candidate.key.includes("| claude-code |"))!;
-        entry.instructions = entry.instructions!.replace(/max_results (\d+)/, (_all, n) => `max_results ${Number(n) + 1}`);
+    test("chief_roster description: an unrelated edit", async () => {
+      const run = await mutated((head) => { head.catalog["chief_roster"]!.description = head.catalog["chief_roster"]!.description.replace("leave them unless the user asks", "act on them freely"); });
+      expect(run).toThrow("chief_roster description is not the base text with the one authorized clause");
+    });
+    test("chief_roster description: the authorized clause kept at base wording", async () => {
+      const run = await mutated((head) => { head.catalog["chief_roster"]!.description = head.catalog["chief_roster"]!.description.replace("others' todos show as one count line (includeOthers: true lists them, tagged)", "others' todos are listed apart and tagged"); });
+      expect(run).toThrow("chief_roster description is not the base text with the one authorized clause");
+    });
+    test("chief_roster.includeOthers missing", async () => {
+      const run = await mutated((head) => { delete head.catalog["chief_roster"]!.inputSchema.properties["includeOthers"]; });
+      expect(run).toThrow("chief_roster.includeOthers is not the planned optional boolean");
+    });
+    test("chief_roster.includeOthers description changed", async () => {
+      const run = await mutated((head) => { head.catalog["chief_roster"]!.inputSchema.properties["includeOthers"]!.description += " Extra."; });
+      expect(run).toThrow("chief_roster.includeOthers is not the planned optional boolean");
+    });
+    test("chief_roster.includeOthers made required", async () => {
+      const run = await mutated((head) => { const schema = head.catalog["chief_roster"]!.inputSchema; schema.required = [...(schema.required ?? []), "includeOthers"]; });
+      expect(run).toThrow("chief_roster.includeOthers is required");
+    });
+    test("a second new optional property on chief_roster", async () => {
+      const run = await mutated((head) => { (head.catalog["chief_roster"]!.inputSchema.properties as Record<string, unknown>)["includeAll"] = { description: "Unexpected.", type: "boolean" }; });
+      expect(run).toThrow("chief_roster (description or schema)");
+    });
+    test("chief_roster.includeOthers copied onto another tool", async () => {
+      const run = await mutated((head) => { (head.catalog["chief_inspect"]!.inputSchema.properties as Record<string, unknown>)["includeOthers"] = INCLUDE_OTHERS_PROPERTY; });
+      expect(run).toThrow("chief_inspect (description or schema)");
+    });
+    describe("the Chief preload line must be exactly select: plus the returned tools in the host's order", () => {
+      const ENTRY = "short rules | chief | claude-code | planner true | research true";
+      test("an extra name appended", async () => {
+        const run = await mutated((head) => editPreload(claudeChief(head), (names) => [...names, "chief_extra"]));
+        expect(run).toThrow(`${ENTRY}: instructions`);
       });
-      expect(run).toThrow("preload max_results is not base + 1");
+      test("two names swapped", async () => {
+        const run = await mutated((head) => editPreload(claudeChief(head), (names) => { const [first, second, ...rest] = names; return [second!, first!, ...rest]; }));
+        expect(run).toThrow(`${ENTRY}: instructions`);
+      });
+      test("a name dropped", async () => {
+        const run = await mutated((head) => editPreload(claudeChief(head), (names) => names.slice(0, -1)));
+        expect(run).toThrow(`${ENTRY}: instructions`);
+      });
+      test("a name repeated", async () => {
+        const run = await mutated((head) => editPreload(claudeChief(head), (names) => [...names, names[0]!]));
+        expect(run).toThrow(`${ENTRY}: instructions`);
+      });
+      test("the old keyword form restored", async () => {
+        const run = await mutated((head) => { const entry = claudeChief(head); entry.instructions = entry.instructions!.replace(/select:\S+/, `query "+chief", max_results ${entry.tools.length}`); });
+        expect(run).toThrow(`${ENTRY}: instructions`);
+      });
+      test("the preload line removed", async () => {
+        const run = await mutated((head) => { const entry = claudeChief(head); entry.instructions = entry.instructions!.split("\n").filter((line) => !line.includes("ToolSearch")).join("\n"); });
+        expect(run).toThrow(`${ENTRY}: instructions`);
+      });
+      test("a preload line added to a codex Chief", async () => {
+        const run = await mutated((head) => { const entry = chiefEntries(head).find((candidate) => candidate.key.includes("| codex |"))!; entry.instructions = entry.instructions!.replace("\n", "\nIf your ToolSearch is needed: select:mcp__bb-bridge__chief_roster\n"); });
+        expect(run).toThrow(`${ENTRY.replace("claude-code", "codex")}: instructions`);
+      });
+      test("a managed worker's preload line changed (a name dropped, then the keyword form)", async () => {
+        const worker = (head: ToolConfig) => head.entries.find((candidate) => candidate.key.includes("| worker | claude-code |"))!;
+        expect(await mutated((head) => { const entry = worker(head); entry.instructions = entry.instructions!.replace(/select:\S+/, "select:mcp__bb-bridge__chief_log"); })).toThrow(": instructions");
+        expect(await mutated((head) => { const entry = worker(head); entry.instructions = entry.instructions!.replace(/select:\S+/, 'query "+chief", max_results 1'); })).toThrow(": instructions");
+      });
+      test("the claude-code worst case: the final tail byte changed, deleted, or one appended", async () => {
+        const worst = (head: ToolConfig) => claudeChief(head, "worst case");
+        const [changed, deleted, appended] = [
+          await mutated((head) => { const entry = worst(head); entry.instructions = `${entry.instructions!.slice(0, -1)}X`; }),
+          await mutated((head) => { const entry = worst(head); entry.instructions = entry.instructions!.slice(0, -1); }),
+          await mutated((head) => { const entry = worst(head); entry.instructions += "r"; }),
+        ];
+        for (const run of [changed, deleted, appended]) expect(run).toThrow("worst case | chief | claude-code | planner true | research true: instructions");
+        // The longer select: line really moves the cap tail: both texts are 32768 characters, but head's ends earlier in the repeated rules than the base's.
+        const { base, head } = await load();
+        const [was, now] = [claudeChief(base, "worst case").instructions!, worst(head).instructions!];
+        expect([was.length, now.length]).toEqual([32768, 32768]);
+        expect(now.endsWith(was.slice(-10))).toBe(false);
+      });
     });
     test("a tool dropped from a role", async () => {
       const run = await mutated((head) => { head.entries[0]!.tools = head.entries[0]!.tools.slice(1); });

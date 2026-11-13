@@ -30,8 +30,9 @@ async function workListScenario() {
     };
     const record = async (step: string, ...chiefs: string[]) => {
       for (const chief of chiefs) {
-        out.push({ step: `${step}: roster of ${chief}`, value: await roster(chief) });
-        out.push({ step: `${step}: roster of ${chief} with waiting and complete`, value: await roster(chief, { includeWaiting: true, includeComplete: true }) });
+        // includeOthers: true keeps the frozen oracle's uncollapsed "Other Chiefs' todos" section; the default collapse is pinned in rosterTools.test.ts.
+        out.push({ step: `${step}: roster of ${chief}`, value: await roster(chief, { includeOthers: true }) });
+        out.push({ step: `${step}: roster of ${chief} with waiting and complete`, value: await roster(chief, { includeOthers: true, includeWaiting: true, includeComplete: true }) });
       }
       out.push({ step: `${step}: bb chief status`, value: await cli([]) });
       out.push({ step: `${step}: bb chief status --json`, value: await cli(["--json"]) });

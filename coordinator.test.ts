@@ -9,6 +9,7 @@ import { MIGRATIONS } from "./src/db/migrations";
 import { loadBaseBuild } from "./scripts/loadBaseBuild";
 import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
+import { PRELOAD_OLD_TAIL, acceptRosterOthersDelta, chiefPreloadTail } from "./test/toolConfigFixture";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -832,10 +833,31 @@ describe("Coordinator", () => {
       expect(farLines).not.toContain("Near worker");
       // Each child's lines are indented under its header; the Coordinator's own Pending block follows the Children block.
       expect(nearLines).toMatch(/\n {2}\S/);
-      // The Coordinator's todo is another Chief's todo to its same-project child, and not listed under the other project's child.
-      expect(nearLines).toContain("Own todo");
-      expect(farLines.slice(0, farLines.indexOf("\nPending:\n- todo"))).not.toContain("Own todo");
+      // The Coordinator's todo is another Chief's todo to its same-project child: by default it is one count line there (not its text), and not counted under the other project's child.
+      expect(nearLines).not.toContain("Own todo");
+      expect(nearLines).toContain("1 other-Chief todo (#2) hidden: not your work. chief_roster includeOthers: true lists them.");
+      expect(farLines.slice(0, farLines.indexOf("\nPending:\n- todo"))).not.toContain("other-Chief todo (#2)");
       expect(text.endsWith(`Pending:\n- todo #2: Own todo`)).toBe(true);
+      // includeOthers: true expands every child block back to the tagged todo lines.
+      const expanded = await call(state, "chief_roster", { includeOthers: true }, coord);
+      const expandedNear = expanded.slice(expanded.indexOf(`(${near})`), expanded.indexOf(`(${far})`));
+      expect(expandedNear).toContain("Own todo");
+      expect(expandedNear).not.toContain("hidden: not your work");
+      expect(expanded.slice(expanded.indexOf(`(${far})`))).toContain("Far todo");
+    });
+
+    test("the Coordinator's own Pending block folds a child's todo into one count line; includeOthers: true lists it", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord, { title: "Only child" })).id;
+      await call(state, "chief_roster", { todo: { text: "Child todo" } }, child);
+      await call(state, "chief_roster", { todo: { text: "Coordinator todo" } }, coord);
+      const ownBlock = (text: string) => text.slice(text.lastIndexOf("\nPending:\n") + 1);
+      const collapsed = ownBlock(await call(state, "chief_roster", {}, coord));
+      expect(collapsed).toBe("Pending:\n- todo #2: Coordinator todo\n- 1 other-Chief todo (#1) hidden: not your work. chief_roster includeOthers: true lists them.");
+      const expanded = ownBlock(await call(state, "chief_roster", { includeOthers: true }, coord));
+      expect(expanded).toContain(`- todo #1 (Chief ${child}): Child todo`);
+      expect(expanded).not.toContain("hidden: not your work");
     });
 
     test("a Coordinator with no children says how to get some", async () => {
@@ -981,6 +1003,7 @@ describe("Coordinator", () => {
     test.each(["codex", "claude-code"] as const)("%s configure: a plain unlinked Chief = base plus exactly the authorized deltas", (provider) => {
       requireBase();
       const [was, now] = [base.configure[provider], structuredClone(head.configure[provider])];
+      const returnedNames = head.configure[provider].tools.map((tool) => tool.name);
       // chief_coordinate sits right after chief_spawn and chief_attach (#213, exact definition) right after chief_coordinate; the coordinator skill is added; all asserted, then dropped.
       const names = now.tools.map((tool) => tool.name);
       expect(names[names.indexOf("chief_spawn") + 1]).toBe("chief_coordinate");
@@ -1012,15 +1035,24 @@ describe("Coordinator", () => {
       for (const tool of now.tools) acceptRetestDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.
       for (const tool of now.tools) acceptEvidenceOnlyDelta(tool, tool.name);
+      // "Chief keeps tool search": chief_roster gains the optional includeOthers boolean and one description clause; asserted, then restored to base.
+      for (const tool of now.tools) acceptRosterOthersDelta(tool, tool.name);
       expect(now.tools).toEqual(was.tools);
-      // Instructions: only the preload line's max_results moves by two (claude-code: chief_coordinate and chief_attach); codex is byte-identical.
+      // Instructions: only the claude-code preload line changes: `query "+chief", max_results N` becomes the exact select: list of every returned tool in the host's order; codex is byte-identical.
       now.instructions = acceptCoreRuleTrim(acceptPlanningLine(now.instructions, was.instructions), was.instructions);
       const preload = (config: Config) => config.instructions.split("\n").filter((line) => line.includes("ToolSearch"));
       if (provider === "codex") expect(preload(was)).toEqual([]);
       else expect(preload(was)).toHaveLength(1);
-      expect(now.instructions.replace(`max_results ${was.tools.length + 2}`, `max_results ${was.tools.length}`)).toBe(was.instructions);
+      expect(now.instructions).toBe(provider === "codex" ? was.instructions : swapPreload(was.instructions, returnedNames));
       expect(now.skills).toEqual(was.skills);
     });
+
+    // The base text with its `query "+chief", max_results N` preload line swapped for the exact select: list of `returned` (an assertion that the line was the keyword form).
+    const swapPreload = (text: string, returned: string[]) => text.split("\n").map((line) => {
+      if (!line.includes("ToolSearch")) return line;
+      expect(line).toMatch(PRELOAD_OLD_TAIL);
+      return line.replace(PRELOAD_OLD_TAIL, chiefPreloadTail(returned));
+    }).join("\n");
 
     test.each(["codex", "claude-code"] as const)("%s configure: a linked child = base plus exactly one Coordinator line (no chief_coordinate, no coordinator skill)", (provider) => {
       requireBase();
@@ -1030,7 +1062,8 @@ describe("Coordinator", () => {
       const lines = child.instructions.split("\n");
       const added = lines.filter((line) => /^Coordinator thr_\w+ supervises you: call chief_escalate before every Need you/.test(line));
       expect(added).toHaveLength(1);
-      expect(acceptCoreRuleTrim(acceptPlanningLine(lines.filter((line) => line !== added[0]).join("\n"), was.instructions), was.instructions).split("\n")).toEqual(was.instructions.split("\n"));
+      const expected = provider === "codex" ? was.instructions : swapPreload(was.instructions, child.tools.map((tool) => tool.name));
+      expect(acceptCoreRuleTrim(acceptPlanningLine(lines.filter((line) => line !== added[0]).join("\n"), was.instructions), was.instructions).split("\n")).toEqual(expected.split("\n"));
     });
   });
 
@@ -1040,6 +1073,8 @@ describe("Coordinator", () => {
       return state.harness.behavior.resolveAgentConfiguration({ ...context, provider: { ...context.provider, id: provider } }) as Promise<{ tools: { name: string }[]; skills: string[]; instructions: string }>;
     };
     const MARKER = "# Project rules marker";
+    // Chief's own budget for the core rules (keeps the rules small), not the SDK cut. The exact select: preload line (about 600 characters for a plain Chief) moved it from 4096/4000.
+    const CHIEF_BUDGET = 5_000;
     const GREETING = "You are the registered Coordinator for Asha: you supervise child Chiefs in any project, not managed threads.";
 
     test.each([["short chief.md", `${MARKER}\n- Keep rules small.`, false], ["32,000-char chief.md", `${MARKER}\n${"- Project rule text.\n".repeat(1_600)}`.slice(0, 32_000), true]])(
@@ -1070,7 +1105,8 @@ describe("Coordinator", () => {
       const { tools, instructions } = await configure(state, await coordinator(state), "claude-code");
       const line = instructions.split("\n").find((text) => text.includes("ToolSearch"))!;
       expect(tools).toHaveLength(3);
-      expect(line.endsWith(`query "+chief", max_results 3`)).toBe(true);
+      expect(line.endsWith("ToolSearch call: select:mcp__bb-bridge__chief_roster,mcp__bb-bridge__chief_spawn,mcp__bb-bridge__chief_attach")).toBe(true);
+      expect(instructions).not.toMatch(/\+chief|max_results/);
     });
 
     test.each(["codex", "claude-code"] as const)("%s: a linked child is a plain Chief minus chief_coordinate and chief_attach, plus exactly one escalate line", async (provider) => {
@@ -1079,22 +1115,30 @@ describe("Coordinator", () => {
       const coord = await coordinator(state);
       const child = (await spawnChild(state, coord)).id;
       const [plainConfig, childConfig] = [await configure(state, plain, provider), await configure(state, child, provider)];
-      expect(plainConfig.instructions.length).toBeLessThan(4000);
+      expect(plainConfig.instructions.length).toBeLessThan(CHIEF_BUDGET);
       expect(plainConfig.skills).toEqual(["chief", "coordinator"]);
       expect(childConfig.skills).toEqual(["chief"]);
       expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate" && name !== "chief_attach"));
       const lines = childConfig.instructions.split("\n");
       const added = lines.filter((line) => line.startsWith("Coordinator "));
       expect(added).toEqual([`Coordinator ${coord} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`]);
-      const preload = (config: typeof plainConfig) => config.instructions.split("\n").find((line) => line.includes("ToolSearch"));
-      const expected = plainConfig.instructions.replace(`max_results ${plainConfig.tools.length}`, `max_results ${childConfig.tools.length}`).split("\n");
+      // The plain Chief's text, except that its preload line asks for the child's tools only (the plain line's two extra names, chief_coordinate and chief_attach, are gone).
+      const names = (config: typeof plainConfig) => config.tools.map((tool) => tool.name);
+      const expected = plainConfig.instructions.split("\n").map((line) => line.includes("ToolSearch") ? line.replace(/select:\S+$/, chiefPreloadTail(names(childConfig))) : line);
       expect(lines.filter((line) => !line.startsWith("Coordinator "))).toEqual(expected);
-      if (provider === "claude-code") expect(preload(childConfig)).toContain(`max_results ${childConfig.tools.length}`);
+      const preloadOf = (config: typeof plainConfig) => config.instructions.split("\n").filter((line) => line.includes("ToolSearch"));
+      if (provider === "claude-code") {
+        expect(preloadOf(plainConfig)).toHaveLength(1);
+        expect(preloadOf(plainConfig)[0]!.endsWith(chiefPreloadTail(names(plainConfig)))).toBe(true);
+        expect(preloadOf(childConfig)[0]!.endsWith(chiefPreloadTail(names(childConfig)))).toBe(true);
+        expect(preloadOf(childConfig)[0]).not.toContain("chief_coordinate");
+        expect(preloadOf(childConfig)[0]).not.toContain("chief_attach");
+      } else expect(preloadOf(childConfig)).toEqual([]);
     });
 
     // The SDK cuts instructions at 32768 chars; the core rules (the last, mandatory one is the Need-you escalation) go before the project rules, so they must end inside the cut even for the longest supported inputs.
-    // The 4096 bound below is Chief's own budget for the core rules (keeps the rules small), not the SDK cut.
-    test("claude-code, planning and research on, linked child, 14-char Coordinator id, 40-char project name: the core rules, Need-you rule included, end inside the 4096-char core-rules budget", async () => {
+    // The CHIEF_BUDGET bound below is Chief's own budget for the core rules (keeps the rules small), not the SDK cut.
+    test("claude-code, planning and research on, linked child, 14-char Coordinator id, 40-char project name: the core rules, Need-you rule included, end inside the 5000-char core-rules budget", async () => {
       const state = await setup();
       const coord = await coordinator(state);
       const child = (await spawnChild(state, coord)).id;
@@ -1117,9 +1161,9 @@ describe("Coordinator", () => {
       expect(linked.instructions.indexOf("# Chief core rules")).toBeGreaterThan(0);
       expect(linked.instructions.indexOf(NEED_YOU_END)).toBeGreaterThan(0);
       expect(idPadding).toBeGreaterThanOrEqual(0);
-      expect(coreEnd(linked.instructions) + idPadding).toBeLessThanOrEqual(4096);
+      expect(coreEnd(linked.instructions) + idPadding).toBeLessThanOrEqual(CHIEF_BUDGET);
       expect(coreEnd(plain.instructions)).toBeLessThanOrEqual(coreEnd(linked.instructions));
-      expect(coreEnd(plain.instructions)).toBeLessThan(4000);
+      expect(coreEnd(plain.instructions)).toBeLessThan(CHIEF_BUDGET);
     });
 
     test("the coordinator skill declares the name the plain Chief's configure lists", async () => {

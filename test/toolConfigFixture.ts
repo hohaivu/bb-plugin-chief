@@ -65,10 +65,36 @@ const SKIP_OLD = "Refused, like override, for an implementation-lane Spec Writer
 const SKIP_NEW = "Refused, like override, for an implementation-lane Spec Writer. Also refused when the branch has a docs/ commit that no Spec Writer of this task is recorded on (Chief-Spec-Writer trailer); when that check cannot run, the reply says so. Never cleaned up.";
 export const TESTS_DOCS_LINE = "- Tests, docs: only a tester writes or runs tests (a plan's test wave, or chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).";
 const SKIPS_OLD_PHRASE = "Guidance, not a rule: small";
+// "Chief keeps tool search" wave (plan thr_peiq8gukb2, wave 1 steps 1 and 5; docs/specs/tool-call-stability.md, docs/specs/work-list.md): the chief_roster delta and the Chief preload edit.
+export const ROSTER_OTHERS_OLD = "others' todos are listed apart and tagged — leave them unless the user asks";
+export const ROSTER_OTHERS_NEW = "others' todos show as one count line (includeOthers: true lists them, tagged) — leave them unless the user asks";
+export const INCLUDE_OTHERS_PROPERTY = { description: "List todos owned by other or ended Chiefs, and unowned ones, in full; by default the Pending block shows them as one count line.", type: "boolean" };
+export const PRELOAD_OLD_TAIL = /query "\+chief", max_results \d+$/;
+/** The order in which the host selects a plain Chief's tools (the `tools` array of `bb.agents.configure`), pinned here as a literal: the preload line follows it, while the SDK returns the tools in registration order. */
+export const CHIEF_HOST_ORDER = [
+  "chief_plan", "chief_consult", "chief_spawn", "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review",
+  "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research", "chief_coordinate", "chief_attach",
+];
+/** The chief_roster delta ("Chief keeps tool search"), asserted exactly and then undone: the optional `includeOthers` boolean and the one description clause. */
+export function acceptRosterOthersDelta(tool: any, name: string) {
+  if (name !== "chief_roster") return;
+  const properties = tool.inputSchema.properties;
+  if (JSON.stringify(properties.includeOthers) !== JSON.stringify(INCLUDE_OTHERS_PROPERTY) || (tool.inputSchema.required ?? []).includes("includeOthers")) throw new Error("chief_roster.includeOthers: must be the one optional boolean");
+  delete properties.includeOthers;
+  if (tool.description.split(ROSTER_OTHERS_NEW).length !== 2) throw new Error("chief_roster description: must hold the one authorized clause");
+  tool.description = tool.description.replace(ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD);
+}
+/** The preload names a Chief row must ask for: the returned tools in the host's pinned order. Throws if the returned tools are not exactly that set (so the order is checked, not assumed from the SDK registration order). */
+export const chiefPreloadTail = (returned: string[]) => {
+  const ordered = CHIEF_HOST_ORDER.filter((name) => returned.includes(name));
+  if (ordered.length !== returned.length || new Set(returned).size !== returned.length) throw new Error(`Chief tools are not a unique subset of the host order: ${returned.join()}`);
+  return `select:${ordered.map((name) => `mcp__bb-bridge__${name}`).join(",")}`;
+};
 
 /** Throws unless `head` equals `base` apart from: the chief_delegate `kind` clause, the chief_complete `skipReview` clause, in Chief's core rules the Tests line (now Tests, docs)
- * and the Skips line (the phrase swap only), and (#213) the chief_attach tool of a plain Chief (exact definition, right after chief_coordinate, and one more `max_results` in the
- * claude-code preload line). Chief instructions must EXACTLY equal the base text rebuilt uncapped, edited, then capped at the SDK limit; everything else must be identical.
+ * and the Skips line (the phrase swap only), and (#213) the chief_attach tool of a plain Chief (exact definition, right after chief_coordinate), and ("Chief keeps tool search") the
+ * chief_roster `includeOthers` property plus its one description clause, and a plain Chief's claude-code preload line `query "+chief", max_results N` becoming `select:` plus every returned
+ * tool in the host's pinned order. Chief instructions must EXACTLY equal the base text rebuilt uncapped, edited (core rules and preload line), then capped at the SDK limit; everything else must be identical.
  * `head` is cloned, never mutated. */
 export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
   const fail = (what: string): never => { throw new Error(`tool config differs from base outside the allowed edits: ${what}`); };
@@ -98,6 +124,14 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
       properties["focus"] = was.inputSchema.properties["focus"];
     }
     // Forward: the base chief_report plus the named edits (exact counts) must equal head's.
+    if (name === "chief_roster") {
+      const properties = now.inputSchema.properties as Record<string, unknown>;
+      if (JSON.stringify(properties["includeOthers"]) !== JSON.stringify(INCLUDE_OTHERS_PROPERTY)) fail("chief_roster.includeOthers is not the planned optional boolean");
+      delete properties["includeOthers"];
+      if ((now.inputSchema.required ?? []).includes("includeOthers")) fail("chief_roster.includeOthers is required");
+      if (was.description.split(ROSTER_OTHERS_OLD).length !== 2 || now.description !== was.description.replace(ROSTER_OTHERS_OLD, ROSTER_OTHERS_NEW)) fail("chief_roster description is not the base text with the one authorized clause");
+      now.description = was.description;
+    }
     if (name === "chief_report") withPlanFlags(was.inputSchema.properties["plan"] as Parameters<typeof withPlanFlags>[0]);
     if (JSON.stringify(now) !== JSON.stringify(was)) fail(`${name} (description or schema)`);
   }
@@ -105,20 +139,11 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
   head.entries.forEach((entry, index) => {
     const old = base.entries[index]!;
     const plainChief = entry.key.includes("| chief |");
+    const returnedTools = [...entry.tools];
     if (plainChief) {
       if (entry.tools[entry.tools.indexOf("chief_coordinate") + 1] !== "chief_attach") fail(`${old.key}: chief_attach not right after chief_coordinate`);
       // Only the one checked insertion is removed; a duplicate stays and fails the exact tools comparison below.
       entry.tools.splice(entry.tools.indexOf("chief_coordinate") + 1, 1);
-      if (entry.key.includes("| claude-code |")) {
-        // The preload line asks for one more tool; the digit count is unchanged, so the SDK cap cuts at the same byte.
-        const lines = entry.instructions?.split("\n") ?? [];
-        const at = lines.findIndex((line) => line.includes("ToolSearch"));
-        const [was, now] = [`max_results ${old.tools.length}`, `max_results ${old.tools.length + 1}`];
-        if (at < 0 || lines.some((line, i) => i > at && line.includes("ToolSearch")) || !lines[at]!.endsWith(` ${now}`)) fail(`${old.key}: preload max_results is not base + 1`);
-        if (was.length !== now.length) fail(`${old.key}: preload digit count changed`);
-        lines[at] = `${lines[at]!.slice(0, -now.length)}${was}`;
-        entry.instructions = lines.join("\n");
-      }
     } else if (entry.tools.includes("chief_attach")) fail(`${old.key}: chief_attach outside a plain Chief`);
     if (entry.key !== old.key || JSON.stringify(entry.tools) !== JSON.stringify(old.tools) || JSON.stringify(entry.skills) !== JSON.stringify(old.skills)) fail(`${old.key}: key, tools or skills`);
     if (entry.instructions === old.instructions) return;
@@ -131,7 +156,16 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
     const prefix = old.instructions!.slice(0, cut);
     if (`${prefix}${rules}`.slice(0, INSTRUCTIONS_CAP) !== old.instructions) fail(`${old.key}: base is not prefix + rules capped`);
     const once = (text: string, start: string) => { const lines = text.split("\n"); const at = lines.findIndex((line) => line.startsWith(start)); if (at < 0 || lines.some((line, index) => index > at && line.startsWith(start))) fail(`${old.key}: base has not exactly one ${start} line`); return { lines, at }; };
-    const tests = once(prefix, "- Tests:");
+    // The preload edit is applied to the uncapped base before the cap, so the longer line moves the cap tail exactly as it does at head.
+    const claudeCode = entry.key.includes("| claude-code |");
+    let edited = prefix;
+    if (claudeCode) {
+      const preload = once(prefix, "If your chief_* tools are deferred");
+      if (!PRELOAD_OLD_TAIL.test(preload.lines[preload.at]!)) fail(`${old.key}: base preload is not the +chief keyword form`);
+      preload.lines[preload.at] = preload.lines[preload.at]!.replace(PRELOAD_OLD_TAIL, chiefPreloadTail(returnedTools));
+      edited = preload.lines.join("\n");
+    } else if (prefix.includes("ToolSearch")) fail(`${old.key}: base has a preload line without claude-code`);
+    const tests = once(edited, "- Tests:");
     tests.lines[tests.at] = TESTS_DOCS_LINE;
     const skips = once(tests.lines.join("\n"), "- Skips:");
     if (!skips.lines[skips.at]!.includes(SKIPS_OLD_PHRASE)) fail(`${old.key}: base Skips line lacks the old phrase`);
