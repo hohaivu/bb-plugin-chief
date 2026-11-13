@@ -118,7 +118,7 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
 
 ## 10. Fold (only with a `## Fold` section in your brief)
 
-Commit only `docs/` on your worktree branch, each commit with the `Chief-Spec-Writer` trailer. Before you report ready, fold the commits onto the task branch `<branch>`:
+Commit only `docs/` on your worktree branch, each commit with the `Chief-Spec-Writer` trailer, after each meaningful step (a passing sub-change, before any risky edit, before reporting). The only push you make is the fold into `<branch>`: never push the side branch or any other branch, and push only through the steps below. The folded branch is what the reviewer sees. Commit your docs, fold them, then report ready; never create, merge, or mark ready any pull request. Before you report ready, fold the commits onto the task branch `<branch>`:
 
 1. Require a clean tree: `git status --porcelain` prints nothing.
 2. `git fetch origin <branch>`, then note `U=$(git rev-parse origin/<branch>)`.

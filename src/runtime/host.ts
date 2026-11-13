@@ -128,7 +128,7 @@ export function registerHost(ctx: Ctx) {
       skills: managedSkills(role, row?.kind ?? (seeded?.success ? seeded.data.kind : undefined)),
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: follow the chief-worker skill's report contract; after reporting, end with one line.`,
-        "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
+        "After any context compaction, before acting, reload in full the chief-* skills your brief names (Skill tool, or read each SKILL.md in full) and re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
         ...(claudeCode ? [toolSchemaLine(tools)] : []),
         ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
