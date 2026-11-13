@@ -6,7 +6,7 @@ import type { Role } from "../core/roles";
 import { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../types";
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
-import { COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, fitLines, recordedLines, type RecordedCommand } from "../core/text";
+import { COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
 import { waveTitle } from "../plan/waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
@@ -315,11 +315,11 @@ export type ReportAlertInput = {
 export function reportAlert(input: ReportAlertInput) {
   const { role, title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp, lessonId } = input;
   const FIELD_ROOM = 600;
-  const ACTION_ROOM = 400;
+  const ACTION_ROOM = 1_200;
   const MIN_RESULT_ROOM = 200;
   const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
   const longLabel = "Result (clipped, full text in the report file): ";
-  const inlineIntro = "To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):";
+  const inlineIntro = "Plan files, wave 1 first. To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):";
   const cost = (lines: string[]) => lines.reduce((total, line) => total + line.length + 1, 0);
   return (pointer: Pointer | null) => {
     const stored = !!pointer?.name;
@@ -355,12 +355,12 @@ export function reportAlert(input: ReportAlertInput) {
     const remaining = alertRoom - fixedCost - cost(fields);
     // Optional detail gets what the required lines leave, minus a floor for Result.
     let room = remaining - (resultText ? sizeLabel.length + Math.min(resultText.length, cap, MIN_RESULT_ROOM) + 1 : 0);
-    const waveFit = fitLines(waveLines, room);
+    const waveFit = fitLines(inlinePlans.length ? [] : waveLines, room);
     room -= cost(waveFit.lines);
     const inlineFit = fitLines(inlinePlans, room - inlineIntro.length - 1, false);
     const inlineBlock = inlineFit.lines.length ? [inlineIntro, ...inlineFit.lines] : [];
     room -= cost(inlineBlock);
-    const commands = recorded === undefined ? [] : recordedLines(recorded, room).slice(1);
+    const commands = recorded ? recordedLines(recorded.filter(failedCommand), room).slice(1) : [];
     const resultRoom = Math.min(cap, remaining - cost(waveFit.lines) - cost(inlineBlock) - cost(commands) - sizeLabel.length - 1);
     const resultCut = !!resultText && resultText.length > resultRoom;
     // A file-bearing report (first pass long or clipped) labels its Result as clipped; only a short, unclipped one stays plain.

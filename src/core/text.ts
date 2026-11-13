@@ -25,16 +25,17 @@ export type RecordedCommand = { command: string; exitCode: number | null; status
 /** Longest command text an alert or prompt shows; the full report file keeps the whole command. */
 export const COMMAND_EXCERPT = 120;
 
+export const failedCommand = (c: RecordedCommand) => c.exitCode !== null && c.exitCode !== 0;
+
 /** Lines for the commands BB recorded, failures first. recorded null means the read failed, [] means none ran.
  * The header always stays; command lines stop at `budget` characters with an "…and N more" line, and each
  * command shows at most COMMAND_EXCERPT characters unless full is set. */
 export function recordedLines(recorded: RecordedCommand[] | null, budget = Infinity, full = false) {
   if (recorded === null) return ["Recorded: could not read the event log (see the plugin log)"];
   if (!recorded.length) return ["Recorded: none recorded"];
-  const failed = (c: RecordedCommand) => c.exitCode !== null && c.exitCode !== 0;
-  const lines = [...recorded.filter(failed), ...recorded.filter((c) => !failed(c))]
+  const lines = [...recorded.filter(failedCommand), ...recorded.filter((c) => !failedCommand(c))]
     .map((c) => `  ${full ? c.command : clip(c.command, COMMAND_EXCERPT)} → exit ${c.exitCode ?? c.status}`);
-  return [`Recorded (last ${recorded.length} commands): ${recorded.filter(failed).length} non-zero exit`, ...fitLines(lines, budget).lines];
+  return [`Recorded (last ${recorded.length} commands): ${recorded.filter(failedCommand).length} non-zero exit`, ...fitLines(lines, budget).lines];
 }
 
 /** Like clip(), but elides the middle instead of the tail: a long brief's opening

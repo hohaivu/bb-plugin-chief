@@ -188,7 +188,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(specSources.length && specWriter ? [
       "", "## Read-only context",
-      "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below belong to the worker and the tester: never write code or tests for them.",
+      "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below are your wave's; they belong to the worker and the tester: never write code or tests for them.",
       ...specSources,
     ] : specSources.length && !evidence ? [
       "", "## Source of truth for test cases",
@@ -215,15 +215,15 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ]),
     ] : []),
     ...(contracts && !specWriter && !evidence ? [
-      "", "## Contracts to verify", contracts,
-      "Keep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.",
+      "", "## Contracts to verify",
+      `Read the \`## Contracts to verify\` section of your plan file (${planContextLine}) in full: it is your checklist. Keep every item. Your ready result confirms each one with its evidence (test, command or file:line); the reviewer checks the same list.`,
     ] : []),
     ...(verifyCommand !== null && !specWriter && !evidence ? [
       "", "## Verify command",
       // Fence longer than any backtick run so a ``` line in the command cannot close it.
       ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
       ...(tester ? [
-        "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure that also occurs at your Base commit is a baseline: list it and do not fix it. Any other failure in product code follows the product-code rule in `## Test work`. If this command runs the whole test suite, run it only when your mission or `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".",
+        "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure that also occurs at your Base commit is a baseline: list it and do not fix it. Any other failure in product code follows the product-code rule in `## Test work`. If this command runs the whole test suite, run it only when your mission or your plan file's `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".",
       ] : [
         "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
         "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
@@ -375,7 +375,7 @@ export function plannerBrief(input: PlannerBriefInput): string {
       `Planner ${revision.plannerThreadId} wrote this plan and its one advisor review (${revision.advisorThreadId}) sent it back. Read every plan file and the advisor's report in full:`,
       ...revision.planPaths.map((path) => `- ${path}`),
       ...(revision.advisorReportPath ? [`- Advisor report: ${revision.advisorReportPath}`] : []),
-      ...(revision.advisorSummary ? [`Advisor summary: ${revision.advisorSummary}`] : []),
+      ...(revision.advisorSummary && !revision.advisorReportPath ? [`Advisor summary: ${revision.advisorSummary}`] : []),
       ...(revision.blocker ? [`The advisor reported blocked: ${revision.blocker}`, `Its recommendation: ${revision.recommendation ?? ""}`] : []),
       "- Keep the parts no finding touches. Fix every blocking finding.",
       "- List each finding you reject under a `## Disputed findings` heading, with your evidence.",
@@ -454,8 +454,7 @@ export function advisorBrief(input: AdvisorBriefInput): string {
       "", "## Plan to review",
       `Planner ${plan.plannerThreadId} wrote this plan. Read every plan file:`,
       ...plan.paths.map((path) => `- ${path}`),
-      ...(plan.summary ? [`Planner result: ${plan.summary}`] : []),
-      ...(plan.reportPath ? [`Planner report: ${plan.reportPath}`] : []),
+      `Planner report: ${plan.reportPath ?? `bb chief inspect ${plan.plannerThreadId}`}`,
       "", "## Plan-review checklist",
       "- Wrong or missing files and callers.",
       "- An unsound wave split or `dependsOn`.",
