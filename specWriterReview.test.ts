@@ -5,10 +5,12 @@ import { fileURLToPath } from "node:url";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
-import { DESIGN_CHECKLIST_LINE, PLANNER_ANCHOR, PLANNER_NEW_COMPLEX_TAIL, PLANNER_OLD_COMPLEX_TAIL, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, spliceAfter, start, status, wave, withReviewerLine } from "./test/harness";
+import { DESIGN_CHECKLIST_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, start, status, wave, withReviewerLine } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { DOCS_RULE_OLD, dropDocsLines } from "./test/docsOwnership";
+import { maskSlimSections, shrinkAlerts } from "./test/shrinkEdits";
+import { contractItems, expectLoadLine } from "./test/loadLine";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -201,7 +203,7 @@ describe("tester role", () => {
       const state = await setup();
       const head = await stringsFixture(state);
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "strings-no-spec-7c3a89d.txt"), "utf8");
-      expect(head).toBe(oracle);
+      expect(head).toBe(shrinkAlerts(oracle, await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "reviewer-advice-626c3cd.txt"), "utf8")));
     });
 
     // Contract 17 (no-spec preservation, briefs): the worker, designer and tester prompts chief_delegate builds on the oracle fixture
@@ -236,7 +238,7 @@ describe("tester role", () => {
     // tester brief trim, each with its exact count; the replacement text is the plan's contract, not a copy of head output.
     const briefSections = (text: string) => Object.fromEntries(text.split(/^=== (.+) ===\n/m).slice(1).reduce<string[][]>((pairs, part, i) => (i % 2 ? pairs[pairs.length - 1]!.push(part) : pairs.push([part]), pairs), []));
     const TESTER_VERIFY_BASE = "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.\nIf this command runs the whole test suite and this brief does not say the owner asked for that, do not run it: list it as \"not run: full suite not asked for\" under Automated Verification.";
-    const TESTER_VERIFY_TRIMMED = "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure that also occurs at your Base commit is a baseline: list it and do not fix it. Any other failure in product code follows the product-code rule in `## Test work`. If this command runs the whole test suite, run it only when your mission or `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".";
+    const TESTER_VERIFY_TRIMMED = "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure that also occurs at your Base commit is a baseline: list it and do not fix it. Any other failure in product code follows the product-code rule in `## Test work`. If this command runs the whole test suite, run it only when your mission or your plan file's `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".";
     const REFACTOR_ORACLE_LINE = "- When this task is a refactor or migration meant to keep behaviour, treat the base commit as the oracle: where practical, compare old and new behaviour through tests on the same inputs and report the comparison under Automated Verification; explain every difference, since an unexplained one is a regression.\n";
     const REPLAN_LINE = "- If this work cannot be finished in this thread, commit what is done, then report blocked with what is done, the remaining scope, and a proposed split into smaller waves; recommend \"re-plan the remaining scope\".";
     const NO_HEAD = "Its report names no Head commit: read the full report.";
@@ -246,7 +248,8 @@ describe("tester role", () => {
       text = replaceText(text, REPLAN_LINE, DOCS_RULE_OLD, 1);
       if (!planned) {
         text = replaceText(text, "- Regression passes\n\n## Constraints\n- None stated.\n\n## Source of truth", "- Regression passes\n\n## Source of truth", 1);
-        return replaceText(text, "## Predecessor's last report\nDone\nFull report:", `## Predecessor's last report\n${NO_HEAD}\nFull report:`, 1);
+        // The short ready result of a worker with no recorded command no longer writes a report file, so its pointer line goes.
+        return replaceText(text, "## Predecessor's last report\nDone\nFull report: <storage>/chief/proj_1/thr_2/report-1.md\n", `## Predecessor's last report\n${NO_HEAD}\n`, 1);
       }
       text = replaceText(text, "## Success criteria\n- None stated.\n\n## Constraints\n- None stated.\n\n## Context", "## Context", 1);
       text = replaceText(text, "plan-1.md\n- Totals stay non-negative\n", "plan-1.md\n", 1);
@@ -262,28 +265,27 @@ describe("tester role", () => {
       expect(Object.keys(head)).toEqual(Object.keys(base));
       const headCommit = "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.";
       for (const name of ["worker, unplanned", "designer, unplanned", "worker, planned"]) {
-        expect(dropDocsLines(head[name]!), name).toBe(dropDocsLines(base[name]!));
+        expect(maskSlimSections(dropDocsLines(head[name]!)), name).toBe(maskSlimSections(dropDocsLines(base[name]!)));
       }
       for (const [name, planned] of [["tester, unplanned", false], ["tester, planned", true]] as const) {
         const lines = head[name]!.split("\n");
         expect(lines.filter((line) => line === headCommit), name).toHaveLength(1);
-        expect(lines.filter((line) => line !== headCommit).join("\n"), name).toBe(trimmedTester(base[name]!, planned));
+        expect(maskSlimSections(lines.filter((line) => line !== headCommit).join("\n")), name).toBe(maskSlimSections(trimmedTester(base[name]!, planned)));
       }
     });
 
-    // Contract 17 (planner and advisor briefs): they change on purpose, so assert the changed lines only. The planner is told the
-    // spec flag, the `## Spec delta` heading and that the Spec Writer commits docs in parallel with the wave's worker, which builds from the plan; the advisor's plan review
+    // Contract 17 (planner and advisor briefs): they change on purpose, so assert the changed lines only. The planner's plan-field rules moved to the
+    // `chief-role-read-only` skill (skill-owned, not tested); its brief keeps the load line, the read-only item and the wave cap. The advisor's plan review
     // checks a docs-changing chain for a missing spec: true wave.
     test("the planner's and the advisor's briefs carry the spec-first lines", async () => {
       const state = await setup();
       const chief = await start(state);
       await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chief.threadId));
       const planPrompt = state.spawned.at(-1).prompt as string;
-      expect(planPrompt).toContain("`{body, dependsOn, design?, test?, spec?, feature?, reshape?}`");
-      expect(planPrompt).toContain("mark the implementation wave that makes the change `spec: true` and give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full).");
-      expect(planPrompt).not.toContain("Test waves are never");
-      expect(planPrompt).not.toContain("mark its test wave `spec: true`");
-      expect(planPrompt).not.toContain("before the wave's worker runs");
+      expectLoadLine(planPrompt, "planner");
+      expect(contractItems(planPrompt)).toContain("- Remain read-only: do not create, modify, or delete any file the repository tracks, and do not commit or push.");
+      expect(contractItems(planPrompt)).toContain("- Split the work into at most 8 waves.");
+      for (const gone of ["Test waves are never", "mark its test wave `spec: true`", "before the wave's worker runs", "`{body, dependsOn"]) expect(planPrompt, gone).not.toContain(gone);
 
       const planner = await plan(state, chief.threadId, [specImpl(1), planWave(2), TEST_WAVE(3)]);
       await approvePlan(state, chief.threadId, planner.threadId);
@@ -360,7 +362,6 @@ describe("tester role", () => {
     };
     // <baseline-oracle-end>
 
-    const oracleFile = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", name), "utf8");
     const WRITER_BASELINE = "- Baseline: this wave's plan has a `## Spec baseline` heading.";
     const TESTER_BASELINE = "- A new spec's baseline (the current behaviour a Spec Writer documented";
     const gateOf = (prompt: string) => prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!.split("\nRead each worker report")[0]!.split("\n");
@@ -379,55 +380,20 @@ describe("tester role", () => {
       expect(gateOf(entries.find(([name]) => name === "reviewer prompt")![1])).toHaveLength(6);
     });
 
-    // Contract (planner equivalence, base oracle): plannerBrief output is the bytes of base 6d288a2 for a plain and a revision brief,
-    // after only the counted substitutions below (2 = plain and revision; the `complex` bullet is plain-only). Any other drift fails.
-    // Regression: a rule dropped from, duplicated in, or moved within the Working contract; a trigger line that loses its skill name.
-    // Expected new lines are literals written from wave 1's plan (Steps 1.3 to 1.11), never imported from src.
-    const PLANNER_READ_ONLY_LINE = "- Remain read-only: do not create, modify, or delete any file the repository tracks, and do not commit or push. A worker implements the plan in its own worktree.";
-    const PLANNER_REPORT_LINE = "- Report with chief_report state ready and the plan in its `plan` field, never as a file write: an array of `{body, dependsOn, design?, test?, spec?, feature?, reshape?}`, one entry per wave in order. Mark every implementation wave that adds new behaviour `feature: true`, and the reshape wave `reshape: true`; the reviewer runs the native-design check only for them. Chief receives each wave as its own file. The `result` is a short summary, not the plan: the goal, the files to touch, the ordered steps as one line each, and the \"What we're NOT doing\" headline, under 800 characters. Leave `summary` unset.";
-    const PLANNER_DEPENDS_LINE = "- Split the work into at most 8 waves, each a self-contained plan one worker finishes; one implementation wave by default. `dependsOn` per wave: omitted = builds on the previous wave; `[k]` (1-based) = builds on wave k's implementation or branch; `[]` = independent, its own chain. A head wave and every wave that builds on it share one branch, pull request and worktree. Prefer independent chains to long ones: one failure blocks the rest of its chain. A wave that needs only another wave's interface (types, API, schema, CLI shape) may take `[]` when (a) it builds and verifies from the default base without a declaration another wave adds (the interface is already on the base, or each wave codes against a local stub the merge order resolves; name which) and (b) each shared file or declaration has one owning wave, named in the plan. Then write that interface into both waves' `## Contracts to verify`; otherwise chain it. Waves have no phases, except that a `spec: true` implementation wave has a Spec Writer that runs in parallel with its worker.";
-    const PLANNER_DESIGN_TRIGGER = "- UI whose look no approved design or explicit visual spec fixes (pure-UI work too) gets a design-only wave marked `design: true` before the wave that builds it: follow the Design wave section of the `chief-role-read-only` skill. Other work has no design wave.";
-    const PLANNER_RESHAPE_TRIGGER = "- Big feature (new behaviour, not a bug fix, refactor, migration or docs- or test-only change, whose implementation touches 3+ modules or 10+ files): put one reshape wave between the chain's last feature implementation wave and its test wave, and follow the Reshape wave section of the `chief-role-read-only` skill. Never add a reshape wave to a bug fix, a refactor or a smaller feature.";
-    /** `base` with every line that starts with `prefix` replaced by `to` (a removed line when `to` is null); fails unless exactly `count` lines match. */
-    const replaceLine = (base: string, prefix: string, to: string | null, count: number) => {
-      let hits = 0;
-      const out = base.split("\n").flatMap((l) => l.startsWith(prefix) ? (hits += 1, to === null ? [] : [to]) : [l]).join("\n");
-      expect(hits, prefix).toBe(count);
-      return out;
-    };
-    const plannerExpected = (base: string) => {
-      let out = replaceLine(base, "- Remain read-only: ", PLANNER_READ_ONLY_LINE, 2);
-      out = replaceLine(out, "- Report with chief_report state ready. Its result", PLANNER_REPORT_LINE, 2);
-      out = replaceLine(out, "- Split the work into at most", PLANNER_DEPENDS_LINE, 2);
-      out = replaceLine(out, "- When the task mixes UI that no approved design", null, 2);
-      out = replaceText(out, "(dependsOn the chain's last implementation wave), delegated", "(dependsOn the chain's last implementation wave; never `spec: true`), delegated", 2);
-      out = spliceAfter(out, PLANNER_ANCHOR, `${PLANNER_DESIGN_TRIGGER}\n${PLANNER_RESHAPE_TRIGGER}`, 2);
-      out = replaceText(out, "who commits the docs before the wave's worker runs. Test waves are never `spec: true`. List",
-        "who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full). List", 2);
-      out = replaceLine(out, "- Submit the plan through chief_report's `plan` field", null, 2);
-      out = replaceText(out, "The worker and the reviewer both receive this exact list.",
-        "The worker and the reviewer both receive this exact list. Write each item so a reviewer can check it by reading the pinned pull request commit and the reports. Name a commit by a fixed sha or by where the reviewer finds it (\"the Head commit wave 1's worker report names\"), never a `<…>` placeholder. Leave out facts about the worker's process (its HEAD before the first edit, force pushes, branches or pull requests it did not create): put those in the wave's steps. Never need another repository's checkout: pin that content by commit and quote it in the plan.", 2);
-      return replaceText(out, PLANNER_OLD_COMPLEX_TAIL, PLANNER_NEW_COMPLEX_TAIL, 1);
-    };
-    test("the planner prompt equals base 6d288a2's for a plain and a revision brief", async () => {
-      const state = await setup();
-      expect(await plannerFixture(state)).toBe(plannerExpected(await oracleFile("planner-6d288a2.txt")));
-    });
-
-    // Contract (planner invariants): in the plain and the revision prompt the plan field is named once, the design and reshape rule
-    // bodies stay out (the skill holds them), and both triggers name the skill. Regression: the plan-field rule is restated, a rule
-    // body returns to the prompt, or a trigger loses its skill name. The prompt is rendered output, not a prose file.
-    test("a planner prompt names the plan field once, holds both triggers and none of the design or reshape bodies", async () => {
+    // Contract (planner brief, wave 2): in the plain and the revision prompt the Working contract is the load line, the read-only item and
+    // the wave cap only, and the plan-field, design and reshape rule bodies stay out (the skill holds them). The revision brief names the
+    // plan files and the advisor's summary. Regression: a rule body returns to the prompt; the load line is missing or names other skills.
+    test("a planner prompt holds the load line, the read-only item and the wave cap, and none of the moved rule bodies", async () => {
       const state = await setup();
       const prompts = (await plannerFixture(state)).split(/^=== .* ===\n/m).filter(Boolean);
       expect(prompts).toHaveLength(2);
       for (const prompt of prompts) {
-        expect(prompt.match(/plan`? field/g)).toHaveLength(1);
-        expect(prompt.match(/never `spec: true`/g)).toHaveLength(1);
-        for (const gone of ["Test waves are never", "Like the test wave", "make-native", "Pareto", "learn each touched area", "Designer draws the artboards"]) expect(prompt, gone).not.toContain(gone);
-        for (const trigger of [PLANNER_DESIGN_TRIGGER, PLANNER_RESHAPE_TRIGGER]) expect(prompt).toContain(`${trigger}\n`);
-        expect(prompt.match(/`chief-role-read-only`/g)).toHaveLength(2);
+        expectLoadLine(prompt, "planner");
+        expect(contractItems(prompt).slice(1, 3)).toEqual(["- Remain read-only: do not create, modify, or delete any file the repository tracks, and do not commit or push.", "- Split the work into at most 8 waves."]);
+        for (const gone of ["`{body, dependsOn", "Test waves are never", "make-native", "Pareto", "Designer draws the artboards", "design: true", "reshape wave"]) expect(prompt, gone).not.toContain(gone);
       }
+      expect(prompts[1]).toContain("Advisor summary: Merge the two waves");
+      expect(prompts[1]).toMatch(/- <storage>\/chief\/proj_1\/thr_\d+\/plan-1\.md/);
     });
 
     // Contract (mixed chain, existing-only first): wave 1's Spec Writer and worker prompts are base 6d288a2's bytes although wave 2 has
