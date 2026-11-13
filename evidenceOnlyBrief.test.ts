@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { type WorkerBriefInput, workerBrief } from "./src/research/delegationBrief";
 import { READY, ctxOf, delegateWave, plan, readyIdle, readyImpl, refusal, report, rowOf, tool, workerOn } from "./test/testerHelpers";
@@ -169,6 +173,65 @@ describe("evidence-only tester brief", () => {
         expect(workerBrief({ ...input, evidenceOnly: true }), label).toEqual(omitted);
         expect(workerBrief({ ...input, evidenceOnly: false }), label).toEqual(omitted);
       }
+    });
+
+    // Contract (wave 1 of the Spec-delta plan, contracts 2-4): the matrix is rendered on base 7687ebfd (the stack base) and the result stored in
+    // test/fixtures/briefs-matrix-7687ebf.json: a sha256 of each complete worker, designer, tester and evidence-only tester output (prompt and brief,
+    // nothing masked), and the full base text of the 8 Spec Writer cells with findings=false prior=false verify=npm test specDocs=1.
+    // Only the Spec Writer Inputs sentence changes, by the one named edit below applied to the BASE text.
+    // Regression: any byte changed in a non-writer brief; an Inputs line that keeps the old allowance or is missing in either lane; a changed Baseline line.
+    describe("equal to base 7687ebfd", () => {
+      const base = readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "briefs-matrix-7687ebf.json"), "utf8").then((text) => JSON.parse(text) as { hashes: Record<string, string>; writers: Record<string, string> });
+      const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+      const OLD_INPUTS = "You may read the code entry points and guideline files those domains need, read-only.";
+      const NEW_INPUTS = "Read code only to check a name or path the delta states; a gap goes under `## Open questions`.";
+
+      test.each(["worker", "designer", "tester"])("%s: every cell renders the base's complete bytes", async (kind) => {
+        const { hashes } = await base;
+        const own = cells.filter(([label]) => label.startsWith(`${kind} planned`));
+        expect(own).toHaveLength(64);
+        for (const [label, input] of own) expect(sha(workerBrief(input)), label).toBe(hashes[label]);
+      });
+
+      test("evidence-only tester: every cell renders the base's complete bytes", async () => {
+        const { hashes } = await base;
+        const own = cells.filter(([label]) => label.startsWith("tester planned"));
+        expect(own).toHaveLength(64);
+        for (const [label, input] of own) expect(sha(workerBrief({ ...input, evidenceOnly: true })), `${label} evidenceOnly`).toBe(hashes[`${label} evidenceOnly`]);
+      });
+
+      test.each(["spec-writer side", "spec-writer implementation"])("%s: the Inputs line is the new one in every cell, and the base text plus that one edit is the brief", async (kind) => {
+        const { writers } = await base;
+        const own = cells.filter(([label]) => label.startsWith(`${kind} planned`));
+        expect(own).toHaveLength(64);
+        for (const [label, input] of own) {
+          const prompt = workerBrief(input).prompt;
+          expect(prompt.split(NEW_INPUTS), label).toHaveLength(2);
+          expect(prompt, label).not.toContain(OLD_INPUTS);
+          expect(prompt, label).not.toContain("You may read the code entry points");
+        }
+        const stored = Object.entries(writers).filter(([label]) => label.startsWith(`${kind} planned`));
+        expect(stored).toHaveLength(4);
+        for (const [label, text] of stored) {
+          const input = own.find(([name]) => name === label)![1];
+          expect(text.split(OLD_INPUTS), label).toHaveLength(2);
+          expect(workerBrief(input).prompt, label).toBe(text.replace(OLD_INPUTS, NEW_INPUTS));
+        }
+      });
+
+      test.each(["spec-writer side", "spec-writer implementation"])("%s: baseline:true keeps the base's Baseline line whole; baseline:false has none", async (kind) => {
+        const { writers } = await base;
+        const baselineLine = (text: string) => text.split("\n").filter((line) => line.startsWith("- Baseline:"));
+        const own = cells.filter(([label]) => label.startsWith(`${kind} planned`));
+        for (const [label, input] of own) expect(baselineLine(workerBrief(input).prompt), label).toHaveLength(input.baseline ? 1 : 0);
+        const stored = Object.entries(writers).filter(([label]) => label.startsWith(`${kind} planned`) && label.endsWith("baseline=true"));
+        expect(stored).toHaveLength(2);
+        for (const [label, text] of stored) {
+          const line = baselineLine(text);
+          expect(line, label).toHaveLength(1);
+          for (const [name, input] of own) if (input.baseline) expect(baselineLine(workerBrief(input).prompt), name).toEqual(line);
+        }
+      });
     });
 
     test("tester: evidenceOnly false renders the same bytes as omitted, and true changes the brief", () => {
