@@ -29,22 +29,18 @@ export const RETRO_SCRIPT = String.raw`export const meta = {
   phases: [{ title: "Judge" }],
 };
 const models = args.models || {};
-const LESSON = {
-  anyOf: [
-    { type: "null" },
-    {
-      type: "object",
-      properties: {
-        surface: { type: "string" }, rule: { type: "string" }, missingOrWrong: { type: "string" }, prevents: { type: "string" },
-        recurrence: { type: "string", enum: ["recurs", "severe"] },
-        existingInstruction: { anyOf: [{ type: "string" }, { type: "null" }] },
-        evidence: { type: "array", items: { type: "string" } },
-      },
-      required: ["surface", "rule", "missingOrWrong", "prevents", "recurrence", "existingInstruction", "evidence"],
-      additionalProperties: false,
-    },
-  ],
+const LESSON_OBJECT = {
+  type: "object",
+  properties: {
+    surface: { type: "string" }, rule: { type: "string" }, missingOrWrong: { type: "string" }, prevents: { type: "string" },
+    recurrence: { type: "string", enum: ["recurs", "severe"] },
+    existingInstruction: { type: ["string", "null"] },
+    evidence: { type: "array", items: { type: "string" } },
+  },
+  required: ["surface", "rule", "missingOrWrong", "prevents", "recurrence", "existingInstruction", "evidence"],
+  additionalProperties: false,
 };
+const LESSON = Object.assign({}, LESSON_OBJECT, { type: ["object", "null"] });
 const STRINGS = { type: "array", items: { type: "string" } };
 const THREAD = {
   type: "object",
@@ -56,7 +52,7 @@ const THREAD = {
   required: ["threadId", "scores", "lesson"],
   additionalProperties: false,
 };
-const SIGNAL = { anyOf: [{ type: "boolean" }, { type: "null" }] };
+const SIGNAL = { type: ["boolean", "null"] };
 const COMM = {
   type: "object",
   properties: {
@@ -65,22 +61,33 @@ const COMM = {
       signals: { type: "object", properties: { briefGapBlock: SIGNAL, askedTwice: SIGNAL, unclearBriefRounds: SIGNAL, userWordsLost: SIGNAL }, required: ["briefGapBlock", "askedTwice", "unclearBriefRounds", "userWordsLost"], additionalProperties: false },
       evidence: STRINGS,
     }, required: ["threadId", "label", "reason", "signals", "evidence"], additionalProperties: false } },
-    lessons: { type: "array", items: LESSON.anyOf[1] },
+    lessons: { type: "array", items: LESSON_OBJECT },
   },
   required: ["handoffs", "lessons"],
   additionalProperties: false,
 };
 const limit = Math.min(args.cap, budget().maxAgentCalls);
 if (args.jobs.length > limit) throw new Error("Retro needs " + args.jobs.length + " agent calls; the limit is " + limit + ".");
-const results = await parallel(args.jobs.map((job) => () => agent(
-  args.preamble + "\n\n" + job.prompt,
-  Object.assign({ phase: "Judge", schema: job.kind === "communication" ? COMM : THREAD }, models.judge || {}),
-)));
+const errors = [];
+const results = await parallel(args.jobs.map((job) => async () => {
+  try {
+    return await agent(
+      args.preamble + "\n\n" + job.prompt,
+      Object.assign({ phase: "Judge", schema: job.kind === "communication" ? COMM : THREAD }, models.judge || {}),
+    );
+  } catch (error) {
+    errors.push(String((error && error.message) || error));
+    return null;
+  }
+}));
 const threads = [];
 let communication = null;
 args.jobs.forEach((job, i) => { if (job.kind === "communication") communication = results[i] || null; else threads.push(results[i] || null); });
 const lost = results.filter((result) => !result).length;
-if (lost === args.jobs.length) throw new Error("All " + lost + " judge calls failed. See the failed calls for the provider error.");
+if (lost === args.jobs.length) {
+  const causes = errors.filter((message, i) => errors.indexOf(message) === i).join(" | ").slice(0, 600);
+  throw new Error("All " + lost + (causes ? " judge calls failed: " + causes : " judge calls returned no result."));
+}
 return { threads, communication, lost };
 `;
 
