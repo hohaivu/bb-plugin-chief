@@ -46,7 +46,9 @@ export function createObserve(ctx: Ctx) {
       if (value != null) tags[name] = String(value);
     }
     setImmediate(() => {
-      if (receipt.get(eventId)) sentry.send({ eventId, level: WARNING.has(kind) ? "warning" : "error", kind, message: clean ?? kind, tags });
+      let committed: unknown;
+      try { committed = receipt.get(eventId); } catch { return; } // db closed before this macrotask: nothing to send
+      if (committed) sentry.send({ eventId, level: WARNING.has(kind) ? "warning" : "error", kind, message: clean ?? kind, tags });
     });
   }
 
@@ -54,8 +56,8 @@ export function createObserve(ctx: Ctx) {
   function warn(message: string) {
     sentry.send({ eventId: newEventId(), level: "warning", kind: "plugin_warn", message, tags: {} });
   }
-  // A Proxy keeps the SDK object's own `this`; only log.warn differs.
+  // A Proxy keeps the SDK object's own `this`; only log.warn differs. `sdk` is callable but a namespace, not a method: binding it breaks it.
   const log = { debug: (message: string) => bb.log.debug(message), info: (message: string) => bb.log.info(message), error: (message: string) => bb.log.error(message), warn: (message: string) => { bb.log.warn(message); warn(message); } };
-  const observed = new Proxy(bb, { get: (target, prop) => { const value = prop === "log" ? log : Reflect.get(target, prop, target); return typeof value === "function" ? value.bind(target) : value; } });
+  const observed = new Proxy(bb, { get: (target, prop) => { const value = prop === "log" ? log : Reflect.get(target, prop, target); return typeof value === "function" && prop !== "sdk" ? value.bind(target) : value; } });
   return { observe: { event, warn }, bb: observed };
 }
