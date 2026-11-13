@@ -164,7 +164,7 @@ A plan chain has one branch, one pull request and one implementation worktree. E
 | Role | Kind or thread role | Job | Waived by |
 | --- | --- | --- | --- |
 | Designer | `kind: "designer"` | Decides or implements how the UI looks. In a plan it draws artboards in its own design-only wave, before the wave that builds the UI. | n/a |
-| Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs in parallel with the worker of a `spec: true` wave, in its own worktree. Folds `docs/` onto the chain branch. | `chief_skip_specs` |
+| Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs in parallel with the worker of a `spec: true` wave, in its own worktree. Folds `docs/` onto the chain branch. Writes from the plan's Spec delta and reads code only to check names. | `chief_skip_specs` |
 | Worker | `kind: "worker"` | Implements one wave. It never writes tests. A reshape wave is also a worker. | n/a |
 | Tester | `kind: "tester"` | Writes and runs the tests for the waves it builds on. | `chief_skip_tests`, or `testsSkipped` on `chief_complete`. After a fix round, `retestSkipped` on `chief_review` waives the rerun. |
 | Reviewer | thread role `reviewer` | Reports a `verdict` of `approve` or `request_changes`. It never edits. | `skipReview` |

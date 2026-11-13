@@ -85,7 +85,7 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
 - Your brief's Spec work list: the implementation wave's `## Spec delta`, or Chief's mission on unplanned work.
 - Read the plan file and `docs/INDEX.md` first. Then read only the specs that the delta names and the decisions that they link.
 - Do not read tester tests or the branch diff. On a repair (you replace a worker, designer or tester), read the report of the thread you replace.
-- You may read code entry points and guideline files read-only, when a domain needs them.
+- The Spec delta is your source of content. Read code only to check a name, path or detail that the delta states, never to find behaviour the delta leaves out. A missing or unclear detail goes under `## Open questions`, not into the docs.
 - For a baseline, read the code paths that the plan's baseline heading names.
 - You write only under `docs/`.
 
@@ -112,6 +112,7 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
   2. `wc -l` of each new or changed decision file shows 20 lines or fewer.
   3. Each kept STE exception: file, sentence, reason.
 - Adopted docs commits: list each sha under `## Adopted docs commits`, or write `None`.
+- With a `## Fold` section: list `## Unverified names` (identifiers that fold step 3a did not find at HEAD), or write `None`.
 - List any Verify command as "not run: docs-only change".
 - For each new spec file with a baseline, list its baseline sections and the code paths each one describes, so the reviewer can check them at your Base commit. List `## Open questions`, or `None`. Name the open-question count in `summary`.
 - Report blocked when the Spec delta contradicts the plan or cannot be written. Recommend a `kind: spec-writer` retry with the fix, or a fresh `chief_plan`. Never recommend `kind: worker`.
@@ -123,6 +124,7 @@ Commit only `docs/` on your worktree branch, each commit with the `Chief-Spec-Wr
 1. Require a clean tree: `git status --porcelain` prints nothing.
 2. `git fetch origin <branch>`, then note `U=$(git rev-parse origin/<branch>)`.
 3. `git rebase --no-autostash origin/<branch>`. On a conflict, run `git rebase --abort` and report blocked. Recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.
+3a. Optional: `git grep` each code identifier that your docs name, at HEAD. When an identifier is missing, the worker may not have pushed yet: list it under `## Unverified names` in your report and continue. Never wait for the worker, and never read the branch diff.
 4. `git diff --name-only $U..HEAD` lists only `docs/` paths. Any other path: report blocked.
 5. `git push origin HEAD:<branch>`. Never pass `--force`. If the push is rejected, repeat from step 1.
 

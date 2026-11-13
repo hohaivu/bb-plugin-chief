@@ -16,3 +16,4 @@ Rejected: a second task branch or pull request, and a write in a shared worktree
 - A rejected push fetches, rebases with no autostash, and pushes again. It never force-pushes.
 - The Reviewer scopes a writer by its fold range.
 - Pre-plan specs can be stale. The plan wins for the Worker.
+- The writer works from the Spec delta and does not read the code again.
