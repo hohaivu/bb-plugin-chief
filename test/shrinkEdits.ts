@@ -18,7 +18,7 @@ export function expandClippedActions(text: string, ...otherBaseTexts: string[]):
       if (line === clipped) continue;
       const at = line.indexOf(prefix);
       if (at !== -1 && line.length - at > CLIPPED) exact.add(line.slice(at));
-      const start = line.indexOf("The reviewer ");
+      const start = line.indexOf(prefix.slice(0, 12));
       if (start !== -1 && line.length - start > CLIPPED && shape(line.slice(start, start + CLIPPED - 1)) === shape(prefix) && !/thr_\d/.test(line.slice(start + CLIPPED - 1))) {
         renamed.add(prefix + line.slice(start + CLIPPED - 1));
       }
@@ -27,7 +27,7 @@ export function expandClippedActions(text: string, ...otherBaseTexts: string[]):
     if (wholes.size !== 1) throw new Error(`expected exactly one whole action for a clipped line, found ${wholes.size}: ${clipped.slice(0, 80)}`);
     return [...wholes][0]!;
   };
-  return text.split("\n").map((line) => (line.length === CLIPPED && line.endsWith("…") && /^The reviewer /.test(line) ? wholeOf(line) : line)).join("\n");
+  return text.split("\n").map((line) => (line.length === CLIPPED && line.endsWith("…") ? wholeOf(line) : line)).join("\n");
 }
 
 /** Base alert blocks (text from `[Chief lifecycle alert]` to the next blank line or `---`) whose action was clipped lose their report-file pointer. */
@@ -37,10 +37,10 @@ export function dropPointerOfClippedActions(base: string, expanded: string): str
   if (baseBlocks.length !== expandedBlocks.length) throw new Error("block count changed by the expansion");
   return expandedBlocks.map((block, index) => {
     if (block === baseBlocks[index]) return block;
-    if (/\(clipped|…and \d+ more/.test(block)) throw new Error("an alert clipped for another reason keeps its report file");
+    if (/\(clipped[;)]|…and \d+ more/.test(block)) throw new Error("an alert clipped for another reason keeps its report file");
     const pointer = block.split("\n").filter((line) => /^Full report: \S+\.md$/.test(line));
     if (pointer.length !== 1) throw new Error(`expected exactly one Full report pointer, found ${pointer.length}`);
-    return block.replace(`${pointer[0]}\n`, "");
+    return block.replace(`${pointer[0]}\n`, "").replace("\nResult (clipped, full text in the report file): ", "\nResult: ");
   }).join("");
 }
 
@@ -90,3 +90,15 @@ export function shrinkPlannerAlert(alert: string): string {
 }
 /** Applies `edit` to every string inside a JSON value. */
 export const mapStrings = <T>(value: T, edit: (text: string) => string): T => JSON.parse(JSON.stringify(value), (_key, entry) => (typeof entry === "string" ? edit(entry) : entry));
+
+/** (b') The roster's `  report: <path>` lines of workers whose report file is no longer written. */
+export const dropRosterReportLines = (text: string) => text.split("\n").filter((line) => !/^  report: <storage>\/chief\/\S+\/report-\d+\.md$/.test(line)).join("\n");
+
+/** A base oracle kept as JSON text (every string may hold alerts or a roster): edits (a), (b) and (b') on each string; the whole action comes from any string of the same file. */
+export function shrinkJsonOracle(raw: string): string {
+  const value = JSON.parse(raw);
+  const strings: string[] = [];
+  mapStrings(value, (text) => { strings.push(text); return text; });
+  const all = strings.join("\n");
+  return `${JSON.stringify(mapStrings(value, (text) => dropRosterReportLines(shrinkAlerts(text, all))), null, 2)}\n`;
+}

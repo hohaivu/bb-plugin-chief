@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { delegate, disposeAll, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { shrinkJsonOracle } from "./test/shrinkEdits";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -93,6 +94,6 @@ describe("work list: base 310043a oracle", () => {
   });
 
   test.skipIf(process.env.WORKLIST_ORACLE_OUT)("roster, bb chief status and the hand-off equal base on the same scenario", async () => {
-    expect(await workListScenario()).toBe(await readFile(WORKLIST_ORACLE, "utf8"));
+    expect(await workListScenario()).toBe(shrinkJsonOracle(await readFile(WORKLIST_ORACLE, "utf8")));
   });
 });
