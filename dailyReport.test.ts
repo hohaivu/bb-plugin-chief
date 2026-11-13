@@ -108,7 +108,9 @@ describe("daily report: Sentry", () => {
 
 describe("daily report: retro sections", () => {
   const RUBRIC = "2026-11-13.1";
-  const judgedWorker = (state: State, id: string, pass: boolean) => state.db.prepare(`INSERT INTO chief_scores (thread_id, plan_thread_id, role, scorer, rubric_version, label, score, reason, at) VALUES (?, 'thr_plan', 'worker', 'efficiency', ?, 'x', ?, 'because', ?)`).run(id, RUBRIC, pass ? 0.9 : 0.1, Date.now() - 1_000);
+  // A worker's status is aggregate's over its applicable rubrics, so a judged worker carries all three non-communication scores (a fail is a low efficiency).
+  const score = (state: State, id: string, scorer: string, label: string, value: number | null) => state.db.prepare(`INSERT INTO chief_scores (thread_id, plan_thread_id, role, scorer, rubric_version, label, score, reason, at) VALUES (?, 'thr_plan', 'worker', ?, ?, ?, ?, 'because', ?)`).run(id, scorer, RUBRIC, label, value, Date.now() - 1_000);
+  const judgedWorker = (state: State, id: string, pass: boolean) => { score(state, id, "efficiency", "x", pass ? 0.9 : 0.1); score(state, id, "procedure-compliance", "x", 0.9); score(state, id, "verbosity", "x", 0.9); };
   const verdict = (state: State, id: string, kind: string, bound: boolean) => state.db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES ('thr_rev', ?, ?, 1, ?, ?, ?)`).run(id, kind, Date.now(), bound ? "abc" : null, bound ? 1 : null);
   const section = (report: string, title: string) => new RegExp(`## ${title.replace(/[()]/g, "\\$&")}[^\n]*\n([\\s\\S]*?)\n## `).exec(report)![1]!;
 
@@ -126,6 +128,25 @@ describe("daily report: retro sections", () => {
     expect(calibration).toContain("| pass | 4 | 2 |");
     expect(calibration).toContain("| fail | 3 | 3 |");
     expect(calibration).toContain("Disagreement rate 42% (5/12)");
+  });
+
+  test("calibration: a worker with one valid score and missing or insufficient dimensions is counted insufficient, outside the matrix and its denominator, even with a bound verdict", async () => {
+    const state = await setup();
+    const world = await dailyWorld(state);
+    for (let i = 0; i < 10; i++) { judgedWorker(state, `thr_ok${i}`, true); verdict(state, `thr_ok${i}`, "approve", true); }
+    score(state, "thr_missing", "efficiency", "x", 1); // procedure-compliance and verbosity were never stored
+    verdict(state, "thr_missing", "request_changes", true);
+    score(state, "thr_null", "efficiency", "x", 1);
+    score(state, "thr_null", "procedure-compliance", "insufficient_evidence", null);
+    score(state, "thr_null", "verbosity", "insufficient_evidence", null);
+    verdict(state, "thr_null", "approve", true);
+    const calibration = section(await readFile((await world.run()).path!, "utf8"), "Calibration (judge vs first reviewer verdict, workers, non-communication)");
+    expect(calibration).toContain("10 workers judged");
+    expect(calibration).toContain("10 with a bound verdict (coverage 100%); 0 unbound");
+    expect(calibration).toContain("2 insufficient, outside the matrix");
+    expect(calibration).toContain("| pass | 10 | 0 |");
+    expect(calibration).toContain("| fail | 0 | 0 |");
+    expect(calibration).toContain("Disagreement rate 0% (0/10)");
   });
 
   test("calibration with fewer than 10 bound verdicts says insufficient evidence and prints no matrix", async () => {
