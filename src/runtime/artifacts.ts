@@ -55,13 +55,21 @@ export function createArtifacts(ctx: Ctx) {
     return atomicWrite(hostId, join(storageRootPath, relPath), content);
   }
 
-  /** Atomic: the content lands under a temp name and is moved into place, so a failed
-   * write never leaves a partial file under the final name. */
+  /** The content lands under a temp name and is moved into place, so a failed write never leaves a partial file under
+   * the final name. An existing file at the path is replaced (remove, then move): a reader may briefly see it missing,
+   * and a failed second move loses the old version. */
   async function atomicWrite(hostId: string, path: string, content: string) {
     const tmp = `${path}.tmp-${randomUUID()}`;
     try {
       await bb.sdk.files.write({ hostId, path: tmp, content, createParents: true });
-      await bb.sdk.files.move({ hostId, sourcePath: tmp, destinationPath: path });
+      try {
+        await bb.sdk.files.move({ hostId, sourcePath: tmp, destinationPath: path });
+      } catch (error) {
+        // shortcut: the host's message text is how we detect an existing destination; upgrade when FileMoveArgs gets an overwrite flag.
+        if (!/already exists/i.test(String((error as Error)?.message ?? error))) throw error;
+        await bb.sdk.files.remove({ hostId, path });
+        await bb.sdk.files.move({ hostId, sourcePath: tmp, destinationPath: path });
+      }
     } catch (error) {
       await bb.sdk.files.remove({ hostId, path: tmp }).catch(() => undefined);
       throw error;

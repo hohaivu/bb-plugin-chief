@@ -340,6 +340,21 @@ The bundle is written as Chief artifacts `retro/<planId>/…` under the Chief th
   - A handoff with a missing side is marked `counterpart unavailable`.
 - The plugin computes the observed counts for each handoff: nudges, blocks, review rounds, brief characters, alert characters and estimated tokens. The judge never computes them.
 
+### Artifact writes (`atomicWrite` in `src/runtime/artifacts.ts`)
+
+Every Chief artifact goes through `atomicWrite`. The write replaces an existing file at the same path.
+
+1. `atomicWrite` writes the text to `<path>.tmp-<uuid>`.
+2. It moves the tmp file to the path.
+3. When the move fails with a message that matches `/already exists/i`, it removes the destination file and moves once more.
+4. Any other move error, or a failure of the second move, removes the tmp file and throws the error.
+
+- A retry of a retro writes `retro/<planId>/…` over the files of its own earlier attempt. The bundle of another plan is at other paths and stays unchanged.
+  Reason: the host move refuses an existing destination, and `FileMoveArgs` has no overwrite flag.
+- The code finds an existing destination by the text of the host message. When the host changes that text, an overwrite fails with an error and loses no data.
+- The replace is remove then move. A reader can see the file missing for a short time.
+- A failed second move loses the old version. The caller sees the error and retries.
+
 ### Judge workflow
 
 - `RETRO_SCRIPT` is an inline workflow named `chief-retro-judge`. It reads only `args`. It never interpolates text into code.
@@ -348,6 +363,13 @@ The bundle is written as Chief artifacts `retro/<planId>/…` under the Chief th
 - `runWorkflowCli` in `src/research/workflowCli.ts` runs, polls and stops the workflow. The research survey and investigate paths use the same function. The function keeps its arguments, its environment, its timeout and its error mapping.
 - Each agent returns scores with labels, reasons and evidence references of the form `thr_x#seq`. It may also return one lesson.
 - The prompt says: return lesson null unless all four filing conditions hold. No change is a valid result.
+- The result schemas of the agents use only the safe schema subset of the workflows host. They hold no `anyOf`, `oneOf`, `allOf`, `$ref`, `pattern` or `format`.
+  - A value that can be null uses a type array, for example `type: ["string", "null"]`.
+  Reason: the host rejects other keywords inside `agent()` before it creates a call. A bad schema then fails every call, and the run records zero calls.
+- When every call fails, the run error starts with `All N judge calls failed:`. It then names the distinct errors that `agent()` raised, cut to 600 characters.
+  - When no call raised an error, the run error says that the calls returned no result.
+  Reason: `settle` stores the run error in `last_error` and in the `retro-failed` alert. The error must show the real cause.
+- When some calls fail and at least one succeeds, the result stays `{threads, communication, lost}`. `lost` counts the calls with no result.
 
 ### Collect
 

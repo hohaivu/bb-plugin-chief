@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,7 +160,14 @@ export async function setup(options: { /** projects.get rejects these ids, as th
           await writeFile(path, content);
           return {};
         },
-        move: async ({ sourcePath, destinationPath }: { sourcePath: string; destinationPath: string }) => { await rename(sourcePath, destinationPath); return {}; },
+        // The real host refuses an existing destination (no overwrite flag); node rename would silently replace it.
+        move: async ({ sourcePath, destinationPath }: { sourcePath: string; destinationPath: string }) => {
+          if (await access(destinationPath).then(() => true, () => false)) throw new Error(`HTTP 502: Destination already exists: ${destinationPath}`);
+          await rename(sourcePath, destinationPath);
+          return {};
+        },
+        // One file, not recursive; a missing path errors, as on the host.
+        remove: async ({ path }: { path: string }) => { await unlink(path); return {}; },
       },
       environments: {
         get: async ({ environmentId }: { environmentId: string }) => ({
