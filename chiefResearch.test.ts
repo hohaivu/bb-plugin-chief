@@ -88,6 +88,7 @@ describe("chief_research", () => {
     expect(args.at(-1)).toBe("--json");
     expect(options.env).toMatchObject({ BB_THREAD_ID: planner, BB_PROJECT_ID: "proj_1" });
     expect(options.env.PATH).toContain("/opt/homebrew/bin");
+    expect(options.timeout).toBe(30_000);
   });
 
   test("switches gate live, through settings and setResearchSettings", async () => {

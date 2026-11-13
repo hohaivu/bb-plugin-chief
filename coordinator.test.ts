@@ -241,6 +241,8 @@ describe("Coordinator", () => {
       const spawned = state.spawned.length;
       await expect(call(state, tool, params, id)).rejects.toThrow(/not available to a Coordinator.*ask the child Chief that owns the work/i);
       await expect(call(state, tool, params, id)).rejects.toThrow(/planner, worker, reviewer, tester, advisor or researcher/);
+      // The refusal is a failed call like any other: ledgered with the tool name, while the caller still gets the refusal itself.
+      expect(state.db.prepare("SELECT detail FROM chief_events WHERE kind='tool_error'").all()).toContainEqual({ detail: expect.stringContaining(`${tool}: `) });
       expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads").get()).toEqual(rows);
       expect(state.spawned.length).toBe(spawned);
     });

@@ -35,10 +35,11 @@ describe("event ledger: one row at each detection point", () => {
     await expect(tool(state, "chief_inspect", { threadId: "thr_nope" }, chief.threadId)).rejects.toThrow("No managed thread thr_nope for this Chief");
   });
 
-  test("a successful tool call writes no tool_error row", async () => {
+  test("a successful tool call returns the tool's own result and writes no tool_error row", async () => {
     const state = await setup();
     const chief = await start(state);
-    await tool(state, "chief_sync", {}, chief.threadId);
+    await delegate(state, chief.threadId, "Fix checkout totals");
+    expect(await tool(state, "chief_roster", {}, chief.threadId)).toContain("Fix checkout totals");
     expect(events(state, "tool_error")).toEqual([]);
   });
 
