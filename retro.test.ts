@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
-import { disposeAll, setup } from "./test/harness";
+import { disposeAll, execFileMock, setup } from "./test/harness";
 import { blockedReport, completedPlan, dueNow, ev, retroRow, userSays, workflowStubs } from "./test/retroFixture";
 import { provideSdk } from "./test/sdk";
 
@@ -119,6 +119,34 @@ describe("retro state machine", () => {
     expect(retroRow(state, planner).last_error).toContain("timed out after 2 h");
   });
 
+  test("a succeeded run whose retro.md write keeps failing retries inside 2 hours, then exhausts the attempts into one failure alert", async () => {
+    const { state, stubs, planner, tick } = await judged((ids) => answer(ids));
+    state.failWritesMatching(/retro\.md\.tmp-/); // the bundle and the manifest still write; only the result file is refused
+    const overdue = () => state.db.prepare(`UPDATE chief_retros SET started_at=? WHERE plan_thread_id=?`).run(Date.now() - 2 * 60 * 60_000 - 1_000, planner);
+
+    await tick(); // attempt 1 launches
+    await tick(); // collect fails, still inside the bound: the row stays running for the next tick
+    expect(retroRow(state, planner)).toMatchObject({ state: "running", attempts: 1 });
+    expect(retroRow(state, planner).last_error).toContain("collect failed");
+    expect(state.db.prepare(`SELECT COUNT(*) n FROM chief_scores`).get()).toEqual({ n: 0 });
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (attempt > 1) { dueNow(state, planner); await tick(); } // the next attempt launches
+      overdue();
+      await tick(); // collect fails past 2 hours: the run settles through the retry budget
+      dueNow(state, planner);
+    }
+    expect(retroRow(state, planner)).toMatchObject({ state: "failed", attempts: 3, run_id: null });
+    expect(retroRow(state, planner).last_error).toContain("timed out after 2 h");
+    expect(failedAlerts(state)).toHaveLength(1);
+    expect(failedAlerts(state)[0].message).toContain("failed after 3 attempts");
+    expect(stubs.stop).not.toHaveBeenCalled(); // the run had already succeeded
+    await tick();
+    expect(stubs.run).toHaveBeenCalledTimes(3);
+    expect(failedAlerts(state)).toHaveLength(1);
+    expect(retroAlerts(state)).toHaveLength(0);
+  });
+
   test("two overlapping ticks make one claim and one launch", async () => {
     const { state, stubs, planner, tick } = await judged(() => null);
     await Promise.all([tick(), tick()]);
@@ -181,6 +209,52 @@ describe("retro collection", () => {
     expect(rows).toHaveLength(stored);
     if (stored) expect(rows[0]).toMatchObject({ status: "proposed", surface: "worker-brief", plan_thread_id: planner });
     expect(retroRow(state, planner).state).toBe("done");
+  });
+});
+
+describe("retro bundle bound", () => {
+  const SHA = "a".repeat(40);
+  const FILE_LIMIT = 120_000;
+  const bigDiff = `diff --git a/totals.ts b/totals.ts\n${"+const line = 1;\n".repeat(2_000)}`;
+
+  test("a thread file with a long brief, diff, ledger and event history stays within 120,000 characters, and its refs match the events kept", async () => {
+    const state = await setup({ projectPath: "/repo/proj1" });
+    state.harness.sdk.stub("system.config", async () => ({ primaryHostId: "host_1" }));
+    const stubs = workflowStubs();
+    const wrapped = execFileMock.getMockImplementation()!;
+    execFileMock.mockImplementation(async (file: string, args: string[], options: object) => file === "git"
+      ? { stdout: args[0] === "symbolic-ref" ? "origin/main\n" : args[0] === "rev-parse" ? `${SHA}\n` : args[0] === "diff" ? bigDiff : "", stderr: "" }
+      : wrapped(file, args, options));
+    const { chief, planner, worker, tick } = await completedPlan(state, { branch: "feature/x", mission: `BRIEF_HEAD ${"b".repeat(11_900)}` });
+    stubs.status.mockResolvedValue({ status: "succeeded", result: null });
+    for (let n = 0; n < 50; n++) state.db.prepare(`INSERT INTO chief_events (event_id, at, thread_id, role, kind, detail) VALUES (?, ?, ?, 'worker', 'stall', ?)`).run(`ledger-${n}`, Date.now() + n, worker, `L${n} ${"d".repeat(296)}`);
+    state.seedEvents(worker, Array.from({ length: 150 }, (_, n) => userSays(n + 1, `${n + 1} ${"u".repeat(1_700)}`)));
+    await tick();
+
+    const dir = join(state.storageRoot, "chief", "proj_1", chief, "retro", planner);
+    const names = await readdir(dir);
+    expect(names).toEqual(expect.arrayContaining([`thread-${worker}.md`, `thread-${planner}.md`, "handoffs.md", "manifest.json"]));
+    const lengths = Object.fromEntries(await Promise.all(names.map(async (name) => [name, (await readFile(join(dir, name), "utf8")).length])));
+    expect(Math.max(...Object.values(lengths))).toBeLessThanOrEqual(FILE_LIMIT);
+
+    const text = await readFile(join(dir, `thread-${worker}.md`), "utf8");
+    // Non-vacuous: every ingredient is present and the events were cut to make room, so the bound was what limited the file.
+    expect(text.includes("BRIEF_HEAD")).toBe(true);
+    expect(text.includes("```diff")).toBe(true);
+    const ledgerLines = [...text.matchAll(/^- \S+ stall: L\d+ /gm)].length; // at most 40 observed events, whatever the ledger holds
+    expect(ledgerLines).toBeGreaterThan(30);
+    expect(ledgerLines).toBeLessThanOrEqual(40);
+    expect(/lines cut to fit/.test(text)).toBe(true);
+    expect(text.length).toBeGreaterThan(100_000);
+    const kept = [...text.matchAll(/^#(\d+) /gm)].map((match) => Number(match[1]));
+    expect(kept.length).toBeGreaterThan(20);
+    expect(kept.length).toBeLessThan(150);
+    // Refs are exactly the cited lines visible in the retained files: the thread file's events plus this thread's lines kept in handoffs.md.
+    const handoffs = await readFile(join(dir, "handoffs.md"), "utf8");
+    const cited = [...handoffs.matchAll(new RegExp(`^${worker}#(\\d+) `, "gm"))].map((match) => Number(match[1]));
+    const refs: number[] = JSON.parse(await readFile(join(dir, "manifest.json"), "utf8")).refs[worker];
+    expect([...new Set(refs)].sort((a, b) => a - b)).toEqual([...new Set([...kept, ...cited])].sort((a, b) => a - b));
+    expect(kept.every((seq) => refs.includes(seq))).toBe(true);
   });
 });
 
