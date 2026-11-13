@@ -22,7 +22,10 @@ export function registerSkipSpecsTool(ctx: Ctx) {
       const { outcome, parent } = plans.waiveSpecs(planThreadId, wave);
       const nextStep = `Specs on wave ${wave} bypassed: delegate its worker — chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}${parent !== null ? `, replaces: ${latestWorker(planThreadId, parent)?.thread_id ?? `<wave ${parent}'s latest worker>`}` : ""})${parent !== null ? ` once wave ${parent} is ready` : ""}.`;
       if (outcome === "already-waived-delegated") return `Specs on wave ${wave} were already bypassed.`;
-      if (outcome === "waive") store.skipWave(planThreadId, wave, { specsSkipped: reason });
+      if (outcome === "waive") {
+        store.skipWave(planThreadId, wave, { specsSkipped: reason });
+        ctx.observe.event("specs_skipped", { ...planner, plan_thread_id: planThreadId, plan_wave: wave }, reason);
+      }
       return nextStep;
     },
   });}

@@ -16,7 +16,7 @@ export interface ReportIntakeAdapters {
   /** chief_lessons is written only by the intake; the thread store keeps only managed_threads (threadStore.ts:66-67). */
   db: Database;
   store: ThreadStore<ManagedRow>;
-  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets">;
+  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets" | "ladder">;
   lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInsert<ManagedRow["role"], ManagedRow["state"]> }>;
   writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string): Promise<{ path: string }[]>;
   writeArtifact(threadId: string, projectId: string, name: string, content: string): Promise<string>;
@@ -36,6 +36,8 @@ export interface ReportIntakeAdapters {
   /** Hands the files an accepted report wrote to the tracker sync. Called after the commit and before the alert; never awaited, never throws. */
   trackFiles(row: ManagedRow, files: { name: string; content: string }[]): void;
   warn(message: string): void;
+  /** One chief_events row, in the caller's transaction (observe.event); unset, nothing is ledgered. */
+  event?(kind: string, row: Partial<ManagedRow>, detail?: string | null): void;
 }
 
 export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
@@ -432,7 +434,7 @@ export function reportFileBody(input: {
 
 /** The one owner of chief_report acceptance and publication: required state commits first, then the optional files and the alert. */
 export function createReportIntake(adapters: ReportIntakeAdapters): { report(threadId: string, params: ReportParams, callerProjectId: string): Promise<boolean> } {
-  const { db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, trackFiles, warn } = adapters;
+  const { db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, trackFiles, warn, event } = adapters;
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
     const found = await lookupRow(threadId, callerProjectId);
     // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
@@ -520,6 +522,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         store.markAdvised(threadId, now);
         // The plan's one review: the first advice from any of its advisors decides it.
         if (row.plan_thread_id) store.resolvePlanReview(row.plan_thread_id, params.state === "ready" && verdict === "approve" ? "approved" : "changes");
+        if (params.state === "ready" && verdict === "request_changes") event?.("plan_review_changes", row);
       }
       if (plannerReady && scheduledWaves) {
         store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.test && !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
@@ -530,6 +533,14 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role) VALUES (?, ?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role);
       }
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
+      if (params.state === "blocked") event?.("blocked", row, clip(params.blocker?.split("\n")[0] ?? "", 160));
+      if (event && row.role === "reviewer" && params.state === "ready" && verdict === "request_changes") {
+        // One row per covered worker, with the streak that worker's task is on now that this verdict is recorded.
+        const covered = ledger.targets(threadId).map((target) => target.worker_thread_id);
+        for (const workerId of covered.length ? covered : row.worker_thread_id ? [row.worker_thread_id] : []) {
+          event("request_changes", store.get(workerId) ?? { thread_id: workerId, project_id: row.project_id }, `round=${ledger.ladder(workerId).streak}`);
+        }
+      }
       if (row.role === "reviewer" && params.state === "ready" && verdict) {
         enqueueVerdictComments(row, reserved.report_seq, verdict, findingList, params.result, params.recommendation);
       } else if (row.role === "worker" && params.state === "blocked") {

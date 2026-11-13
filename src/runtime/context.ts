@@ -17,6 +17,7 @@ import type { createRoster } from "./roster";
 import type { createInspect } from "./inspect";
 import type { createResearchWiring } from "./researchWiring";
 import type { createToolRegistry } from "../tools/register";
+import type { createObserve } from "../observe/events";
 
 /** Mutable state the plugin closure kept in `let`s and Maps. One object per plugin invocation: read and write it as ctx.state.x, never through a copy. */
 export interface State {
@@ -97,6 +98,7 @@ export interface Ctx {
   updateTodo: ReturnType<typeof createCore>["updateTodo"];
   upsertCooldown: ReturnType<typeof createCore>["upsertCooldown"];
   writerPending: ReturnType<typeof createCore>["writerPending"];
+  observe: ReturnType<typeof createObserve>["observe"];
   sweep: ReturnType<typeof createSweep>["sweep"];
   toManaged: ReturnType<typeof createSweep>["toManaged"];
   catalogReader: ReturnType<typeof createSettingsRuntime>["catalogReader"];

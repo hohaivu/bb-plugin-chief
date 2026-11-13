@@ -81,6 +81,11 @@ export function createCore(ctx: Ctx) {
       description: "One Chief project = tracker project per line, e.g. proj_abc=ABC",
       default: "",
     },
+    sentryDsn: { type: "string", label: "Sentry DSN", description: "Empty = nothing is sent. Failures, review outcomes, plugin warnings and failed chief_* calls are mirrored as scrubbed metadata.", secret: true },
+    sentryAuthToken: { type: "string", label: "Sentry read token (event:read, project:read)", secret: true },
+    sentryOrg: { type: "string", label: "Sentry organization slug", default: "" },
+    sentryProject: { type: "string", label: "Sentry project slug", default: "" },
+    sentryApiUrl: { type: "string", label: "Sentry API URL", default: "https://sentry.io" },
   });
 
   const db = bb.storage.database();

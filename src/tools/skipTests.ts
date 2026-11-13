@@ -25,7 +25,10 @@ export function registerSkipTestsTool(ctx: Ctx) {
         const live = await bb.sdk.threads.get({ threadId: latest.thread_id });
         if (BUSY_STATUSES.has(live.status)) throw new Error(`Wave ${wave}'s worker ${latest.thread_id} is ${live.status}: wait until it is idle, then waive.`);
       }
-      if (!alreadyWaived) store.skipWave(planThreadId, wave, { testsSkipped: reason });
+      if (!alreadyWaived) {
+        store.skipWave(planThreadId, wave, { testsSkipped: reason });
+        ctx.observe.event("tests_skipped", { ...planner, plan_thread_id: planThreadId, plan_wave: wave }, reason);
+      }
       if (latest) return ctx.waivedLine(latest);
       const owner = parent !== null ? latestWorker(planThreadId, parent) : undefined;
       const next = owner?.state === "ready" ? ctx.workerReadyNextStep(owner, true) : null;

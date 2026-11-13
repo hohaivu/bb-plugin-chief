@@ -413,4 +413,9 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN coordinator_thread_id TEXT`,
     // Worker row only: Chief's reason for reviewing a fix without the tester rerun it owed (chief_review retestSkipped); NULL otherwise.
     `ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT`,
+    // The one event ledger: failures, review outcomes and nudges, one row per dedupe unit. event_id is random, doubles as the Sentry event id and is the commit receipt a send checks.
+    `CREATE TABLE chief_events (id INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, at INTEGER NOT NULL, project_id TEXT, thread_id TEXT, role TEXT, plan_thread_id TEXT, plan_wave INTEGER, kind TEXT NOT NULL, detail TEXT)`,
+    `CREATE INDEX chief_events_at ON chief_events (at)`,
+    `CREATE INDEX chief_events_plan ON chief_events (plan_thread_id)`,
+    `CREATE INDEX chief_events_thread_kind ON chief_events (thread_id, kind)`,
 ];

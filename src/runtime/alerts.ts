@@ -47,8 +47,9 @@ export function createAlerts(ctx: Ctx) {
   function recordFailure(row: ManagedRow, kind: "provider" | "stall" | "hard_stall", detail: "usage_limit" | "connection" | null) {
     try {
       if (!row.chief_thread_id) return null;
-      db.prepare(`INSERT OR IGNORE INTO chief_failure_events (source_thread_id, active_cycle, kind, detail, legacy, at) VALUES (?, ?, ?, ?, 0, ?)`)
-        .run(row.thread_id, row.active_cycle, kind, detail, Date.now());
+      const inserted = db.prepare(`INSERT OR IGNORE INTO chief_failure_events (source_thread_id, active_cycle, kind, detail, legacy, at) VALUES (?, ?, ?, ?, 0, ?)`)
+        .run(row.thread_id, row.active_cycle, kind, detail, Date.now()).changes > 0;
+      if (inserted) ctx.observe.event(kind === "provider" ? "provider_transient" : kind, row, detail);
       return null;
     } catch (error) {
       return `This failure could not be recorded for bb chief stats: ${clip(String(error), 200)}`;
