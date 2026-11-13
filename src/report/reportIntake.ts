@@ -300,6 +300,8 @@ export type ReportAlertInput = {
   waveLines: string[];
   inlinePlans: string[];
   preview: boolean;
+  /** The id of the proposed lesson this report stored, else null. */
+  lessonId: number | null;
   /** `Read at <sha>…` for a researcher or planner report, else null. */
   stamp: string | null;
 };
@@ -311,7 +313,7 @@ export type ReportAlertInput = {
   // report-<seq>.md, or for a reviewer's verdict its verdict-<seq>.md. Both names carry the report number,
   // so no file an earlier alert pointed at is ever overwritten.
 export function reportAlert(input: ReportAlertInput) {
-  const { role, title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp } = input;
+  const { role, title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp, lessonId } = input;
   const FIELD_ROOM = 600;
   const ACTION_ROOM = 400;
   const MIN_RESULT_ROOM = 200;
@@ -344,7 +346,7 @@ export function reportAlert(input: ReportAlertInput) {
     const recordedHead = recorded === undefined ? [] : recordedLines(recorded, 0);
     const blocker = params.state === "blocked" ? params.blocker! : null;
     const fieldCount = (blocker === null ? 0 : 1) + (params.recommendation ? 1 : 0);
-    const lessonLines = params.state === "ready" && params.lesson ? [`Lesson recorded for future managed threads: ${clip(params.lesson, 300)}`] : [];
+    const lessonLines = params.state === "ready" && params.lesson ? [`Lesson proposed for future managed threads: ${clip(params.lesson, 300)}`, `Proposed lesson ${lessonId}: bb chief lesson accept ${lessonId} --reason "…" (or retire)`] : [];
     const fixedCost = cost([...top, ...planHead, ...verdictLines, actionLine, ...lessonLines, ...inspectLine, ...recordedHead]);
     const fieldRoom = Math.min(FIELD_ROOM, Math.max(100, Math.floor((alertRoom - fixedCost) / Math.max(fieldCount, 1)) - 20));
     const suffix = pointer?.name ? ` (clipped; full text in ${pointer.name})` : " (clipped)";
@@ -510,6 +512,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     // reject_streak counts only consecutive request_changes verdicts, and
     // resets the moment either side breaks the streak with an approve.
     // report_seq is reserved here, so the per-report file names below never collide.
+    let lessonId: number | null = null;
     const { report_seq: seq, result_rev: resultRev } = store.batch(() => {
       const reserved = store.reserveReport({
         threadId, state: params.state, result: params.result ?? null, summary: params.summary ?? null,
@@ -530,7 +533,8 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }
       if ((row.role === "advisor" || row.role === "reviewer") && params.state === "ready" && params.lesson) {
-        db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role) VALUES (?, ?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role);
+        // Proposed: no prompt carries it until Chief accepts it (bb chief lesson accept).
+        lessonId = Number(db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role, status) VALUES (?, ?, ?, ?, ?, ?, 'proposed')`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role).lastInsertRowid);
       }
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
       if (params.state === "blocked") event?.("blocked", row, clip(params.blocker?.split("\n")[0] ?? "", 160));
@@ -589,7 +593,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const waveLines = plannerReady && planWaves ? planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`) : [];
     // Optional enrichment: the state, seq and pending alert are already committed above.
     const stamp = row.role === "researcher" || row.role === "planner" ? await reportStamp(threadId) : null;
-    const layout = reportAlert({ role: row.role, title: row.title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp });
+    const layout = reportAlert({ role: row.role, title: row.title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp, lessonId });
     // Long-or-clipped is decided from this first pass; the pass that follows only adds the pointer.
     const first = layout(null);
     let alert = first.text;

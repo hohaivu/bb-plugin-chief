@@ -36,6 +36,12 @@ export function createCore(ctx: Ctx) {
       description: "Automatically start a Chief supervisor when BB opens, the default project changes, or an active project Chief is missing.",
       default: false,
     },
+    retroJudge: {
+      type: "boolean",
+      label: "Grade completed plans (retro judge)",
+      description: "When a plan completes, a read-only judge scores its threads and the Chief handoffs (at most 9 model calls per plan) and files lesson proposals that wait for your accept. Off = no retro runs.",
+      default: true,
+    },
     forgeOwnerHandle: {
       type: "string",
       label: "Forge handle to @-mention on escalations",
@@ -94,6 +100,8 @@ export function createCore(ctx: Ctx) {
   db.prepare(`INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('failure_events_since', ?)`).run(String(Date.now()));
   // Threads created before this key cannot be proved free of artifact fallbacks, so their storage is kept.
   db.prepare(`INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('artifact_fallbacks_since', ?)`).run(String(Date.now()));
+  // Plans completed before the retro grader existed are never graded (no backfill); set at runtime like failure_events_since.
+  db.prepare(`INSERT OR IGNORE INTO plugin_meta (key, value) VALUES ('retros_since', ?)`).run(String(Date.now()));
 
   const activeChiefForProject = db.prepare<[string]>(
     `SELECT * FROM managed_threads WHERE role='chief' AND chief_thread_id IS NULL AND COALESCE(coordinator,0)=0 AND project_id=? AND state NOT IN ('failed','deleted','archived','complete') ORDER BY created_at DESC LIMIT 1`,

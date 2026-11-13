@@ -420,4 +420,18 @@ export const MIGRATIONS = [
     `CREATE INDEX chief_events_thread_kind ON chief_events (thread_id, kind)`,
     // One row per completed worker, written before the completion that queues cleanup: the evidence cleanup cannot clear. diff_state says whether completion.diff is whole, clipped or missing (diff_note says why).
     `CREATE TABLE chief_completions (thread_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, plan_thread_id TEXT, pr_url TEXT, base TEXT, head_sha TEXT, diff_state TEXT NOT NULL CHECK(diff_state IN ('ok','truncated','unavailable')), diff_note TEXT, diff_path TEXT, brief_path TEXT, at INTEGER NOT NULL)`,
+    // The retro grader: one row per completed plan (PK = exclusive claim). run_id is NULL until a launch succeeds; attempts counts starts.
+    `CREATE TABLE chief_retros (plan_thread_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, chief_thread_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','running','done','failed')), run_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, started_at INTEGER, last_error TEXT, path TEXT, rubric_version TEXT NOT NULL, at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+    // One score per thread, scorer and rubric version. score is NULL for not_applicable and insufficient_evidence.
+    `CREATE TABLE chief_scores (thread_id TEXT NOT NULL, plan_thread_id TEXT NOT NULL, role TEXT NOT NULL, scorer TEXT NOT NULL, rubric_version TEXT NOT NULL, label TEXT NOT NULL, score REAL, reason TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(thread_id, scorer, rubric_version))`,
+    // The lesson gate: proposed -> accepted -> retired (proposed -> retired is a rejection). Rows that exist now are accepted, which keeps today's injection.
+    `ALTER TABLE chief_lessons ADD COLUMN status TEXT NOT NULL DEFAULT 'accepted'`,
+    `ALTER TABLE chief_lessons ADD COLUMN surface TEXT`,
+    `ALTER TABLE chief_lessons ADD COLUMN plan_thread_id TEXT`,
+    `ALTER TABLE chief_lessons ADD COLUMN evidence TEXT`,
+    `ALTER TABLE chief_lessons ADD COLUMN rubric_version TEXT`,
+    `ALTER TABLE chief_lessons ADD COLUMN proposal_key TEXT`,
+    `ALTER TABLE chief_lessons ADD COLUMN decided_at INTEGER`,
+    `ALTER TABLE chief_lessons ADD COLUMN decided_reason TEXT`,
+    `CREATE UNIQUE INDEX chief_lessons_proposal ON chief_lessons(proposal_key)`,
 ];
