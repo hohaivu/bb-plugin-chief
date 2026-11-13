@@ -7,6 +7,7 @@ import { HEAD_SHA, TEST_WAVE, approvePlan, chiefReview, disposeAll, execFileMock
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { acceptOwnership, dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
+import { shrinkAlerts } from "./test/shrinkEdits";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -413,7 +414,7 @@ describe("tester role", () => {
     test("review decisions oracle", async () => {
       const head = await reviewDecisionsFixture();
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "review-decisions-4b5ad00.txt"), "utf8");
-      expect(dropDocsLines(dropSkippedNote(acceptOwnership(head)))).toBe(dropDocsLines(oracle));
+      expect(dropDocsLines(dropSkippedNote(acceptOwnership(head)))).toBe(dropDocsLines(shrinkAlerts(oracle, await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "reviewer-advice-626c3cd.txt"), "utf8"))));
     }, 120_000);
 
     // Contract: chief_complete's skipReview refusal names the first busy review down the worker's own task chain, own

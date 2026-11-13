@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, TEST_WAVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { mapStrings, shrinkPlannerAlert } from "./test/shrinkEdits";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -143,7 +144,7 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       expect(probe === "never" ? extra.length === 0 : probe === "must" ? extra.length > 0 : true, `${name}: probe count ${extra.length}`).toBe(true);
       const rest = { ...actual, exec: actual.exec.filter((call) => !extra.includes(call)) };
       const baseSchemas = golden.outputs.tools;
-      expect({ ...withoutMerge(rest), tools: undefined }, name).toEqual({ ...golden.outputs, tools: undefined });
+      expect({ ...withoutMerge(rest), tools: undefined }, name).toEqual({ ...mapStrings(golden.outputs, shrinkPlannerAlert), tools: undefined });
       // Plan 2 contract 6: the Spec Writer wording of three tools moved; asserted, then restored to the recorded text.
       const shown = structuredClone(withoutMerge(rest).tools);
       for (const tool of shown) acceptSpecLaneWording(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);

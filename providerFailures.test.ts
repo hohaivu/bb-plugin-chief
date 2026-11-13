@@ -481,6 +481,12 @@ describe("Chief backend", () => {
           if (name !== "managed_threads") return row;
           const { coordinator, coordinator_thread_id: coordinatorThreadId, retest_skipped: retestSkipped, ...legacy } = row;
           expect([coordinator ?? null, coordinatorThreadId ?? null, retestSkipped ?? null]).toEqual([null, null, null]);
+          // Shrink-prompts wave 1: thr_3's ready alert no longer overflows its action room, so no report file is written and its report_path stays NULL.
+          // The oracle hash predates that: base's value is put back before hashing (the hash equality then pins every other byte of the fixture).
+          if (legacy.thread_id === "thr_3") {
+            expect(legacy.report_path).toBeNull();
+            return { ...legacy, report_path: `${state.storageRoot}/chief/proj_1/thr_3/report-1.md` };
+          }
           return legacy;
         });
         // Only the random temp storage root (in report_path and verdict_path) is normalized.

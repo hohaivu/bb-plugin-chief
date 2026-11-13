@@ -275,9 +275,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
     const workerAlert = state.sent.at(-1).input[0].text as string;
     const workerAction = readyAction(worker.threadId);
-    // The alert clips an action over 400 characters (the full text is in its report file's Next line); the roster carries it whole.
-    expect(workerAlert).toContain(workerAction.slice(0, 300));
-    expect(await readFile(join(state.storageRoot, "chief", "proj_1", worker.threadId, "report-1.md"), "utf8")).toContain(`Next: ${workerAction}`);
+    // The alert keeps an action up to 1,200 characters whole (no report file is needed for it); the roster carries it whole too.
+    expect(workerAction.length).toBeLessThanOrEqual(1_200);
+    expect(workerAlert).toContain(workerAction);
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain("Pending:");
     expect(roster).toContain(`- worker “Fix checkout totals” (${worker.threadId}): ${workerAction}`);

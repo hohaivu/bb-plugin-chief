@@ -8,6 +8,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
 import { reviewAttemptExpected } from "./test/reviewWave1";
+import { shrinkReportPointers } from "./test/shrinkEdits";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -468,7 +469,7 @@ describe("tester role", () => {
     test("review attempt oracle", async () => {
       const head = await reviewAttemptFixture();
       // Expected = the 19babad transcript with wave 1's named edits per prompt, the `## Docs ownership` block included, each inserted once (test/reviewWave1.ts).
-      expect(dropDocsLines(dropSkippedNote(head))).toBe(dropDocsLines(reviewAttemptExpected(await snapshotText("review-attempt-cf92d9c.txt"))));
+      expect(dropDocsLines(dropSkippedNote(head))).toBe(dropDocsLines(reviewAttemptExpected(shrinkReportPointers(await snapshotText("review-attempt-cf92d9c.txt"), { dropped: 21, earlier: 2, added: 1 }))));
     }, 300_000);
 
     // A host lookup that never answers no longer holds chief_review (#177): the ancestry check's 20 s deadline covers the

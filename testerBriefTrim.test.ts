@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { type WorkerBriefInput, workerBrief } from "./src/research/delegationBrief";
-import { DOCS_RULE_NEW, DOCS_RULE_OLD } from "./test/docsOwnership";
+import { SPEC_WRITER_BOUNDARY, TESTER_BOUNDARY, WORKER_BOUNDARY } from "./test/docsOwnership";
 import { NOT_DOING, SPEC_DELTA, fullChain } from "./test/specWriterHelpers";
 import { PLAN_FIXTURE, TEST_WAVE, delegate, disposeAll, setup, start } from "./test/harness";
 import { plan, readyIdle, workerOn } from "./test/testerHelpers";
@@ -56,13 +56,17 @@ describe("empty sections", () => {
 });
 
 describe("contracts to verify", () => {
-  // Regression: a clip on the list (a worker or tester sees a cut list), or the list rendered for one kind only.
-  test.each(["worker", "designer", "tester"] as const)("a %s with a 5,000-character contract list gets it verbatim, once", (kind) => {
+  // Regression: the list inlined again for one kind (the brief grows by the whole list), or the pointer losing the plan path or the keep-every-item duty.
+  test.each(["worker", "designer", "tester"] as const)("a %s with a 5,000-character contract list gets a pointer to its plan file, not the list", (kind) => {
     const contracts = contractList("c", 5_000);
     const text = prompt(kind, { ...planned, contracts });
     expect(contracts.length).toBeGreaterThanOrEqual(5_000);
-    expect(section(text, "Contracts to verify")).toBe(`${contracts}\nKeep every item above. Your ready result confirms each one, with its evidence (test, command or file:line); the reviewer checks the same list.\n`);
-    expect(count(text, contracts)).toBe(1);
+    const pointer = section(text, "Contracts to verify")!;
+    expect(pointer).toContain("Plan file (wave 2 of 2): /plans/plan-2.md");
+    expect(pointer).toContain("Keep every item.");
+    expect(pointer).toContain("the reviewer checks the same list");
+    expect(text).not.toContain("c item 0000");
+    expect(text.length).toBeLessThan(contracts.length);
   });
 
   test("a Spec Writer brief renders no Contracts to verify section", () => {
@@ -110,7 +114,7 @@ describe("Base commit", () => {
   ] as [string, Partial<WorkerBriefInput>][])("with %s the tester records it once, in the sync sentence, and never a Local sync", (_label, extra) => {
     const text = prompt("tester", extra);
     expect(count(text, "Base commit: <sha>")).toBe(1);
-    expect(text).toContain("and record `Base commit: <sha>` (`git rev-parse HEAD`)");
+    expect(text).toContain("and record `Base commit: <sha>`");
     expect(section(text, "Test work")).not.toContain("Base commit");
     expect(text).not.toContain("Local sync");
   });
@@ -128,7 +132,7 @@ describe("Base commit", () => {
 
   test("a worker with a branch keeps its Local sync and records no Base commit in its Git workflow", () => {
     const text = prompt("worker", { branch: "feature/x" });
-    expect(text).toContain("and record `Local sync: <sha>` (`git rev-parse HEAD`)");
+    expect(text).toContain("and record `Local sync: <sha>`");
     expect(section(text, "Git workflow")).not.toContain("Base commit");
   });
 });
@@ -209,19 +213,16 @@ describe("tester working contract", () => {
   test("a tester's working contract drops the refactor, re-plan, user-journey and Docs needed lines", () => {
     const text = contract(tester);
     for (const gone of ["refactor or migration", "base commit as the oracle", "re-plan the remaining scope", "user journey", "Docs needed", "lint/analyze", "Never write, edit or run tests"]) expect(text, gone).not.toContain(gone);
-    expect(text).toContain("- Own the requested outcome in this worktree. Keep scope narrow.\n");
-    expect(lines(text, DOCS_RULE_OLD)).toBe(1);
-    expect(lines(tester, DOCS_RULE_NEW)).toBe(0);
+    expect(lines(text, TESTER_BOUNDARY)).toBe(1);
+    expect(lines(tester, WORKER_BOUNDARY)).toBe(0);
   });
 
-  test("a worker and a designer keep the re-plan line, the user-journey sentence, the Docs needed route and the build rules", () => {
+  test("a worker and a designer keep their one boundary line with the Docs needed route, and the Deviations line on a planned wave", () => {
     for (const kind of ["worker", "designer"] as const) {
       const text = contract(prompt(kind, { ...planned, branch: "feature/x" }));
-      expect(text, kind).toContain("recommend \"re-plan the remaining scope\".");
-      expect(text, kind).toContain("verify the user journey or closest executable seam.");
-      expect(lines(text, DOCS_RULE_NEW), kind).toBe(1);
-      expect(text, kind).toContain("Never write, edit or run tests of any kind");
-      expect(text, kind).toContain("run the project's lint/analyze and build");
+      expect(lines(text, WORKER_BOUNDARY), kind).toBe(1);
+      expect(lines(text, TESTER_BOUNDARY), kind).toBe(0);
+      expect(count(text, "## Deviations from plan"), kind).toBe(1);
     }
   });
 
@@ -233,11 +234,11 @@ describe("tester working contract", () => {
     }
   });
 
-  test("a Spec Writer's working contract is unchanged: no docs rule, and its trailer and adoption lines", () => {
+  test("a Spec Writer's working contract has no docs rule and its docs-only boundary with the trailer once", () => {
     const text = prompt("spec-writer", { ...planned, branch: "feature/x" });
     expect(text).not.toContain("Never change docs/");
-    expect(text).toContain("Chief-Spec-Writer: $BB_THREAD_ID");
-    expect(text).toContain("recommend \"re-plan the remaining scope\".");
+    expect(lines(contract(text), SPEC_WRITER_BOUNDARY)).toBe(1);
+    expect(count(text, "Chief-Spec-Writer: $BB_THREAD_ID")).toBe(1);
   });
 });
 
@@ -251,18 +252,20 @@ describe("chief_delegate: planned chain with 5,000-character contract lists", ()
   };
 
   // Regression: a contract clip on the worker, the tester's Source of truth still listing contracts, or the Spec Writer's context losing or lengthening them.
-  test("the worker gets its list verbatim, the tester its own wave's list verbatim and the Spec Writer a 3,000-character clip", async () => {
+  test("the worker and the tester get a plan-file pointer, not the list, and the Spec Writer a 3,000-character clip", async () => {
     const { worker, writer, tester } = await chainPrompts();
-    expect(count(worker, contractList("W1", 5_000))).toBe(1);
-    expect(count(tester, contractList("W2", 5_000))).toBe(1);
+    expect(worker).not.toContain("W1 item");
+    expect(tester).not.toContain("W2 item");
     expect(tester).not.toContain("W1 item");
+    expect(section(worker, "Contracts to verify")).toMatch(/plan-1\.md/);
+    expect(section(tester, "Contracts to verify")).toMatch(/plan-2\.md/);
     const context = section(writer, "Read-only context")!;
     const full = count(contractList("W1", 5_000), "W1 item");
-    for (const tag of ["W1", "W2"]) {
-      expect(count(context, `${tag} item`), tag).toBeGreaterThan(100);
-      expect(count(context, `${tag} item`), tag).toBeLessThan(full);
-    }
-    expect(context.length).toBeLessThan(7_000);
+    // Own-wave contracts only: wave 1's list, clipped; wave 2's never reaches the wave-1 Spec Writer.
+    expect(count(context, "W1 item")).toBeGreaterThan(100);
+    expect(count(context, "W1 item")).toBeLessThan(full);
+    expect(context).not.toContain("W2 item");
+    expect(context.length).toBeLessThan(5_000);
     expect(writer).not.toContain("## Contracts to verify");
   });
 
@@ -286,7 +289,7 @@ describe("chief_delegate: an unplanned tester", () => {
     const text = state.spawned.at(-1).prompt as string;
     expect(text).not.toContain("## Success criteria\n- None stated.");
     expect(text.split("\n## Source of truth for test cases\n")[0]).not.toContain("None stated.");
-    expect(section(text, "Predecessor's last report")!.startsWith("Its report names no Head commit: read the full report.\nFull report: ")).toBe(true);
+    expect(section(text, "Predecessor's last report")!.startsWith("Its report names no Head commit: read the full report.")).toBe(true);
     expect(text).not.toContain("The totals are fixed.\nFull report");
   });
 

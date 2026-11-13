@@ -1,6 +1,7 @@
 import { configurationContext, setup, start } from "./harness";
 import { GAPS_PROPERTY, FOCUS_PROPERTY, withPlanFlags } from "./reviewerToolDelta";
 import { ATTACH_DEFINITION, acceptEvidenceOnlyDelta } from "./specLaneWording";
+import { withHostCompaction } from "./shrinkEdits";
 
 // The tool-config capture of toolCallStability.test.ts (lines 20-69, same cases, same normalization), reused to snapshot another commit.
 // test/fixtures/tool-config-9689364.txt was captured by running it unchanged on base 9689364; tool-config-7178582.txt stays frozen.
@@ -146,8 +147,9 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
       entry.tools.splice(entry.tools.indexOf("chief_coordinate") + 1, 1);
     } else if (entry.tools.includes("chief_attach")) fail(`${old.key}: chief_attach outside a plain Chief`);
     if (entry.key !== old.key || JSON.stringify(entry.tools) !== JSON.stringify(old.tools) || JSON.stringify(entry.skills) !== JSON.stringify(old.skills)) fail(`${old.key}: key, tools or skills`);
-    // Only a non-Chief entry may match base unchanged; every Chief entry needs the authorized core-rule edits (and the preload edit on claude-code), so a restored base text must reach the exact comparison below.
+    // Only a non-Chief entry may match base unchanged or with the shrink-prompts compaction edit (applied to the base text); every Chief entry needs the authorized core-rule edits (and the preload edit on claude-code), so a restored base text must reach the exact comparison below.
     if (!plainChief && entry.instructions === old.instructions) return;
+    if (!plainChief && old.instructions !== undefined && entry.instructions === withHostCompaction(old.instructions)) return;
     if (!plainChief || !entry.instructions || !old.instructions) fail(`${old.key}: instructions`);
     // Chief's project rules are the last instruction component, so the uncapped base is the frozen text up to the marker plus the generator's own full rule input.
     // Anchor that reconstruction to the frozen base, apply only the authorized edits BEFORE the cap, cap at the SDK limit, and require exact equality: no tail byte is taken from head.

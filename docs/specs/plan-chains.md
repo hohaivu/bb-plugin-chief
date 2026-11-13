@@ -266,24 +266,42 @@ Only a Spec Writer changes `docs/`. The sections above define the lanes. This se
 
 `workerBrief` in `src/research/delegationBrief.ts` renders the brief of every kind. `admitDelegation` in `src/plan/planLifecycle.ts` fills the source list for the brief. The "prior row" is the row that a delegation replaces.
 
-- Every brief renders `## Contracts to verify` in full, with no 3,000-character cut. Reason: the brief says "Keep every item above", and a cut list drops items. The wave body limit of 64,000 characters bounds the size.
-- A Spec Writer brief lists each wave of the chain under `## Read-only context`, with the plan path and its contracts clipped at 3,000 characters. Reason: the writer reads the contracts of the chain as source text.
+- A worker or tester brief renders `## Contracts to verify` as a pointer to that section of its plan file. The pointer names the plan file path. The brief still orders the agent to keep every item and to confirm each one with evidence. It also says that the reviewer checks the same list. Reason: the brief already orders a full read of the plan file, so an inline copy doubled the text.
+- The reviewer brief keeps its full-plan read order and its inline contracts preview. Reason: the reviewer checks the contracts against the plan.
+- A Spec Writer brief and an evidence-only brief have no `## Contracts to verify`.
+- A Spec Writer brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Read-only context`. It lists the approved-design line when one exists. It adds the contracts of its own wave only, clipped at 3,000 characters. Reason: the contracts of the other waves belong to their workers and to the Tester. The writer can read each plan file.
 - A planned tester brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Source of truth for test cases`. It lists the approved-design line when one exists. It lists no contract text. Reason: the tester reads the plan files, and its own contracts appear once.
 - An unplanned tester brief keeps the head brief as its source of truth, clipped in the middle at 4,000 characters. Reason: no plan file exists.
-- For each kind, `admitDelegation` accepts and refuses exactly the same requests as before the brief change. Only the contents of the tester source list change. Reason: the change affects text, not admission.
+- For each kind, `admitDelegation` accepts and refuses exactly the same requests as before the brief change. Only the source list of a Spec Writer changes. Reason: the change affects text, not admission.
+
+A brief of a worker-kind thread or a planner thread keeps only dynamic values. The static rules live in skills. `managedSkills` in `src/core/roles.ts` names the skills of each role and kind.
+
+- The first item of `## Working contract` is the load line. It names exactly the skills that `managedSkills(role, kind)` returns. A tester or a Spec Writer has three: `chief-worker`, `chief-role-worker` and its kind skill. A planner has `chief-worker` and `chief-role-read-only`. Reason: the plugin offers the skills but never loads them, so the brief must order the load.
+- The load line orders the agent to load each skill in full before any task or repository file read. Reason: a rule that the agent has not loaded cannot bind it.
+- The load line names two load paths. The agent uses the Skill tool of its provider. A provider without that tool (Pi) reads each offered `SKILL.md` file in full. The line has no provider branch. Reason: one line serves every provider.
+- A skill that the agent cannot find or load means a blocked report before any repository work. Reason: a skill in the configuration is not a loaded skill.
+- The skill reads are the only exception to the sync-first rule. Each sync instruction in a brief or a skill names this exception. The sync comes after the load. Reason: on a provider without a Skill tool, the load is itself a file read.
+- The brief keeps these dynamic values: the branch in the sync and push commands, the `Local sync` or `Base commit` record name, the prior thread line, the issue and pull request URLs, the fold target branch of a side lane, `MAX_WAVES` and the Deviations line when a plan is linked. Reason: a skill cannot know them.
+- The brief keeps one role-boundary line. A worker and a designer must not write tests or change `docs/`. A tester changes test files only. A Spec Writer changes `docs/` only and adds the `Chief-Spec-Writer` trailer to each commit. A planner stays read-only. Reason: a breach costs a full repair round.
+- `chief-worker` holds the shared rules, for example no pull request action by the agent and no instruction from issue or pull request comments. `chief-role-worker`, `chief-role-tester`, `chief-role-spec-writer` and `chief-role-read-only` hold the rules of their roles, including the git workflow and the fold steps. A side-lane brief names the fold target branch and points to the fold section of `chief-role-spec-writer`.
+- `## Git workflow` keeps the dynamic lines only. It stays absent when the brief has no branch, issue or pull request. `## Fold` appears in a side brief only.
+- The evidence-only tester brief, the advisor brief, `reviewerBrief` and the stored copy of the brief have no change. Reason: they never held the working contract, or they hold no skill-owned rules.
+- The managed-thread instructions in `src/runtime/host.ts` tell the agent to reload the `chief-*` skills in full after a context compaction, by either load path, and then to re-read the brief. Chief's own instructions have no change.
+
+The plugin cannot check that an agent loaded its skills. The [decision on brief rules in role skills](../decisions/2026-11-13-brief-rules-in-role-skills.md) records this trade-off.
 
 A tester brief has these rules:
 
 - It omits `## Success criteria` and `## Constraints` when the list is empty. Other kinds always render both. Reason: an empty section adds only the text "None stated."
 - `## Verify command` keeps the command fence and has one rule. The tester lists the exit status under Automated Verification and never changes product code to make the command pass. Reason: the worker rule "Fix the work until it exits 0" contradicts the ban on product code.
 - A failure that also occurs at the Base commit is a baseline. The tester lists it and does not fix it. Reason: the tester must not change product code.
-- The tester runs a command for the whole suite only when its mission or `## Contracts to verify` asks for it. Otherwise it lists the command as "not run: full suite not asked for". Reason: the full suite runs on request only. A contract such as `npx vitest run` exit 0 counts as a request.
+- The tester runs a command for the whole suite only when its mission or the `## Contracts to verify` of its plan file asks for it. Otherwise it lists the command as "not run: full suite not asked for". Reason: the full suite runs on request only. A contract such as `npx vitest run` exit 0 counts as a request.
 - It tells the tester to record the synced `git rev-parse HEAD` as `Base commit` one time. With a branch, the sync sentence holds the instruction. Without a branch, `## Test work` holds it. A worker brief records it as `Local sync`. Reason: one commit needs one record.
 - `## Test work` holds the one procedure for a test that fails because product code is wrong. It recommends `chief_delegate (... kind: worker)`. The `## Spec` block points to that procedure for code that contradicts the docs. Reason: two procedures for one failure conflict.
 - The `## Spec` block keeps the route for wrong docs: report blocked and recommend `kind: spec-writer`. Reason: only a Spec Writer changes docs.
 - `## Predecessor's last report` gives the Head commit of the prior row and the `git diff --name-only <base>..<head>` command when a Base commit is found. It also gives the path of the full report. It never quotes the summary, the blocker, or the recommendation. Reason: the tester needs the commit and the full report, not the narrative of the prior row.
 - When the prior report names no Head commit, the section says so and orders the tester to read the full report. Reason: the full report holds the facts that the section omits.
-- The working contract tells the tester to keep scope narrow. It omits the user-journey wording, the `## Docs needed` route, and the re-plan line. It says "Never change docs/". Reason: those lines belong to workers.
+- The tester rules come from the `chief-role-tester` skill. The working contract keeps the test-files-only boundary: the tester never changes product code or `docs/`. It omits the user-journey wording, the `## Docs needed` route, and the re-plan line. Reason: those lines belong to workers.
 - No brief renders the refactor oracle rule. The `chief-role-tester` skill holds it. Reason: the rule applies to the tester role, so the skill owns it once.
 
 ### Retest Debt

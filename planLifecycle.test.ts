@@ -423,6 +423,20 @@ describe("admitDelegation: specSources", () => {
     expect(short.admit({ ...planned, wave: 1, kind: "spec-writer", resolvedKind: "spec-writer", branch: undefined }).specSources).toEqual(["Wave 1 of 2: w1", "contract one", "Wave 2 of 2: w2"]);
   });
 
+  // Contract (shrink-prompts wave 1): on wave w of a chain of k waves a Spec Writer lists all k `Wave n of N: <path>` lines and only wave w's contracts
+  // (clipped at 3,000); no other wave's contracts reach it. Regression: every wave's contracts pushed for the writer, or the writer's own dropped.
+  test.each([1, 2, 3])("a Spec Writer on wave %i of a four-wave chain lists four paths and only its own wave's contracts", (own) => {
+    const chain: PlanWave[] = [1, 2, 3, 4].map((n) => ({ path: `w${n}`, contracts: `contracts of wave ${n} ${"x".repeat(4_000)}`, ...(n === 4 ? { test: true } : { spec: true }) }));
+    const { admit } = world({ [P]: chain }, [{ id: "prev", plan: P, wave: own - 1 || 1 }]);
+    const sources = admit({ ...planned, wave: own, kind: "spec-writer", resolvedKind: "spec-writer", branch: undefined }).specSources;
+    expect(sources.filter((line) => /^Wave \d of 4: w\d$/.test(line))).toEqual([1, 2, 3, 4].map((n) => `Wave ${n} of 4: w${n}`));
+    const contracts = sources.filter((line) => line.startsWith("contracts of wave"));
+    expect(contracts).toHaveLength(1);
+    expect(contracts[0]!.startsWith(`contracts of wave ${own} `)).toBe(true);
+    expect(contracts[0]!.length).toBeLessThan(3_100);
+    expect(sources).toHaveLength(5);
+  });
+
   test("a design wave on the chain adds the owner's approval line, or says none was recorded", () => {
     const waves: PlanWave[] = [{ path: "w1", design: true }, { path: "w2", test: true }];
     const approved = world({ [P]: waves }, [{ id: "d", plan: P, wave: 1, kind: "designer", approval: "ok by owner", report: "/r/d.md" }, { id: "w", plan: P, wave: 2 }]);

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { disposeAll } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { withHostCompaction } from "./test/shrinkEdits";
 import { INSTRUCTIONS_CAP, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, type ToolConfig, toolConfigCases, toolConfigFixture } from "./test/toolConfigFixture";
 
 provideSdk(sdkTesting);
@@ -12,7 +13,7 @@ vi.mock("node:child_process", async () => (await import("./test/execMock")).chil
 afterEach(disposeAll);
 
 // Preservation of the "Chief keeps tool search" change, runnable UNCHANGED on base 6534bea and on head (both must pass):
-// every role's tools and skills, every managed-role and codex instruction, every claude-code Chief line outside the one preload line, and every tool definition except chief_roster.
+// every role's tools and skills, every managed-role and codex instruction (a managed role may also carry the host's reworded compaction sentence, base -> head via withHostCompaction, nothing else), every claude-code Chief line outside the one preload line, and every tool definition except chief_roster.
 // The expected values are test/fixtures/tool-config-6534bea.txt, captured by running test/toolConfigFixture.ts's generator on base 6534bea, never by the code under test.
 // It asserts nothing about the new schema or the new preload text: those changed-behaviour checks live in toolConfigPreservation.test.ts and toolCallStability.test.ts and fail on base on purpose.
 const dir = dirname(fileURLToPath(import.meta.url));
@@ -43,7 +44,7 @@ export function assertPreserved(base: ToolConfig, original: ToolConfig) {
     if (JSON.stringify(entry.tools) !== JSON.stringify(old.tools)) fail(`${old.key}: tools`);
     if (JSON.stringify(entry.skills) !== JSON.stringify(old.skills)) fail(`${old.key}: skills`);
     if (!isClaudeChief(old.key)) {
-      if (entry.instructions !== old.instructions) fail(`${old.key}: instructions`);
+      if (entry.instructions !== old.instructions && entry.instructions !== withHostCompaction(old.instructions!)) fail(`${old.key}: instructions`);
       return;
     }
     // A claude-code Chief: the one preload line may change, so it is cut out of both texts; its position and its lead-in text are kept, and the rest up to the project rules is byte for byte.

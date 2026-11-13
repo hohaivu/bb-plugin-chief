@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { NO_DEVIATIONS, PLAN_FIXTURE, REQUEST_CHANGES, TEST_WAVE, approvePlan, completeWorker, delegate, disposeAll, legacyWave, planFile, planTwoWaves, setup, start, status, waiveTests, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { expectLoadLine } from "./test/loadLine";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -112,13 +113,14 @@ describe("Chief backend", () => {
       type: "managed-worktree",
       baseBranch: { kind: "named", name: "feature/fix-checkout-totals" },
     });
-    // The forge stays Chief's: the brief has to say so, or the worker opens its own PR.
-    expect(state.spawned[1].prompt).toContain("Your worktree is based on feature/fix-checkout-totals");
-    expect(state.spawned[1].prompt).toContain("https://github.com/acme/shop/issues/7");
-    expect(state.spawned[1].prompt).toContain("Do not create, merge, or mark ready any pull request");
-    // The worker's ready report splits verification the same way the planner's does.
-    expect(state.spawned[1].prompt).toContain("Read every file this brief names in full before acting or spawning anything: no partial reads, no limit or offset.");
-    expect(state.spawned[1].prompt).toContain("splits verification into Automated (the command you ran and its exit status) and Manual (what only a human can confirm)");
+    // The brief keeps the dynamic values: the branch in the sync and push commands, the issue and the pull request. The forge
+    // rule, the full-read rule and the report split live in the skills the load line orders loaded.
+    const prompt: string = state.spawned[1].prompt;
+    expect(prompt).toContain("Task branch: feature/fix-checkout-totals.");
+    expect(prompt).toContain("`git push origin HEAD:feature/fix-checkout-totals`");
+    expect(prompt).toContain("Tracking issue: https://github.com/acme/shop/issues/7");
+    expect(prompt).toContain("Draft pull request: https://github.com/acme/shop/pull/8");
+    expectLoadLine(prompt, "worker");
   });
 
   test("keeps the project default base when a delegation names no branch", async () => {
@@ -185,7 +187,7 @@ describe("Chief backend", () => {
     expect(freshWorkerSpawn.environment).toEqual({ type: "reuse", environmentId: "env_worker" });
     expect(freshWorkerSpawn.prompt).toContain("Review findings to fix");
     expect(freshWorkerSpawn.prompt).toContain("- totals.ts:1 — Totals go negative.");
-    expect(freshWorkerSpawn.prompt).toContain("Your worktree is based on feature/fix-checkout-totals");
+    expect(freshWorkerSpawn.prompt).toContain("Task branch: feature/fix-checkout-totals.");
 
     const rows = (await status(state)).threads;
     expect(rows.find((row) => row.threadId === worker.threadId)?.state).toBe("complete");
@@ -320,7 +322,8 @@ describe("Chief backend", () => {
     expect(state.spawned.at(-1).prompt).toContain(`Plan file (wave 1 of 2): ${path1}`);
     expect(state.spawned.at(-1).prompt).toContain('Wave 1 of 2. Implement only this wave\'s plan file. Name "Wave 1 of 2" in your ready result.');
     expect(state.spawned.at(-1).prompt).toContain("No review runs after this wave.");
-    expect(state.spawned.at(-1).prompt).toContain("## Contracts to verify\n- Totals stay non-negative\nKeep every item above.");
+    expect(state.spawned.at(-1).prompt).toContain(`## Contracts to verify\nRead the \`## Contracts to verify\` section of your plan file (Plan file (wave 1 of 2): ${path1}) in full: it is your checklist. Keep every item.`);
+    expect(state.spawned.at(-1).prompt).not.toContain("- Totals stay non-negative");
 
     const row = state.db.prepare(`SELECT plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
     expect(row).toEqual({ plan_thread_id: planner.threadId, plan_wave: 1 });
@@ -407,7 +410,8 @@ describe("Chief backend", () => {
     const freshWorker = JSON.parse(replaceResult.stdout!) as { threadId: string };
 
     expect(state.spawned.at(-1).prompt).toContain(`Plan file (wave 1 of 2): ${path1}`);
-    expect(state.spawned.at(-1).prompt).toContain("## Contracts to verify\n- Totals stay non-negative");
+    expect(state.spawned.at(-1).prompt).toContain(`## Contracts to verify\nRead the \`## Contracts to verify\` section of your plan file (Plan file (wave 1 of 2): ${path1}) in full`);
+    expect(state.spawned.at(-1).prompt).not.toContain("- Totals stay non-negative");
     const freshRow = state.db.prepare(`SELECT plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(freshWorker.threadId) as any;
     expect(freshRow).toEqual({ plan_thread_id: planner.threadId, plan_wave: 1 });
   });
@@ -762,14 +766,14 @@ describe("Chief backend", () => {
     expect(roster).toContain("waves: 4/4 done, wave 3 approved");
   });
 
-  test("tells the worker the forge is Chief's even when only a pull request was created", async () => {
+  test("keeps the Git workflow section and the pull request link when only a pull request was created", async () => {
     const state = await setup();
     const chief = await start(state);
-    // Branch creation can fail after the draft PR exists; the constraint still has to reach the worker.
+    // Branch creation can fail after the draft PR exists; the section and the link still reach the worker (the forge rule is in its skill).
     await delegate(state, chief.threadId, "Fix checkout totals", { prUrl: "https://github.com/acme/shop/pull/8" });
     expect(state.spawned[1].prompt).toContain("## Git workflow");
-    expect(state.spawned[1].prompt).toContain("https://github.com/acme/shop/pull/8");
-    expect(state.spawned[1].prompt).toContain("Do not create, merge, or mark ready any pull request");
+    expect(state.spawned[1].prompt).toContain("Draft pull request: https://github.com/acme/shop/pull/8");
+    expect(state.spawned[1].prompt).not.toContain("Task branch:");
   });
 
   test("records the branch and forge links on the thread and shows them in the roster and inspect", async () => {

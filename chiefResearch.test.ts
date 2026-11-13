@@ -436,7 +436,8 @@ describe("chief_research", () => {
     await roleThread(state, "planner");
     await roleThread(state, "reviewer");
     const prompt = (role: string) => state.spawned.findLast((args) => args.pluginMetadata?.role === role).prompt as string;
-    expect(prompt("planner")).toContain("use chief_research");
+    // The research guidance lives in the chief-role-read-only skill the brief orders loaded; the brief no longer repeats it.
+    expect(prompt("planner")).not.toContain("use chief_research");
     expect(prompt("reviewer")).not.toContain("chief_research");
     await state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
     const chief = (await status(state)).threads.find((row) => row.role === "chief" && row.state !== "archived")!.threadId;

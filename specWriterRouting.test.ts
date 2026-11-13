@@ -868,8 +868,8 @@ describe("tester role", () => {
     });
 
     const BASE_HEAD = "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.";
-    const localSync = (branch: string, label = "Local sync") => `Before you read any file, sync this checkout with ${branch}: require a clean tree (\`git status --porcelain\` prints nothing), run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`, and record \`${label}: <sha>\` (\`git rev-parse HEAD\`). If the tree is not clean or the fast-forward fails, report blocked. Never use autostash, never force, never touch another worktree.`;
-    const rejectedPush = (branch: string) => `If that push is rejected because ${branch} moved, run \`git fetch origin ${branch}\` then \`git rebase --no-autostash origin/${branch}\` on a clean tree and push again; never force-push.`;
+    // Wave 2 of the shrink-prompts plan: the brief keeps the dynamic values (branch, record name, push command); the sync and rebase rules live in the skills.
+    const localSync = (branch: string, label = "Local sync") => `Task branch: ${branch}. After loading your skills and before any other file read, sync and record \`${label}: <sha>\`; push every commit with \`git push origin HEAD:${branch}\`; follow the git workflow in your loaded skills.`;
     const BLOCKED_PLAN = "- If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.";
     const WORKER_SPEC_RULES = [
       "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
@@ -892,45 +892,22 @@ describe("tester role", () => {
         BASE_HEAD,
       ].join("\n") + "\n");
       expect(section(prompt, "Git workflow")).toContain(localSync(CHAIN));
-      expect(section(prompt, "Git workflow")).toContain(rejectedPush(CHAIN));
       expect(prompt).not.toMatch(/implement to match them|kind: spec-writer|you run before its worker/);
     });
 
-    // Wave 2 contracts 1 and 5 (side-lane writer prompt): the rendered prompt carries the whole fold protocol as numbered steps and
-    // the docs-only diff against the fetched U, a plain push to the chain branch, and the Fold base/head/none record; none of the
-    // run-first wording, the pre-fold docs-only check against <base> or the "commit and push after each step" rule survives.
-    // Regression: the writer folds without the clean-tree check, rebases with autostash, pushes the side branch or forces.
-    test("a side-lane Spec Writer's prompt carries the fold protocol and none of the run-first wording", async () => {
+    // Side-lane writer prompt: the `## Fold` section names the chain branch and sends the writer to the skill's Fold steps; the side branch is never pushed
+    // except through them, and none of the run-first wording or the "commit and push after each step" rule survives.
+    // Regression: the Fold section loses the target branch, or the writer is told to push the side branch.
+    test("a side-lane Spec Writer's prompt names the fold target and the skill's Fold steps, with none of the run-first wording", async () => {
       const state = await setup();
       const { writer } = await withWriter(state);
       const prompt = state.spawned.at(-1).prompt as string;
       expect(section(prompt, "Wave")).toContain("Wave 1 of 2: you run in parallel with its worker, in your own worktree on a side branch cut from feature/chain.");
-      expect(section(prompt, "Fold")).toBe([
-        `Commit only docs/ on your worktree branch. Before you report ready, fold the commits onto ${CHAIN}:`,
-        "1. Require a clean tree: `git status --porcelain` prints nothing.",
-        `2. \`git fetch origin ${CHAIN}\`, then note \`U=$(git rev-parse origin/${CHAIN})\`.`,
-        `3. \`git rebase --no-autostash origin/${CHAIN}\`. On a conflict, run \`git rebase --abort\` and report blocked, recommending \`chief_delegate (replaces: <your thread id>, kind: spec-writer)\`.`,
-        "4. `git diff --name-only $U..HEAD` lists only docs/ paths. Any other path: report blocked.",
-        `5. \`git push origin HEAD:${CHAIN}\`. Never pass --force. If the push is rejected, repeat from step 1.`,
-        "Record `Fold base: <U of the successful attempt>` and `Fold head: <the pushed sha>` in your report. When no docs change was needed, record `Fold: none` with Fold base and Fold head both equal to U.",
-        "Never use autostash, never force, never touch another worktree.",
-      ].join("\n") + "\n");
-      expect(section(prompt, "Git workflow")).toContain("The only push you make is the fold into feature/chain");
-      expect(prompt).toContain("Push only through the `## Fold` steps");
+      expect(section(prompt, "Fold")).toBe(`Fold your docs/ commits onto ${CHAIN}: follow section 10 (Fold) of the \`chief-role-spec-writer\` skill with <branch> = ${CHAIN}, and record Fold base and Fold head.\n`);
+      expect(section(prompt, "Git workflow")).toContain(`Side branch cut from ${CHAIN}: commit only docs/ on it and push only through the \`## Fold\` steps.`);
       expect(prompt).toContain("A delta item the docs already reflect needs no commit: say so, and record `Fold: none`.");
       expect(prompt).not.toMatch(/you run before its worker|git diff --name-only <base>\.\.HEAD|Commit and push after each meaningful step|Commit and push your work/);
       expect(rowOf(state, writer).kind).toBe("spec-writer");
-    });
-
-    // Wave 2 contract 6 (planner brief): the planner is told the Spec Writer commits docs in parallel with the wave's worker, which builds from
-    // the plan, and is never told the writer runs first. Regression: the planner brief again describes a writer-first chain.
-    test("the planner's brief says the Spec Writer commits in parallel and the worker builds from the plan", async () => {
-      const state = await setup();
-      const chief = await start(state);
-      await plan(state, chief.threadId, [specImpl(), TEST_WAVE(2)]);
-      const prompt = state.spawned.find((entry: any) => entry.prompt.startsWith("You are the managed planner"))!.prompt as string;
-      expect(prompt).toContain("give that wave a `## Spec delta` heading for the Spec Writer, who commits the docs in parallel with the wave's worker (the worker builds from the plan, so write the plan wave in full).");
-      expect(prompt).not.toMatch(/runs its Spec Writer before its worker|Spec Writer runs first|before its worker/);
     });
 
     // Wave 2 contract 3 (tester): the tester checks each listed side writer's Fold head is an ancestor of its HEAD before deriving tests.

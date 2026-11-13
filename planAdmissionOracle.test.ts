@@ -4,10 +4,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { baseImpl, skipSpecs, specImpl } from "./test/specWriterHelpers";
 import { READY, type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, setLive, tool, workerOn } from "./test/testerHelpers";
-import { TEST_WAVE, approvePlan, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
+import { TEST_WAVE, approvePlan, delegate, disposeAll, replaceText, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { acceptDesignRefusal, acceptOwnership, dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
+import { maskSlimSections } from "./test/shrinkEdits";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -644,7 +645,16 @@ describe("tester role", () => {
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "plan-admission-c8a0d76.txt"), "utf8");
       const kept = (text: string) => text.split(/^(?==== )/m).filter((block) => !REPLACED_BY_PARALLEL_LANE(block.slice(4, block.indexOf(" ===\n"))));
       expect(kept(oracle).length).toBeGreaterThan(30);
-      expect(dropDocsLines(dropSkippedNote(acceptDesignRefusal(acceptOwnership(kept(asBase(head)).join("")))))).toBe(dropDocsLines(trimTesterBriefs(kept(oracle).join(""))));
+      const headText = dropDocsLines(dropSkippedNote(acceptDesignRefusal(acceptOwnership(kept(asBase(head)).join("")))));
+      // Named edits of the shrink-prompts waves, applied to the base text with exact counts: a predecessor's or designer's ready alert no longer overflows its
+      // action room, so its report file is gone (4 pointer lines before `## Working contract`, one designer path); a Spec Writer's read-only intro names its own wave's contracts.
+      const filesGone = (text: string) => {
+        const pointers = text.match(/^Full report: <storage>\/chief\/proj_1\/thr_\d+\/report-1\.md\n(?=\n## Working contract)/gm) ?? [];
+        expect(pointers).toHaveLength(4);
+        return replaceText(text.replace(/^Full report: <storage>\/chief\/proj_1\/thr_\d+\/report-1\.md\n(?=\n## Working contract)/gm, ""), "designer report <storage>/chief/proj_1/thr_3/report-1.md", "designer report none", 1);
+      };
+      const ownWave = (text: string) => replaceText(text, "The contracts below belong to the worker and the tester: never", "The contracts below are your wave's; they belong to the worker and the tester: never", 3);
+      expect(maskSlimSections(headText)).toBe(maskSlimSections(ownWave(filesGone(dropDocsLines(trimTesterBriefs(kept(oracle).join("")))))));
     });
   });
 });

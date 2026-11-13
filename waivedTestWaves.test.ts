@@ -273,13 +273,10 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     await expect(omitted.context).toMatchFileSnapshot("./test/fixtures/review-brief-no-waiverlines.context.txt");
   });
 
-  const pushRules = (prompt: string, branch: string) => {
-    expect(prompt).toContain(`Your worktree is based on ${branch}. `);
-    expect(prompt).toContain(`git push origin HEAD:${branch}`);
-    expect(prompt).toContain("Never push any other branch");
-    expect(prompt).toContain(`git fetch origin ${branch}`);
-    expect(prompt).toContain("never force-push");
-    expect(prompt).toContain("Do not create, merge, or mark ready any pull request");
+  // The brief keeps the dynamic values (the branch in the push command, the record name); the sync, rebase and no-force rules live in the role skills.
+  const pushRules = (prompt: string, branch: string, record = "Local sync") => {
+    expect(prompt).toContain(`Task branch: ${branch}. After loading your skills and before any other file read, sync and record \`${record}: <sha>\``);
+    expect(prompt).toContain(`\`git push origin HEAD:${branch}\``);
   };
 
   // Contract (todo #743): every brief with a branch names the exact push refspec, so a worktree on its own bb/ branch still moves the named branch.
@@ -306,7 +303,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     const spawn = state.spawned.at(-1);
     expect(spawn.environment.workspace).toMatchObject({ type: "managed-worktree", baseBranch: { kind: "named", name: "feature/x" } });
     expect(spawn.prompt).toContain("## Test work");
-    pushRules(spawn.prompt, "feature/x");
+    pushRules(spawn.prompt, "feature/x", "Base commit");
   });
 
   test.each([
@@ -317,7 +314,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
     const chief = await start(state);
     const first = await delegate(state, chief.threadId, "Fix totals", { branch: "feature/x" });
     await delegate(state, chief.threadId, "Next", { replaces: first.threadId, ...(kind ? { kind } : {}) });
-    pushRules(state.spawned.at(-1).prompt, "feature/x");
+    pushRules(state.spawned.at(-1).prompt, "feature/x", kind ? "Base commit" : "Local sync");
   });
 
   // Preservation: a brief with no branch has no push-target line; the mutation control makes the line unconditional.
