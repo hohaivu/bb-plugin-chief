@@ -10,6 +10,7 @@ import { provideSdk } from "./test/sdk";
 import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, chiefPreloadTail } from "./test/toolConfigFixture";
+import { withHostCompaction } from "./test/shrinkEdits";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -196,7 +197,8 @@ describe("tool-call stability", () => {
       }
       if (!entry.instructions || !old.instructions) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
       const restored = accepted(preloaded ? withoutPreload(entry.instructions) : entry.instructions);
-      if (old.instructions.length < OLD_CAP) expect(restored, entry.key).toBe(old.instructions);
+      // Wave 2's one named edit, applied to the base text: the managed roles' compaction sentence also asks for the skill reload.
+      if (old.instructions.length < OLD_CAP) expect(restored, entry.key).toBe(entry.key.includes("| chief |") ? old.instructions : withHostCompaction(old.instructions));
       else {
         // The base text was cut at the old cap and the head text at the new one: the base is a prefix of the head, so a cut that eats Chief's rules still fails.
         cut += 1;

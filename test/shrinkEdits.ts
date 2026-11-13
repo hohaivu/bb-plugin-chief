@@ -102,3 +102,13 @@ export function shrinkJsonOracle(raw: string): string {
   const all = strings.join("\n");
   return `${JSON.stringify(mapStrings(value, (text) => dropRosterReportLines(shrinkAlerts(text, all))), null, 2)}\n`;
 }
+
+// (e) The compaction sentence of every managed role's tool-config instructions (src/runtime/host.ts) now also asks for the brief's chief-* skills to be reloaded.
+export const COMPACTION_BASE = "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.";
+export const COMPACTION_HEAD = "After any context compaction, before acting, reload in full the chief-* skills your brief names (Skill tool, or read each SKILL.md in full) and re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.";
+/** Base instructions -> head instructions: the one sentence swapped when present (a Chief's instructions have none). */
+export const withHostCompaction = (instructions: string) => {
+  const parts = instructions.split(COMPACTION_BASE);
+  if (parts.length > 2) throw new Error("the compaction sentence appears more than once");
+  return parts.join(COMPACTION_HEAD);
+};

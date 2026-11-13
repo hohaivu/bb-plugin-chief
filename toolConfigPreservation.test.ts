@@ -7,6 +7,7 @@ import { disposeAll } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, type ToolConfig, compareToolConfig, toolConfigFixture } from "./test/toolConfigFixture";
+import { withHostCompaction } from "./test/shrinkEdits";
 import { ATTACH_DEFINITION, EVIDENCE_ONLY_PROPERTY, acceptCoreRuleTrim } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
@@ -74,9 +75,12 @@ describe("tool config: base 9689364 to head", () => {
     // The three edits are really there: the comparison is not vacuous.
     expect(head.catalog["chief_delegate"]!.inputSchema.properties.kind!.description).not.toBe(base.catalog["chief_delegate"]!.inputSchema.properties.kind!.description);
     expect(head.catalog["chief_complete"]!.inputSchema.properties.skipReview!.description).not.toBe(base.catalog["chief_complete"]!.inputSchema.properties.skipReview!.description);
+    // Chief's entries differ by the core-rule edits; every managed role's entry differs only by the reworded compaction sentence (wave 2).
     const changed = head.entries.filter((entry, index) => entry.instructions !== base.entries[index]!.instructions);
     expect(changed.length).toBeGreaterThan(0);
-    expect(changed.every((entry) => entry.key.includes("| chief |"))).toBe(true);
+    const managed = changed.filter((entry) => !entry.key.includes("| chief |"));
+    expect(managed.length).toBeGreaterThan(0);
+    for (const entry of managed) expect(entry.instructions, entry.key).toBe(withHostCompaction(base.entries[head.entries.indexOf(entry)]!.instructions!));
   });
 
   describe("negative controls: any other difference fails the comparison", () => {
