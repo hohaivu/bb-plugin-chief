@@ -7,6 +7,7 @@ import {
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
+import type { PluginAppSlots } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { ResearchConfiguration } from "./src/research/research";
 import type { rpcContract } from "./src/rpcContract";
@@ -576,12 +577,14 @@ export default definePluginApp((app) => {
     description: "Parallel read-only research for Chief and planners: one shared switch and cap, plus per-mode models, thinking levels, and timeouts.",
     component: ResearchSettings,
   });
-  app.slots.experimental_threadHeaderAction({
+  // The SDK retired this slot from its typings but the host still runs it. experimental_threadAction(placement "header") only draws labelled buttons, so it cannot render the role badge.
+  const slots = app.slots as PluginAppSlots & { experimental_threadHeaderAction(registration: { id: string; title: string; component: typeof ChiefHeaderBadge }): void };
+  slots.experimental_threadHeaderAction({
     id: "chief-role",
     title: "Chief role",
     component: ChiefHeaderBadge,
   });
-  app.slots.experimental_threadHeaderAction({
+  slots.experimental_threadHeaderAction({
     id: "new-chief",
     title: "New Chief",
     component: NewChiefButton,
