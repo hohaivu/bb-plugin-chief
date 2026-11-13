@@ -1,6 +1,10 @@
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import { createState, type Ctx } from "./src/runtime/context";
 import { createCore } from "./src/runtime/core";
+import { createObserve } from "./src/observe/events";
+import { createCompletionSnapshot } from "./src/observe/completionSnapshot";
+import { runDailyReport } from "./src/observe/report";
+import { createRetro } from "./src/observe/retro";
 import { createSweep } from "./src/runtime/sweep";
 import { createSettingsRuntime } from "./src/runtime/settings";
 import { createChiefs } from "./src/runtime/chiefs";
@@ -51,6 +55,7 @@ export type { ManagedRow, ManagedThread, FailEntry, ReportFinding, ReportParams,
 export default async function plugin(bb: BbPluginApi) {
   const ctx = { bb, state: createState() } as Ctx;
   Object.assign(ctx, createCore(ctx));
+  Object.assign(ctx, createObserve(ctx)); // also replaces ctx.bb: its log.warn feeds Sentry for every module built after this
   Object.assign(ctx, createSweep(ctx));
   Object.assign(ctx, createSettingsRuntime(ctx));
   Object.assign(ctx, createChiefs(ctx));
@@ -58,6 +63,7 @@ export default async function plugin(bb: BbPluginApi) {
   Object.assign(ctx, createNextAction(ctx));
   Object.assign(ctx, createCheckout(ctx));
   Object.assign(ctx, createCleanup(ctx));
+  Object.assign(ctx, createCompletionSnapshot(ctx));
   Object.assign(ctx, createCompletion(ctx));
   Object.assign(ctx, createAlerts(ctx));
   Object.assign(ctx, createForgeWiring(ctx));
@@ -67,6 +73,7 @@ export default async function plugin(bb: BbPluginApi) {
   Object.assign(ctx, createRoster(ctx));
   Object.assign(ctx, createInspect(ctx));
   Object.assign(ctx, createResearchWiring(ctx));
+  Object.assign(ctx, createRetro(ctx));
   Object.assign(ctx, createToolRegistry(ctx));
   registerForgeInitTool(ctx);
   registerDelegateTool(ctx);
@@ -89,6 +96,8 @@ export default async function plugin(bb: BbPluginApi) {
   registerReportTool(ctx);
   registerLogTool(ctx);
   registerResearchTool(ctx);
+  ctx.bb.background.schedule("retro", "*/10 * * * *", async () => { await ctx.retroTick(Date.now()); });
+  ctx.bb.background.schedule("daily-report", "0 8 * * *", async () => { await runDailyReport(ctx); });
   registerHost(ctx);
   registerCli(ctx);
   const { settings, store } = ctx;
@@ -98,16 +107,16 @@ export default async function plugin(bb: BbPluginApi) {
   try {
     await ctx.reconcile(); // each reconciled row's reload sweeps rows absorbed before this version
   } catch (error) {
-    bb.log.warn(`Initial reconciliation deferred: ${String(error)}`);
+    ctx.bb.log.warn(`Initial reconciliation deferred: ${String(error)}`);
   }
   store.reload();
   await ctx.state.sweeping;
-  await ctx.plannerEnabled().catch((error) => bb.log.warn(`Could not read the planner setting: ${String(error)}`));
-  await ctx.researchSettings().catch((error) => bb.log.warn(`Could not read the researcher settings: ${String(error)}`));
+  await ctx.plannerEnabled().catch((error) => ctx.bb.log.warn(`Could not read the planner setting: ${String(error)}`));
+  await ctx.researchSettings().catch((error) => ctx.bb.log.warn(`Could not read the researcher settings: ${String(error)}`));
   const initial = await settings.get();
   ctx.state.cleanupActive = initial.cleanupApproved;
   if (initial.autoSpawn && initial.chiefProject) {
-    void ctx.ensureChief(initial.chiefProject).catch((error) => bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
+    void ctx.ensureChief(initial.chiefProject).catch((error) => ctx.bb.log.warn(`Could not auto-start Chief: ${String(error)}`));
   }
   bb.log.info("Chief supervisor loaded");
 }

@@ -294,6 +294,7 @@ export function createDelegation(ctx: Ctx) {
       input: [{ type: "text", text, mentions: [] }],
       senderThreadId: effectiveChiefId,
     });
+    ctx.observe.event("nudge", row, `chars=${instruction.length}`);
     const now = Date.now();
     // The store decides from the stored counter inside one synchronous transaction, not the pre-send snapshot:
     // overlapping continues and an interleaved report (which zeroes it) must each see the current value.

@@ -81,7 +81,7 @@ The transaction runs these steps in order:
 1. `reserveReport` stores the report columns, adds 1 to `report_seq`, and clears `report_path`.
 2. An advisor ready or blocked report marks the row advised. When the advisor has a plan thread, the first advice resolves the plan review. `approved` means a ready report with verdict `approve`. Any other advice means `changes`.
 3. A planner ready report with a plan sets the plan review. The review is `required` when the row has no `replaces_thread_id`, and either the plan has more than one implementation wave or `complex` is true. Otherwise the review is null. A design wave and a test wave never count, because each is a fixed companion wave (a Designer's artboards, a Tester's tests) and not extra implementation scope. When the planner replaces a planner with review `changes`, the replaced planner completes.
-4. An advisor or reviewer ready report with a `lesson` inserts one `chief_lessons` row. The row holds the project, the text, the reporting thread, the reviewed worker, the time, and the role.
+4. An advisor or reviewer ready report with a `lesson` inserts one `chief_lessons` row. The row holds the project, the text, the reporting thread, the reviewed worker, the time, and the role. The row has the status `proposed`, so no prompt contains it until Chief accepts it. `observability.md` describes the lesson lifecycle.
 5. `ledger.recordVerdict` adds 1 to `reject_streak` for `request_changes` and sets it to 0 for `approve`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head.
 6. A reviewer ready report with a verdict enqueues forge comments (one for each covered pull request). A worker blocked report enqueues one blocked comment. `forge-comments.md` describes them.
 7. When the row has a Chief, the code writes the pending alert. It has the title, the state, and the report number. It adds up to 300 characters of `summary` or `result`. The last line is `The full alert could not be built; run chief_inspect <id>.`
@@ -153,7 +153,7 @@ Each contract carries its reason.
 - One transaction holds these writes. Reason: a crash before the full alert still leaves Chief a pointer.
   - The report columns with seq and rev.
   - The advisor and planner review marks.
-  - The advisor or reviewer lesson, tagged with its role.
+  - The advisor or reviewer lesson, tagged with its role, with the status `proposed`. The report alert adds the line `Proposed lesson <id>: bb chief lesson accept <id> --reason "…" (or retire)`.
   - The verdict rows and the reject counter.
   - The forge comment rows.
   - The pending alert.

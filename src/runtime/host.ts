@@ -77,7 +77,10 @@ export function registerHost(ctx: Ctx) {
     // A researcher's brief says how to use chief_research, so it has no line but still needs the tool while research is on.
     const researchTool = !!research || (role === "researcher" && !!ctx.state.researchActive?.enabled);
     const claudeCode = context.provider.id === "claude-code";
+    // The newest 10 accepted lessons, shown oldest first; proposed and retired ones reach no prompt. better-sqlite3 is synchronous, so configure stays so.
+    const newestLessons = (roleClause: string) => (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? AND status='accepted' AND ${roleClause} ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
     if (role === "chief") {
+      const chiefLessons = newestLessons(`role='chief'`);
       const coordinator = ctx.isCoordinator(row);
       const child = ctx.isLinkedChild(row);
       const tools = coordinator ? COORDINATOR_TOOLS : [
@@ -108,13 +111,14 @@ export function registerHost(ctx: Ctx) {
             chiefCoreRules(`${ctx.state.plannerActive ? "chief_plan, " : ""}chief_review${research ? ", chief_research" : ""}`),
             "",
             rules,
+            // After the rules: the SDK's cut then drops lessons before rules.
+            ...(chiefLessons.length ? ["", clip(["## Chief lessons (communication)", ...chiefLessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 2_000)] : []),
           ]),
         ].join("\n"),
       };
     }
     const chiefThreadId = row?.chief_thread_id ?? (seeded?.success ? seeded.data.chiefThreadId ?? null : null);
     // The newest 10 lessons, shown oldest first and clipped; better-sqlite3 is synchronous, so configure stays so.
-    const newestLessons = (roleClause: string) => (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? AND ${roleClause} ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
     const lessons = newestLessons(`(role IS NULL OR role='advisor')`);
     const reviewLessons = role === "reviewer" ? newestLessons(`role='reviewer'`) : [];
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread

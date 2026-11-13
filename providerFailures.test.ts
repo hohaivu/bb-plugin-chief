@@ -476,7 +476,8 @@ describe("Chief backend", () => {
         state.db.prepare("UPDATE plugin_meta SET value=? WHERE key IN ('stats_since','failure_events_since')").run(String(Date.UTC(2026, 0, 1)));
 
         // The Coordinator migration appends two columns and the retest-debt migration one (retest_skipped) to managed_threads; the oracle hash predates them, so they are checked NULL and dropped.
-        const table = (name: string) => (state.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all() as Record<string, unknown>[]).map((row) => {
+        // The observability waves seed one more plugin_meta key (retros_since, a runtime clock stamp); it is not a stats input, so it is left out and the oracle hash is unchanged.
+        const table = (name: string) => (state.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all() as Record<string, unknown>[]).filter((row) => !(name === "plugin_meta" && row.key === "retros_since")).map((row) => {
           if (name !== "managed_threads") return row;
           const { coordinator, coordinator_thread_id: coordinatorThreadId, retest_skipped: retestSkipped, ...legacy } = row;
           expect([coordinator ?? null, coordinatorThreadId ?? null, retestSkipped ?? null]).toEqual([null, null, null]);

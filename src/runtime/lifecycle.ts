@@ -58,6 +58,7 @@ export function createLifecycle(ctx: Ctx) {
       ?? (current.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or timeout it reports. Nothing to review or complete." : null)
       ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     warn: (message) => bb.log.warn(message),
+    event: ctx.observe.event,
   });
 
   function stateFromLive(row: ManagedRow, status: string) {
@@ -162,6 +163,7 @@ export function createLifecycle(ctx: Ctx) {
         store.countError(thread.id);
       }
       // `error:` never `failed:`, so the legacy backfill never copies a non-transient failure; the outbox dedupes per cycle.
+      if (!db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key=?`).get(`${row.thread_id}:error:${row.active_cycle}`)) ctx.observe.event("thread_failed", row, failure?.text);
       await ctx.alertChief(row, `error:${row.active_cycle}`, [
         `${row.role} “${row.title}” (${row.thread_id}) failed.`,
         ...(failure ? [`Provider error: ${clip(failure.text, 400)}`] : ["No provider error was recorded."]),

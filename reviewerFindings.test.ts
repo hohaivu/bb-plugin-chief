@@ -174,6 +174,12 @@ describe("reviewer lesson from chief_report to the next reviewer", () => {
     (await state.harness.behavior.resolveAgentConfiguration({ ...configurationContext(threadId, projectId), ...(pluginMetadata ? { pluginMetadata } : {}) })).instructions as string;
   const section = (instructions: string, header: string) => instructions.split("\n\n").find((part) => part.startsWith(header));
   const lessonRows = (state: State) => state.db.prepare("SELECT project_id, text, source_thread_id, worker_thread_id, role FROM chief_lessons ORDER BY id").all();
+  // Lesson gate (docs/decisions/2026-11-13-lesson-lifecycle-gate.md): a report lesson starts proposed; only an accepted one is injected.
+  // These tests accept it through the real CLI first, then keep their original injection expectations.
+  const acceptAll = async (state: State, chiefThreadId: string) => {
+    for (const { id } of state.db.prepare("SELECT id FROM chief_lessons WHERE status='proposed' ORDER BY id").all() as { id: number }[])
+      await state.harness.behavior.runCli(["lesson", "accept", String(id), "--reason", "test accepts"], as(chiefThreadId));
+  };
 
   async function firstReview() {
     const state = await setup();
@@ -198,12 +204,14 @@ describe("reviewer lesson from chief_report to the next reviewer", () => {
       project_id: "proj_1", text: "Check the discount path before flagging rounding.",
       source_thread_id: review.threadId, worker_thread_id: worker.threadId, role: "reviewer",
     }]);
-    expect(state.sent.at(-1).input[0].text).toContain("Lesson recorded for future managed threads: Check the discount path before flagging rounding.");
+    expect(state.db.prepare("SELECT status FROM chief_lessons").all()).toEqual([{ status: "proposed" }]);
+    expect(state.sent.at(-1).input[0].text).toContain("Lesson proposed for future managed threads: Check the discount path before flagging rounding.");
   });
 
   test("the next reviewer of the project sees it under Review lessons; other roles and other projects do not", async () => {
     const { state, chief, report, nextReviewer } = await firstReview();
     await report({ lesson: "Rounding is by design." });
+    await acceptAll(state, chief.threadId);
     const next = await nextReviewer();
     const seen = await instructionsOf(state, next);
     expect(section(seen, REVIEW)).toBe(`${REVIEW}\n- Rounding is by design.`);
@@ -228,6 +236,7 @@ describe("reviewer lesson from chief_report to the next reviewer", () => {
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done", lesson: "Plans name their test wave." }, as(advisor.threadId));
     expect(lessonRows(state)).toEqual([expect.objectContaining({ text: "Plans name their test wave.", source_thread_id: advisor.threadId, role: "advisor" })]);
+    await acceptAll(state, chief.threadId);
     const seeded = (role: string) => ({ role, chiefThreadId: chief.threadId });
     const next = await nextReviewer();
     const texts: [string, string][] = [["reviewer", await instructionsOf(state, next)]];
@@ -239,16 +248,18 @@ describe("reviewer lesson from chief_report to the next reviewer", () => {
   });
 
   test("with 12 reviewer lessons the next reviewer sees the newest 10, oldest first", async () => {
-    const { state, report, nextReviewer } = await firstReview();
+    const { state, chief, report, nextReviewer } = await firstReview();
     for (let n = 1; n <= 12; n += 1) await report({ lesson: `Lesson ${String(n).padStart(2, "0")}.` });
     expect(lessonRows(state)).toHaveLength(12);
+    await acceptAll(state, chief.threadId);
     const shown = section(await instructionsOf(state, await nextReviewer()), REVIEW)!;
     expect(shown.split("\n")).toEqual([REVIEW, ...Array.from({ length: 10 }, (_, n) => `- Lesson ${String(n + 3).padStart(2, "0")}.`)]);
   });
 
   test("a lessons section over 3,000 characters is clipped at 3,000", async () => {
-    const { state, report, nextReviewer } = await firstReview();
+    const { state, chief, report, nextReviewer } = await firstReview();
     for (let n = 0; n < 10; n += 1) await report({ lesson: `${n}`.repeat(400) });
+    await acceptAll(state, chief.threadId);
     const shown = section(await instructionsOf(state, await nextReviewer()), REVIEW)!;
     expect(shown).toHaveLength(3_000);
     expect(shown.endsWith("…")).toBe(true);

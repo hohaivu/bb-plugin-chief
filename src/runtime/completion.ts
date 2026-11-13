@@ -118,9 +118,14 @@ export function createCompletion(ctx: Ctx) {
     }
     const replacement = result ? clip(result, MAX_RESULT_LENGTH) : null;
     // A replaced result drops the summary and report file that described the old one.
+    // Before the write that queues cleanup, so cleanup cannot run ahead of the evidence. Never throws, never refuses completion.
+    if (row.role === "worker") await ctx.snapshotCompletion(row);
     const now = Date.now();
     store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && ctx.state.cleanupActive ? now : null, reviewSkipped, testsSkipped: testsSkippedReason });
     const completed = store.get(threadId)!;
+    if (reviewSkipped) ctx.observe.event("review_skipped", completed, reviewSkipped);
+    if (testsSkippedReason) ctx.observe.event("tests_skipped", completed, testsSkippedReason);
+    if (overrideReason) ctx.observe.event("override", completed, overrideReason);
     ctx.enqueueCompletionComment(completed, overrideReason);
     const cleanup: "queued" | "override" | "unapproved" | "off" | null = row.role !== "worker" ? null
       : overrideNote !== null ? "override" : !approved ? "unapproved" : ctx.state.cleanupActive ? "queued" : "off";
@@ -175,6 +180,7 @@ export function createCompletion(ctx: Ctx) {
     }
     await bb.sdk.threads.stop({ threadId });
     store.markStopped(threadId, clip(`Stopped by Chief${reason ? `: ${reason}` : "."}`, 4_000), ctx.rerouteSteps(row));
+    ctx.observe.event("stopped", row, reason);
     return store.get(threadId)!;
   }
   return { cleanupLine, markComplete, readyPullRequest, recordOwnerApproval, stopThread };

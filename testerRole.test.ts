@@ -472,7 +472,10 @@ describe("tester role", () => {
     const { bb, harness } = createFakePluginHost({ pluginId: "chief-retest-migration" });
     disposals.push(() => harness.lifecycle.dispose());
     const db = bb.storage.database();
-    bb.storage.migrate(db, MIGRATIONS.slice(0, -1));
+    // Later waves append more entries after it: cut the migrations just before the retest_skipped ALTER.
+    const at = MIGRATIONS.indexOf("ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT");
+    expect(at).toBeGreaterThan(0);
+    bb.storage.migrate(db, MIGRATIONS.slice(0, at));
     expect(columns(db)).not.toContain("retest_skipped");
     db.prepare(`INSERT INTO managed_threads (thread_id, role, state, project_id, title, created_at, updated_at) VALUES ('old', 'worker', 'ready', 'p', 't', 1, 1)`).run();
     bb.storage.migrate(db, MIGRATIONS);

@@ -16,7 +16,7 @@ export interface ReportIntakeAdapters {
   /** chief_lessons is written only by the intake; the thread store keeps only managed_threads (threadStore.ts:66-67). */
   db: Database;
   store: ThreadStore<ManagedRow>;
-  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets">;
+  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets" | "ladder">;
   lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInsert<ManagedRow["role"], ManagedRow["state"]> }>;
   writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string): Promise<{ path: string }[]>;
   writeArtifact(threadId: string, projectId: string, name: string, content: string): Promise<string>;
@@ -36,6 +36,8 @@ export interface ReportIntakeAdapters {
   /** Hands the files an accepted report wrote to the tracker sync. Called after the commit and before the alert; never awaited, never throws. */
   trackFiles(row: ManagedRow, files: { name: string; content: string }[]): void;
   warn(message: string): void;
+  /** One chief_events row, in the caller's transaction (observe.event); unset, nothing is ledgered. */
+  event?(kind: string, row: Partial<ManagedRow>, detail?: string | null): void;
 }
 
 export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
@@ -298,6 +300,8 @@ export type ReportAlertInput = {
   waveLines: string[];
   inlinePlans: string[];
   preview: boolean;
+  /** The id of the proposed lesson this report stored, else null. */
+  lessonId: number | null;
   /** `Read at <sha>…` for a researcher or planner report, else null. */
   stamp: string | null;
 };
@@ -309,7 +313,7 @@ export type ReportAlertInput = {
   // report-<seq>.md, or for a reviewer's verdict its verdict-<seq>.md. Both names carry the report number,
   // so no file an earlier alert pointed at is ever overwritten.
 export function reportAlert(input: ReportAlertInput) {
-  const { role, title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp } = input;
+  const { role, title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp, lessonId } = input;
   const FIELD_ROOM = 600;
   const ACTION_ROOM = 400;
   const MIN_RESULT_ROOM = 200;
@@ -342,7 +346,7 @@ export function reportAlert(input: ReportAlertInput) {
     const recordedHead = recorded === undefined ? [] : recordedLines(recorded, 0);
     const blocker = params.state === "blocked" ? params.blocker! : null;
     const fieldCount = (blocker === null ? 0 : 1) + (params.recommendation ? 1 : 0);
-    const lessonLines = params.state === "ready" && params.lesson ? [`Lesson recorded for future managed threads: ${clip(params.lesson, 300)}`] : [];
+    const lessonLines = params.state === "ready" && params.lesson ? [`Lesson proposed for future managed threads: ${clip(params.lesson, 300)}`, `Proposed lesson ${lessonId}: bb chief lesson accept ${lessonId} --reason "…" (or retire)`] : [];
     const fixedCost = cost([...top, ...planHead, ...verdictLines, actionLine, ...lessonLines, ...inspectLine, ...recordedHead]);
     const fieldRoom = Math.min(FIELD_ROOM, Math.max(100, Math.floor((alertRoom - fixedCost) / Math.max(fieldCount, 1)) - 20));
     const suffix = pointer?.name ? ` (clipped; full text in ${pointer.name})` : " (clipped)";
@@ -432,7 +436,7 @@ export function reportFileBody(input: {
 
 /** The one owner of chief_report acceptance and publication: required state commits first, then the optional files and the alert. */
 export function createReportIntake(adapters: ReportIntakeAdapters): { report(threadId: string, params: ReportParams, callerProjectId: string): Promise<boolean> } {
-  const { db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, trackFiles, warn } = adapters;
+  const { db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, trackFiles, warn, event } = adapters;
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
     const found = await lookupRow(threadId, callerProjectId);
     // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
@@ -508,6 +512,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     // reject_streak counts only consecutive request_changes verdicts, and
     // resets the moment either side breaks the streak with an approve.
     // report_seq is reserved here, so the per-report file names below never collide.
+    let lessonId: number | null = null;
     const { report_seq: seq, result_rev: resultRev } = store.batch(() => {
       const reserved = store.reserveReport({
         threadId, state: params.state, result: params.result ?? null, summary: params.summary ?? null,
@@ -520,6 +525,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         store.markAdvised(threadId, now);
         // The plan's one review: the first advice from any of its advisors decides it.
         if (row.plan_thread_id) store.resolvePlanReview(row.plan_thread_id, params.state === "ready" && verdict === "approve" ? "approved" : "changes");
+        if (params.state === "ready" && verdict === "request_changes") event?.("plan_review_changes", row);
       }
       if (plannerReady && scheduledWaves) {
         store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.test && !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
@@ -527,9 +533,18 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }
       if ((row.role === "advisor" || row.role === "reviewer") && params.state === "ready" && params.lesson) {
-        db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role) VALUES (?, ?, ?, ?, ?, ?)`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role);
+        // Proposed: no prompt carries it until Chief accepts it (bb chief lesson accept).
+        lessonId = Number(db.prepare(`INSERT INTO chief_lessons (project_id, text, source_thread_id, worker_thread_id, at, role, status) VALUES (?, ?, ?, ?, ?, ?, 'proposed')`).run(row.project_id, params.lesson, threadId, row.worker_thread_id, now, row.role).lastInsertRowid);
       }
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
+      if (params.state === "blocked") event?.("blocked", row, clip(params.blocker?.split("\n")[0] ?? "", 160));
+      if (event && row.role === "reviewer" && params.state === "ready" && verdict === "request_changes") {
+        // One row per covered worker, with the streak that worker's task is on now that this verdict is recorded.
+        const covered = ledger.targets(threadId).map((target) => target.worker_thread_id);
+        for (const workerId of covered.length ? covered : row.worker_thread_id ? [row.worker_thread_id] : []) {
+          event("request_changes", store.get(workerId) ?? { thread_id: workerId, project_id: row.project_id }, `round=${ledger.ladder(workerId).streak}`);
+        }
+      }
       if (row.role === "reviewer" && params.state === "ready" && verdict) {
         enqueueVerdictComments(row, reserved.report_seq, verdict, findingList, params.result, params.recommendation);
       } else if (row.role === "worker" && params.state === "blocked") {
@@ -578,7 +593,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const waveLines = plannerReady && planWaves ? planWaves.map((wave, index) => `Wave ${index + 1} of ${planWaves.length}: ${wave.path}`) : [];
     // Optional enrichment: the state, seq and pending alert are already committed above.
     const stamp = row.role === "researcher" || row.role === "planner" ? await reportStamp(threadId) : null;
-    const layout = reportAlert({ role: row.role, title: row.title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp });
+    const layout = reportAlert({ role: row.role, title: row.title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp, lessonId });
     // Long-or-clipped is decided from this first pass; the pass that follows only adds the pointer.
     const first = layout(null);
     let alert = first.text;

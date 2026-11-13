@@ -58,7 +58,8 @@ describe("Coordinator", () => {
     test("the base statements are unchanged; the two Coordinator columns, then the retest_skipped column, are appended", () => {
       const prefix = MIGRATIONS.slice(0, BASE_MIGRATIONS.length);
       expect(createHash("sha256").update(JSON.stringify(prefix)).digest("hex")).toBe(BASE_MIGRATIONS.sha256);
-      expect(MIGRATIONS.slice(BASE_MIGRATIONS.length)).toEqual([
+      // Append only: later waves (observability) add entries after these three; only the first three are pinned here.
+      expect(MIGRATIONS.slice(BASE_MIGRATIONS.length, BASE_MIGRATIONS.length + 3)).toEqual([
         "ALTER TABLE managed_threads ADD COLUMN coordinator INTEGER",
         "ALTER TABLE managed_threads ADD COLUMN coordinator_thread_id TEXT",
         "ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT",
@@ -240,6 +241,8 @@ describe("Coordinator", () => {
       const spawned = state.spawned.length;
       await expect(call(state, tool, params, id)).rejects.toThrow(/not available to a Coordinator.*ask the child Chief that owns the work/i);
       await expect(call(state, tool, params, id)).rejects.toThrow(/planner, worker, reviewer, tester, advisor or researcher/);
+      // The refusal is a failed call like any other: ledgered with the tool name, while the caller still gets the refusal itself.
+      expect(state.db.prepare("SELECT detail FROM chief_events WHERE kind='tool_error'").all()).toContainEqual({ detail: expect.stringContaining(`${tool}: `) });
       expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads").get()).toEqual(rows);
       expect(state.spawned.length).toBe(spawned);
     });
@@ -955,8 +958,9 @@ describe("Coordinator", () => {
     test("MIGRATIONS: the base array is an unchanged prefix of head, followed by the two Coordinator ALTERs and the retest_skipped ALTER", () => {
       requireBase();
       expect(head.migrations.slice(0, base.migrations.length)).toEqual(base.migrations);
-      const added = head.migrations.slice(base.migrations.length);
-      expect(added).toHaveLength(3);
+      // Append only: the observability waves add entries after these three.
+      const added = head.migrations.slice(base.migrations.length, base.migrations.length + 3);
+      expect(head.migrations.length).toBeGreaterThanOrEqual(base.migrations.length + 3);
       for (const statement of added.slice(0, 2)) expect(statement).toMatch(/^ALTER TABLE \w+ ADD COLUMN .*(coordinator)/is);
       expect(added[2]).toBe("ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT");
     });

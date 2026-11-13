@@ -43,6 +43,8 @@ export function registerCli(ctx: Ctx) {
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
     "  bb chief complete <thread-id> [--result \"…\"] [--override \"reason\"] [--json]",
+    "  bb chief lessons [--status proposed|accepted|retired] [--project proj_id] [--json]",
+    "  bb chief lesson accept|retire <id> --reason \"…\" [--json]",
   ].join("\n");
 
   bb.cli.register({
@@ -61,6 +63,8 @@ export function registerCli(ctx: Ctx) {
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
       { name: "complete", summary: "Mark verified, non-running managed work complete", usage: "bb chief complete <thread-id> [--result \"…\"] [--override \"reason\"] [--json]" },
+      { name: "lessons", summary: "List lessons by status (only accepted ones reach prompts)", usage: "bb chief lessons [--status proposed|accepted|retired] [--project proj_id] [--json]" },
+      { name: "lesson", summary: "Accept a proposed lesson into prompts, or retire one", usage: "bb chief lesson accept|retire <id> --reason \"…\" [--json]" },
     ],
     async run(argv: string[], context: PluginCliContext): Promise<PluginCliResult> {
       const [command, ...rest] = argv;
@@ -211,6 +215,31 @@ export function registerCli(ctx: Ctx) {
           const ready = await ctx.readyPullRequest(row);
           return ok({ ...ctx.toManaged(row), overridden, cleanup, prReady: ready.prReady, ...(ready.error ? { prReadyError: ready.error } : {}) },
             `Marked “${row.title}” complete${overridden ? " without a matching approve (override recorded in its result)" : ""}.${ready.line}${ctx.cleanupLine(cleanup)}`);
+        }
+        if (command === "lessons" || command === "lesson") {
+          const projectId = readScope ? readProject : args.one("project") ?? context.projectId ?? (await settings.get()).chiefProject;
+          if (command === "lessons") {
+            const status = args.one("status");
+            if (status && !["proposed", "accepted", "retired"].includes(status)) return fail("--status must be proposed, accepted or retired.");
+            if (!projectId) return fail("lessons requires --project outside a project thread");
+            const rows = ctx.db.prepare(`SELECT id, status, role, surface, text, evidence FROM chief_lessons WHERE project_id=? ${status ? "AND status=?" : ""} ORDER BY id`).all(...(status ? [projectId, status] : [projectId])) as { id: number; status: string; role: string | null; surface: string | null; text: string; evidence: string | null }[];
+            return ok(rows, rows.length ? rows.map((r) => `#${r.id} ${r.status} role=${r.role ?? "all"} surface=${r.surface ?? "-"}: ${r.text}${r.evidence ? `\n  evidence: ${r.evidence}` : ""}`).join("\n") : "No lessons.");
+          }
+          const [action, idText] = args.positional;
+          const reason = args.one("reason")?.trim();
+          if (action !== "accept" && action !== "retire") return fail("lesson requires accept or retire.");
+          const id = Number(idText);
+          if (!Number.isInteger(id) || id < 1) return fail(`lesson ${action} requires a lesson id.`);
+          if (!reason || reason === "true") return fail(`lesson ${action} requires --reason "…".`);
+          if (reason.length > 400) return fail("--reason is at most 400 characters.");
+          const lesson = ctx.db.prepare(`SELECT status, project_id FROM chief_lessons WHERE id=?`).get(id) as { status: string; project_id: string } | undefined;
+          if (!lesson || (readScope && lesson.project_id !== readProject)) return fail(`No lesson ${id}.`);
+          if (action === "accept" ? lesson.status !== "proposed" : lesson.status === "retired") return fail(`Lesson ${id} is ${lesson.status}: ${action === "accept" ? "only a proposed lesson can be accepted" : "it is already retired"}.`);
+          const to = action === "accept" ? "accepted" : "retired";
+          // The status guard makes a lost race a no-op rather than a second decision.
+          const changed = ctx.db.prepare(`UPDATE chief_lessons SET status=?, decided_at=?, decided_reason=? WHERE id=? AND status=?`).run(to, Date.now(), reason, id, lesson.status).changes;
+          if (!changed) return fail(`Lesson ${id} changed meanwhile; list it again.`);
+          return ok({ id, status: to }, `Lesson ${id} is now ${to}.`);
         }
         return fail(`Unknown command “${command}”.`);
       } catch (error) {
