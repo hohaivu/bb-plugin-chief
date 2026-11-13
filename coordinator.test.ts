@@ -13,6 +13,7 @@ import { PRELOAD_OLD_TAIL, acceptRosterOthersDelta, chiefPreloadTail } from "./t
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { replaceText } from "./test/harness";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -987,9 +988,10 @@ describe("Coordinator", () => {
       expect(added[2]).toBe("ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT");
     });
 
-    test("roster: a plain Chief's roster is byte-identical to base", () => {
+    // One named edit: the ready worker's alert action no longer overflows its room, so no report file exists and its roster `report:` line is gone.
+    test("roster: a plain Chief's roster equals base apart from the one report-file line", () => {
       requireBase();
-      expect(head.roster).toBe(base.roster);
+      expect(head.roster).toBe(replaceText(base.roster, "  report: <storage>/chief/proj_1/thr_2/report-1.md\n", "", 1));
       expect(base.roster).toContain("Blocked work");
       expect(base.roster).toContain("Follow up with the owner");
     });
