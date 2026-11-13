@@ -130,23 +130,31 @@ describe("daily report: retro sections", () => {
     expect(calibration).toContain("Disagreement rate 42% (5/12)");
   });
 
-  test("calibration: a worker with one valid score and missing or insufficient dimensions is counted insufficient, outside the matrix and its denominator, even with a bound verdict", async () => {
+  test("calibration: nonfailing incomplete evidence is insufficient and outside the matrix; a fail with incomplete evidence stays a fail inside it", async () => {
     const state = await setup();
     const world = await dailyWorld(state);
     for (let i = 0; i < 10; i++) { judgedWorker(state, `thr_ok${i}`, true); verdict(state, `thr_ok${i}`, "approve", true); }
+    // Nonfailing and incomplete: insufficient, whatever the reviewer said.
     score(state, "thr_missing", "efficiency", "x", 1); // procedure-compliance and verbosity were never stored
     verdict(state, "thr_missing", "request_changes", true);
     score(state, "thr_null", "efficiency", "x", 1);
     score(state, "thr_null", "procedure-compliance", "insufficient_evidence", null);
     score(state, "thr_null", "verbosity", "insufficient_evidence", null);
     verdict(state, "thr_null", "approve", true);
+    // A valid score below 0.5 fails the worker even though the other dimensions are missing or explicitly insufficient.
+    score(state, "thr_failmissing", "efficiency", "x", 0.4);
+    verdict(state, "thr_failmissing", "approve", true);
+    score(state, "thr_failnull", "efficiency", "x", 0.4);
+    score(state, "thr_failnull", "procedure-compliance", "insufficient_evidence", null);
+    score(state, "thr_failnull", "verbosity", "insufficient_evidence", null);
+    verdict(state, "thr_failnull", "request_changes", true);
     const calibration = section(await readFile((await world.run()).path!, "utf8"), "Calibration (judge vs first reviewer verdict, workers, non-communication)");
-    expect(calibration).toContain("10 workers judged");
-    expect(calibration).toContain("10 with a bound verdict (coverage 100%); 0 unbound");
+    expect(calibration).toContain("12 workers judged");
+    expect(calibration).toContain("12 with a bound verdict (coverage 100%); 0 unbound");
     expect(calibration).toContain("2 insufficient, outside the matrix");
     expect(calibration).toContain("| pass | 10 | 0 |");
-    expect(calibration).toContain("| fail | 0 | 0 |");
-    expect(calibration).toContain("Disagreement rate 0% (0/10)");
+    expect(calibration).toContain("| fail | 1 | 1 |");
+    expect(calibration).toContain("Disagreement rate 8% (1/12)");
   });
 
   test("calibration with fewer than 10 bound verdicts says insufficient evidence and prints no matrix", async () => {

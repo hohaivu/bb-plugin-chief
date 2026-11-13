@@ -271,35 +271,42 @@ describe("tool wrapper (the real registry, only the SDK registration and the led
   });
 });
 
-describe("plugin warnings leave no workflow command text in the Sentry envelope", () => {
+describe("plugin warnings leave no workflow script, prompt or code in the Sentry envelope", () => {
   const fetchMock = vi.fn();
   beforeEach(() => { fetchMock.mockReset().mockResolvedValue({ ok: true, status: 200 }); vi.stubGlobal("fetch", fetchMock); });
   afterEach(() => { vi.unstubAllGlobals(); });
   const SCRIPT = "SCRIPT_SENTINEL_9f3a";
   const PROMPT = "PROMPT_SENTINEL_77c1";
   const echoed = `Command failed: bb workflows run --script export default async () => { return "${SCRIPT}" } --args {"question":"${PROMPT}"} --json`;
+  // Short sentinels: the malformed-output parser diagnostic only quotes a short preview of what it could not parse.
+  const CODE = "C1_CODE";
+  const TEXT = "P1_PROMPT";
 
   test.each([
-    ["an execFile timeout", () => Object.assign(new Error(`${echoed}\n`), { killed: true, signal: "SIGTERM", stdout: "", stderr: "" })],
-    ["a non-JSON failure", () => Object.assign(new Error(`${echoed}\nsomething broke`), { code: 1, stdout: "not json", stderr: "something broke" })],
-  ])("%s on a survey launch: the log keeps the command, the serialized envelope carries neither the script nor the prompt", async (_name, failure) => {
+    ["an execFile timeout echoing the command", [SCRIPT, PROMPT], () => { throw Object.assign(new Error(`${echoed}\n`), { killed: true, signal: "SIGTERM", stdout: "", stderr: "" }); }],
+    ["a non-JSON failure echoing the command", [SCRIPT, PROMPT], () => { throw Object.assign(new Error(`${echoed}\nsomething broke`), { code: 1, stdout: "not json", stderr: "something broke" }); }],
+    ["a marker-free JSON error.message", [CODE, TEXT], () => { throw Object.assign(new Error("exit 1"), { code: 1, stdout: JSON.stringify({ ok: false, error: { message: `Invalid workflow: const ${CODE} = 1; prompt ${TEXT}` } }), stderr: "" }); }],
+    ["malformed CLI output", [CODE, TEXT], () => ({ stdout: `${CODE} ${TEXT}`, stderr: "" })],
+  ] as [string, string[], () => { stdout: string; stderr: string }][])("%s on a survey launch: the log keeps the diagnostic, the serialized envelope is the fixed code only", async (_name, sentinels, launch) => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true, sentryDsn: DSN });
     const chief = await start(state);
     const planner = await plan(state, chief.threadId);
-    execFileMock.mockImplementation(async (_file: string, args: string[]) => { if (args[0] === "workflows") throw failure(); return { stdout: "", stderr: "" }; });
+    execFileMock.mockImplementation(async (_file: string, args: string[]) => (args[0] === "workflows" ? launch() : { stdout: "", stderr: "" }));
 
     const reply = await state.harness.behavior.callAgentTool("chief_research", { mode: "survey", question: "Who calls this?", items: ["a.ts"] }, { threadId: planner.threadId, projectId: "proj_1" }) as string;
     await flush();
 
     expect(reply).toContain("could not start the workflow");
-    // Non-vacuous: the local log still holds the original diagnostic, so the outbound copy was rewritten, not just never produced.
-    expect(state.harness.logEntries.some((entry) => entry.level === "warn" && entry.message.includes(SCRIPT) && entry.message.includes(PROMPT))).toBe(true);
-    expect(fetchMock).toHaveBeenCalled();
-    const bodies = fetchMock.mock.calls.map((call) => call[1].body as string).join("\n");
-    expect(bodies).toContain("chief_research could not start a workflow from the server: Command failed:");
-    for (const sentinel of [SCRIPT, PROMPT, "--script", "--args"]) expect(bodies).not.toContain(sentinel);
-    const item = JSON.parse(fetchMock.mock.calls.at(-1)![1].body.split("\n")[2]);
-    expect(JSON.stringify(item.fingerprint)).not.toContain("SENTINEL");
+    // Non-vacuous: the local log still holds the real diagnostic with every sentinel, so the outbound copy was never built from it.
+    const local = state.harness.logEntries.filter((entry) => entry.level === "warn" && entry.message.includes("chief_research could not start a workflow"));
+    expect(local.some((entry) => sentinels.every((sentinel) => entry.message.includes(sentinel)))).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = fetchMock.mock.calls[0]![1].body as string;
+    for (const sentinel of [SCRIPT, PROMPT, CODE, TEXT, "--script", "--args", "Command failed", "Invalid workflow"]) expect(body).not.toContain(sentinel);
+    const item = JSON.parse(body.split("\n")[2]!);
+    expect(item.message.formatted).toBe("plugin_warn");
+    expect(item.fingerprint).toEqual(["plugin_warn", "plugin_warn"]);
+    expect(item.tags).toEqual({});
   });
 });
