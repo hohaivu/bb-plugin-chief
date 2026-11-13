@@ -160,9 +160,9 @@ Secret settings have no default. The code handles an undefined value. The plugin
 
 - A warning from the plugin through `ctx.bb.log.warn` also goes to Sentry as the kind `plugin_warn`, through `ctx.observe.warn`.
 - The ledger does not record a plugin warning. The throttle applies to it.
-- The warning goes to Sentry without content. The text from `Command failed:` onward becomes `[omitted]`. The text from the first `--script`, `--args` or `--prompt` onward also becomes `[omitted]`. The marker stays.
-  Reason: a failed `execFile` call echoes its command line, which holds a workflow script, a prompt and arguments. `scrub` removes secrets, not code.
-- The omission happens before Sentry builds the message and the fingerprint. Neither one holds the omitted text.
+- `ctx.observe.warn` takes no warning text. Sentry receives the fixed code `plugin_warn` as the message and as the fingerprint. The event has no tags that come from the warning.
+  Reason: warning text can hold code, prompts, scripts, arguments or stderr, with or without a command marker. `scrub` removes secrets, not code.
+- All plugin warnings share this fingerprint. The 10-minute throttle sends at most one of them in each window.
 - The full warning text stays in the local log.
 - The Sentry module uses the original warn. A failed send never feeds itself.
 
@@ -463,10 +463,13 @@ The daily report adds these sections. None of them averages scores across `rubri
 
 - The report joins the worker threads that the judge graded at the current version to `reviewer_verdicts` on `worker_thread_id`.
 - The verdict is the first row by `id` whose `head_sha` and `worker_report_seq` are both non-null. A row with a null in either column is counted as unbound and excluded.
-- The status of each worker is the `aggregate` status of its applicable rubrics, without `communication`. A worker with a missing or `insufficient_evidence` dimension is `insufficient`.
-  Reason: a worker with one valid score and missing dimensions is not a pass, and a matrix that counts it as a pass claims agreement without evidence.
-- The report shows a 2×2 table of the judge status (pass or fail) against the first verdict (`approve` or `request_changes`). It also shows the coverage (bound verdicts ÷ judged workers) and the rate of disagreement.
-- Workers with the status `insufficient` are outside the matrix and outside the coverage count. The report gives their number on its own.
+- The status of each worker is the `aggregate` status of its applicable rubrics, without `communication`.
+  - A valid applicable raw score below 0.5 makes the worker `fail`. A missing or `insufficient_evidence` dimension does not change this.
+  - Without such a score, a missing or `insufficient_evidence` dimension makes the worker `insufficient`.
+  - Without such a score and without such a dimension, the worker is `pass`.
+  Reason: incomplete evidence cannot establish a pass, but it cannot erase an established fail.
+- The report shows a 2×2 table of the judge status (pass or fail) against the first verdict (`approve` or `request_changes`). It also shows the coverage (bound pass or fail workers ÷ all judged pass or fail workers) and the rate of disagreement.
+- Workers with the status `insufficient` are outside the matrix. They are in neither count of the coverage. The report gives their number on its own.
 - Below 10 bound pairs, the report prints `insufficient evidence (n=…)`.
   Reason: a small sample gives a misleading rate.
 
