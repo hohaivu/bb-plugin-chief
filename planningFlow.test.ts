@@ -5,6 +5,7 @@ import { PLAN_FIXTURE, REVIEWER_NATIVE_LINE, TEST_WAVE, chiefReview, configurati
 import { NATIVE_NO_RESHAPE_LINE } from "./test/reviewWave1";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { expectLoadLine } from "./test/loadLine";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -248,13 +249,11 @@ describe("Chief backend", () => {
     expect(spawned.input).toBeUndefined();
     const planPrompt = spawned.prompt as string;
     expect(planPrompt).toContain("do not create, modify, or delete any file the repository tracks, and do not commit or push");
-    // The plan body goes through chief_report's plan field, never a direct file write.
-    expect(planPrompt).toContain("chief_report state ready and the plan in its `plan` field, never as a file write");
     expect(planPrompt).not.toContain("$BB_THREAD_STORAGE");
-    // Split success criteria and the out-of-scope section are the planner's contract, not an afterthought.
-    expect(planPrompt).toContain("Read every file this brief names in full before proposing anything: no partial reads, no limit or offset.");
-    expect(planPrompt).toContain("Split success criteria per wave into Automated Verification (a command a worker can run, reported with its exit status) and Manual Verification (what only a human can confirm)");
-    expect(planPrompt).toContain("What we're NOT doing");
+    // The plan contract (plan field, split verification, out-of-scope section) lives in the skill the brief orders loaded first;
+    // the brief keeps the wave limit and the read-only line.
+    expectLoadLine(planPrompt, "planner");
+    expect(planPrompt).toContain("Split the work into at most 8 waves.");
     expect(JSON.stringify(plan)).toContain("Its ready alert lists the wave schedule and the exact next call");
 
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -281,7 +280,10 @@ describe("Chief backend", () => {
     expect(reported).toContain("Planner report");
     const planPath = planFile(state, planner.threadId, 1);
     expect(reported).toContain("Plan: 2 wave(s)");
-    expect(reported).toContain(`Wave 1 of 2: ${planPath}`);
+    // The mirror succeeded: each plan file shows once, as an inline-vis line, and no `Wave n of N` path line repeats it.
+    expect(reported).toContain(`::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-1.md"}`);
+    expect(reported).not.toContain("Wave 1 of 2:");
+    expect(reported).not.toContain(planPath);
     expect(reported).toContain(`Delegate wave 1 now: run chief_forge_init (planThreadId: ${planner.threadId}, wave: 1), then chief_delegate (planThreadId: ${planner.threadId}, wave: 1)`);
     expect(await readFile(planPath, "utf8")).toBe(`${PLAN_FIXTURE}\n`);
 
@@ -359,10 +361,8 @@ describe("Chief backend", () => {
 
     const reported = state.sent.at(-1).input[0].text;
     expect(reported).toContain("Plan: 4 wave(s)");
-    expect(reported).toContain(`Wave 1 of 4: ${path1}`);
-    expect(reported).toContain(`Wave 2 of 4: ${path2}`);
-    expect(reported).toContain(`Wave 3 of 4: ${path3}`);
-    expect(reported).toContain(`Wave 4 of 4: ${path4}`);
+    expect(reported).not.toMatch(/Wave \d of 4:/);
+    for (const path of [path1, path2, path3, path4]) expect(reported).not.toContain(path);
     // Mirrored into Chief's storage so Chief can echo inline-vis previews.
     expect(await readFile(join(state.storageRoot, chief.threadId, "plans", planner.threadId, "plan-2.md"), "utf8")).toBe(`${wave(2, "Migrate the data.")}\n`);
     expect(reported).toContain(`::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-1.md"}`);
@@ -455,10 +455,10 @@ describe("Chief backend", () => {
 
     const reported = state.sent.at(-1).input[0].text as string;
     expect(reported.length).toBeLessThanOrEqual(3_000);
-    for (const index of waves.keys()) {
-      const path = planFile(state, planner.threadId, index + 1);
-      expect(reported).toContain(`Wave ${index + 1} of 8: ${path}`);
-    }
+    const lines = [...waves.keys()].map((index) => `::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-${index + 1}.md"}`);
+    for (const line of lines) expect(reported).toContain(line);
+    expect(lines.map((line) => reported.indexOf(line))).toEqual([...lines.map((line) => reported.indexOf(line))].sort((a, b) => a - b));
+    expect(reported).not.toMatch(/Wave \d of 8:/);
     expect(reported).toContain(`Plan ${planner.threadId} has 7 implementation waves: get its one advisor review first — chief_consult (planThreadId: ${planner.threadId}`);
   });
 

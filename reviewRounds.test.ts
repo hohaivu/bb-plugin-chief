@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { APPROVE, PLAN_FIXTURE, REQUEST_CHANGES, TEST_WAVE, chiefReview, completeWorker, configurationContext, delegate, disposeAll, latestReviewContext, reviewContextOf, rowOf, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { expectLoadLine } from "./test/loadLine";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -576,7 +577,7 @@ describe("Chief backend", () => {
       const prompt: string = state.spawned.at(-1).prompt;
       expect(prompt).toContain(`Verdict file: ${pathOf()}`);
       expect(prompt).toContain("Totals go negative.");
-      expect(prompt).toContain("names a plan file or verdict file, read that file in full");
+      expectLoadLine(prompt, "worker");
     });
 
     test("a failed verdict-file write does not fail the report", async () => {
