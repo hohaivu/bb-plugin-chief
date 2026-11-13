@@ -466,7 +466,8 @@ The daily report adds these sections. None of them averages scores across `rubri
 - The status of each worker is the `aggregate` status of its applicable rubrics, without `communication`.
   - A valid applicable raw score below 0.5 makes the worker `fail`. A missing or `insufficient_evidence` dimension does not change this.
   - Without such a score, a missing or `insufficient_evidence` dimension makes the worker `insufficient`.
-  - Without such a score and without such a dimension, the worker is `pass`.
+  - Without such a score, a worker with no valid scored dimension is `insufficient`. This includes a worker whose applicable rubrics all have the label `not_applicable`: that label removes a rubric from the set and adds no score.
+  - Only a worker with at least one valid score, no failing score and no missing or `insufficient_evidence` dimension is `pass`.
   Reason: incomplete evidence cannot establish a pass, but it cannot erase an established fail.
 - The report shows a 2×2 table of the judge status (pass or fail) against the first verdict (`approve` or `request_changes`). It also shows the coverage (bound pass or fail workers ÷ all judged pass or fail workers) and the rate of disagreement.
 - Workers with the status `insufficient` are outside the matrix. They are in neither count of the coverage. The report gives their number on its own.
