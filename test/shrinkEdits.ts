@@ -46,3 +46,29 @@ export function dropPointerOfClippedActions(base: string, expanded: string): str
 
 /** `otherBaseTexts`: further base-recorded fixtures that hold the same action unclipped (matched by the exact clipped prefix, thread ids included). */
 export const shrinkAlerts = (base: string, ...otherBaseTexts: string[]) => dropPointerOfClippedActions(base, expandClippedActions(base, ...otherBaseTexts));
+
+// (c) A worker report's stored file now exists only when something still overflows. Base wrote it also for an action over 400 characters, which a worker
+// ready alert reaching this review prompt always had; head writes it when a recorded command ran without a failure (the alert lists failed commands only,
+// so the file keeps the rest). On a review prompt whose recorded block is the base's own bytes this is, per review context: with `Recorded: none recorded`
+// the `Full report: <path>` pointer line goes (and an earlier-worker entry loses its `Full report: <path>; ` prefix); with a zero-exit command in the block,
+// the pointer line appears above `Full report and last output:`. Counts are exact, so any other pointer line fails the test.
+export function shrinkReportPointers(base: string, expected: { dropped: number; earlier: number; added: number }): string {
+  const lines = base.split("\n");
+  const count = { dropped: 0, earlier: 0, added: 0 };
+  let recorded: "none" | "ran" | "other" = "other";
+  const out: string[] = [];
+  lines.forEach((line, index) => {
+    if (line.startsWith("## Recorded commands")) {
+      const block = lines.slice(index + 1, index + 1 + lines.slice(index + 1).findIndex((entry) => entry === ""));
+      recorded = block[0] === "Recorded: none recorded" ? "none" : block.some((entry) => / → exit 0$/.test(entry)) ? "ran" : "other";
+    }
+    if (/^Full report: <storage>\/chief\/\S+\/report-\d+\.md$/.test(line) && recorded === "none") { count.dropped++; return; }
+    const earlier = /^(- worker \S+: )Full report: <storage>\/chief\/\S+\/report-\d+\.md; (bb chief inspect \S+)$/.exec(line);
+    if (earlier && lines[index + 1] === "  Recorded: none recorded") { count.earlier++; out.push(`${earlier[1]}${earlier[2]}`); return; }
+    const inspect = /^Full report and last output: bb chief inspect (\S+)$/.exec(line);
+    if (inspect && recorded === "ran" && !/^Full report: /.test(lines[index - 1]!)) { count.added++; out.push(`Full report: <storage>/chief/proj_1/${inspect[1]}/report-1.md`); }
+    out.push(line);
+  });
+  if (JSON.stringify(count) !== JSON.stringify(expected)) throw new Error(`report pointer edits ${JSON.stringify(count)} differ from the expected ${JSON.stringify(expected)}`);
+  return out.join("\n");
+}
