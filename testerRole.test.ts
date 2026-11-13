@@ -5,6 +5,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import { checkPlan } from "./src/report/reportIntake";
 import { managedSkills } from "./src/core/roles";
+import { TESTER_BOUNDARY, WORKER_BOUNDARY } from "./test/docsOwnership";
 import { READY, type State, ctxOf, delegateWave, fixedAfterRejection, followRoute, plan, planWave, planWaves, readyIdle, readyImpl, refusal, report, reviewed, review, reviewerCount, rerunRoute, rowOf, setLive, tick, tool, twoRejectedChains, unplannedFix, unplannedRoute, wavePaths, withTester, workerOn } from "./test/testerHelpers";
 import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, disposals, disposeAll, legacyWave, reviewContextOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -583,16 +584,16 @@ describe("tester role", () => {
   // Contract (provenance, tester brief): the tester's brief lists every present wave file and contract of its chain as
   // its source of truth, and the approved design when the chain has one; unplanned, the head worker's brief.
   // Regression: the tester is briefed from the diff alone (no spec section), so its cases are derived from the code.
-  // Contract (wave 1 of the brief trim): the source of truth names the plan files only; the contracts appear once, in full, under `## Contracts to verify`.
-  test("a tester's brief lists its chain's plan files as the source of truth and its contracts once, under Contracts to verify", async () => {
+  // Contract (wave 1 of the brief trim): the source of truth names the plan files only; the contracts are a pointer to the plan file under `## Contracts to verify`, never inlined.
+  test("a tester's brief lists its chain's plan files as the source of truth and points at its plan file for the contracts", async () => {
     const state = await setup();
     const { chief, planner, impl } = await readyImpl(state);
     await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
     const [path1, path2] = wavePaths(state, planner.threadId);
     expect(state.spawned.at(-1).prompt).toContain(
-      `## Source of truth for test cases\nRead each in full, with the docs they name. Derive every test case from these, never from the implementation.\nWave 1 of 2: ${path1}\nWave 2 of 2: ${path2}\n\n## Contracts to verify\n- Wave 2 keeps its invariant\n`);
-    expect(String(state.spawned.at(-1).prompt).split("- Totals stay non-negative")).toHaveLength(1);
-    expect(String(state.spawned.at(-1).prompt).split("- Wave 2 keeps its invariant")).toHaveLength(2);
+      `## Source of truth for test cases\nRead each in full, with the docs they name. Derive every test case from these, never from the implementation.\nWave 1 of 2: ${path1}\nWave 2 of 2: ${path2}\n\n## Contracts to verify\nRead the \`## Contracts to verify\` section of your plan file (Plan file (wave 2 of 2): ${path2}) in full`);
+    expect(String(state.spawned.at(-1).prompt)).not.toContain("- Totals stay non-negative");
+    expect(String(state.spawned.at(-1).prompt)).not.toContain("- Wave 2 keeps its invariant");
   });
 
   test("a tester's brief on an approved design chain names the approval and the designer report", async () => {
@@ -602,7 +603,8 @@ describe("tester role", () => {
     await delegateWave(state, chief.threadId, planner.threadId, 1);
     const designer = workerOn(state, planner.threadId, 1);
     expect(designer.kind).toBe("designer");
-    await readyIdle(state, designer.thread_id, `${READY}\nArtboards: Checkout`);
+    // A designer result longer than the summary cap gets its report file (a short, unclipped alert has none), which the tester brief names.
+    await readyIdle(state, designer.thread_id, `${READY}\nArtboards: Checkout\n${"Layer notes. ".repeat(100)}`);
     await tool(state, "chief_owner_approval", { workerThreadId: designer.thread_id, approval: "Looks right, ship it" }, chief.threadId);
     await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: designer.thread_id });
     const implementer = workerOn(state, planner.threadId, 2).thread_id;
@@ -610,6 +612,7 @@ describe("tester role", () => {
     await delegateWave(state, chief.threadId, planner.threadId, 3, { replaces: implementer });
     const prompt = state.spawned.at(-1).prompt as string;
     const reportPath = rowOf(state, designer.thread_id).report_path;
+    expect(reportPath).toMatch(/report-1\.md$/);
     expect(prompt).toContain(`Approved design: wave 1's artboards, owner's approval “Looks right, ship it”, designer report ${reportPath}`);
     for (const path of wavePaths(state, planner.threadId)) expect(prompt).toContain(path);
   });
@@ -677,7 +680,8 @@ describe("tester role", () => {
     await readyIdle(state, first.threadId, "Done");
     const worker = await delegate(state, chief.threadId, "Policy", extra(first.threadId));
     const prompt = state.spawned.at(-1).prompt as string;
-    expect(prompt.includes("Never write, edit or run tests of any kind (unit, integration, end-to-end, screenshot or golden); a tester does.")).toBe(!tests);
+    expect(prompt.includes(WORKER_BOUNDARY)).toBe(!tests);
+    expect(prompt.includes(TESTER_BOUNDARY)).toBe(tests);
     expect(prompt.includes("## Test work")).toBe(tests);
     expect(prompt.includes("Change only test files, fixtures, test helpers and test config; never product code.")).toBe(tests);
     await readyIdle(state, worker.threadId, "Done");
