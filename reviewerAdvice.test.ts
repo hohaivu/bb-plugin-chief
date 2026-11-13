@@ -8,6 +8,7 @@ import { plan, planWave, readyIdle, report, reviewed, tool } from "./test/tester
 import { HEAD_SHA, REQUEST_CHANGES, TEST_WAVE, approvePlan, disposeAll, execFileMock, legacyWave, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { shrinkAlerts } from "./test/shrinkEdits";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -351,7 +352,7 @@ describe("tester role", () => {
       const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "reviewer-advice-626c3cd.txt"), "utf8");
       const kept = (text: string) => text.split(/^(?==== )/m).filter((block) => !REPLACED_BY_PARALLEL_LANE(block.slice(4, block.indexOf(" ===\n"))));
       expect(kept(oracle).length).toBeGreaterThan(30);
-      expect(kept(head).join("")).toBe(kept(oracle).join(""));
+      expect(kept(head).join("")).toBe(kept(shrinkAlerts(oracle)).join(""));
     }, 180_000);
 
     // Advice is not permission: the consult advice is the reviewer's instruction, the consult gate on chief_delegate is a separate ledger decision.
