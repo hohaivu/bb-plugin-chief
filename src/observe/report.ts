@@ -1,6 +1,6 @@
 import { clip } from "../core/text";
 import type { Ctx } from "../runtime/context";
-import { curve, FAIL_BELOW, INSUFFICIENT, NOT_APPLICABLE, RUBRIC_VERSION } from "./rubrics";
+import { aggregate, applicableRubrics, curve, FAIL_BELOW, INSUFFICIENT, NOT_APPLICABLE, RUBRIC_VERSION } from "./rubrics";
 import { normalize, scrub } from "./scrub";
 import { ACTIVITY_KINDS, ADAPTERS, type Adapter, collectSources, configuredSecrets, type Item, type Section } from "./sources";
 
@@ -125,19 +125,25 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
     `Attributed by the judge (not observed): ${["briefGapBlock", "askedTwice", "unclearBriefRounds", "userWordsLost"].map((name) => `${name} ${signalCount(name)}`).join(", ")}.`] : []);
 
   // Calibration: worker threads judged at the current version vs the first bound reviewer verdict. Communication is never calibrated.
-  const judged = failedByThread(scores.filter((entry) => entry.role === "worker" && entry.rubric_version === RUBRIC_VERSION && entry.scorer !== "communication"));
+  const calibrationRows = new Map<string, { scorer: string; score: number | null; label: string }[]>();
+  for (const entry of scores) if (entry.role === "worker" && entry.rubric_version === RUBRIC_VERSION && entry.scorer !== "communication") calibrationRows.set(entry.thread_id, [...(calibrationRows.get(entry.thread_id) ?? []), entry]);
+  // Each worker's status is aggregate's over its applicable rubrics: a missing or insufficient dimension is insufficient, never pass.
+  const judged = new Map([...calibrationRows].map(([threadId, rows]) => [threadId, aggregate(rows, applicableRubrics(store.get(threadId)?.kind).filter((name) => name !== "communication")).status]));
+  const insufficientWorkers = [...judged.values()].filter((status) => status === "insufficient").length;
+  const matrixSize = judged.size - insufficientWorkers;
   const matrix = { pass: { approve: 0, request_changes: 0 }, fail: { approve: 0, request_changes: 0 } };
   let bound = 0, unbound = 0;
-  for (const [threadId, failed] of judged) {
+  for (const [threadId, status] of judged) {
+    if (status === "insufficient") continue;
     const verdicts = db.prepare(`SELECT verdict, head_sha, worker_report_seq FROM reviewer_verdicts WHERE worker_thread_id=? ORDER BY id`).all(threadId) as { verdict: "approve" | "request_changes"; head_sha: string | null; worker_report_seq: number | null }[];
     const first = verdicts.find((verdict) => verdict.head_sha !== null && verdict.worker_report_seq !== null);
     if (!first) { if (verdicts.length) unbound += 1; continue; }
     bound += 1;
-    matrix[failed ? "fail" : "pass"][first.verdict] += 1;
+    matrix[status][first.verdict] += 1;
   }
   const disagree = matrix.pass.request_changes + matrix.fail.approve;
   block("Calibration (judge vs first reviewer verdict, workers, non-communication)", judged.size ? [
-    `${judged.size} workers judged at ${RUBRIC_VERSION}; ${bound} with a bound verdict (coverage ${Math.round(100 * bound / judged.size)}%); ${unbound} unbound (null head_sha or worker_report_seq) excluded.`,
+    `${matrixSize} workers judged at ${RUBRIC_VERSION}; ${bound} with a bound verdict (coverage ${matrixSize ? Math.round(100 * bound / matrixSize) : 0}%); ${unbound} unbound (null head_sha or worker_report_seq) excluded; ${insufficientWorkers} insufficient, outside the matrix.`,
     ...(bound < 10 ? [`insufficient evidence (n=${bound})`] : [
       "| judge \\ first verdict | approve | request_changes |", "| --- | --- | --- |",
       `| pass | ${matrix.pass.approve} | ${matrix.pass.request_changes} |`, `| fail | ${matrix.fail.approve} | ${matrix.fail.request_changes} |`,

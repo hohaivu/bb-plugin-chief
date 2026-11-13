@@ -410,7 +410,8 @@ export function createRetro(ctx: Ctx) {
         ...(observed.length ? observed.slice(0, 40).map((event) => `- ${new Date(event.at).toISOString()} ${event.kind}${event.detail ? `: ${scrubbed(event.detail)}` : ""}`) : ["none"]),
         "", "## Events (each line starts with #<seq>; cite it as " + row.thread_id + "#<seq>)",
       ];
-      const events = fit(read.lines, 100_000);
+      // The whole file is bounded: the events take what the metadata, brief, diff and ledger lines leave. Refs come from the events kept.
+      const events = fit(read.lines, FILE_CHARS - text.reduce((total, line) => total + line.length + 1, 0));
       refs[row.thread_id] = [...(events.join("\n").matchAll(/^#(\d+) /gm))].map((match) => Number(match[1]));
       const file = await write(`thread-${row.thread_id}.md`, [...text, ...events, ""].join("\n"));
       manifest.threads.push({ threadId: row.thread_id, role: row.role, kind: row.kind, title: row.title, file, applicable, unavailable: read.unavailable });
@@ -560,9 +561,10 @@ export function createRetro(ctx: Ctx) {
       try {
         await collect(row, run);
       } catch (error) {
-        // retro.md or the database failed: the row stays running and the next tick retries, inside the 2 h bound.
+        // retro.md or the database failed: the row stays running and the next tick retries, inside the 2 h bound; past it the run settles through the retry budget (it already succeeded: nothing to stop).
         const reason = clip(error instanceof Error ? error.message : String(error), 300);
         bb.log.warn(`Retro collect for ${row.plan_thread_id} failed: ${reason}`);
+        if (overdue) { await settle(row, `timed out after 2 h; collect failed (${reason})`, now); continue; }
         db.prepare(`UPDATE chief_retros SET last_error=?, updated_at=? WHERE plan_thread_id=? AND state='running' AND run_id=?`).run(`collect failed: ${reason}`, now, row.plan_thread_id, row.run_id);
       }
     }

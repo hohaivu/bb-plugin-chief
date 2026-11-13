@@ -31,7 +31,7 @@ export function createObserve(ctx: Ctx) {
   const receipt = db.prepare<[string]>(`SELECT 1 FROM chief_events WHERE event_id=?`);
 
   /** Inserts one row synchronously, so a caller's transaction rolls it back. A ledgered kind then reaches Sentry on the next macrotask, only if its row (the receipt) was committed. */
-  function event(kind: string, row: EventRow, detail?: string | null, extraTags: Record<string, string> = {}) {
+  function event(kind: string, row: EventRow, detail?: string | null, extraTags: Record<string, string> = {}, localOnly = false) {
     const eventId = newEventId();
     const clean = detail == null ? null : scrub(detail, secrets()).slice(0, 300);
     try {
@@ -40,7 +40,7 @@ export function createObserve(ctx: Ctx) {
       bb.log.warn(`Could not record a ${kind} event: ${String(error)}`);
       return;
     }
-    if (LOCAL_ONLY.has(kind)) return;
+    if (localOnly || LOCAL_ONLY.has(kind)) return;
     const tags: Record<string, string> = { kind, ...extraTags };
     for (const [name, value] of [["role", row.role], ["thread_id", row.thread_id], ["project_id", row.project_id], ["plan_thread_id", row.plan_thread_id], ["plan_wave", row.plan_wave]] as const) {
       if (value != null) tags[name] = String(value);
@@ -52,9 +52,9 @@ export function createObserve(ctx: Ctx) {
     });
   }
 
-  /** Plugin warnings go straight to Sentry: not ledgered, so no receipt. */
+  /** Plugin warnings go straight to Sentry: not ledgered, so no receipt. An execFile failure echoes its command line (a workflow script, prompt or args) and stderr: only the marker leaves the process, so neither the message nor the fingerprint carries them. */
   function warn(message: string) {
-    sentry.send({ eventId: newEventId(), level: "warning", kind: "plugin_warn", message, tags: {} });
+    sentry.send({ eventId: newEventId(), level: "warning", kind: "plugin_warn", message: message.replace(/(Command failed:|--(?:script|args|prompt)\b)[\s\S]*/, "$1 [omitted]"), tags: {} });
   }
   // A Proxy keeps the SDK object's own `this`; only log.warn differs. `sdk` is callable but a namespace, not a method: binding it breaks it.
   const log = { debug: (message: string) => bb.log.debug(message), info: (message: string) => bb.log.info(message), error: (message: string) => bb.log.error(message), warn: (message: string) => { bb.log.warn(message); warn(message); } };

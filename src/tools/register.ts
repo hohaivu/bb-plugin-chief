@@ -17,7 +17,7 @@ export function createToolRegistry(ctx: Ctx) {
         } catch (error) {
           try {
             const row = (context.threadId ? store.get(context.threadId) : undefined) ?? { thread_id: context.threadId, project_id: context.projectId };
-            ctx.observe.event("tool_error", row, `${tool.name}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`, { tool: tool.name });
+            ctx.observe.event("tool_error", row, `${tool.name}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`, { tool: tool.name }, tool.name === "chief_report"); // a failed report rolled back: its own error stays local
           } catch { /* observing must never replace the tool's error */ }
           throw error;
         }
