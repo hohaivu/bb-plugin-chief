@@ -19,7 +19,11 @@ export const DOCS_RULE_NEW = "- Never change docs/: only a Spec Writer does, on 
 export const DOCS_RULE_OLD = "- Never change docs/: only a Spec Writer does.";
 export const TRAILER_LINE = "- Every commit you make carries the trailer Chief-Spec-Writer: commit with git commit --trailer \"Chief-Spec-Writer: $BB_THREAD_ID\". A rebase keeps it. Never squash or amend it away.";
 export const ADOPT_LINE = "- When your mission names docs/ commits that another role made, check each one. Correct the docs in your own commits (a revert is a correction). List each such commit's sha under \"## Adopted docs commits\" in your ready result.";
-const ITEM4_NEW = "(4) a docs/ ownership violation (see Docs ownership)";
+// Head wording (wave 2 of the shrink-prompts plan): one role-boundary line per kind; the rest of each rule lives in the role skills.
+export const WORKER_BOUNDARY = "- Never write, edit or run tests, and never change docs/: list a docs need under \"## Docs needed\".";
+export const TESTER_BOUNDARY = "- Change only test files, fixtures, helpers and test config; never product code or docs/.";
+export const SPEC_WRITER_BOUNDARY = "- Change only files under docs/; every commit carries the trailer Chief-Spec-Writer: $BB_THREAD_ID.";
+const ITEM4_NEW ="(4) a docs/ ownership violation (see Docs ownership)";
 const ITEM4_OLD = "(4) a docs/ change in a worker's, designer's or tester's own commit range";
 
 const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
