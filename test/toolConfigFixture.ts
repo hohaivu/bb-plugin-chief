@@ -85,6 +85,13 @@ export function acceptRosterOthersDelta(tool: any, name: string) {
   if (tool.description.split(ROSTER_OTHERS_NEW).length !== 2) throw new Error("chief_roster description: must hold the one authorized clause");
   tool.description = tool.description.replace(ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD);
 }
+/** Coordinator comms wave 2: chief_coordinate gains the one optional `goal` string (COORD-1), asserted exactly and then undone. */
+export const COORDINATE_GOAL_PROPERTY = { description: "The owner's words asking for coordination, verbatim; saved to brief.md.", type: "string", minLength: 1, maxLength: 4000 };
+export function acceptCoordinateGoalDelta(tool: any, name: string) {
+  if (name !== "chief_coordinate") return;
+  if (JSON.stringify(tool.inputSchema.properties.goal) !== JSON.stringify(COORDINATE_GOAL_PROPERTY) || (tool.inputSchema.required ?? []).includes("goal")) throw new Error("chief_coordinate.goal: must be the one optional bounded string");
+  delete tool.inputSchema.properties.goal;
+}
 /** The preload names a Chief row must ask for: the returned tools in the host's pinned order. Throws if the returned tools are not exactly that set (so the order is checked, not assumed from the SDK registration order). */
 export const chiefPreloadTail = (returned: string[]) => {
   const ordered = CHIEF_HOST_ORDER.filter((name) => returned.includes(name));
@@ -115,6 +122,7 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
       property.description = wasText;
     };
     acceptEvidenceOnlyDelta(now, name);
+    acceptCoordinateGoalDelta(now, name);
     if (name === "chief_delegate") edit(now, "kind", KIND_OLD, KIND_NEW, was.inputSchema.properties.kind!.description!);
     if (name === "chief_complete") edit(now, "skipReview", SKIP_OLD, SKIP_NEW, was.inputSchema.properties.skipReview!.description!);
     if (name === "chief_review") {

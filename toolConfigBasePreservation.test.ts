@@ -6,7 +6,7 @@ import { disposeAll } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { withHostCompaction } from "./test/shrinkEdits";
-import { INSTRUCTIONS_CAP, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, type ToolConfig, toolConfigCases, toolConfigFixture } from "./test/toolConfigFixture";
+import { INSTRUCTIONS_CAP, acceptCoordinateGoalDelta, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, type ToolConfig, toolConfigCases, toolConfigFixture } from "./test/toolConfigFixture";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -35,6 +35,7 @@ export function assertPreserved(base: ToolConfig, original: ToolConfig) {
       delete (now.inputSchema.properties as Record<string, unknown>)["includeOthers"];
       now.description = now.description.replace(ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD);
     }
+    acceptCoordinateGoalDelta(now, name);
     if (JSON.stringify(now) !== JSON.stringify(base.catalog[name])) fail(`catalog ${name}`);
   }
   if (head.entries.length !== base.entries.length) fail("entry count");

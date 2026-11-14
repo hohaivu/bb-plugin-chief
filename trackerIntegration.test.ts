@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, TEST_WAVE, chiefReview, completeWorker, delegate, disposeAll, execFileMock, ghHead, setup, start, status, wave } from "./test/harness";
+import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, TEST_WAVE, chiefReview, completeWorker, delegate, disposeAll, execFileMock, ghHead, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -232,7 +232,7 @@ describe("tracker integration", () => {
       state, tasks, run,
       seen: {
         out: run.out.map((text) => n(String(text))),
-        alerts: state.sent.map((message) => [message.threadId, n(message.input[0].text)]),
+        alerts: state.sent.map((message) => [message.threadId, n(withoutAlertMarker(message.input[0].text))]),
         forge: (state.db.prepare("SELECT dedupe_key, target, body, mention FROM forge_comments ORDER BY dedupe_key").all() as object[]).map((row) => JSON.parse(n(JSON.stringify(row)))),
         gh: forgeCalls().map(n),
       },
@@ -291,7 +291,7 @@ describe("tracker integration", () => {
     expect(answerAlerts(state)).toHaveLength(0);
     tasks.owner(task, "Option A");
     for (let i = 0; i < 3; i += 1) { advance(61_000); await settled(state, tasks); }
-    expect(answerAlerts(state).map((message) => [message.threadId, message.input[0].text])).toEqual([[chief, `[Chief lifecycle alert]\n${ANSWERED(1, "Option A")}`]]);
+    expect(answerAlerts(state).map((message) => [message.threadId, withoutAlertMarker(message.input[0].text)])).toEqual([[chief, `[Chief lifecycle alert]\n${ANSWERED(1, "Option A")}`]]);
     expect(tasks.of("update").filter((a) => a.includes("--remove-label"))).toHaveLength(1);
   });
 
@@ -312,10 +312,11 @@ describe("tracker integration", () => {
     expect(pending()).toEqual({ target_thread_id: chief, delivered_at: null });
     state.addLive("thr_adopted", "proj_1");
     expect((await state.harness.behavior.runCli(["adopt", "--thread", "thr_adopted"])).exitCode).toBe(0);
+    advance(31_000);
     await state.supervisorCycle();
     await until(() => pending()?.delivered_at);
     expect(pending()!.target_thread_id).toBe("thr_adopted");
-    expect(answerAlerts(state).map((message) => [message.threadId, message.input[0].text])).toEqual([["thr_adopted", `[Chief lifecycle alert]\n${ANSWERED(1, "Option A")}`]]);
+    expect(answerAlerts(state).map((message) => [message.threadId, withoutAlertMarker(message.input[0].text)])).toEqual([["thr_adopted", `[Chief lifecycle alert]\n${ANSWERED(1, "Option A")}`]]);
   });
 
   // Contract (spec, Answers reasons): each decision's answer has its own alert kind, so two answers to two decisions on one thread both
@@ -337,9 +338,10 @@ describe("tracker integration", () => {
     await until(() => rows().length === 2 && rows().every((row) => row.attempts === 1));
     expect(rows().map((row) => [row.target_thread_id, row.delivered_at])).toEqual([[chief, null], [chief, null]]);
     expect(answerAlerts(state)).toHaveLength(0);
+    advance(31_000);
     await state.supervisorCycle();
     await until(() => rows().every((row) => row.delivered_at));
-    expect(answerAlerts(state).map((message) => message.input[0].text).sort()).toEqual([
+    expect(answerAlerts(state).map((message) => withoutAlertMarker(message.input[0].text)).sort()).toEqual([
       `[Chief lifecycle alert]\n${ANSWERED(1, "#1 Option A")}`, `[Chief lifecycle alert]\n${ANSWERED(2, "#2 Later")}`,
     ]);
   });
