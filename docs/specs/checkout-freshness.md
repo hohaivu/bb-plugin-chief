@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The checkout freshness domain keeps Chief's checkout current before a researcher or planner reads it. It also records in each researcher and planner report which commit that reader saw.
+The checkout freshness domain keeps Chief's checkout current before a researcher or planner reads it. It also records in each researcher and planner report which commit that reader saw. A reader started on a branch gets its own worktree on that branch, and Chief's checkout is not used.
 
 ## Domain Terms
 
@@ -15,15 +15,18 @@ The checkout freshness domain keeps Chief's checkout current before a researcher
 - **Stage**: one bounded step of the freshness call, for example one SDK read.
 - **Stamp**: the `Read at <sha>` text in a reader's report alert and report file.
 - **Shares**: a planner shares Chief's checkout when Chief's environment path equals the project source path.
+- **Recorded branch**: the `branch` value in a reader's thread row. It is null when the reader started without a branch.
+- **Branch reader**: a researcher or planner with a recorded branch. It runs in its own worktree on that branch.
 
 ## Ownership and Entry Points
 
 | Entry point | File | Role |
 | --- | --- | --- |
 | `fastForward`, `commitStamp`, `stampLine` | `src/forge/checkoutSync.ts` | Run git and build the stamp text. |
-| `freshenChiefCheckout`, `reportStamp`, `serverCheckout`, `stageRead` | `server.ts` | Decide whether to fast-forward and read the stamp. `reportStamp` is an adapter of the report intake. |
+| `freshenChiefCheckout`, `syncChiefCheckout`, `reportStamp`, `serverCheckout`, `stageRead` | `src/runtime/checkout.ts` | Decide whether to fast-forward and read the stamp. `reportStamp` is an adapter of the report intake. |
 | `startResearcher`, `researchRun` | `src/research/research.ts` | Start a researcher and build the tool reply. |
-| `startPlan`, `chief_plan`, CLI `plan` | `server.ts` | Start a planner and build the tool and CLI replies. |
+| `startPlan`, `startConsult`, `startPlanConsult` | `src/runtime/delegation.ts` | Start a planner or advisor, in the project default or on a branch. |
+| `chief_plan`, CLI `plan` | `src/tools/plan.ts`, `src/runtime/cli.ts` | Build the tool and CLI replies. |
 | `report` (`createReportIntake`) | `src/report/reportIntake.ts` | Save a report and deliver the alert. `report-intake.md` describes it. |
 | `reportAlert`, `reportFileBody` | `src/report/reportIntake.ts` | Lay out the alert and the report file. |
 
@@ -44,7 +47,7 @@ This section describes the code before this change. The next sections describe t
 
 ### Planner start
 
-- `chief_plan` and CLI `plan` both call `startPlan` in `server.ts`.
+- `chief_plan` and CLI `plan` both call `startPlan` in `src/runtime/delegation.ts`.
 - `startPlan` refuses when planning is off. It then resolves the owning Chief and the revision input.
 - The planner launches with `{ type: "project-default" }`. Chief also launches with `project-default`.
   Reason: a planner is read-only work in the project default environment.
@@ -66,9 +69,24 @@ The alert has no commit stamp. `reportAlert` puts the title line, then `State: <
 
 ## Flows and States
 
+### Start on a branch
+
+Chief names a branch with `branch` on `chief_research`, `chief_plan`, or `chief_consult`. The role then runs in a new BB managed worktree based on that branch.
+
+| Call | Environment | Freshness call |
+| --- | --- | --- |
+| `chief_research` with `branch` (Chief only) | Managed worktree on `branch` | None |
+| `chief_plan` with `branch`, or a revision with no `branch` of a planner that has a recorded branch | Managed worktree on that branch | None |
+| `chief_consult` with `branch` and no `workerThreadId` | Managed worktree on `branch` | None |
+| Plan consult with no `branch`, of a planner that has a recorded branch | Managed worktree on the planner's branch | None |
+
+- The launch names a host, a managed worktree, and the base branch. It never reuses Chief's environment and never uses `project-default`.
+- The launch stores `branch` in the thread row. The busy check and the report stamp read it.
+- The `chief_research` reply says `in a fresh worktree on branch <branch>` in place of `in your checkout`.
+
 ### Fast-forward before a spawn
 
-`chief_research`, `chief_plan`, and CLI `plan` call `freshenChiefCheckout` after every refusal check. The call returns `null` or one warning line.
+`chief_research`, `chief_plan`, and CLI `plan` call `freshenChiefCheckout` after every refusal check, unless the call names a branch (see Start on a branch). The call returns `null` or one warning line.
 
 1. `serverCheckout` reads Chief's thread, its environment, and the primary host.
 2. The server decides whether the reader shares Chief's checkout (see Planner sharing).
@@ -95,7 +113,7 @@ Sharing has three values.
 | no | Both paths are known and differ. | Run no git. Add no warning. |
 | unknown | A lookup failed or a path is missing. | Run no git. Add the warning `could not tell whether the planner shares it`. |
 
-A researcher always reads Chief's checkout. The sharing value applies only to a planner call.
+A researcher without a `branch` always reads Chief's checkout. The sharing value applies only to a planner call without a `branch`.
 
 ### Busy check
 
@@ -104,9 +122,10 @@ A reader is running when it meets all of these conditions:
 - It belongs to this Chief.
 - Its stored state is not terminal.
 - It is a researcher, or it is a planner whose sharing is not `no`.
+- Its recorded branch is null.
 - Its live status is `active`, `starting`, `stopping`, or `pending`, or the live read fails or times out.
 
-A researcher with live status `ready`, `blocked`, or `idle` does not block. A reader of another Chief never blocks.
+A researcher with live status `ready`, `blocked`, or `idle` does not block. A reader of another Chief never blocks. A reader with a recorded branch never blocks, because it runs in its own worktree.
 
 ### Skip causes
 
@@ -140,12 +159,12 @@ The warning has this form: `Did not fast-forward your checkout to origin/<branch
 The report intake (`report`) calls `reportStamp` for a researcher or planner report. Worker, reviewer, and advisor alerts do not change.
 
 1. `store.batch` commits the report state, the sequence number, and the pending alert.
-2. `reportStamp` reads the reporter's own checkout. For a researcher, this is Chief's checkout.
+2. `reportStamp` reads the reporter's own checkout. For a researcher without a branch, this is Chief's checkout.
 3. `commitStamp` reads `git rev-parse HEAD`. A failure here omits the stamp.
-4. `commitStamp` then reads `git ls-remote origin refs/heads/<default branch>`. A failure here drops only the comparison.
+4. `commitStamp` then reads `git ls-remote origin refs/heads/<compared branch>`. The compared branch is the recorded branch, else the default branch. A failure here drops only the comparison.
 5. `reportAlert` puts the stamp line after `State:`, clipped to 160 characters. `reportFileBody` puts it after `State:`.
 
-The stamp text is `Read at <12 hex>`. When `ls-remote` returns a different SHA, the text adds `; <default branch> is now <12 hex>, so this answer may be stale`.
+The stamp text is `Read at <12 hex>`. When `ls-remote` returns a different SHA, the text adds `; <compared branch> is now <12 hex>, so this answer may be stale`.
 
 ## Contracts
 
@@ -164,6 +183,18 @@ Each contract carries its reason.
 - A merge retry starts only when at least 10 s remain. Each merge attempt needs the full reserve, not only the first. Reason: an under-budget retry can meet the deadline halfway through a working tree update.
 - The merge uses `--no-overwrite-ignore`. An ignored untracked file that `origin/<default branch>` adds stays unchanged, and the merge fails as a skip. Reason: git replaces such a file by default, and the user's file is lost.
 
+### Branch start
+
+- A call without `branch` launches with the same environment and freshness calls as before this change. Reason: existing callers must see no change.
+- A call with `branch` never calls `freshenChiefCheckout`. Reason: the reader does not read Chief's checkout.
+- Only readers that can be in Chief's checkout delay its fast-forward. A reader with a recorded branch never delays it. Reason: that reader runs in its own worktree.
+- `chief_consult` with both `workerThreadId` and `branch` is refused before any thread exists. Reason: a worker's worktree and branch belong to the worker.
+- `chief_research` with `branch` from a caller other than Chief is refused before any thread exists. Reason: a researcher thread already reads its own worktree.
+- The researcher's prompt never contains `branch`. Reason: the researcher's own `chief_research` call would refuse it.
+- A `chief_research` call with `runId` ignores `branch`. Reason: not stated in the plan.
+- A plan revision with no `branch` inherits the recorded branch of the plan it revises. Reason: the revision plans the same branch as the plan it revises.
+- A plan consult with no `branch` uses its planner's recorded branch when it has one. Reason: the advisor reviews the planner's branch.
+
 ### Deadlines
 
 - One freshness call has one absolute deadline of 30 s.
@@ -181,12 +212,14 @@ Each contract carries its reason.
 - The stamp never changes the report state, the sequence number, or the saved files.
 - The stamp line is a required line in `fixedCost` of `reportAlert`. Reason: a long result must not push it out of the alert.
 - The stamp adds no database column. Reason: the stamp lives in the alert text and the report file.
+- `reportStamp` compares against the reader's recorded branch when it has one, else the environment default branch. Reason: a branch reader's answer concerns the branch it read.
 
 ## Trade-offs
 
 - The stamp is taken at report time, not at spawn time. It does not prove what the reader saw earlier in the run.
 - "Moved" means a different SHA. It does not mean ancestry or chronology.
-- Researchers share Chief's checkout by design. The user rejected a worktree for each researcher.
+- Researchers share Chief's checkout by default. A researcher gets its own worktree only when Chief names a branch (user decision 2026-11-14, stacked-branch work).
+- Chief's cleanup does not remove a researcher's branch worktree, because researcher rows are never cleanup-eligible.
 - Planner worktrees in projects whose default is a worktree are not fast-forwarded. Only the stamp covers them.
 - Path comparison is by string, with no realpath step. A symlinked path that differs as a string reads as a separate checkout. The planner call stays silent, as before this change.
 - A concurrent second `chief_research` or `chief_plan` call meets git's own lock. It becomes an ordinary skip warning.
@@ -197,7 +230,7 @@ Each contract carries its reason.
 
 ## Out of Scope
 
-- No worktree for each researcher.
+- No worktree for each researcher unless Chief names a branch.
 - No fast-forward of worker, reviewer, or advisor environments.
 - No `origin/HEAD`, `main`, or `master` fallback when the environment has no `defaultBranch`.
 - No stamp on the server's `research-unreported` alert.

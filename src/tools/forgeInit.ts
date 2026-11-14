@@ -11,14 +11,14 @@ import type { Ctx } from "../runtime/context";
 const FORGE_BRIEF_SECTION_MAX = 1_500;
 
 export function registerForgeInitTool(ctx: Ctx) {
-  const { bb, chainOwner, chainStarted, planWavesFor, store } = ctx;
+  const { bb, chainOwner, chainStarted, planBase, planWavesFor, store } = ctx;
   ctx.registerChiefTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
     description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan until its required advisor review resolves. For a plan, call it only on a chain head (a wave nothing precedes) that has no worker yet: a chain has one branch and one pull request, its later waves continue it with chief_delegate replaces:, and the pull request body lists every wave of the chain. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
     parameters: z.object({
       title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
-      base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request. Stack only when this work builds on that pull request's changes; independent work gets its own PR on the default base."),
+      base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request. Stack only when this work builds on that pull request's changes; independent work gets its own PR on the default base. Omit on a plan wave: a stacked or branch-based plan fixes it."),
       body: z.string().trim().min(1).max(4_000).optional().describe("Short summary for the issue and pull request body."),
       planThreadId: z.string().optional().describe("For planned work: the planner thread the task's wave comes from. Give it with wave; the plan summary and the wave's contracts are added to the issue and pull request body."),
       wave: z.number().int().min(1).optional().describe("For planned work: the 1-based wave this task implements. Give it with planThreadId."),
@@ -38,6 +38,7 @@ export function registerForgeInitTool(ctx: Ctx) {
         throw new Error("chief_forge_init without planThreadId requires mission (with successCriteria and constraints when you have them): the pull request body is the reviewer's whole brief. Pass the same text you will give chief_delegate.");
       }
       let body = params.body;
+      let stacked = false;
       // Sections the pull request alone must carry for the reviewer; each is clipped so the body stays bounded.
       const briefSections = [
         ...(mission ? ["## Mission", clip(mission, FORGE_BRIEF_SECTION_MAX)] : []),
@@ -65,6 +66,16 @@ export function registerForgeInitTool(ctx: Ctx) {
         const started = chainStarted(planThreadId, rawWaves, wave);
         if (started) {
           throw new Error(`Wave ${wave}'s chain already has worker ${started.thread_id}${started.branch ? ` on branch ${started.branch}` : ""}${started.pr_url ? ` with pull request ${started.pr_url}` : ""}: a chain has one branch and one pull request. ${chainOwner(planThreadId, rawWaves, wave) ? `Continue it with chief_delegate (planThreadId: ${planThreadId}, wave: ${started.plan_wave ?? wave}, replaces: ${chainOwner(planThreadId, rawWaves, wave)!.thread_id}).` : `Delegate wave ${wave}'s worker onto it with chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}).`}`);
+        }
+        // The plan base is authoritative for a stacked or branch-based chain: forge, admission and review read the same value.
+        const pb = planBase(planThreadId, wave);
+        if (pb) {
+          if (params.base !== undefined && params.base !== pb.base) {
+            throw new Error(`Wave ${wave}'s base is fixed by the plan (${pb.base ?? "the parent chain's branch"}); omit base.`);
+          }
+          if (pb.waiting || !pb.base) throw new Error(`Wave ${wave} is stacked: ${pb.waiting ?? pb.unresolved}. Run chief_forge_init for it after that.`);
+          params.base = pb.base;
+          stacked = true;
         }
         body = [
           params.body ?? `Tracking work for ${params.title}.`,
@@ -141,7 +152,7 @@ export function registerForgeInitTool(ctx: Ctx) {
         ...(failure ? [`Running it on the server did not finish (${failure}), so run it yourself.`] : []),
         "Run this from the project checkout, verbatim. Every value is already substituted and quoted, every forge step is best-effort, and your own checkout never moves:",
         "", "```sh", script, "```", "",
-        `The last line is CHIEF_FORGE branch=… base=… issue_url=… pr_url=…. Pass those to chief_delegate as branch, issueUrl and prUrl, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, and an empty branch means the cut failed, so delegate without one and the worktree uses the project default. Neither is a failure to report as one. The branch will be ${branch}.`,
+        `The last line is CHIEF_FORGE branch=… base=… issue_url=… pr_url=…. Pass those to chief_delegate as branch, issueUrl and prUrl, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, and an empty branch means the cut failed, so ${stacked ? "the stacked base branch could not be cut: rerun chief_forge_init, and do not delegate without a branch" : "delegate without one and the worktree uses the project default"}. Neither is a failure to report as one. The branch will be ${branch}.`,
       ].join("\n");
     },
   });}

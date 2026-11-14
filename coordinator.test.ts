@@ -9,6 +9,7 @@ import { MIGRATIONS } from "./src/db/migrations";
 import { loadBaseBuild } from "./scripts/loadBaseBuild";
 import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
+import { acceptStackedBranchDelta } from "./test/stackedBranchToolDelta";
 import { PRELOAD_OLD_TAIL, acceptRosterOthersDelta, chiefPreloadTail } from "./test/toolConfigFixture";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, elapse, readyAction, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -1042,6 +1043,8 @@ describe("Coordinator", () => {
       // Plan 2 contract 6: the Spec Writer wording of chief_delegate, chief_complete and chief_skip_specs moved; asserted, then restored to base.
       for (const tool of now.tools) acceptSpecLaneWording(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
+      // Stacked-branch worktrees: optional branch / stackOn and one forge `base` sentence; asserted, then removed (before the plan-flag reversal reads the plan text).
+      for (const tool of now.tools) acceptStackedBranchDelta(tool, tool.name);
       for (const tool of now.tools) acceptReviewerToolDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       for (const tool of now.tools) acceptRetestDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.

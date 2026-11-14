@@ -105,6 +105,9 @@ export const waveShape = z.object({
   dependsOn: z.array(z.number().int()).optional().describe(
     "1-based index of the earlier wave this one builds on, at most one. [] = independent: it starts its own branch and pull request on the default base. [k] = builds on wave k and continues on its branch. Omitted = depends on the previous wave (wave 1: none).",
   ),
+  stackOn: z.number().int().optional().describe(
+    "Chain heads only (dependsOn: []): the 1-based earlier implementation wave, on another chain, whose changes this chain builds on. Its branch and pull request stack on that chain's branch, and it starts once wave k is ready.",
+  ),
   design: z.boolean().optional().describe(
     "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
   ),
@@ -147,7 +150,7 @@ export const reportParams = z.object({
     z.string().trim(),
     z.array(waveShape),
   ]).optional().describe(
-    `Ready only. A planner's ready report requires this: an array of 2 to ${MAX_WAVES} {body, dependsOn, design?, test?, spec?, feature?, reshape?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; test: true marks a test wave, and every chain ends with one; spec: true marks an implementation wave whose ## Spec delta a Spec Writer turns into docs/ in parallel with its worker; feature: true marks an implementation wave that adds new behaviour; reshape: true marks a big feature's reshape wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
+    `Ready only. A planner's ready report requires this: an array of 2 to ${MAX_WAVES} {body, dependsOn, stackOn?, design?, test?, spec?, feature?, reshape?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; test: true marks a test wave, and every chain ends with one; spec: true marks an implementation wave whose ## Spec delta a Spec Writer turns into docs/ in parallel with its worker; feature: true marks an implementation wave that adds new behaviour; reshape: true marks a big feature's reshape wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
   ),
   blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
   recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),

@@ -655,6 +655,81 @@ describe("checkout freshness", () => {
     });
   });
 
+  // Contracts (stacked-branch worktrees, wave 1): a researcher or planner started on a branch runs in its own managed worktree on that branch,
+  // leaves Chief's checkout alone, and is compared with that branch in its report stamp.
+  describe("start on a branch", () => {
+    const BRANCH = "feature/pr-head";
+    const BRANCH_ENV = { type: "host", hostId: expect.any(String), workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: BRANCH } } };
+    const branchOf = (w: World, threadId: string) => (w.state.db.prepare("SELECT branch FROM managed_threads WHERE thread_id=?").get(threadId) as { branch: string | null }).branch;
+    const sync = (w: World) => w.state.harness.behavior.callAgentTool("chief_sync", {}, w.ctx) as Promise<string>;
+    const starts: [string, (w: World) => Promise<string>, string][] = [
+      ["chief_research", (w) => w.state.harness.behavior.callAgentTool("chief_research", { ...SURVEY("Which files?"), branch: BRANCH }, w.ctx) as Promise<string>, "researcher"],
+      ["chief_plan", (w) => w.state.harness.behavior.callAgentTool("chief_plan", { title: "Plan", mission: "Propose how to fix totals", branch: BRANCH }, w.ctx) as Promise<string>, "planner"],
+      ["CLI plan", async (w) => (await w.cliPlan("--branch", BRANCH)).stdout!, "planner"],
+    ];
+
+    test.each(starts)("%s with a branch launches in a fresh managed worktree on it, records it, and neither fast-forwards nor runs any git in Chief's checkout", async (_name, start, role) => {
+      const w = await world({ projectPath: "clone" });
+      await w.r.push();
+      const reply = await start(w);
+      expect(w.spawnedRole(role)).toHaveLength(1);
+      expect(w.spawnedRole(role)[0].environment).toEqual(BRANCH_ENV);
+      expect(branchOf(w, w.rows(role)[0]!)).toBe(BRANCH);
+      expect(reply).not.toContain("Did not fast-forward");
+      expect(w.calls).toEqual([]);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test("the researcher reply says where it runs, and a researcher without a branch still says your checkout", async () => {
+      const w = await world();
+      expect(await starts[0]![1](w)).toContain(`runs the survey in a fresh worktree on branch ${BRANCH} and reports`);
+      expect(await w.research()).toContain("in your checkout");
+    });
+
+    test.each([["researcher", starts[0]!], ["planner", starts[1]!]] as const)("an active %s on a branch never blocks chief_sync, which fast-forwards", async (role, [, start]) => {
+      const w = await world({ projectPath: "clone" });
+      await start(w);
+      w.setLive(w.rows(role)[0]!, "active");
+      const tip = await w.r.push();
+      const reply = await sync(w);
+      expect(reply).not.toContain("still running in it");
+      expect(reply).toContain(tip.slice(0, 12));
+      expect(await w.r.head()).toBe(tip);
+    });
+
+    test("a branch reader does not hide a busy reader with no branch: the null-branch researcher still blocks chief_sync", async () => {
+      const w = await world();
+      await starts[0]![1](w);
+      await w.research();
+      const [onBranch, shared] = w.rows("researcher");
+      w.setLive(onBranch!, "active");
+      w.setLive(shared!, "active");
+      await w.r.push();
+      const reply = await sync(w);
+      expect(reply).toContain(`researcher ${shared} is still running in it`);
+      expect(reply).not.toContain(onBranch!);
+      expect(await w.r.head()).toBe(w.r.c0);
+    });
+
+    test.each([["researcher", starts[0]!], ["planner", starts[1]!]] as const)("the %s report stamp compares with its recorded branch, not the default branch", async (role, [, start]) => {
+      const w = await world({ projectPath: "clone", env: "all" });
+      await start(w);
+      // origin/main moves too, so only a comparison with BRANCH can explain the text below.
+      await w.r.push();
+      const other = join(w.r.root, "other");
+      await writeFile(join(other, "b.txt"), "branch\n");
+      await git(other, "add", "-A");
+      await git(other, "commit", "-q", "-m", "branch work");
+      await git(other, "push", "-q", "origin", `HEAD:${BRANCH}`);
+      const tip = await git(other, "rev-parse", "HEAD");
+      const spawnCalls = w.calls.length;
+      await w.state.harness.behavior.callAgentTool("chief_report", { state: "blocked", blocker: "stuck", recommendation: "retry" }, { threadId: w.rows(role)[0]!, projectId: "proj_1" });
+      const alert = w.state.sent.at(-1).input[0].text as string;
+      expect(alert).toContain(`State: blocked\nRead at ${w.r.c0.slice(0, 12)}; ${BRANCH} is now ${tip.slice(0, 12)}, so this answer may be stale\n`);
+      expect(w.calls.slice(spawnCalls).map((call) => call.args)).toEqual([["rev-parse", "HEAD"], ["ls-remote", "origin", `refs/heads/${BRANCH}`]]);
+    });
+  });
+
   describe("report stamp, through chief_report", () => {
     const alertText = (w: World) => w.state.sent.at(-1).input[0].text as string;
     const report = (w: World, threadId: string, extra: object = { state: "blocked", blocker: "stuck", recommendation: "retry" }) =>
@@ -844,7 +919,7 @@ describe("checkout freshness", () => {
       expect(golden.meta.head).toBe("948c49cb6cac6f2e3066fe0e2164e22c809c8a4f");
       expect(golden.meta.fixtureHash).toBe(fixtureHash);
       expect(actual).toEqual(golden.outputs);
-    });
+    }, 60_000);
   });
 
   // Preservation of #181's callers (chief_research, chief_plan, CLI plan) across the chief_sync refactor. The golden file was

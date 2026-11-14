@@ -46,10 +46,10 @@ function deferred<T>() {
 }
 
 let worlds = 0;
-type Options = { projectPath?: string | null; heads?: Record<string, PinnedHead | null>; engine?: () => unknown; waves?: PlanWave[]; gitEnv?: NodeJS.ProcessEnv };
+type Options = { projectPath?: string | null; heads?: Record<string, PinnedHead | null>; engine?: () => unknown; waves?: PlanWave[]; gitEnv?: NodeJS.ProcessEnv; planBaseOf?: (row: ManagedRow) => { base: string } | { skipped: string } | null };
 
 /** A standalone review attempt over real SQLite and the real ThreadStore; only the host, the forge and spawn are doubles. */
-function world({ projectPath = null, heads = {}, engine, waves = [], gitEnv }: Options = {}) {
+function world({ projectPath = null, heads = {}, engine, waves = [], gitEnv, planBaseOf }: Options = {}) {
   const { bb, harness } = createFakePluginHost({ pluginId: `review-start-${++worlds}` });
   disposals.push(() => harness.lifecycle.dispose());
   const db = bb.storage.database();
@@ -105,6 +105,7 @@ function world({ projectPath = null, heads = {}, engine, waves = [], gitEnv }: O
       retestDebts: () => ({ owed: [], waived: [] }),
       reviewTargetsFor: (worker) => covers ? [worker, ...covers.filter((id) => id !== worker.thread_id).map((id) => store.get(id)!)] : [worker],
       planWavesFor: () => waves,
+      ...(planBaseOf ? { planBaseOf } : {}),
     },
     controlsThread: (row, chiefId) => row.chief_thread_id === chiefId,
     host: host as any, forge, git: { env: () => gitEnv ?? process.env },
@@ -1246,6 +1247,109 @@ async function reviewOf(repo: { dir: string; sha: string } | null, over: { waves
   const out = await w.review.startReview(w.chief, "W1");
   return { w, out, prompt: w.launches[0]!.args.prompt as string, context: w.contexts()[0] as string | undefined };
 }
+
+describe("impact slice base of a stacked or branch-based plan wave", () => {
+  // `main` is origin/HEAD; `develop` (origin/develop) adds src/parent.test.ts on top of it; branch feature/one adds src/x.ts on top of develop.
+  // Only a slice that starts at origin/develop leaves parent.test.ts out of the changed paths, so the test-audit block shows which base the slice used.
+  async function stackedRepo() {
+    const repo = await repoWith({}, (r) => {
+      r.put("src/parent.test.ts", "export const parent = 1;\n"); r.commit("parent");
+      r.git("update-ref", "refs/remotes/origin/develop", "HEAD");
+      r.put("src/x.ts", "export const x = 1;\n"); r.commit("feature");
+      r.git("update-ref", "refs/remotes/origin/feature/one", "HEAD");
+    });
+    repo.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+    return repo;
+  }
+  const review = async (repo: { dir: string; sha: string }, over: Pick<Options, "planBaseOf" | "heads">) => {
+    const w = world({ projectPath: repo.dir, ...over });
+    w.worker("W1", { branch: "feature/one" });
+    const out = await w.review.startReview(w.chief, "W1");
+    return { out, prompt: w.launches[0]!.args.prompt as string, context: w.contexts()[0] as string | undefined };
+  };
+
+  test("a wave with a plan base is sliced against origin/<plan base>, not origin/HEAD", async () => {
+    const repo = await stackedRepo();
+    const stacked = await review(repo, { planBaseOf: () => ({ base: "develop" }) });
+    expect(auditRenders(stacked.prompt)).toBe(false);
+    expect(stacked.out.reply).not.toContain("Impact slice skipped");
+    // Without a plan base the same branch is sliced against origin/HEAD, which still sees the parent's test file.
+    const plain = await review(repo, {});
+    expect(auditRenders(plain.prompt)).toBe(true);
+  }, 60_000);
+
+  test("an unresolved plan base skips the slice with its reason and never falls back to origin/HEAD", async () => {
+    const repo = await stackedRepo();
+    const skipped = "stack base unresolved: wave 1's chain has no task branch yet";
+    const { out, context } = await review(repo, { planBaseOf: () => ({ skipped }) });
+    expect(out.reply).toContain(`Impact slice skipped: W1: ${skipped}.`);
+    expect(context).toContain(`Skipped: ${skipped}`);
+  });
+
+  test("a pinned head still uses origin/<head.base>, whatever the plan base says", async () => {
+    const repo = await stackedRepo();
+    const pinned = { [pr(1)]: { branch: "feature/one", sha: repo.sha, base: "develop" } };
+    const w = world({ projectPath: repo.dir, heads: pinned, planBaseOf: () => ({ base: "main" }) });
+    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    await w.review.startReview(w.chief, "W1");
+    expect(auditRenders(w.launches[0]!.args.prompt)).toBe(false);
+    const skippedPlan = world({ projectPath: repo.dir, heads: pinned, planBaseOf: () => ({ skipped: "stack base unresolved: x" }) });
+    skippedPlan.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+    const out = await skippedPlan.review.startReview(skippedPlan.chief, "W1");
+    expect(out.reply).not.toContain("Impact slice skipped");
+  }, 60_000);
+});
+
+describe("unpinned whole-plan review: the primary diff base of a stacked or branch-based plan wave", () => {
+  // Topology: waves 1/2 on feature/a, waves 3/4 (stackOn 1) on feature/b. All ready, no PR, so every target is unpinned.
+  // Contract: a target with a plan base is diffed against origin/<plan base>, never the project default; an unresolved base makes the range unavailable.
+  const twoChains = (planBaseOf: (row: ManagedRow) => { base: string } | { skipped: string } | null) => {
+    const w = world({ planBaseOf });
+    w.worker("W1", { branch: "feature/a", planWave: 1 });
+    w.worker("W3", { branch: "feature/b", planWave: 3 });
+    w.covering(["W1", "W3"]);
+    return w;
+  };
+  const lineFor = (w: ReturnType<typeof world>, branch: string) =>
+    (w.launches[0]!.args.prompt as string).split("\n").filter((line) => line.startsWith(`- branch ${branch},`));
+  const DEFAULT_RANGE = "git diff <the project's default branch>...";
+
+  test("the stacked chain is diffed against its plan base, the unstacked chain keeps the default branch", async () => {
+    const w = twoChains((row) => (row.branch === "feature/b" ? { base: "feature/a" } : null));
+    await w.review.startReview(w.chief, "W1");
+
+    const [stacked] = lineFor(w, "feature/b");
+    expect(lineFor(w, "feature/b")).toHaveLength(1);
+    expect(stacked).toContain("then review `git diff origin/feature/a...origin/feature/b`");
+    expect(stacked).not.toContain(DEFAULT_RANGE);
+    expect(lineFor(w, "feature/a")[0]).toContain(`then review \`${DEFAULT_RANGE}origin/feature/a\``);
+  });
+
+  test("an unresolved plan base makes the stacked chain's range unavailable and never names the default branch", async () => {
+    const skipped = "stack base unresolved: wave 1's chain has no task branch yet";
+    const w = twoChains((row) => (row.branch === "feature/b" ? { skipped } : null));
+    await w.review.startReview(w.chief, "W1");
+
+    const [stacked] = lineFor(w, "feature/b");
+    expect(stacked).toContain(skipped);
+    expect(stacked).not.toMatch(/`git diff [^`]*`/);
+    expect(stacked).not.toContain(DEFAULT_RANGE);
+    expect(stacked).not.toContain("origin/feature/a");
+    expect(lineFor(w, "feature/a")[0]).toContain(`then review \`${DEFAULT_RANGE}origin/feature/a\``);
+  });
+
+  test("a pinned pull request keeps its own base, whatever the plan base says", async () => {
+    const w = world({ heads: { [pr(2)]: { branch: "feature/b", sha: SHA_B, base: "develop" } }, planBaseOf: () => ({ base: "feature/a" }) });
+    w.worker("W1", { branch: "feature/a", planWave: 1 });
+    w.worker("W3", { prUrl: pr(2), branch: "feature/b", planWave: 3 });
+    w.covering(["W1", "W3"]);
+    await w.review.startReview(w.chief, "W1");
+    const lines = (w.launches[0]!.args.prompt as string).split("\n");
+    const pinnedLine = lines.find((line) => line.startsWith(`- ${pr(2)} `));
+    expect(pinnedLine).toContain(`then review \`git diff origin/develop...${SHA_B}\``);
+    expect(pinnedLine).not.toContain("origin/feature/a");
+  });
+});
 
 describe("rule blocks follow the slice's changed paths (Git listings of a real repository)", () => {
   // Contract: the test audit renders when some changed path looks like test code, and not otherwise; `## Docs ownership` renders on a docs/ history or path, and not otherwise.

@@ -19,6 +19,11 @@ interface InsertBase {
   status?: string | null;
 }
 
+/** A fresh managed worktree on the named branch, else on the project default. */
+export function worktreeEnvironment(hostId: string, branch?: string | null): SpawnInput["environment"] {
+  return { type: "host", hostId, workspace: { type: "managed-worktree", baseBranch: branch ? { kind: "named", name: branch } : { kind: "default" } } };
+}
+
 interface Prepared {
   execution: Execution;
   sectionId: string;

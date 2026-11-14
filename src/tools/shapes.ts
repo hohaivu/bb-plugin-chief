@@ -51,11 +51,13 @@ export const delegateParams = delegateShape.superRefine((value, ctx) => {
  * constraints it is being asked to propose. */
 export const planParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
   revises: z.string().trim().min(1).optional().describe("A planner whose plan its one advisor review sent back with changes: the new planner revises that plan with the advice attached, and its plan is delegated with no second review."),
+  branch: z.string().trim().min(1).max(300).optional().describe("An open branch (for example a stacked pull request's head) to read instead of the project default: the thread runs in a fresh worktree based on it. For a plan, its chain heads stack on this branch."),
 }).transform(titled((v) => v.mission));
 
 export const consultParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
   workerThreadId: z.string().trim().min(1).optional().describe("The managed worker whose change keeps failing review: the advisor runs in its worktree and gets its brief, reviewer verdicts, and branch."),
   planThreadId: z.string().trim().min(1).optional().describe("A planner whose multi-wave or complex plan needs its one read-only advisor review before chief_forge_init or chief_delegate. Not with workerThreadId."),
+  branch: z.string().trim().min(1).max(300).optional().describe("An open branch (for example a stacked pull request's head) to read instead of the project default: the thread runs in a fresh worktree based on it. Not with workerThreadId."),
 }).transform(titled((v) => v.mission));
 
 /** Why a worker is completed without a matching approve; recorded in its result. */

@@ -97,6 +97,8 @@ export type WorkerBriefInput = {
   waveTotal: number | undefined;
   waveNext: number | null;
   waveIndependent: boolean;
+  /** A fresh chain head's plan base: its branch and PR are based on it. */
+  stackBase?: string;
   designWave: boolean;
   implementsDesign: number | null;
   contracts: string | undefined;
@@ -135,7 +137,7 @@ const deviationsLine = "- Your ready result must contain a `## Deviations from p
 
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
-  const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, planContextLine,
+  const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, planContextLine,
     kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false } = input;
   const tester = kind === "tester";
   const evidence = evidenceOnly && tester;
@@ -189,7 +191,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
         ? `Wave ${wave} of ${waveTotal}: ${side ? `you run in parallel with its worker, in your own worktree on a side branch cut from ${branch}` : "its worker continues from your branch once you report ready"}. Your work is only its \`## Spec delta\` and the docs rules in the \`chief-role-spec-writer\` skill. Name "Wave ${wave} of ${waveTotal}" in your ready result.`
         : `Wave ${wave} of ${waveTotal}.${evidence ? "" : " Implement only this wave's plan file."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
       waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
-      ...(waveIndependent ? ["This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch."] : []),
+      ...(stackBase ? [`This wave heads its own chain, stacked on ${stackBase}: its branch and PR are based on ${stackBase}; do not rebase onto the default branch.`] : waveIndependent ? ["This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch."] : []),
       ...(implementsDesign !== null ? [`This wave implements the artboards that wave ${implementsDesign} drew and the owner approved. Read them through the design tool's MCP (read-only; never edit the design) and match them; the artboard names are in your mission or wave ${implementsDesign}'s report.`] : []),
       ...(designWave ? ["This is a design-only wave: the next wave implements it once the owner approves your artboards."] : []),
     ] : []),
@@ -328,8 +330,12 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   return { prompt, brief, reviewerBrief };
 }
 
+const branchLine = (branch: string) => `Your worktree is based on branch ${branch} (an open branch, not the project default). Read and plan against it.`;
+
 export type PlannerBriefInput = {
   title: string; chiefThreadId: string; mission: string; context?: string; research: boolean;
+  /** An open branch the planner's worktree is based on; chain heads of its plan stack on it. */
+  branch?: string;
   /** Set for chief_plan revises: the plan its one advisor review sent back, and that advice. */
   revision?: {
     plannerThreadId: string;
@@ -344,9 +350,10 @@ export type PlannerBriefInput = {
 
 /** A planner's prompt: the problem and the plan contract. */
 export function plannerBrief(input: PlannerBriefInput): string {
-  const { title, chiefThreadId, mission, context, revision } = input;
+  const { title, chiefThreadId, mission, context, revision, branch } = input;
   return [
     `You are the managed planner for “${title}”. Report to Chief thread ${chiefThreadId}.`,
+    ...(branch ? [branchLine(branch), `Chain heads of this plan stack on ${branch}: chief_forge_init bases their branches and pull requests on it.`] : []),
     "", "## Problem", mission,
     ...(context ? ["", "## Context", context] : []),
     ...(revision ? [
@@ -383,15 +390,18 @@ export type AdvisorBriefInput = {
     report_path: string | null;
   };
   reviews: VerdictRow[];
+  /** An open branch a no-worker or plan consult's worktree is based on. */
+  branch?: string;
   /** Set for a plan review (chief_consult planThreadId): the planner, its plan files, result and report. */
   plan?: { plannerThreadId: string; paths: string[]; summary: string | null; reportPath: string | null };
 };
 
 /** An advisor's prompt: the question, and with a worker its brief, verdicts, branch and report. */
 export function advisorBrief(input: AdvisorBriefInput): string {
-  const { title, chiefThreadId, mission, context, worker, reviews, plan } = input;
+  const { title, chiefThreadId, mission, context, worker, reviews, plan, branch } = input;
   return [
     `You are the managed advisor for “${title}”. Report to Chief thread ${chiefThreadId}.`,
+    ...(branch ? [branchLine(branch)] : []),
     "You are a strategic advisor and debugger of last resort: find the root cause and the smallest credible way forward.",
     "", "## Question", mission,
     ...(context ? ["", "## Context", context] : []),

@@ -1,6 +1,7 @@
 import { ATTACH_DEFINITION, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { acceptRosterOthersDelta } from "./test/toolConfigFixture";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
+import { acceptStackedBranchDelta } from "./test/stackedBranchToolDelta";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
@@ -148,6 +149,8 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       // Plan 2 contract 6: the Spec Writer wording of three tools moved; asserted, then restored to the recorded text.
       const shown = structuredClone(withoutMerge(rest).tools);
       for (const tool of shown) acceptSpecLaneWording(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
+      // Stacked-branch worktrees: optional branch / stackOn and one forge `base` sentence; asserted, then removed.
+      for (const tool of shown) acceptStackedBranchDelta(tool, tool.name);
       for (const tool of shown) acceptReviewerToolDelta(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       for (const tool of shown) acceptRetestDelta(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.

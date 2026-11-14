@@ -166,7 +166,7 @@ export function createRoster(ctx: Ctx) {
       return [
         `waves: ${done}/${total} done, ${segments.map((segment) => `wave ${segment.wave} ${segmentLabel(segment.state)}`).join(", ")}`,
         ...waves.map((wave, index) => `  wave ${index + 1} of ${waves.length}: ${wave.path}${
-          wave.dependsOn ? wave.dependsOn.length ? ` (after wave ${wave.dependsOn[0]})` : " (independent)" : ""}${wave.testsSkipped ? `: tests skipped: ${clip(wave.testsSkipped, 200)}` : ""}${wave.specsSkipped ? `: specs skipped: ${clip(wave.specsSkipped, 200)}` : ""}`),
+          wave.dependsOn ? wave.dependsOn.length ? ` (after wave ${wave.dependsOn[0]})` : " (independent)" : ""}${wave.stackOn ? ` (stacked on wave ${wave.stackOn})` : ""}${wave.testsSkipped ? `: tests skipped: ${clip(wave.testsSkipped, 200)}` : ""}${wave.specsSkipped ? `: specs skipped: ${clip(wave.specsSkipped, 200)}` : ""}`),
       ];
     }
     if (row.role === "worker" && row.plan_thread_id && row.plan_wave != null) {

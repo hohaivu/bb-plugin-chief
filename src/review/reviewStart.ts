@@ -85,6 +85,8 @@ export interface BriefTarget {
   hasResult: boolean;
   reportPath: string | null;
   head: PinnedHead | null;
+  /** Not pinned only: the target's plan base (stacked or branch-based wave), `skipped` while unresolved; absent = the project default branch. */
+  planBase?: { base: string } | { skipped: string } | null;
   /** Re-review: the previous reviewed head this round's range starts from; absent = review the whole change. */
   since?: string;
   kind?: "designer" | "tester" | "spec-writer" | null;
@@ -247,7 +249,11 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       return `- ${first.prUrl} (branch ${pinned.branch}, targeting ${pinned.base}), pinned to ${pinned.sha}: \`git fetch origin ${pinned.branch} && git checkout --detach ${pinned.sha}\`, then review ${scopeText(pinned, first.since)}. Workers: ${group.map((target) => `${kindName(target)} ${target.threadId} “${target.title}”`).join("; ")}.`;
     }
     const prUrl = group.find((target) => target.prUrl)?.prUrl;
-    return `- branch ${first.branch}${prUrl ? ` (${prUrl})` : ""}, head not readable, not pinned: \`git fetch origin ${first.branch}\`, then review \`git diff <the project's default branch>...origin/${first.branch}\`. Workers: ${group.map((target) => `${kindName(target)} ${target.threadId} “${target.title}” (the verdict binds to its report ${target.reportSeq})`).join("; ")}.`;
+    const pb = first.planBase;
+    const range = pb && "skipped" in pb
+      ? `its plan base is unresolved (${pb.skipped}), so the base-dependent diff is unavailable: review only what you can read from \`origin/${first.branch}\` itself and say the range could not be checked, never diff against the default branch`
+      : `review \`git diff ${pb ? `origin/${pb.base}` : "<the project's default branch>"}...origin/${first.branch}\``;
+    return `- branch ${first.branch}${prUrl ? ` (${prUrl})` : ""}, head not readable, not pinned: \`git fetch origin ${first.branch}\`, then ${range}. Workers: ${group.map((target) => `${kindName(target)} ${target.threadId} “${target.title}” (the verdict binds to its report ${target.reportSeq})`).join("; ")}.`;
   };
   const pinnedGroups = [...groups.values()].filter((group) => group[0]!.head).length;
   const branchGroups = groups.size - pinnedGroups;
@@ -454,6 +460,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
     specWriters?: (planThreadId: string, wave?: number) => Row[];
     /** The Spec Writers of one task: its replaces: chain's writers plus the side-lane writers of its plan chain (taskChain ids passed in). Optional: older callers omit it, and only the replaces: chain's writers count. */
     taskWriters?: (row: Row, chainIds: string[]) => Row[];
+    /** A plan row's chain base (stacked or branch-based), `skipped` while unresolved, or null for the project default. Optional: older callers omit it, and every wave is unstacked. */
+    planBaseOf?: (row: Row) => { base: string } | { skipped: string } | null;
   };
   controlsThread: (row: Row, callerChiefId: string) => boolean;
   host: ReviewHost<Row>;
@@ -541,7 +549,10 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const sha = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${row.branch}^{commit}`])
         ?? await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${row.branch}^{commit}`]);
       if (!sha) return { skipped: `branch ${row.branch} not found locally` };
-      const baseRef = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+      // A stacked or branch-based plan wave is reviewed against its plan base, never origin/HEAD.
+      const pb = deps.plan.planBaseOf?.(row);
+      if (pb && "skipped" in pb) return pb;
+      const baseRef = pb ? `origin/${pb.base}` : await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
       if (!baseRef) return { skipped: "origin/HEAD not set" };
       return await computeImpactSlice({ ...options(), sha, baseRef, fetchRef: row.branch });
     };
@@ -741,6 +752,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const briefTarget = ({ row, head: pinned, since }: CoveredTarget<Row>): BriefTarget => ({
         threadId: row.thread_id, title: row.title, prUrl: row.pr_url, branch: row.branch, reportSeq: row.report_seq,
         hasResult: !!row.result, reportPath: row.report_path, head: pinned,
+        ...(pinned ? {} : { planBase: deps.plan.planBaseOf?.(row) ?? null }),
         ...(since ? { since } : {}),
         kind: row.kind, lane: laneOf(row), earlier: earlier.get(row.thread_id) ?? [],
       });

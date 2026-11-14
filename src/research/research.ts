@@ -1,7 +1,7 @@
 import type { ExecFileOptions } from "node:child_process";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import type { ManagedSpawn } from "./managedSpawn";
+import { worktreeEnvironment, type ManagedSpawn } from "./managedSpawn";
 import { createWorkflowCli } from "./workflowCli";
 import { modelSelectionSchema, type ModelSelection } from "../types";
 import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from "../core/roles";
@@ -103,6 +103,7 @@ export const researchParams = z.object({
     combine: workflowSelectionSchema.optional(),
   }).strict().optional().describe("Per-stage overrides: a full {provider, model, reasoningLevel} or nothing."),
   runId: z.string().trim().min(1).optional().describe("Keep waiting on a run an earlier call started instead of starting a new one."),
+  branch: z.string().trim().min(1).max(300).optional().describe("Chief only: run the researcher in a fresh worktree on this branch instead of your checkout."),
 }).superRefine((value, ctx) => {
   if (value.runId) return;
   const need = (field: string) => ctx.addIssue({ code: "custom", path: [field], message: `${field} is required${value.mode ? ` for ${value.mode}` : ""}` });
@@ -277,8 +278,10 @@ export interface ResearchDeps<Row extends ResearchRow, Catalog> {
   /** The shared start-up recipe (section, rules, spawn, row, brief); the cooldown check stays in researchPrepare. */
   managedSpawn: ManagedSpawn<{
     threadId: string; role: "researcher"; projectId: string; chiefThreadId: string; parentThreadId: string;
-    title: string; brief: string; state: "starting"; status: string;
+    title: string; brief: string; state: "starting"; status: string; branch?: string | null;
   }>;
+  /** The host a fresh worktree for a branch-started researcher is created on, when Chief's own environment names none. */
+  projectHost: (projectId: string) => Promise<string>;
   alertChief: (row: Row, key: string, message: string) => Promise<unknown>;
   /** Fast-forwards Chief's checkout before a researcher reads it; the warning line when it did not. Never throws. */
   freshenCheckout: (chief: Row) => Promise<string | null>;
@@ -296,7 +299,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
   const {
     db, bb, managedRow, roleRow, terminal, isActiveChief, researchSettings, readResearchModel, environmentHostId, discover,
     catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError, lastOutput, managedSpawn,
-    alertChief, freshenCheckout, writeArtifact, serverPath, clip, execFileAsync,
+    alertChief, freshenCheckout, projectHost, writeArtifact, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   } = deps;
 
@@ -682,14 +685,17 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
    */
   async function startResearcher(params: ResearchParams, chief: Row, cap: number) {
     const prepared = await researchPrepare(params, chief.thread_id, cap, false, true);
+    const { branch } = params;
     // The child reads Chief's working tree, so it must reuse Chief's environment: no fresh worktree fallback.
-    if (!prepared.environmentId) {
+    // With a branch it reads its own worktree on that branch instead.
+    if (!branch && !prepared.environmentId) {
       throw new Error("chief_research did not start: Chief's checkout cannot be shared with a researcher thread (this thread has no reusable environment).");
     }
     const mode = params.mode!;
     const managed = await managedSpawn.prepare(chief.project_id, { execution: prepared.child! });
     const title = `Research · ${mode} · ${clip(params.question!, 60)}`;
-    const { runId: _runId, ...call } = params;
+    // researchRun refuses branch from a non-Chief caller, so the child's call carries none.
+    const { runId: _runId, branch: _branch, ...call } = params;
     const prompt = [
       `You are the managed researcher for a ${mode} requested by Chief thread ${chief.thread_id}. Report to that Chief.`,
       "", "## Question", params.question!,
@@ -709,14 +715,18 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
       "- Do not ask the user directly from this thread.",
     ].join("\n");
     // After every refusal above: a refused call leaves Chief's checkout as it was.
-    const warning = await freshenCheckout(chief);
+    const warning = branch ? undefined : await freshenCheckout(chief);
     const thread = await managedSpawn.launch(managed, {
       projectId: chief.project_id,
-      environment: { type: "reuse", environmentId: prepared.environmentId },
+      environment: branch
+        ? worktreeEnvironment(prepared.hostId ?? await projectHost(chief.project_id), branch)
+        : { type: "reuse", environmentId: prepared.environmentId! },
       title, prompt,
       extra: prepared.permissionMode ? { permissionMode: prepared.permissionMode } : {},
-      onSpawnError: (error) => new Error(`chief_research did not start: BB could not run a researcher thread in Chief's checkout (${clip(error instanceof Error ? error.message : String(error), 200)}). Nothing was started in a fresh worktree.`),
-    }, { role: "researcher", chiefThreadId: chief.thread_id, brief: prompt });
+      onSpawnError: (error) => new Error(branch
+        ? `chief_research did not start: BB could not run a researcher thread in a fresh worktree on branch ${branch} (${clip(error instanceof Error ? error.message : String(error), 200)}).`
+        : `chief_research did not start: BB could not run a researcher thread in Chief's checkout (${clip(error instanceof Error ? error.message : String(error), 200)}). Nothing was started in a fresh worktree.`),
+    }, { role: "researcher", chiefThreadId: chief.thread_id, brief: prompt, ...(branch ? { branch } : {}) });
     return { threadId: thread.id, title, prefix: prepared.prefix, warning };
   }
 
@@ -736,10 +746,11 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
       deadline = Math.min(deadline, hard.at);
     }
     if (params.runId) return awaitResearch(params.runId, context, deadline, call, hard);
+    if (params.branch && role !== "chief") throw new Error("chief_research branch is for Chief only; this thread already reads its own worktree.");
     if (role === "chief") {
       const started = await startResearcher(params, row, cap);
       call.outcome = "spawned";
-      return `${started.prefix}Started researcher thread ${started.threadId} (${started.title}). It runs the ${params.mode} in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.${started.warning ? `\n${started.warning}` : ""}`;
+      return `${started.prefix}Started researcher thread ${started.threadId} (${started.title}). It runs the ${params.mode} in ${params.branch ? `a fresh worktree on branch ${params.branch}` : "your checkout"} and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.${started.warning ? `\n${started.warning}` : ""}`;
     }
     const prepared = await researchPrepare(params, context.threadId, cap, role !== "researcher");
     const { script, args, prefix } = prepared;

@@ -264,6 +264,11 @@ export function createSettingsRuntime(ctx: Ctx) {
     }
   }
 
+  /** The machine a fresh worktree for the project is created on: its own, else the default host. */
+  async function projectHost(projectId: string) {
+    return (await projectHostId(projectId)) ?? await defaultHostId();
+  }
+
   /** The target project's own local checkout path, or null when unknown. */
   async function projectPath(projectId: string) {
     try {
@@ -323,6 +328,6 @@ export function createSettingsRuntime(ctx: Ctx) {
     ctx.state.researchActive = researchFrom(await settings.get());
     return ctx.state.researchActive;
   }
-  return { catalogReader, chiefForProject, cooldownError, defaultHostId, discover, ensureSection, environmentHostId, execution, hostFallback, lifecycleOwner, owningChief, plannerEnabled, projectHostId, projectName, projectPath, readResearchModel, readRoleModel, readRules, researchFrom, researchSettings, spawnExecution, storedSectionId, usableSelection, writeResearchModel, writeRoleModel };
+  return { catalogReader, chiefForProject, cooldownError, defaultHostId, discover, ensureSection, environmentHostId, execution, hostFallback, lifecycleOwner, owningChief, plannerEnabled, projectHost, projectHostId, projectName, projectPath, readResearchModel, readRoleModel, readRules, researchFrom, researchSettings, spawnExecution, storedSectionId, usableSelection, writeResearchModel, writeRoleModel };
 }
 
