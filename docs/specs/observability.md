@@ -196,9 +196,21 @@ Secret settings have no default. The code handles an undefined value. The plugin
 
 ### Durable brief (`persistBrief` in `src/runtime/artifacts.ts`)
 
-- `persistBrief(threadId, projectId, prompt)` writes two copies of the spawn prompt. Each write fails alone and never fails the spawn.
+- `launch` in `src/research/managedSpawn.ts` starts `persistBrief` and does not wait for it.
+- The spawn result never waits for the brief.
+  Reason: a fresh environment can take seconds to become available.
+- `persistBrief(threadId, projectId, prompt)` writes two copies of the spawn prompt independently.
   - The first copy is `brief.md` in the thread storage. The thread re-reads it after a compaction.
   - The second copy is the Chief artifact `brief.md`, at `<dataDir>/chief/<projectId>/<threadId>/brief.md`.
+- Each copy retries while bb answers HTTP 409 "Thread environment is unavailable".
+- The retry waits 1, 2, 4, 8, 15 and 30 seconds (at most 7 attempts, about 60 s).
+- Chief does not retry any other error.
+- After the last attempt, the copy logs a warning and is lost.
+- `persistBrief` never fails the spawn.
+- The Chief artifact copy goes to the host of the project (`projectHostId`). It does not ask bb for the storage location of the thread.
+  Reason: the storage location is unavailable while the environment provisions, and the retro reads this copy, so it must not depend on that call.
+- Trade-off: the artifact copy uses the host of the project, not the host of the thread. On a single-host setup they are the same machine.
+- `artifactDir` in `src/runtime/artifacts.ts`: when the caller names the host, Chief does not ask bb for the storage location of the thread.
 - Cleanup clears only the thread storage. The artifacts survive.
   Reason: the retro grades from the artifact brief and from `chief_completions`, not from storage that cleanup clears.
 
