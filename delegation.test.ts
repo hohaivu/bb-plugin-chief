@@ -595,6 +595,48 @@ describe("Chief backend", () => {
     await expect(readFile(planFile(state, planner.threadId, 1), "utf8")).rejects.toThrow();
   });
 
+  const stackedPlanner = async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    const chief = await start(state);
+    await state.harness.behavior.runCli(
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      { threadId: chief.threadId, projectId: "proj_1" },
+    );
+    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    return { state, chief, planner };
+  };
+
+  test.each([
+    ["zero", [{ body: PLAN_FIXTURE }, TEST_WAVE(2, [1]), { body: wave(3), dependsOn: [], stackOn: 0 }, TEST_WAVE(4, [3])], /plan wave 3 stackOn is 0, not an earlier wave/],
+    ["negative", [{ body: PLAN_FIXTURE }, TEST_WAVE(2, [1]), { body: wave(3), dependsOn: [], stackOn: -1 }, TEST_WAVE(4, [3])], /plan wave 3 stackOn is -1, not an earlier wave/],
+    ["not an integer", [{ body: PLAN_FIXTURE }, TEST_WAVE(2, [1]), { body: wave(3), dependsOn: [], stackOn: 1.5 }, TEST_WAVE(4, [3])], /arguments are invalid: plan/],
+    ["its own wave", [{ body: PLAN_FIXTURE }, TEST_WAVE(2, [1]), { body: wave(3), dependsOn: [], stackOn: 3 }, TEST_WAVE(4, [3])], /plan wave 3 stackOn is 3, not an earlier wave/],
+    ["a later wave", [{ body: PLAN_FIXTURE }, TEST_WAVE(2, [1]), { body: wave(3), dependsOn: [], stackOn: 4 }, TEST_WAVE(4, [3])], /plan wave 3 stackOn is 4, not an earlier wave/],
+    ["on wave 1", [{ body: PLAN_FIXTURE, stackOn: 1 }, TEST_WAVE(2, [1])], /plan wave 1 stackOn is 1.*wave 1 stacks on nothing/],
+    ["on a wave that is not a chain head", [{ body: PLAN_FIXTURE }, TEST_WAVE(2, [1]), { body: wave(3), dependsOn: [] }, { body: wave(4), dependsOn: [3], stackOn: 1 }, TEST_WAVE(5, [4])], /plan wave 4 stackOn is 1, but wave 4 is not a chain head/],
+    ["a test wave", [{ body: PLAN_FIXTURE }, TEST_WAVE(2, [1]), { body: wave(3), dependsOn: [], stackOn: 2 }, TEST_WAVE(4, [3])], /plan wave 3 stackOn is 2, test wave 2/],
+    ["a design wave", [{ body: PLAN_FIXTURE, design: true }, { body: wave(2), dependsOn: [1] }, TEST_WAVE(3, [2]), { body: wave(4), dependsOn: [], stackOn: 1 }, TEST_WAVE(5, [4])], /plan wave 4 stackOn is 1, design wave 1/],
+  ])("rejects stackOn that is %s before writing or sending anything", async (_label, plan, error) => {
+    const { state, planner } = await stackedPlanner();
+    const sentBefore = state.sent.length;
+    await expect(state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "Bad stack.", plan,
+    }, { threadId: planner.threadId, projectId: "proj_1" })).rejects.toThrow(error);
+    expect(state.sent).toHaveLength(sentBefore);
+    await expect(readFile(planFile(state, planner.threadId, 1), "utf8")).rejects.toThrow();
+  });
+
+  test("persists a valid stackOn into plan_waves", async () => {
+    const { state, planner } = await stackedPlanner();
+    await state.harness.behavior.callAgentTool("chief_report", {
+      state: "ready", result: "A stacked chain.",
+      plan: [{ body: PLAN_FIXTURE }, TEST_WAVE(2, [1]), { body: wave(3), dependsOn: [], stackOn: 1 }, TEST_WAVE(4, [3])],
+    }, { threadId: planner.threadId, projectId: "proj_1" });
+    const row = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
+    expect(JSON.parse(row.plan_waves).map((w: any) => w.stackOn)).toEqual([undefined, undefined, 1, undefined]);
+  });
+
   test("parallel independent waves review once per branch only after every wave is ready", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
