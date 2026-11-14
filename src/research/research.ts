@@ -1,7 +1,7 @@
 import type { ExecFileOptions } from "node:child_process";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import type { ManagedSpawn } from "./managedSpawn";
+import { worktreeEnvironment, type ManagedSpawn } from "./managedSpawn";
 import { createWorkflowCli } from "./workflowCli";
 import { modelSelectionSchema, type ModelSelection } from "../types";
 import { READ_ONLY, RESEARCH_ONLY, researchRoleSchema, type ResearchRole } from "../core/roles";
@@ -281,7 +281,7 @@ export interface ResearchDeps<Row extends ResearchRow, Catalog> {
     title: string; brief: string; state: "starting"; status: string; branch?: string | null;
   }>;
   /** The host a fresh worktree for a branch-started researcher is created on, when Chief's own environment names none. */
-  projectHostId: (projectId: string) => Promise<string>;
+  projectHost: (projectId: string) => Promise<string>;
   alertChief: (row: Row, key: string, message: string) => Promise<unknown>;
   /** Fast-forwards Chief's checkout before a researcher reads it; the warning line when it did not. Never throws. */
   freshenCheckout: (chief: Row) => Promise<string | null>;
@@ -299,7 +299,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
   const {
     db, bb, managedRow, roleRow, terminal, isActiveChief, researchSettings, readResearchModel, environmentHostId, discover,
     catalogReader, usableSelection, anyCooldown, cooldownError, noteCooldown, lastProviderError, lastOutput, managedSpawn,
-    alertChief, freshenCheckout, projectHostId, writeArtifact, serverPath, clip, execFileAsync,
+    alertChief, freshenCheckout, projectHost, writeArtifact, serverPath, clip, execFileAsync,
     maxResultLength: MAX_RESULT_LENGTH,
   } = deps;
 
@@ -719,11 +719,7 @@ export function createResearch<Row extends ResearchRow, Catalog>(deps: ResearchD
     const thread = await managedSpawn.launch(managed, {
       projectId: chief.project_id,
       environment: branch
-        ? {
-          type: "host",
-          hostId: prepared.hostId ?? await projectHostId(chief.project_id),
-          workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: branch } },
-        }
+        ? worktreeEnvironment(prepared.hostId ?? await projectHost(chief.project_id), branch)
         : { type: "reuse", environmentId: prepared.environmentId! },
       title, prompt,
       extra: prepared.permissionMode ? { permissionMode: prepared.permissionMode } : {},

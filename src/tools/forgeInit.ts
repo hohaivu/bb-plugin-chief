@@ -38,6 +38,7 @@ export function registerForgeInitTool(ctx: Ctx) {
         throw new Error("chief_forge_init without planThreadId requires mission (with successCriteria and constraints when you have them): the pull request body is the reviewer's whole brief. Pass the same text you will give chief_delegate.");
       }
       let body = params.body;
+      let stacked = false;
       // Sections the pull request alone must carry for the reviewer; each is clipped so the body stays bounded.
       const briefSections = [
         ...(mission ? ["## Mission", clip(mission, FORGE_BRIEF_SECTION_MAX)] : []),
@@ -74,6 +75,7 @@ export function registerForgeInitTool(ctx: Ctx) {
           }
           if (pb.waiting || !pb.base) throw new Error(`Wave ${wave} is stacked: ${pb.waiting ?? pb.unresolved}. Run chief_forge_init for it after that.`);
           params.base = pb.base;
+          stacked = true;
         }
         body = [
           params.body ?? `Tracking work for ${params.title}.`,
@@ -150,7 +152,7 @@ export function registerForgeInitTool(ctx: Ctx) {
         ...(failure ? [`Running it on the server did not finish (${failure}), so run it yourself.`] : []),
         "Run this from the project checkout, verbatim. Every value is already substituted and quoted, every forge step is best-effort, and your own checkout never moves:",
         "", "```sh", script, "```", "",
-        `The last line is CHIEF_FORGE branch=… base=… issue_url=… pr_url=…. Pass those to chief_delegate as branch, issueUrl and prUrl, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, and an empty branch means the cut failed, so ${planThreadId !== undefined && planBase(planThreadId, wave!) ? "the stacked base branch could not be cut: rerun chief_forge_init, and do not delegate without a branch" : "delegate without one and the worktree uses the project default"}. Neither is a failure to report as one. The branch will be ${branch}.`,
+        `The last line is CHIEF_FORGE branch=… base=… issue_url=… pr_url=…. Pass those to chief_delegate as branch, issueUrl and prUrl, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, and an empty branch means the cut failed, so ${stacked ? "the stacked base branch could not be cut: rerun chief_forge_init, and do not delegate without a branch" : "delegate without one and the worktree uses the project default"}. Neither is a failure to report as one. The branch will be ${branch}.`,
       ].join("\n");
     },
   });}

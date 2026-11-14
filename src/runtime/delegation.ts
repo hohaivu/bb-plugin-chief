@@ -1,6 +1,7 @@
 import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
 import { MAX_CARRIED_FAILS } from "../report/reportIntake";
 import { researchLine } from "../research/research";
+import { worktreeEnvironment } from "../research/managedSpawn";
 import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
 import { clip } from "../core/text";
@@ -16,13 +17,9 @@ const MAX_LOG_READ = 30;
 
 export function createDelegation(ctx: Ctx) {
   const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, progress, reviewerFails, store } = ctx;
-  /** A fresh managed worktree based on an open branch: the environment of a read-only role started with `branch`. */
-  async function branchEnvironment(projectId: string, branch: string) {
-    return {
-      type: "host" as const,
-      hostId: ((await ctx.projectHostId(projectId)) ?? await ctx.defaultHostId()) as string,
-      workspace: { type: "managed-worktree" as const, baseBranch: { kind: "named" as const, name: branch } },
-    };
+  /** A read-only role's environment: a fresh worktree on `branch` when it names one, else the project default. */
+  async function readerEnvironment(projectId: string, branch?: string) {
+    return branch ? worktreeEnvironment(await ctx.projectHost(projectId), branch) : { type: "project-default" as const };
   }
 
   /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout; with a branch, a fresh worktree on it. Nothing is implemented until Chief delegates. */
@@ -42,7 +39,7 @@ export function createDelegation(ctx: Ctx) {
     });
     const warning = branch ? null : await ctx.freshenChiefCheckout(chief, "planner");
     const thread = await ctx.managedSpawn.launch(prepared,
-      { projectId, environment: branch ? await branchEnvironment(projectId, branch) : { type: "project-default" }, title, prompt },
+      { projectId, environment: await readerEnvironment(projectId, branch), title, prompt },
       { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null, ...(branch ? { branch } : {}) },
       // Earlier revision attempts that failed or stopped are superseded atomically with the new one.
       params.revises ? (newId) => {
@@ -105,7 +102,7 @@ export function createDelegation(ctx: Ctx) {
       projectId,
       environment: worker
         ? { type: "reuse", environmentId: workerLive!.environmentId! }
-        : params.branch ? await branchEnvironment(projectId, params.branch) : { type: "project-default" },
+        : await readerEnvironment(projectId, params.branch),
       title, prompt,
     }, { role: "advisor", chiefThreadId: chief.thread_id, workerThreadId: worker?.thread_id ?? null, ...(params.branch ? { branch: params.branch } : {}) });
     return { threadId: thread.id, title, projectId };
@@ -136,7 +133,7 @@ export function createDelegation(ctx: Ctx) {
       },
     });
     const thread = await ctx.managedSpawn.launch(prepared,
-      { projectId, environment: branch ? await branchEnvironment(projectId, branch) : { type: "project-default" }, title, prompt },
+      { projectId, environment: await readerEnvironment(projectId, branch), title, prompt },
       { role: "advisor", chiefThreadId, planThreadId: plannerId, ...(branch ? { branch } : {}) });
     return { threadId: thread.id, title, projectId };
   }
@@ -234,7 +231,7 @@ export function createDelegation(ctx: Ctx) {
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
     }
-    const hostId = prior ? await ctx.environmentHostId(priorLive!.environmentId!) : (await ctx.projectHostId(projectId)) ?? await ctx.defaultHostId();
+    const hostId = prior ? await ctx.environmentHostId(priorLive!.environmentId!) : await ctx.projectHost(projectId);
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: kind, hostId });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
@@ -253,14 +250,7 @@ export function createDelegation(ctx: Ctx) {
       projectId,
       environment: prior
         ? { type: "reuse", environmentId: priorLive!.environmentId! }
-        : {
-          type: "host",
-          hostId: hostId as string,
-          workspace: {
-            type: "managed-worktree",
-            baseBranch: branch ? { kind: "named" as const, name: branch } : { kind: "default" as const },
-          },
-        },
+        : worktreeEnvironment(hostId as string, branch),
       title: params.title, prompt,
     }, {
       role: "worker", chiefThreadId: chief.thread_id, brief: reviewerBrief,

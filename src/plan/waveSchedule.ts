@@ -255,6 +255,14 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return branch ? { stacked: true, base: branch } : null;
   }
 
+  /** The base a plan row's branch is reviewed and docs-checked against: its plan base, `skipped` while that is unresolved, null for the
+   * project default. The one place that rule lives: a stacked or branch-based chain is never read against origin/HEAD. */
+  function planBaseOf(row: { plan_thread_id: string | null; plan_wave: number | null }): { base: string } | { skipped: string } | null {
+    const pb = row.plan_thread_id && row.plan_wave != null ? planBase(row.plan_thread_id, row.plan_wave) : null;
+    if (!pb) return null;
+    return pb.base ? { base: pb.base } : { skipped: `stack base unresolved: ${pb.unresolved}` };
+  }
+
   /** A planner's chain heads, and those of them still to delegate. One chain: any linked implementation worker counts as
    * delegated, as before parallel waves existed. waiting: undelegated heads on a plan base that cannot launch yet; not in undelegated. */
   function undelegatedHeads(planThreadId: string, waves: PlanWave[]) {
@@ -291,5 +299,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(latestWorker(worker.plan_thread_id!, tip)?.state ?? ""));
   }
 
-  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, planBaseOf, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }

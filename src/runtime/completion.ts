@@ -8,7 +8,7 @@ import type { Ctx } from "./context";
 import { isWriter } from "../plan/waveSchedule";
 
 export function createCompletion(ctx: Ctx) {
-  const { bb, chainOwner, isDesignWave, isTestWave, latestWorker, ledger, planBase, planWavesFor, progress, sideLane, store, taskWriters } = ctx;
+  const { bb, chainOwner, isDesignWave, isTestWave, latestWorker, ledger, planBaseOf, planWavesFor, progress, sideLane, store, taskWriters } = ctx;
   /** Why a worker may not complete yet, or null when its newest review covers what it would ship.
    * With a pull request the verdict must be an approve given for the PR head the forge reports now;
    * without one it must be an approve for the worker's current report. A design-wave worker needs the owner's recorded approval instead.
@@ -44,9 +44,9 @@ export function createCompletion(ctx: Ctx) {
       head = pr;
     } else if (row.branch) {
       // A stacked or branch-based plan wave is checked against its plan base, never origin/HEAD.
-      const pb = row.plan_thread_id && row.plan_wave != null ? planBase(row.plan_thread_id, row.plan_wave) : null;
-      if (pb && !pb.base) return skipped(`stack base unresolved: ${pb.unresolved}`);
-      head = pb ? { branch: row.branch, base: pb.base! } : { branch: row.branch };
+      const pb = planBaseOf(row);
+      if (pb && "skipped" in pb) return skipped(pb.skipped);
+      head = { branch: row.branch, ...pb };
     } else return skipped("no task branch");
     const found = await docsCommits({ cwd: path, env: forgeEnv(), deadlineMs: 20_000, head });
     if ("skipped" in found) return skipped(found.skipped);

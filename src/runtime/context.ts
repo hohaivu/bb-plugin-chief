@@ -75,6 +75,7 @@ export interface Ctx {
   chainOwner: ReturnType<typeof createCore>["chainOwner"];
   chainStarted: ReturnType<typeof createCore>["chainStarted"];
   planBase: ReturnType<typeof createCore>["planBase"];
+  planBaseOf: ReturnType<typeof createCore>["planBaseOf"];
   coexists: ReturnType<typeof createCore>["coexists"];
   isDesignWave: ReturnType<typeof createCore>["isDesignWave"];
   isTestWave: ReturnType<typeof createCore>["isTestWave"];
@@ -119,6 +120,7 @@ export interface Ctx {
   lifecycleOwner: ReturnType<typeof createSettingsRuntime>["lifecycleOwner"];
   owningChief: ReturnType<typeof createSettingsRuntime>["owningChief"];
   plannerEnabled: ReturnType<typeof createSettingsRuntime>["plannerEnabled"];
+  projectHost: ReturnType<typeof createSettingsRuntime>["projectHost"];
   projectHostId: ReturnType<typeof createSettingsRuntime>["projectHostId"];
   projectName: ReturnType<typeof createSettingsRuntime>["projectName"];
   projectPath: ReturnType<typeof createSettingsRuntime>["projectPath"];
