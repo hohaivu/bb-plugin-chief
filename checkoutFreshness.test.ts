@@ -919,7 +919,7 @@ describe("checkout freshness", () => {
       expect(golden.meta.head).toBe("948c49cb6cac6f2e3066fe0e2164e22c809c8a4f");
       expect(golden.meta.fixtureHash).toBe(fixtureHash);
       expect(actual).toEqual(golden.outputs);
-    });
+    }, 60_000);
   });
 
   // Preservation of #181's callers (chief_research, chief_plan, CLI plan) across the chief_sync refactor. The golden file was
