@@ -23,8 +23,9 @@ export function createArtifacts(ctx: Ctx) {
     return paths;
   }
   async function artifactDir(threadId: string, projectId: string, onHost?: string) {
-    const location = await bb.sdk.threads.storageLocation({ threadId });
-    const hostId = onHost ?? location.hostId, storageRootPath = location.storageRootPath;
+    // A named host skips storageLocation, which answers HTTP 409 while a new environment provisions.
+    const location = onHost ? null : await bb.sdk.threads.storageLocation({ threadId });
+    const hostId = onHost ?? location!.hostId;
     if (!ctx.state.dataDirs.has(hostId)) {
       // ponytail: per-process cache; a moved BB data dir needs a plugin reload
       let reason = "its thread storage root is unknown";
@@ -36,7 +37,7 @@ export function createArtifacts(ctx: Ctx) {
         bb.log.warn(`Host ${hostId}'s BB data dir is unavailable (${reason}); writing Chief artifacts to thread storage instead.`);
         // Recorded before the path is used, so a thread's storage that holds evidence is never cleared; if this throws, so does the artifact write.
         db.prepare(`INSERT OR IGNORE INTO artifact_fallbacks (thread_id, at) VALUES (?, ?)`).run(threadId, Date.now());
-        return { hostId, dir: storageRootPath };
+        return { hostId, dir: location!.storageRootPath };
       }
     }
     return { hostId, dir: join(ctx.state.dataDirs.get(hostId)!, "chief", projectId, threadId) };
@@ -89,11 +90,34 @@ export function createArtifacts(ctx: Ctx) {
     }
   }
 
+  /** Runs the write, retrying while bb answers HTTP 409 (the thread's environment is still provisioning): 7 tries,
+   * about 60 s of waits. Any other error, or the last 409, propagates. */
+  async function retryWhileProvisioning<T>(write: () => Promise<T>) {
+    for (const seconds of [1, 2, 4, 8, 15, 30]) {
+      try {
+        return await write();
+      } catch (error) {
+        // shortcut: the SDK's BbHttpError is not exported, so the message text is how we detect the 409; upgrade when it is.
+        if (!/HTTP 409/.test(String(error))) throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+    }
+    return write();
+  }
+
   /** Best-effort: keeps the exact spawn prompt in the thread's own storage so it can re-read its brief after a compaction,
-   * and as the brief.md Chief artifact, which cleanup never clears. Each write fails alone and never throws. */
+   * and as the brief.md Chief artifact, which cleanup never clears. The two copies run independently, each retried while
+   * a new environment provisions; the artifact copy goes to the project's host without asking for the thread's storage
+   * location. Each write fails alone and persistBrief never throws. */
   async function persistBrief(threadId: string, projectId: string, prompt: string) {
-    await writeStorageFile(threadId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`));
-    await writeArtifact(threadId, projectId, "brief.md", prompt).catch((error) => bb.log.warn(`Could not write ${threadId}'s brief artifact: ${String(error)}`));
+    await Promise.all([
+      retryWhileProvisioning(() => writeStorageFile(threadId, "brief.md", prompt))
+        .catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`)),
+      // The host lookup lives in this branch so a slow lookup never delays the storage copy.
+      ctx.projectHostId(projectId)
+        .then((hostId) => retryWhileProvisioning(() => writeArtifact(threadId, projectId, "brief.md", prompt, hostId ?? undefined)))
+        .catch((error) => bb.log.warn(`Could not write ${threadId}'s brief artifact: ${String(error)}`)),
+    ]);
   }
   return { persistBrief, readArtifact, writeArtifact, writePlan, writeStorageFile };
 }

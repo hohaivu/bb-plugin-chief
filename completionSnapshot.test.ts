@@ -44,6 +44,8 @@ const stateOf = (state: State, threadId: string) => (state.db.prepare(`SELECT st
 async function workerOnBranch(state: State) {
   const chief = (await start(state)).threadId;
   const worker = (await delegate(state, chief, "Fix totals", { branch: "feature/x" })).threadId;
+  // launch no longer waits for the brief: let its background write land before the worker completes.
+  await vi.waitFor(() => access(join(state.storageRoot, "chief", "proj_1", worker, "brief.md")));
   return { chief, worker, complete: () => completeWorker(state, chief, worker) };
 }
 
