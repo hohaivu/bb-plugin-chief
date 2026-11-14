@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { plan, planWave, readyIdle, report, reviewed, rowOf, setLive, tool } from "./test/testerHelpers";
-import { HEAD_SHA, TEST_WAVE, approvePlan, chiefReview, disposeAll, execFileMock, legacyWave, setup, start, status, wave } from "./test/harness";
+import { HEAD_SHA, TEST_WAVE, approvePlan, chiefReview, disposeAll, execFileMock, legacyWave, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { acceptOwnership, dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
@@ -28,11 +28,11 @@ describe("tester role", () => {
       const PR = "https://github.com/acme/shop/pull/8";
       const NO_TESTER = { testsSkipped: "oracle: no tester" };
       /** A review after a fix owes a tester rerun; the oracle waives it so every scenario still reaches the decision it pins. */
-      const reviewedOrWaived = (state: any, chief: string, id: string, verdict: "approve" | "request_changes") =>
-        reviewed(state, chief, id, verdict).catch((error: Error) => {
+      const reviewedOrWaived = async (state: any, chief: string, id: string, verdict: "approve" | "request_changes") =>
+        withoutAlertMarker(await reviewed(state, chief, id, verdict).catch((error: Error) => {
           if (!error.message.includes("rerun the tests")) throw error;
           return reviewed(state, chief, id, verdict, { retestSkipped: "oracle: no tester" });
-        });
+        }));
       const run = async (name: string, body: (k: any) => Promise<void>) => {
         const state = await setup();
         await state.harness.behavior.setSettings({ cleanupApproved: true });
@@ -249,7 +249,7 @@ describe("tester role", () => {
           const chief = await k.chief();
           const { id } = await k.rejected(chief, streak);
           await k.consult(chief, id);
-          k.emit(`the advisor's alert at streak ${streak}`, k.state.sent.at(-1).input[0].text);
+          k.emit(`the advisor's alert at streak ${streak}`, withoutAlertMarker(k.state.sent.at(-1).input[0].text));
         });
       }
 

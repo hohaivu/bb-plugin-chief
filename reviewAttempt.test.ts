@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rename, writeFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { READY, plan, planWave, readyIdle, report, reviewed, rowOf, setLive, tool } from "./test/testerHelpers";
-import { APPROVE, HEAD_SHA, TEST_WAVE, approvePlan, disposeAll, execFileMock, reviewContextOf, setup, snapshotText, start, status, wave, withReviewerLine } from "./test/harness";
+import { APPROVE, HEAD_SHA, TEST_WAVE, approvePlan, disposeAll, execFileMock, reviewContextOf, setup, snapshotText, start, status, wave, withReviewerLine, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { dropDocsLines, dropSkippedNote } from "./test/docsOwnership";
@@ -182,7 +182,7 @@ describe("tester role", () => {
                 "review-context.md:", context ?? "(none)",
               );
             }
-            for (const text of state.sent.slice(before.sent).map((sent) => `to ${sent.threadId}: ${sent.input[0].text}`)) parts.push("chief alert:", text);
+            for (const text of state.sent.slice(before.sent).map((sent) => `to ${sent.threadId}: ${withoutAlertMarker(sent.input[0].text)}`)) parts.push("chief alert:", text);
             parts.push(`reviewers: ${reviewerIds().map((id) => `${id}=${rowOf(state, id).state}/streak ${rowOf(state, id).reject_streak}`).join(", ") || "none"}`);
             emit(label, parts.join("\n"));
           },

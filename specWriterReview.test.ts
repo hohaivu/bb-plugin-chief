@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
-import { DESIGN_CHECKLIST_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, start, status, wave, withReviewerLine } from "./test/harness";
+import { DESIGN_CHECKLIST_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, start, status, wave, withReviewerLine, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { DOCS_RULE_OLD, dropDocsLines } from "./test/docsOwnership";
@@ -165,7 +165,7 @@ describe("tester role", () => {
     // <strings-oracle-fixture>
     const stringsFixture = async (state: State) => {
       const out: string[] = [];
-      const alertOf = () => state.sent.at(-1).input[0].text as string;
+      const alertOf = () => withoutAlertMarker(state.sent.at(-1).input[0].text as string);
       const rosterOf = async (chiefThreadId: string) => String(await tool(state, "chief_roster", { includeComplete: true }, chiefThreadId));
       const chief = await start(state);
       const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, TEST_WAVE(2)]);
