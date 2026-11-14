@@ -753,3 +753,112 @@ describe("docs ownership: the implementation-lane Spec Writer route (C10)", () =
     expect(route([{ path: "w1", spec: true, specsSkipped: "docs exist" }], [{ id: "w", wave: 1 }], 1, "w")).toMatchObject({ lane: "implementation" });
   });
 });
+
+// Contract (docs/specs/plan-chains.md "Stacked Chain Base"): planBase is the one owner of a chain head's base. Identity (durable): a stackOn head is based on the
+// task branch of wave k's chain implementation owner (a side-lane Spec Writer alone does not count), else the planner's recorded branch, else null (project default).
+// Readiness (live): a stackOn head waits until wave k's latest implementation worker is ready or complete. Rows are in memory; the wave graph is the real createWaveSchedule.
+describe("planBase: identity and readiness of a stacked or branch-based chain", () => {
+  const STACK: PlanWave[] = [{ path: "w1" }, { path: "w2", test: true }, { path: "w3", dependsOn: [], stackOn: 1 }, { path: "w4", test: true, dependsOn: [3] }];
+  const parent = (over: Partial<Worker> = {}): Worker => ({ id: "w1", plan: P, wave: 1, branch: "feature/a", ...over });
+  const stacked = (workers: Worker[], plans: PlanWave[] = STACK) => {
+    const w = world({ [P]: plans }, workers);
+    return { ...w, schedule: createWaveSchedule(() => w.rows) };
+  };
+
+  test("a plan with no stackOn and an unbranched planner has the project default: null for every wave", () => {
+    const { schedule } = stacked([parent()], [{ path: "w1" }, { path: "w2", dependsOn: [] }, { path: "w3", test: true, dependsOn: [2] }]);
+    for (const n of [1, 2, 3]) expect(schedule.planBase(P, n), `wave ${n}`).toBeNull();
+  });
+
+  test("a planner with a recorded branch fixes every chain head to it, never waiting", () => {
+    const { rows, schedule } = stacked([], [{ path: "w1" }, { path: "w2", dependsOn: [] }, { path: "w3", test: true, dependsOn: [2] }]);
+    rows.get(P)!.branch = "feature/open-pr";
+    for (const n of [1, 2, 3]) expect(schedule.planBase(P, n), `wave ${n}`).toEqual({ stacked: true, base: "feature/open-pr" });
+  });
+
+  test.each([
+    ["no worker yet", [], null, true],
+    ["active", [parent({ state: "active", last: null })], "feature/a", true],
+    ["blocked", [parent({ state: "blocked", last: "blocked" })], "feature/a", true],
+    ["idle after a blocked report", [parent({ state: "idle", last: "blocked" })], "feature/a", true],
+    ["idle with no report", [parent({ state: "idle", last: null })], "feature/a", true],
+    ["ready", [parent()], "feature/a", false],
+    ["idle after a ready report", [parent({ state: "idle", last: "ready" })], "feature/a", false],
+    ["complete", [parent({ state: "complete", last: "ready" })], "feature/a", false],
+  ] as const)("a stackOn head: wave k's worker %s", (_label, workers, base, waiting) => {
+    const { schedule } = stacked([...workers]);
+    const pb = schedule.planBase(P, 3)!;
+    expect(pb.stacked).toBe(true);
+    expect(pb.base).toBe(base);
+    expect(pb.waiting !== undefined).toBe(waiting);
+    if (waiting) expect(pb.waiting).toBe("wave 3 stacks on wave 1, whose worker has not reported ready yet");
+  });
+
+  test("the base is unresolved while only a side-lane Spec Writer of wave k exists, then the implementation owner's branch", () => {
+    const SPEC: PlanWave[] = [{ path: "w1", spec: true }, ...STACK.slice(1)];
+    const writer: Worker = { id: "sw", plan: P, wave: 1, kind: "spec-writer", branch: "feature/a-docs" };
+    expect(stacked([writer], SPEC).schedule.planBase(P, 3)).toMatchObject({ base: null, unresolved: "wave 1's chain has no task branch yet" });
+    expect(stacked([writer, parent()], SPEC).schedule.planBase(P, 3)).toMatchObject({ base: "feature/a" });
+    const branchless = stacked([parent()], SPEC);
+    branchless.rows.get("w1")!.branch = null;
+    expect(branchless.schedule.planBase(P, 3)).toMatchObject({ base: null, unresolved: "wave 1's chain has no task branch yet" });
+  });
+
+  test("a stackOn head ignores the planner's branch; a later wave of the stacked chain shares its head's base", () => {
+    const { rows, schedule } = stacked([parent()]);
+    rows.get(P)!.branch = "feature/open-pr";
+    expect(schedule.planBase(P, 3)).toEqual({ stacked: true, base: "feature/a" });
+    expect(schedule.planBase(P, 4)).toEqual(schedule.planBase(P, 3));
+  });
+
+  test("identity does not depend on readiness: when wave k's chain re-enters a fix round, the head waits but its base stays", () => {
+    const ready = stacked([parent()]).schedule.planBase(P, 3)!;
+    expect(ready.waiting).toBeUndefined();
+    const fixing = stacked([parent({ state: "complete" }), { id: "fix", plan: P, wave: 1, replaces: "w1", branch: "feature/a", state: "active", last: null }]).schedule.planBase(P, 3)!;
+    expect(fixing.waiting).toBeDefined();
+    expect(fixing.base).toBe(ready.base);
+  });
+
+  test("undelegatedHeads: a head whose base is waiting or unresolved is listed apart, and joins undelegated once it can launch", () => {
+    const heads = (workers: Worker[]) => { const { schedule } = stacked(workers); const { heads, undelegated, waiting } = schedule.undelegatedHeads(P, schedule.planWavesFor(P)); return { heads, undelegated, waiting }; };
+    expect(heads([parent({ state: "active", last: null })])).toEqual({ heads: [1, 3], undelegated: [], waiting: [3] });
+    expect(stacked([{ id: "sw", plan: P, wave: 1, kind: "spec-writer", branch: "feature/a-docs" }], [{ path: "w1", spec: true }, ...STACK.slice(1)]).schedule.undelegatedHeads(P, STACK)).toMatchObject({ undelegated: [1], waiting: [3] });
+    expect(heads([parent()])).toEqual({ heads: [1, 3], undelegated: [3], waiting: [] });
+    const unstacked = stacked([parent({ state: "active", last: null })], [{ path: "w1" }, { path: "w2", test: true }, { path: "w3", dependsOn: [] }, { path: "w4", test: true, dependsOn: [3] }]);
+    expect(unstacked.schedule.undelegatedHeads(P, unstacked.schedule.planWavesFor(P))).toMatchObject({ undelegated: [3], waiting: [] });
+  });
+});
+
+describe("admitDelegation: a fresh head on a plan base", () => {
+  const STACK: PlanWave[] = [{ path: "w1" }, { path: "w2", test: true }, { path: "w3", dependsOn: [], stackOn: 1 }, { path: "w4", test: true, dependsOn: [3] }];
+  const parentRow = (over: Partial<Worker> = {}): Worker => ({ id: "w1", plan: P, wave: 1, branch: "feature/a", ...over });
+
+  test("is refused while the parent chain is not ready, with a reason that offers no explicit base", () => {
+    for (const workers of [[], [parentRow({ state: "active", last: null })]]) {
+      const { admit } = world({ [P]: STACK }, workers);
+      const refusal = (() => { try { admit({ ...planned, wave: 3, branch: "main" }); } catch (error) { return (error as Error).message; } return ""; })();
+      expect(refusal).toMatch(/^Wave 3 is stacked: /);
+      expect(refusal).not.toMatch(/\bbase\b/);
+    }
+  });
+
+  test("is refused without a branch once launchable, and admitted with one carrying the plan base", () => {
+    const { admit } = world({ [P]: STACK }, [parentRow()]);
+    expect(() => admit({ ...planned, wave: 3 })).toThrow(`Wave 3 stacks on feature/a: run chief_forge_init (planThreadId: ${P}, wave: 3) and pass its branch.`);
+    expect(admit({ ...planned, wave: 3, branch: "feature/b" })).toMatchObject({ stackBase: "feature/a", waveIndependent: true });
+  });
+
+  test("a head of a branch-based plan is refused without a branch and never falls back to the default base", () => {
+    const { rows, admit } = world({ [P]: [{ path: "w1" }, { path: "w2", test: true }] });
+    rows.get(P)!.branch = "feature/open-pr";
+    expect(() => admit({ ...planned, wave: 1 })).toThrow("Wave 1 stacks on feature/open-pr: run chief_forge_init");
+    expect(admit({ ...planned, wave: 1, branch: "feature/b" })).toMatchObject({ stackBase: "feature/open-pr" });
+  });
+
+  test("unchanged: an unstacked plan admits a fresh head with no branch, and a continuation or replacement on a stacked chain needs no new branch", () => {
+    const unstacked = world({ [P]: [{ path: "w1" }, { path: "w2", dependsOn: [] }] }, [{ id: "w1", plan: P, wave: 1 }]);
+    expect(unstacked.admit({ ...planned, wave: 2 })).toMatchObject({ stackBase: undefined, waveIndependent: true });
+    const chain = world({ [P]: STACK }, [parentRow(), { id: "w3", plan: P, wave: 3, branch: "feature/b" }]);
+    expect(chain.admit({ ...planned, wave: 4, prior: "w3", kind: "tester", resolvedKind: "tester" })).toMatchObject({ stackBase: undefined });
+  });
+});
