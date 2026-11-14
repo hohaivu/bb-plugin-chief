@@ -103,14 +103,15 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - `reconcileThread` reads the live thread. It records a deleted or archived thread. It moves the thread to the Chief section. It syncs the row state and status with the live thread.
 - An unchanged row causes no write and no reload. A changed row writes through `store.syncLive`, which reloads the store and starts the sweep.
 
-### Alerts (`writeAlert`, `deliverAlert`)
+### Alerts (`writeAlert`, `insertAlert`, `deliverAlert`)
 
 - `writeAlert` takes a managed row with a `chief_thread_id`. The key is `<kind>:<detail>`. The dedupe key is `<source thread id>:<key>`.
 - `writeAlert` first deletes the undelivered rows of the same source and the same kind, except the new key. Reason: a newer alert supersedes an older alert of the same kind.
-- It then runs `INSERT OR IGNORE`. A repeated key adds no row.
+- It then delegates to `insertAlert`. A repeated key adds no row.
 - `deliverAlert` sends the message to `target_thread_id` with `senderThreadId` set to the source thread. It uses `queue-if-active` mode.
 - A failed send records the error and leaves the row for `retryAlerts`. A retry first checks for the same text in the target's queue and last 50 messages.
 - `retryAlerts` skips rows whose target is `complete`, `archived` or `deleted`. It does not filter by project.
+- Contract COORD-11 defines the durable outbox delivery rules after this baseline.
 
 ### Chief configuration (`bb.agents.configure`, Chief branch)
 
@@ -243,6 +244,29 @@ Each contract has an identifier. Tests and reviews cite it.
 - A database that exists before the change keeps its rows. Their two new columns are null.
 - `chief_thread_id` never holds the link. Reason: it means "managed work of this Chief".
 
+### COORD-11 Alert outbox delivery
+
+- `insertAlert` formats each newly stored message as `[<label>]\n<body>` clipped to leave room for the marker, followed by `\n[alert <id>]`.
+- The marker identifier `<id>` is the first 10 hexadecimal characters of `sha1(dedupe_key)`.
+- The default alert label is `Chief lifecycle alert`.
+- Pre-existing outbox rows keep their text without rewriting.
+- Retries match older rows that lack a marker by exact message text. Reason: a retry finds its own earlier copy even when BB rewraps the text or another round has identical wording.
+- `retryDue` and `pendingAlerts` require a row with attempts `n > 0` to wait `min(30000 * 2^(n - 1), 1800000)` milliseconds after `last_attempt_at`.
+- `pendingAlerts` requires a row with zero attempts to wait 60 seconds before batch selection.
+- Coordinator rows that contain `:coordinator-` in `dedupe_key` stop retrying after 10 attempts.
+- Other alerts retry without an attempt cap. Reason: a worker receives instructions not to report again.
+- Rows that backoff or retry caps skip occupy no slot in the 100-row limit of `pendingAlerts`.
+- Direct delivery calls in `deliverAlert` enforce the same backoff and attempt cap as `pendingAlerts`.
+- `deliverAlert` returns false for a deferred or capped row and sends no message.
+- A first delivery attempt is immediate.
+- `deliverAlert` increments `attempts` and writes `last_attempt_at` before sending via `threads.send`. Reason: crashes during delivery leave attempt records for subsequent retries.
+- On any retry with prior attempts, `deliverAlert` invokes `stillDue` before inspecting target messages.
+- `deliverAlert` settles a stale row by setting `delivered_at` and setting `last_error` to start with `stale: ` without sending.
+- A worker stall alert is stale once that worker leaves its active cycle.
+- When an active retry remains due, `deliverAlert` checks the target queue and the last 50 `userMessage` events for the marker or legacy exact text.
+- If the target holds the marker or exact text, `deliverAlert` marks the row delivered and skips sending.
+- `MIGRATIONS` in `src/db/migrations.ts` appends `ALTER TABLE alert_outbox ADD COLUMN last_attempt_at INTEGER`. Reason: the host platform hashes migration statements by array index.
+
 ## Invariants
 
 - A Coordinator has `role='chief'`. No new role exists. Reason: a new role would need a rebuild of the `managed_threads` role check.
@@ -258,6 +282,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - The first `configure` call for a just-spawned child can run before its insert. It then sees a plain Chief and offers `chief_coordinate` for one turn. The store predicates in COORD-1 and COORD-4 keep this safe.
 - The done check scans linked children on every sweep pass. It writes only through `INSERT OR IGNORE` and does not reload the store.
 - Cross-project delivery uses a child thread as `senderThreadId` for a Coordinator in another project. The same path serves an alert within one project.
+- Outbox rows in `alert_outbox` are never pruned. Delivered rows serve as once-only receipts for research alerts, thread failure events, done notices, and retro evidence.
 
 ## Related decisions
 
