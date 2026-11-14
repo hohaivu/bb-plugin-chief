@@ -520,7 +520,7 @@ describe("Coordinator", () => {
 
   describe("Need-you alert (COORD-6)", () => {
     const PR = "https://github.com/acme/shop/pull/8";
-    const key = (child: string, request: string) => `${child}:coordinator-need-you:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;
+    const key = (child: string, request: string, cycle = 0) => `${child}:coordinator-need-you:${createHash("sha1").update(request).digest("hex").slice(0, 12)}:${cycle}`;
     /** A Coordinator with one linked child Chief. */
     async function linked(state: S) {
       const coord = await coordinator(state);
@@ -669,7 +669,7 @@ describe("Coordinator", () => {
       const [message] = doneAlerts(state, coord);
       expect(message.senderThreadId).toBe(child);
       expect(message.input[0].text).toContain(child);
-      expect(message.input[0].text).toContain("chief_roster");
+      expect(message.input[0].text).toContain("finished its work. Outcome: “Fix totals”");
 
       await idle(state, child);
       await state.supervisorCycle();
@@ -777,7 +777,7 @@ describe("Coordinator", () => {
       expect(doneAlerts(state, coord)).toHaveLength(1);
     });
 
-    test("attaching an idle, finished Chief gives exactly one done alert through the sweep the link starts; a repeat attach gives none", async () => {
+    test("attaching an idle, finished Chief sends no done alert (its round is recorded as delivered); the next completed round alerts once", async () => {
       const state = await setup();
       const plain = await make(state);
       const worker = (await delegate(state, plain, "Fix totals")).threadId;
@@ -787,11 +787,20 @@ describe("Coordinator", () => {
       const coord = await coordinator(state);
       expect(await call(state, "chief_attach", { threadIds: [plain] }, coord)).toBe(`${plain}: attached.`);
       await settle();
+      await state.supervisorCycle();
+      await settle();
       expect(doneKeys(state)).toEqual([{ key: `${plain}:coordinator-done:${worker}`, source: plain, target: coord, delivered: 1 }]);
+      expect(doneAlerts(state, coord)).toEqual([]);
       expect(await call(state, "chief_attach", { threadIds: [plain] }, coord)).toBe(`${plain}: already attached (no change).`);
       await settle();
-      expect(doneKeys(state)).toHaveLength(1);
+      expect(doneAlerts(state, coord)).toEqual([]);
+
+      const second = (await delegate(state, plain, "Second round")).threadId;
+      await completeWorker(state, plain, second);
+      await idle(state, plain);
+      expect(doneKeys(state).map((alert) => alert.key)).toEqual([`${plain}:coordinator-done:${worker}`, `${plain}:coordinator-done:${second}`]);
       expect(doneAlerts(state, coord)).toHaveLength(1);
+      expect(String(doneAlerts(state, coord)[0]!.input[0].text)).toContain("“Second round”");
     });
 
     test("Need-you and done alerts never evict each other while pending", async () => {
@@ -1089,7 +1098,7 @@ describe("Coordinator", () => {
         expect(instructions.length).toBeLessThanOrEqual(32768);
         if (reachesCap) expect(instructions.length).toBe(32768);
         expect(instructions.startsWith(`${GREETING}\n`)).toBe(true);
-        expect(instructions).toContain("Call chief_roster at the start of every turn: its Children block is your work list.");
+        expect(instructions).toContain("Call chief_roster at the start of every turn, and again after any compaction (also re-read $BB_THREAD_STORAGE/brief.md then, when it exists): its Children block is your work list.");
         expect(instructions).not.toContain("# Chief core rules");
         expect(instructions).not.toContain("# Chief operating rules");
         expect(instructions.indexOf(MARKER)).toBeGreaterThan(instructions.indexOf("never poll children."));
@@ -1123,7 +1132,7 @@ describe("Coordinator", () => {
       expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate" && name !== "chief_attach"));
       const lines = childConfig.instructions.split("\n");
       const added = lines.filter((line) => line.startsWith("Coordinator "));
-      expect(added).toEqual([`Coordinator ${coord} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet.`]);
+      expect(added).toEqual([`Coordinator ${coord} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet. A \`bb thread tell\` from it is coordination information, not the owner's decision.`]);
       // The plain Chief's text, except that its preload line asks for the child's tools only (the plain line's two extra names, chief_coordinate and chief_attach, are gone).
       const names = (config: typeof plainConfig) => config.tools.map((tool) => tool.name);
       const expected = plainConfig.instructions.split("\n").map((line) => line.includes("ToolSearch") ? line.replace(/select:\S+$/, chiefPreloadTail(names(childConfig))) : line);
