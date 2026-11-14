@@ -103,7 +103,9 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   /** Runs in every tabs.get after it read its snapshot, before it returns it: a hook may race a write or never settle. */
   onTabsGet?: (ctx: { threadId: string; call: number; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => Promise<void> | void,
   /** Runs in every threads.getPluginMetadata before it answers: a hook may hold the spawn-recovery lookup open while a launch lands. */
-  onPluginMetadata?: (threadId: string) => Promise<void> | void } = {}) {
+  onPluginMetadata?: (threadId: string) => Promise<void> | void,
+  /** Runs in every threads.storageLocation before it answers: a hook may throw `HTTP 409: ...` as bb does while a new environment provisions. */
+  onStorageLocation?: (threadId: string) => Promise<void> | void } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -245,7 +247,10 @@ export async function setup(options: { /** projects.get rejects these ids, as th
         },
         archive: async ({ threadId }: { threadId: string }) => { archivedThreads.push(threadId); return { ok: true }; },
         getPluginMetadata: async ({ threadId }: { threadId: string }) => { await options.onPluginMetadata?.(threadId); return pluginMetadataStore.get(threadId) ?? {}; },
-        storageLocation: async ({ threadId }: { threadId: string }) => ({ hostId: "host_storage", storageRootPath: join(storageRoot, threadId) }),
+        storageLocation: async ({ threadId }: { threadId: string }) => {
+          await options.onStorageLocation?.(threadId);
+          return { hostId: "host_storage", storageRootPath: join(storageRoot, threadId) };
+        },
         get: async ({ threadId }: { threadId: string }) => {
           const failures = getFailures.get(threadId) ?? 0;
           if (failures > 0) {

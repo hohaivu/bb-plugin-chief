@@ -27,7 +27,7 @@ async function world(moveFails: (call: number) => Error | undefined = () => unde
     },
     remove: async ({ path }: { path: string }) => { calls.push(`remove ${path}`); await unlink(path); return {}; },
   };
-  const bb = { sdk: { files, threads: { storageLocation: async () => ({ hostId: "host_1", storageRootPath: root }) } } };
+  const bb = { onDispose: () => undefined, sdk: { files, threads: { storageLocation: async () => ({ hostId: "host_1", storageRootPath: root }) } } };
   const { writeStorageFile } = createArtifacts({ bb, db: {}, state: { dataDirs: new Map() } } as never);
   return { root, calls, write: (content: string) => writeStorageFile("thr_1", "out/file.md", content), path: join(root, "out/file.md") };
 }

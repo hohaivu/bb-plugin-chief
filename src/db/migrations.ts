@@ -438,4 +438,6 @@ export const MIGRATIONS = [
     `ALTER TABLE chief_scores ADD COLUMN detail TEXT`,
     // When the last delivery try started (written before the send): the outbox backoff reads it.
     `ALTER TABLE alert_outbox ADD COLUMN last_attempt_at INTEGER`,
+    // A brief persistBrief is still writing: removed once both copies settle; the brief-replay service replays what a reload interrupted.
+    `CREATE TABLE IF NOT EXISTS pending_briefs (thread_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, prompt TEXT NOT NULL, at INTEGER NOT NULL)`,
 ];
