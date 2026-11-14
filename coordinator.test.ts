@@ -1369,7 +1369,7 @@ describe("Coordinator", () => {
       await settle();
     };
     const fail = async (state: S, id: string) => {
-      state.live.set(id, { ...state.live.get(id)!, status: "failed" });
+      state.live.set(id, { ...state.live.get(id)!, status: "error" });
       await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(id)!, error: null });
       await settle();
     };
@@ -1601,6 +1601,255 @@ describe("Coordinator", () => {
           expect(state.sent.filter((sent) => String(sent.input[0].text).includes(`Chief “`) && String(sent.input[0].text).includes("has been active for"))).toEqual([]);
         });
       });
+    });
+  });
+
+  describe("done alert content (COORD-7)", () => {
+    const outcomeOf = (text: string) => text.slice(text.indexOf("Outcome: ") + "Outcome: ".length, text.lastIndexOf("\n[alert "));
+    async function finishedRounds(state: S, titles: string[], over: { prUrl?: string } = {}) {
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      elapse(0);
+      for (const title of titles) {
+        await completeWorker(state, child, (await delegate(state, child, title, over)).threadId);
+        elapse(1_000);
+      }
+      await idle(state, child);
+      return { coord, child };
+    }
+    const doneText = (state: S, coord: string) => String(sentToCoordinator(state, coord).find((sent) => String(sent.input[0].text).includes("finished its work"))!.input[0].text);
+
+    test("the outcome lists the newest three completed titles and leaves the oldest out", async () => {
+      const state = await setup();
+      const { coord } = await finishedRounds(state, ["Round A", "Round B", "Round C", "Round D"]);
+      const outcome = outcomeOf(doneText(state, coord));
+      expect(outcome).toContain("“Round B”");
+      expect(outcome.indexOf("“Round D”")).toBeLessThan(outcome.indexOf("“Round C”"));
+      expect(outcome.indexOf("“Round C”")).toBeLessThan(outcome.indexOf("“Round B”"));
+      expect(outcome).not.toContain("Round A");
+    });
+
+    test("three long titles with pull request links give an outcome of at most 300 characters, each title cut to 80", async () => {
+      const state = await setup();
+      const long = (letter: string) => `${letter}${"x".repeat(149)}`;
+      const { coord } = await finishedRounds(state, [long("A"), long("B"), long("C")], { prUrl: "https://github.com/acme/shop/pull/8" });
+      const text = doneText(state, coord);
+      const outcome = outcomeOf(text);
+      expect(outcome.length).toBeLessThanOrEqual(300);
+      expect(outcome).toContain("Cxxx");
+      expect(outcome).not.toContain(long("C").slice(0, 100));
+      expect(text.length).toBeLessThanOrEqual(3_000);
+    });
+
+    test("an undelivered done alert is replaced by the next round's: only the newest key stays, and it is delivered", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      const first = (await delegate(state, child, "First round")).threadId;
+      await completeWorker(state, child, first);
+      state.failNextSend();
+      await idle(state, child);
+      expect(doneKeys(state)).toEqual([{ key: `${child}:coordinator-done:${first}`, source: child, target: coord, delivered: 0 }]);
+      elapse(1_000);
+      const second = (await delegate(state, child, "Second round")).threadId;
+      await completeWorker(state, child, second);
+      await idle(state, child);
+      expect(doneKeys(state)).toEqual([{ key: `${child}:coordinator-done:${second}`, source: child, target: coord, delivered: 1 }]);
+    });
+  });
+
+  describe("retry freshness (COORD-12a)", () => {
+    const sha12 = (text: string) => createHash("sha1").update(text).digest("hex").slice(0, 12);
+    const marker = (key: string) => `[alert ${createHash("sha1").update(key).digest("hex").slice(0, 10)}]`;
+    const activate = async (state: S, id: string) => {
+      state.live.set(id, { ...state.live.get(id)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(id)! });
+      await settle();
+    };
+    const stored = (state: S, key: string) => state.db.prepare("SELECT attempts, delivered_at, last_error FROM alert_outbox WHERE dedupe_key=?").get(key) as { attempts: number; delivered_at: number | null; last_error: string | null };
+    const sends = (state: S, key: string) => state.sent.filter((sent) => String(sent.input[0].text).includes(marker(key))).length;
+    type Pending = { key: string; change: () => Promise<void> };
+
+    /** Each case leaves one failed, undelivered Coordinator alert (one attempt) and a `change` that makes its condition false. */
+    const cases: [string, (state: S) => Promise<Pending>][] = [
+      ["need-you: the child began a new turn", async (state) => {
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        const cycle = row(state, child).active_cycle as number;
+        state.failNextSend();
+        await call(state, "chief_escalate", { request: "Which team owns this?" }, child);
+        await settle();
+        return { key: `${child}:coordinator-need-you:${sha12("Which team owns this?")}:${cycle}`, change: async () => { await activate(state, child); await idle(state, child); } };
+      }],
+      ["done: the child took on new open work", async (state) => {
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        const worker = (await delegate(state, child, "Fix totals")).threadId;
+        await completeWorker(state, child, worker);
+        state.failNextSend();
+        await idle(state, child);
+        return { key: `${child}:coordinator-done:${worker}`, change: async () => { await delegate(state, child, "Another round"); } };
+      }],
+      ["failed: the child went active again", async (state) => {
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        await activate(state, child);
+        const cycle = row(state, child).active_cycle as number;
+        state.failNextSend();
+        state.live.set(child, { ...state.live.get(child)!, status: "error" });
+        await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(child)!, error: null });
+        await settle();
+        return { key: `${child}:coordinator-failed:${cycle}`, change: async () => { await activate(state, child); } };
+      }],
+      ["stalled (active): the turn ended", async (state) => {
+        await state.harness.behavior.setSettings({ stallMinutes: "1" });
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        elapse(0);
+        await activate(state, child);
+        const cycle = row(state, child).active_cycle as number;
+        elapse(60_000);
+        state.failNextSend();
+        await state.supervisorCycle();
+        return { key: `${child}:coordinator-stalled:${cycle}:active`, change: async () => { await idle(state, child); } };
+      }],
+      ["stalled (idle): the child asked the owner", async (state) => {
+        await state.harness.behavior.setSettings({ stallMinutes: "1" });
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        const worker = (await delegate(state, child, "Fix totals")).threadId;
+        await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker);
+        await activate(state, child);
+        await idle(state, child);
+        elapse(0);
+        elapse(61_000);
+        state.failNextSend();
+        await state.supervisorCycle();
+        return { key: `${child}:coordinator-stalled:${row(state, child).active_cycle}:idle`, change: async () => { await call(state, "chief_escalate", { request: "Which team owns this?" }, child); await settle(); } };
+      }],
+    ];
+
+    test.each(cases)("%s: the retry settles it as stale and sends nothing; unchanged, the same retry sends it", async (_label, build) => {
+      const control = await setup();
+      const kept = await build(control);
+      expect(stored(control, kept.key)).toMatchObject({ attempts: 1, delivered_at: null });
+      elapse(31_000);
+      await control.supervisorCycle();
+      expect(stored(control, kept.key).delivered_at).not.toBeNull();
+      expect(stored(control, kept.key).last_error).toBeNull();
+      expect(sends(control, kept.key)).toBe(1);
+
+      const state = await setup();
+      const pending = await build(state);
+      expect(stored(state, pending.key)).toMatchObject({ attempts: 1, delivered_at: null });
+      await pending.change();
+      elapse(31_000);
+      await state.supervisorCycle();
+      expect(stored(state, pending.key)).toMatchObject({ attempts: 1 });
+      expect(stored(state, pending.key).delivered_at).not.toBeNull();
+      expect(stored(state, pending.key).last_error).toMatch(/^stale: /);
+      expect(sends(state, pending.key)).toBe(0);
+    });
+
+    test("an ended alert is historical: it is still sent after its child was superseded by a successor", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      await delegate(state, child, "Fix totals");
+      state.failNextSend();
+      state.live.set(child, { ...state.live.get(child)!, archivedAt: Date.now() });
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(child)! });
+      await settle();
+      const key = `${child}:coordinator-ended:archived`;
+      expect(stored(state, key)).toMatchObject({ attempts: 1, delivered_at: null });
+      await state.supervisorCycle();
+      expect(row(state, child).state).toBe("complete");
+      elapse(31_000);
+      await state.supervisorCycle();
+      expect(stored(state, key).last_error).toBeNull();
+      expect(stored(state, key).delivered_at).not.toBeNull();
+      expect(sends(state, key)).toBe(1);
+      expect(state.sent.filter((sent) => sent.threadId === coord && String(sent.input[0].text).includes(marker(key)))).toHaveLength(1);
+    });
+  });
+
+  describe("notices to children (COORD-13)", () => {
+    const archive = async (state: S, id: string) => {
+      state.live.set(id, { ...state.live.get(id)!, archivedAt: new Date().toISOString() });
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(id)! });
+      await settle();
+    };
+    const noticesTo = (state: S, id: string) => state.sent.filter((sent) => sent.threadId === id && String(sent.input[0].text).startsWith("[Coordinator notice]"));
+    const marker = (key: string) => `[alert ${createHash("sha1").update(key).digest("hex").slice(0, 10)}]`;
+    const outbox = (state: S, key: string) => state.db.prepare("SELECT attempts, delivered_at, last_error FROM alert_outbox WHERE dedupe_key=?").get(key) as { attempts: number; delivered_at: number | null; last_error: string | null };
+
+    test("attaching a Chief sends it one notice naming its Coordinator, with no sender; attaching again sends none", async () => {
+      const state = await setup();
+      const plain = await make(state);
+      const coord = await coordinator(state);
+      await call(state, "chief_attach", { threadIds: [plain] }, coord);
+      await call(state, "chief_attach", { threadIds: [plain] }, coord);
+      await settle();
+      const notices = noticesTo(state, plain);
+      expect(notices).toHaveLength(1);
+      expect(notices[0]!.senderThreadId).toBeUndefined();
+      expect(String(notices[0]!.input[0].text)).toContain(coord);
+      expect(String(notices[0]!.input[0].text)).toContain("chief_escalate");
+      expect(String(notices[0]!.input[0].text).endsWith(marker(`${plain}:coordinator-attached:${coord}`))).toBe(true);
+    });
+
+    test("a pending attached notice is settled stale, and never sent, once another Coordinator took the child over", async () => {
+      const state = await setup();
+      const plain = await make(state);
+      const first = await coordinator(state);
+      state.failNextSend();
+      await call(state, "chief_attach", { threadIds: [plain] }, first);
+      await settle();
+      const key = `${plain}:coordinator-attached:${first}`;
+      expect(outbox(state, key)).toMatchObject({ attempts: 1, delivered_at: null });
+      await archive(state, first);
+      const second = await coordinator(state);
+      expect(await call(state, "chief_attach", { threadIds: [plain] }, second)).toBe(`${plain}: attached.`);
+      await settle();
+      elapse(31_000);
+      await state.supervisorCycle();
+      expect(outbox(state, key).delivered_at).not.toBeNull();
+      expect(outbox(state, key).last_error).toMatch(/^stale: /);
+      expect(state.sent.filter((sent) => String(sent.input[0].text).includes(marker(key)))).toEqual([]);
+      expect(noticesTo(state, plain).map((sent) => String(sent.input[0].text)).some((text) => text.includes(second))).toBe(true);
+    });
+
+    test("when its Coordinator is archived an active child gets one notice that names chief_attach; later cycles add none", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      await archive(state, coord);
+      await state.supervisorCycle();
+      await state.supervisorCycle();
+      const notices = noticesTo(state, child);
+      expect(notices).toHaveLength(1);
+      expect(notices[0]!.senderThreadId).toBeUndefined();
+      expect(String(notices[0]!.input[0].text)).toContain("chief_attach");
+      expect(String(notices[0]!.input[0].text)).toContain(coord);
+      expect(String(notices[0]!.input[0].text).endsWith(marker(`${child}:coordinator-gone:${coord}`))).toBe(true);
+    });
+
+    test("a pending gone notice is settled stale once another Coordinator attaches the child", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      state.failNextSend();
+      await archive(state, coord);
+      const key = `${child}:coordinator-gone:${coord}`;
+      expect(outbox(state, key)).toMatchObject({ attempts: 1, delivered_at: null });
+      const second = await coordinator(state);
+      expect(await call(state, "chief_attach", { threadIds: [child] }, second)).toBe(`${child}: attached.`);
+      await settle();
+      elapse(31_000);
+      await state.supervisorCycle();
+      expect(outbox(state, key).delivered_at).not.toBeNull();
+      expect(outbox(state, key).last_error).toMatch(/^stale: /);
+      expect(state.sent.filter((sent) => String(sent.input[0].text).includes(marker(key)))).toEqual([]);
     });
   });
 });
