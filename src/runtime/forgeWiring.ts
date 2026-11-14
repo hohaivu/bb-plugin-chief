@@ -32,7 +32,7 @@ export function createForgeWiring(ctx: Ctx) {
     get: store.get, all: store.all, taskChain: ledger.taskChain,
     reviewTargets: (reviewerId) => ledger.targets(reviewerId).map((target) => target.worker_thread_id),
     planDone: (planner) => !!planner.plan_waves && progress.plannerAbsorbed(planner),
-    prMerged: async (url, projectId) => prMerged(url, await ctx.projectPath(projectId)),
+    prMerged: async (url, projectId) => (await prMerged(url, await ctx.projectPath(projectId)))?.merged ?? null,
     // The live Chief of the thread: its own, else the project's active one.
     answerAlert: (threadId, key, message) => {
       const source = store.get(threadId);

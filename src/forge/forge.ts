@@ -235,17 +235,19 @@ export async function markPrReady(pullRequest: string, cwd: string | null): Prom
   return { ready: false, error };
 }
 
-/** Whether a pull request is merged, with whichever forge CLI hosts it. Null when no forge CLI could say. */
-export async function prMerged(pullRequest: string, cwd: string | null): Promise<boolean | null> {
+/** Whether a pull request is merged and its head commit (null when the forge gave no valid sha), with whichever forge CLI hosts it. Null when no forge CLI could say. */
+export async function prMerged(pullRequest: string, cwd: string | null): Promise<{ merged: boolean; head: string | null } | null> {
   try {
     const { target, repo, forges } = await pullRequestForges(pullRequest, cwd);
     for (const candidate of forges) {
       const [cli, args] = candidate === "github"
-        ? ["gh", ["pr", "view", target, "--json", "state", ...(repo ? ["--repo", repo] : [])]]
+        ? ["gh", ["pr", "view", target, "--json", "state,headRefOid", ...(repo ? ["--repo", repo] : [])]]
         : ["glab", ["mr", "view", target, "-F", "json", ...(repo ? ["--repo", repo] : [])]];
       try {
         const { stdout } = await execFileAsync(cli as string, args as string[], { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
-        return String((JSON.parse(stdout) as { state?: unknown }).state).toLowerCase() === "merged";
+        const parsed = JSON.parse(stdout) as { state?: unknown; headRefOid?: unknown; sha?: unknown; diff_refs?: { head_sha?: unknown } };
+        const sha = String((candidate === "github" ? parsed.headRefOid : parsed.sha ?? parsed.diff_refs?.head_sha) ?? "").trim().toLowerCase();
+        return { merged: String(parsed.state).toLowerCase() === "merged", head: SHA_PATTERN.test(sha) ? sha : null };
       } catch {
         // Try the next forge.
       }

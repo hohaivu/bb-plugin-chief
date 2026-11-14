@@ -72,12 +72,13 @@ export function ownedBranch(branchName: string | null, owns: (threadId: string) 
 
 export type BranchDelete = { deleted: true; note?: string } | { gone: true } | { kept: string } | { error: string };
 
-/** Deletes a local branch only when freshly fetched origin heads hold every commit on it and no worktree has it checked out.
+/** Deletes a local branch when no worktree has it checked out and either freshly fetched origin heads hold every commit on it,
+ * or a merged task pull request's head (from `mergedHeads`, asked only when origin holds nothing) is the tip or contains it.
  * Local-only checks run before the network. Never throws. */
-export async function deleteSafeBranch(opts: { cwd: string; env: NodeJS.ProcessEnv; branch: string; deadlineMs: number }): Promise<BranchDelete> {
+export async function deleteSafeBranch(opts: { cwd: string; env: NodeJS.ProcessEnv; branch: string; deadlineMs: number; mergedHeads?: () => Promise<string[]> }): Promise<BranchDelete> {
   const ref = `refs/heads/${opts.branch}`;
   try {
-    const git = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs);
+    let git = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs);
     const tip = (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], true)).trim();
     if (!tip) return { gone: true };
     const checkedOut = (await git(["for-each-ref", "--format=%(worktreepath)", ref])).trim();
@@ -87,8 +88,20 @@ export async function deleteSafeBranch(opts: { cwd: string; env: NodeJS.ProcessE
     await git(["fetch", "--prune", "--no-tags", "origin", "+refs/heads/*:refs/remotes/origin/*"]);
     const holders = (await git(["for-each-ref", "--contains", tip, "--format=%(refname)", "refs/remotes/origin/"])).split("\n").filter((name) => name && name !== "refs/remotes/origin/HEAD");
     if (!holders.length) {
-      const missing = (await git(["rev-list", "--count", tip, "--not", "--glob=refs/remotes/origin/*"])).trim();
-      return { kept: `${missing} commit(s) not on origin` };
+      let proved = false;
+      if (opts.mergedHeads) {
+        const heads = await opts.mergedHeads();
+        git = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs); // the forge call must not use up the git deadline
+        for (const head of heads) {
+          if (!(await git(["rev-parse", "--verify", "--quiet", `${head}^{commit}`], true)).trim()) continue; // object not local: no proof
+          // rev-list, not merge-base --is-ancestor: noMatchOk maps exit 1 to "" and would lose the answer.
+          if ((await git(["rev-list", "--count", tip, "--not", head])).trim() === "0") { proved = true; break; }
+        }
+      }
+      if (!proved) {
+        const missing = (await git(["rev-list", "--count", tip, "--not", "--glob=refs/remotes/origin/*"])).trim();
+        return { kept: `${missing} commit(s) not on origin${opts.mergedHeads ? " and no merged task pull request contains them" : ""}` };
+      }
     }
     await git(["update-ref", "-d", ref, tip]); // compare-and-delete: refuses when the tip moved
     try { await git(["config", "--remove-section", `branch.${opts.branch}`]); }
