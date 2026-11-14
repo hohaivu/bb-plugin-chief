@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { APPROVE, PLAN_FIXTURE, REQUEST_CHANGES, TEST_WAVE, chiefReview, completeWorker, configurationContext, delegate, disposeAll, latestReviewContext, reviewContextOf, rowOf, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -583,7 +583,8 @@ describe("Chief backend", () => {
     test("a failed verdict-file write does not fail the report", async () => {
       const { state, chief, reviewer } = await reviewed();
       // A plain file where the reviewer's artifact directory should be makes the write fail. The durable brief
-      // (persistBrief) already created that directory, so remove it first.
+      // (persistBrief) creates that directory in the background: wait for it, then remove it.
+      await vi.waitFor(() => access(join(state.storageRoot, "chief", "proj_1", reviewer.threadId, "brief.md")));
       await rm(join(state.storageRoot, "chief", "proj_1", reviewer.threadId), { recursive: true, force: true });
       await mkdir(join(state.storageRoot, "chief", "proj_1"), { recursive: true });
       await writeFile(join(state.storageRoot, "chief", "proj_1", reviewer.threadId), "not a directory");
