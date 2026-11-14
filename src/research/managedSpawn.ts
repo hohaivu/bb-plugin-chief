@@ -101,7 +101,8 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
     } as unknown as Input);
     if (inTransaction) db.transaction(() => { insert(); inTransaction(thread.id); })();
     else insert();
-    await persistBrief(thread.id, projectId, prompt);
+    // The brief retries in the background while a fresh environment provisions, so the spawn result is not delayed.
+    void persistBrief(thread.id, projectId, prompt);
     return thread;
   }
 
