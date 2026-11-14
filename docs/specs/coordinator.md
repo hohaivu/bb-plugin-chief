@@ -276,18 +276,24 @@ Each contract has an identifier. Tests and reviews cite it.
 - Retries match older rows that lack a marker by exact message text. Reason: a retry finds its own earlier copy even when BB rewraps the text or another round has identical wording.
 - `retryDue` and `pendingAlerts` require a row with attempts `n > 0` to wait `min(30000 * 2^(n - 1), 1800000)` milliseconds after `last_attempt_at`.
 - `pendingAlerts` requires a row with zero attempts to wait 60 seconds before batch selection.
+- A direct delivery call does not acquire this batch grace period.
 - Coordinator rows that contain `:coordinator-` in `dedupe_key` stop retrying after 10 attempts.
 - Other alerts retry without an attempt cap. Reason: a worker receives instructions not to report again.
 - Rows that backoff or retry caps skip occupy no slot in the 100-row limit of `pendingAlerts`.
 - Direct delivery calls in `deliverAlert` enforce the same backoff and attempt cap as `pendingAlerts`.
 - `deliverAlert` returns false for a deferred or capped row and sends no message.
+- A deferred or capped receipt remains pending.
 - A first delivery attempt is immediate.
 - `deliverAlert` increments `attempts` and writes `last_attempt_at` before sending via `threads.send`. Reason: crashes during delivery leave attempt records for subsequent retries.
-- On any retry with prior attempts, `deliverAlert` invokes `stillDue` before inspecting target messages.
-- `deliverAlert` settles a stale row by setting `delivered_at` and setting `last_error` to start with `stale: ` without sending.
+- Retry backoff and the attempt cap apply before freshness settlement.
+- On an eligible retry with prior attempts, `deliverAlert` invokes `stillDue` before inspecting target messages.
+- A Coordinator-kind row with zero attempts and a recorded terminal target also enters this freshness check.
+- `deliverAlert` settles a stale row by setting `delivered_at` and setting `last_error` to start with `stale: ` without sending or incrementing `attempts`.
 - A worker stall alert is stale once that worker leaves its active cycle.
-- Pending Coordinator receipts targeting a terminal Coordinator remain reachable for retry freshness settlement so `deliverAlert` settles them as stale.
-- `deliverAlert` never sends messages to terminal targets.
+- Pending non-ended Coordinator-kind receipts can enter batch retry selection despite a recorded terminal target.
+- These receipts must still satisfy the batch age or backoff rule and the attempt cap.
+- If freshness evaluation finds the receipt stale, `deliverAlert` settles it as stale without sending.
+- `deliverAlert` sends no Coordinator-kind receipt to a target whose managed row is `complete`, `archived` or `deleted`.
 - When an active retry remains due, `deliverAlert` checks the target queue and the last 50 `userMessage` events for the marker or legacy exact text.
 - If the target holds the marker or exact text, `deliverAlert` marks the row delivered and skips sending.
 - `MIGRATIONS` in `src/db/migrations.ts` appends `ALTER TABLE alert_outbox ADD COLUMN last_attempt_at INTEGER`. Reason: the host platform hashes migration statements by array index.
@@ -306,19 +312,24 @@ Each contract has an identifier. Tests and reviews cite it.
 - Active stalled alerts check only the duration of the active turn.
 - Each problem alert tells the Coordinator to inform the owner.
 - A complete (superseded) child never sends done, failed, or stalled alerts.
-- A complete child that receives a deletion event transitions to `deleted` and sends an ended alert.
-- An ended alert is a historical receipt and is always delivered.
+- A complete child that receives a deletion event transitions to `deleted`. It creates an ended receipt only when its Coordinator is live.
+- An ended alert is a historical receipt. Source changes do not invalidate it during freshness evaluation.
+- Delivery still requires an eligible target and follows the retry backoff and attempt cap.
+- An ended receipt targeting a recorded terminal Coordinator remains undelivered.
+- Batch retry excludes an ended receipt to a terminal target.
+- A direct delivery call returns false without sending the ended receipt or settling it stale.
 
 ### COORD-12a Retry freshness
 
 - Before delivering a retried alert (`attempts > 0`), `stillDue` verifies the alert against the condition that created it.
-- A retried alert is settled as stale (marked delivered with `last_error` starting with `stale:`) and never sent when:
+- An eligible retried non-ended Coordinator alert is settled as stale (marked delivered with `last_error` starting with `stale:`) and never sent when:
   1. The child row no longer exists or was superseded (`complete`).
   2. The Coordinator link changed or the Coordinator is no longer active.
   3. A fresh condition evaluation produces a different key.
-- Pending Coordinator receipts targeting a terminal Coordinator remain reachable for retry freshness evaluation and settle as stale without sending any message.
+- Eligible pending non-ended Coordinator receipts targeting a terminal Coordinator enter freshness evaluation per COORD-11 and settle as stale without sending.
+- A child that becomes complete does not invalidate an already-created ended receipt to a live Coordinator.
 - For stalled alerts, work going busy, a new need-you arrival, new child activity, or a turn change settles the alert as stale.
-- An ended alert is a historical receipt and remains always due.
+- `stillDue` does not invalidate an ended receipt. This exemption does not override target restrictions, backoff or the attempt cap.
 - A legacy need-you row (`<child>:coordinator-need-you:<sha12>`) remains due as long as the child remains linked to the same live Coordinator.
 
 ### COORD-13 Notices to children
