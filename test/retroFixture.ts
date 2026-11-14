@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { vi } from "vitest";
 import { CLOSE_OUT, delegate, execFileMock, start, type setup } from "./harness";
 import { plan, report, setLive } from "./testerHelpers";
@@ -35,7 +36,11 @@ export async function completedPlan(state: State, options: { mission?: string; /
   state.db.prepare(`UPDATE managed_threads SET state='complete', updated_at=? WHERE thread_id=?`).run(Date.now() + 1_000, planner);
   await options.before?.({ chief, planner, worker });
   // The thread store reloads its row cache on its next write: an unrelated delegate is that write.
-  await delegate(state, chief, "Reload trigger");
+  const trigger = (await delegate(state, chief, "Reload trigger")).threadId;
+  // launch writes both brief copies in the background: wait until they land, or the bundle reads "[brief artifact missing]". The chief has no brief.
+  for (const id of [planner, worker, trigger]) {
+    for (const path of [join(state.storageRoot, id, "brief.md"), join(state.storageRoot, "chief", "proj_1", id, "brief.md")]) await vi.waitFor(() => access(path));
+  }
   return { chief, planner, worker, tick: () => state.harness.behavior.runSchedule("retro") };
 }
 

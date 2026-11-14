@@ -56,9 +56,11 @@ export const snapshotText = (name: string) => readFile(join(dirname(fileURLToPat
 export const elapse = (ms: number) => vi.setSystemTime(Date.now() + ms);
 export const disposals: Array<() => Promise<void>> = [];
 export const disposeAll = async () => {
+  vi.useRealTimers();
+  // launch writes the brief in the background: let it land before the plugin is disposed, or its stale-handle warning reaches the next test's fetch.
+  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
   while (disposals.length) await disposals.pop()!();
   execFileMock.mockReset();
-  vi.useRealTimers();
 };
 // Every plan test needs a NOT-doing heading, so a single fixture keeps the wording pinned in one place.
 export const PLAN_FIXTURE = "# Plan\n\n## Contracts to verify\n- Totals stay non-negative\n\n## What we're NOT doing\n- x";
