@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { APPROVE, PLAN_FIXTURE, REQUEST_CHANGES, TEST_WAVE, chiefReview, completeWorker, configurationContext, delegate, disposeAll, latestReviewContext, reviewContextOf, rowOf, setup, start, status } from "./test/harness";
+import { APPROVE, PLAN_FIXTURE, REQUEST_CHANGES, TEST_WAVE, chiefReview, completeWorker, configurationContext, delegate, disposeAll, elapse, latestReviewContext, reviewContextOf, rowOf, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { expectLoadLine } from "./test/loadLine";
@@ -52,6 +52,7 @@ describe("Chief backend", () => {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "idle result",
     });
+    elapse(31_000);
     await state.supervisorCycle();
     expect(state.sent.some((entry: any) => entry.input[0].text.includes("Needs review"))).toBe(true);
   });
@@ -82,6 +83,7 @@ describe("Chief backend", () => {
     const outboxRow = state.db.prepare(`SELECT message FROM alert_outbox WHERE dedupe_key LIKE ?`)
       .get(`${worker.threadId}:report:%`) as any;
     state.seedQueuedMessage(chief.threadId, outboxRow.message);
+    elapse(31_000);
     await state.supervisorCycle();
     expect(state.sent).toHaveLength(0);
     const delivered = state.db.prepare(`SELECT delivered_at FROM alert_outbox WHERE dedupe_key LIKE ?`)

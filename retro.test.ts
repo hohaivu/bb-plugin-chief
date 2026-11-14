@@ -300,6 +300,22 @@ describe("retro communication", () => {
     expect(state.db.prepare(`SELECT label FROM chief_scores WHERE thread_id=? AND scorer='communication'`).get(worker)).toEqual({ label: "clear" });
   });
 
+  test("Chief lifecycle, Coordinator alert and Coordinator notice messages are automated: the Chief's side keeps only the user's words", async () => {
+    const { state, chief, planner, tick } = await judged((ids) => answer(ids));
+    const at = updatedAt(state, planner);
+    state.seedEvents(chief, [
+      userSays(7, `[Chief lifecycle alert]\nLIFECYCLE-ALERT ${planner}`, at),
+      userSays(8, `[Coordinator alert]\nCOORDINATOR-ALERT ${planner}`, at),
+      userSays(9, `[Coordinator notice]\nCOORDINATOR-NOTICE ${planner}`, at),
+      userSays(10, `Fix the totals. ${CONSTRAINT}`, at),
+    ]);
+    await tick();
+    await tick();
+    const side = (await handoffsOf(state, chief, planner)).slice((await handoffsOf(state, chief, planner)).indexOf("## Chief's side"));
+    expect(side).toContain(CONSTRAINT);
+    for (const automated of ["LIFECYCLE-ALERT", "COORDINATOR-ALERT", "COORDINATOR-NOTICE"]) expect(side).not.toContain(automated);
+  });
+
   test("a child whose events cannot be read is insufficient_evidence even when the judge says clear", async () => {
     const { state, worker, tick } = await judged((ids) => answer(ids));
     state.harness.sdk.stub("threads.events.list", async ({ threadId }: { threadId: string }) => { if (threadId === worker) throw new Error("events API down"); return []; });

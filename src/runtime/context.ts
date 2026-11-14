@@ -133,6 +133,7 @@ export interface Ctx {
   writeRoleModel: ReturnType<typeof createSettingsRuntime>["writeRoleModel"];
   createChief: ReturnType<typeof createChiefs>["createChief"];
   ensureChief: ReturnType<typeof createChiefs>["ensureChief"];
+  replaceChief: ReturnType<typeof createChiefs>["replaceChief"];
   handOver: ReturnType<typeof createChiefs>["handOver"];
   handoffSection: ReturnType<typeof createChiefs>["handoffSection"];
   managedSpawn: ReturnType<typeof createChiefs>["managedSpawn"];
@@ -170,6 +171,8 @@ export interface Ctx {
   alertChief: ReturnType<typeof createAlerts>["alertChief"];
   alertCoordinator: ReturnType<typeof createAlerts>["alertCoordinator"];
   alertSelf: ReturnType<typeof createAlerts>["alertSelf"];
+  baselineDone: ReturnType<typeof createAlerts>["baselineDone"];
+  needYouAt: ReturnType<typeof createAlerts>["needYouAt"];
   insertAlert: ReturnType<typeof createAlerts>["insertAlert"];
   deliverAlert: ReturnType<typeof createAlerts>["deliverAlert"];
   enqueueAlert: ReturnType<typeof createAlerts>["enqueueAlert"];
@@ -200,6 +203,8 @@ export interface Ctx {
   isActiveChief: ReturnType<typeof createRoster>["isActiveChief"];
   isCoordinator: ReturnType<typeof createRoster>["isCoordinator"];
   isLinkedChild: ReturnType<typeof createRoster>["isLinkedChild"];
+  liveCoordinatorId: ReturnType<typeof createRoster>["liveCoordinatorId"];
+  compatibleSuccessor: ReturnType<typeof createRoster>["compatibleSuccessor"];
   pendingBlock: ReturnType<typeof createRoster>["pendingBlock"];
   pendingLines: ReturnType<typeof createRoster>["pendingLines"];
   replacesCall: ReturnType<typeof createRoster>["replacesCall"];

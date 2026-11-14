@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { reportAlert, reportFileBody, type ReportAlertInput } from "./src/report/reportIntake";
-import { MAX_ALERT_LENGTH, type RecordedCommand } from "./src/core/text";
+import { ALERT_MARKER_ROOM, MAX_ALERT_LENGTH, type RecordedCommand } from "./src/core/text";
 import type { ReportParams } from "./src/types";
 
 // Contracts (shrink-prompts wave 1, plan-1.md "Contracts to verify"): the worker ready alert lists only the failed recorded commands under a header that
@@ -9,7 +9,7 @@ import type { ReportParams } from "./src/types";
 // while lower-priority lines shrink first; a planner alert shows each plan file once. reportAlert is a pure function of its input, so each test
 // names the one input it varies. Expected values are written from the plan, never from a render of the code.
 
-const ROOM = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
+const ROOM = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length - ALERT_MARKER_ROOM;
 const POINTER = { line: "Full report: /s/chief/proj_1/thr_9/report-1.md", name: "report-1.md" };
 const cmd = (command: string, exitCode: number | null): RecordedCommand => ({ command, exitCode, status: exitCode === null ? "running" : "done" });
 const input = (over: Partial<ReportAlertInput> = {}): ReportAlertInput => ({

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import plugin from "./server";
 import { roster, specImpl } from "./test/specWriterHelpers";
 import { plan, planWave, readyIdle, report, reviewed, tool } from "./test/testerHelpers";
-import { HEAD_SHA, REQUEST_CHANGES, TEST_WAVE, approvePlan, disposeAll, execFileMock, legacyWave, setup, start, status, wave } from "./test/harness";
+import { HEAD_SHA, REQUEST_CHANGES, TEST_WAVE, approvePlan, disposeAll, execFileMock, legacyWave, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { shrinkAlerts } from "./test/shrinkEdits";
@@ -95,14 +95,14 @@ describe("tester role", () => {
               state: "ready", result: "The discount is applied twice", verdict, ...(v.regression ? { regression: true } : {}),
               findings: verdict === "approve" ? [] : [{ file: "totals.ts", line: 3, severity: "blocking", message: "The discount is applied twice", fix: "Apply it once" }],
             });
-            emit(`${label}: alert`, state.sent.at(-1).input[0].text);
+            emit(`${label}: alert`, withoutAlertMarker(state.sent.at(-1).input[0].text));
             await k.pending(`${label}: Pending`, chief, reviewer);
             return reviewer;
           },
           /** The reviewer reports again (a later report re-reads the persisted state): emits the alert it sent, then the Pending line. */
           again: async (label: string, chief: string, reviewer: string, params: object) => {
             await report(state, reviewer, params);
-            emit(`${label}: alert`, state.sent.at(-1).input[0].text);
+            emit(`${label}: alert`, withoutAlertMarker(state.sent.at(-1).input[0].text));
             await k.pending(`${label}: Pending`, chief, reviewer);
           },
           /** Any later write reloads the row cache, so a SQL edit made after a report is read. */
@@ -340,7 +340,7 @@ describe("tester role", () => {
         await tool(k.state, "chief_complete", { threadId: worker, testsSkipped: "oracle: no tester", override: "oracle override" }, chief);
         const reviewer = (await status(k.state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId;
         await report(k.state, reviewer, { state: "ready", result: "The discount is applied twice", ...REQUEST_CHANGES });
-        k.emit("reported after the worker completed: alert", k.state.sent.at(-1).input[0].text);
+        k.emit("reported after the worker completed: alert", withoutAlertMarker(k.state.sent.at(-1).input[0].text));
         await k.pending("reported after the worker completed: Pending", chief, reviewer);
       });
       return blocks.join("\n");

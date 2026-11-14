@@ -3,6 +3,7 @@ import { type ManagedRow } from "../types";
 import { clip } from "../core/text";
 import { spawnMetadataSchema } from "../tools/shapes";
 import { transientFailure } from "./util";
+import { stallThresholdMs } from "./core";
 import type { ThreadInput } from "./artifacts";
 import type { Ctx } from "./context";
 
@@ -142,8 +143,12 @@ export function createLifecycle(ctx: Ctx) {
         : kind === "idle" ? "idle"
           : kind === "failed" ? "failed"
             : kind === "archived" ? "archived" : "deleted";
-      store.recordState(thread.id, state, thread.status ?? state, now);
-      if (state === "idle") ctx.alertCoordinator(store.get(thread.id)!, { kind: "done" });
+      if (state === "active") {
+        // active_cycle counts a Chief's turns and active_since marks the turn start, so per-turn receipts and the active stall work.
+        const enteringActive = row.state !== "active";
+        store.markActive(thread.id, thread.status ?? "active", enteringActive ? now : row.active_since ?? now, enteringActive, now);
+      } else store.recordState(thread.id, state, thread.status ?? state, now);
+      ctx.alertCoordinator(store.get(thread.id)!, { kind: "state" });
       return;
     }
     if (kind === "active") {
@@ -214,8 +219,7 @@ export function registerLifecycle(ctx: Ctx) {
           await ctx.checkUnreported(store.all());
           const values = await settings.get();
           ctx.state.cleanupActive = values.cleanupApproved;
-          const parsed = Number(values.stallMinutes);
-          const threshold = (Number.isFinite(parsed) && parsed > 0 ? parsed : 15) * 60_000;
+          const threshold = stallThresholdMs(values);
           const now = Date.now();
           for (const row of store.all()) {
             if (row.role === "chief" || row.state !== "active" || row.active_since === null) continue;
@@ -240,6 +244,7 @@ export function registerLifecycle(ctx: Ctx) {
               store.markStallAlerted(row.thread_id, row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle);
             }
           }
+          for (const row of store.all()) if (ctx.isLinkedChild(row)) ctx.alertCoordinator(row, { kind: "stalled", thresholdMs: threshold });
           // Hand an archived or deleted Chief's open work to the project's live Chief, starting
           // one if none is left. A failed Chief is not replaced: a failed turn is recoverable
           // (touchCallerChief), and its next event returns it to idle or active. Alerts from
@@ -250,7 +255,10 @@ export function registerLifecycle(ctx: Ctx) {
             && store.all().some((child) => child.chief_thread_id === row.thread_id && !["failed", "deleted", "archived", "complete"].includes(child.state)));
           for (const orphaned of orphanedChiefs) {
             const next = await ctx.ensureChief(orphaned.project_id);
-            if (next.threadId !== orphaned.thread_id) ctx.handOver(orphaned.thread_id, next.threadId, orphaned.project_id);
+            if (next.threadId === orphaned.thread_id) continue;
+            // Work never moves to a Chief of another Coordinator: that case gets a dedicated successor.
+            if (ctx.compatibleSuccessor(orphaned, store.get(next.threadId))) ctx.handOver(orphaned.thread_id, next.threadId, orphaned.project_id);
+            else await ctx.replaceChief(orphaned);
           }
           if (values.autoSpawn && values.chiefProject) await ctx.ensureChief(values.chiefProject);
           // Replace terminal Chiefs and retarget their queued alerts before any

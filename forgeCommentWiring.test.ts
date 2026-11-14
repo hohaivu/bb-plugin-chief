@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
-import { APPROVE, NO_DEVIATIONS, chiefReview, completeWorker, delegate, disposals, disposeAll, execFileMock, ghHead, rowOf, setup, start, status, wave } from "./test/harness";
+import { APPROVE, NO_DEVIATIONS, chiefReview, completeWorker, delegate, disposals, disposeAll, execFileMock, ghHead, rowOf, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { dropSkippedNote } from "./test/docsOwnership";
@@ -46,7 +46,7 @@ describe("forge comments", () => {
   /** A comment call that stays unresolved until `release()`, then answers as a healthy forge would. */
   const gate = (op: Op) => { let release!: () => void; const held = new Promise((resolve) => { release = () => resolve(ANSWERS[op]); }); return { held, release }; };
   const alerts = (state: State, text: string) => state.sent.filter((message) => String(message.input?.[0]?.text).includes(text));
-  const sentText = (state: State, from: number) => state.sent.slice(from).map((message) => ({ threadId: message.threadId, text: message.input[0].text }));
+  const sentText = (state: State, from: number) => state.sent.slice(from).map((message) => ({ threadId: message.threadId, text: withoutAlertMarker(message.input[0].text) }));
 
   async function blockedWorker(state: State, forge: { issueUrl?: string; prUrl?: string } = { prUrl: PR }) {
     const chief = await start(state);

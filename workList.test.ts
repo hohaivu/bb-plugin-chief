@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { delegate, disposeAll, setup, start, status } from "./test/harness";
+import { delegate, disposeAll, setup, start, status, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { shrinkJsonOracle } from "./test/shrinkEdits";
@@ -63,11 +63,13 @@ async function workListScenario() {
       out.push({ step: `${step}: chief_todos rows`, value: state.db.prepare(`SELECT id, project_id, chief_thread_id, text, after, state FROM chief_todos ORDER BY id`).all() });
       out.push({ step: `${step}: alert_outbox rows`, value: (state.db.prepare(`SELECT dedupe_key, target_thread_id, source_thread_id, delivered_at IS NOT NULL AS delivered FROM alert_outbox ORDER BY dedupe_key`).all() as any[])
         .map((row) => ({ ...row, dedupe_key: row.dedupe_key.replace(/:[0-9a-f]{16}$/, ":<hash>") })) }); // the key's tail hashes the storage path, which differs per run
-      out.push({ step: `${step}: alert messages sent`, value: state.sent.map((message) => ({ threadId: message.threadId, text: norm(message.input[0].text) })) });
+      out.push({ step: `${step}: alert messages sent`, value: state.sent.map((message) => ({ threadId: message.threadId, text: norm(withoutAlertMarker(message.input[0].text)) })) });
     };
     const archive = async (threadId: string) => {
       state.live.set(threadId, { ...state.live.get(threadId)!, archivedAt: Date.now() });
       await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(threadId)! });
+      // The clock is frozen so the oracle's timestamps hold: backdate the failed attempt instead of waiting out the 30 s retry backoff.
+      state.db.prepare(`UPDATE alert_outbox SET last_attempt_at = last_attempt_at - 31000 WHERE last_attempt_at IS NOT NULL`).run();
       await state.supervisorCycle();
     };
 

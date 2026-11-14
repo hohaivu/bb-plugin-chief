@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
-import { APPROVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, rowOf, setup, start, status, wave } from "./test/harness";
+import { APPROVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, rowOf, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -114,7 +114,7 @@ describe("chief_report reviewer findings acceptance", () => {
       const row = rowOf(state, review.threadId);
       // Thread ids differ per fixture: compare the texts with the ids masked.
       const mask = (text: string) => text.replaceAll(review.threadId, "<reviewer>");
-      return { stored: row.findings, file: mask(await readFile(row.verdict_path, "utf8")), alert: mask(state.sent.at(-1).input[0].text).replace(/\S*verdict-1\.md/g, "<file>").replace(/thr_\w+/g, "<id>") };
+      return { stored: row.findings, file: mask(await readFile(row.verdict_path, "utf8")), alert: mask(withoutAlertMarker(state.sent.at(-1).input[0].text)).replace(/\S*verdict-1\.md/g, "<file>").replace(/thr_\w+/g, "<id>") };
     };
     const asArray = await run(list);
     const asString = await run(JSON.stringify(list));

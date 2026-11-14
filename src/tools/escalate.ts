@@ -19,11 +19,11 @@ export function registerEscalateTool(ctx: Ctx) {
       const concerned = threadId === undefined ? undefined : await ctx.controlledTarget(threadId, caller);
       ctx.touchCallerChief(caller);
       const chatOnly = "No pull request or issue to post on; write the request in chat only.";
-      ctx.alertCoordinator(caller, { kind: "need-you", request, concerned });
-      if (!concerned) return chatOnly;
-      const url = concerned.pr_url ?? concerned.issue_url
+      const url = concerned && (concerned.pr_url ?? concerned.issue_url
         ?? (concerned.role === "reviewer" ? ledger.targets(concerned.thread_id).map((target) => target.pr_url ?? store.get(target.worker_thread_id)?.pr_url).find(Boolean) : undefined)
-        ?? (concerned.role === "planner" ? concerned.plan_issue_url : undefined);
+        ?? (concerned.role === "planner" ? concerned.plan_issue_url : undefined));
+      ctx.alertCoordinator(caller, { kind: "need-you", request, concerned, url: url ?? undefined });
+      if (!concerned) return chatOnly;
       if (!merge) void ctx.trackerSync.decide(concerned, request);
       if (!url) return chatOnly;
       const id = `escalate:${threadId}:${createHash("sha1").update(request).digest("hex").slice(0, 12)}`;

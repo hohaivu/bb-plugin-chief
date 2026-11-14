@@ -1,6 +1,6 @@
 # Coordinator
 
-A Coordinator is a Chief that supervises other Chiefs, in any project, instead of managed threads. It wakes only when a child Chief needs the owner or finishes.
+A Coordinator is a Chief that supervises other Chiefs, in any project, instead of managed threads. It wakes on a child's Need you, done, failure, end or stall.
 
 ## Terms
 
@@ -19,19 +19,22 @@ A Coordinator is a Chief that supervises other Chiefs, in any project, instead o
 
 ## Ownership and entry points
 
-`server.ts` owns the tools, the lifecycle, the sweep and the configuration. `src/db/threadStore.ts` owns the writes to `managed_threads`.
+Dedicated tool and runtime modules own the tools, the lifecycle, the sweep, the alerts, and configuration. `src/db/threadStore.ts` owns the writes to `managed_threads`.
 
 | Entry point | File | Role in this domain |
 | --- | --- | --- |
-| `chief_coordinate` | `server.ts` | Upgrades a Chief to a Coordinator. |
-| `chief_attach` | `server.ts` | Links existing Chiefs to a Coordinator. |
-| `chief_spawn` | `server.ts` | Starts a child Chief, in any project when a Coordinator calls it. |
-| `chief_escalate` | `server.ts` | Triggers the Need-you alert. |
-| `chief_roster` | `server.ts` | Shows the Children block to a Coordinator. |
-| `handOver`, `bb chief adopt` | `server.ts` | Refuse to move work to or from a Coordinator. |
-| `sweep`, `lifecycle` | `server.ts` | Trigger the Done alert. |
-| `bb.agents.configure` | `server.ts` | Gives each kind of Chief its tools and instructions. |
-| `setCoordinator`, `linkToCoordinator`, `insert` | `src/db/threadStore.ts` | Write the two columns. |
+| `chief_coordinate` | `src/tools/coordinate.ts` | Upgrades a Chief to a Coordinator. |
+| `chief_attach` | `src/tools/attach.ts` | Links existing Chiefs to a Coordinator. |
+| `chief_spawn` | `src/tools/spawn.ts` | Starts a child Chief in any project when a Coordinator calls it. |
+| `chief_escalate` | `src/tools/escalate.ts` | Triggers the Need-you alert. |
+| `chief_roster` | `src/tools/roster.ts` | Shows the Children block to a Coordinator. |
+| `handOver`, `replaceChief` | `src/runtime/chiefs.ts` | Preserve Coordinator links and handle orphan recovery without moving work across Coordinators. |
+| `bb chief adopt` | `src/runtime/cli.ts` | Refuses to move work across Coordinators and adopts registered Chiefs. |
+| `sweep` | `src/runtime/sweep.ts` | Triggers state evaluation and done alerts. |
+| `lifecycle`, supervisor, orphan recovery | `src/runtime/lifecycle.ts` | Track active cycles, trigger problem alerts, and supervise orphan recovery. |
+| `bb.agents.configure` | `src/runtime/host.ts` | Gives each kind of Chief its tools and instructions. |
+| Alerts (`alertCoordinator`, `stalledKey`, `stillDue`) | `src/runtime/alerts.ts` | Build, serialize, check freshness, and deliver Coordinator alerts and notices. |
+| `setCoordinator`, `linkToCoordinator`, `inheritCoordinator`, `insert` | `src/db/threadStore.ts` | Write Coordinator columns and maintain links. |
 
 ## Baseline (behaviour at base 95aa7df)
 
@@ -103,14 +106,15 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - `reconcileThread` reads the live thread. It records a deleted or archived thread. It moves the thread to the Chief section. It syncs the row state and status with the live thread.
 - An unchanged row causes no write and no reload. A changed row writes through `store.syncLive`, which reloads the store and starts the sweep.
 
-### Alerts (`writeAlert`, `deliverAlert`)
+### Alerts (`writeAlert`, `insertAlert`, `deliverAlert`)
 
 - `writeAlert` takes a managed row with a `chief_thread_id`. The key is `<kind>:<detail>`. The dedupe key is `<source thread id>:<key>`.
 - `writeAlert` first deletes the undelivered rows of the same source and the same kind, except the new key. Reason: a newer alert supersedes an older alert of the same kind.
-- It then runs `INSERT OR IGNORE`. A repeated key adds no row.
+- It then delegates to `insertAlert`. A repeated key adds no row.
 - `deliverAlert` sends the message to `target_thread_id` with `senderThreadId` set to the source thread. It uses `queue-if-active` mode.
 - A failed send records the error and leaves the row for `retryAlerts`. A retry first checks for the same text in the target's queue and last 50 messages.
 - `retryAlerts` skips rows whose target is `complete`, `archived` or `deleted`. It does not filter by project.
+- Contract COORD-11 defines the durable outbox delivery rules after this baseline.
 
 ### Chief configuration (`bb.agents.configure`, Chief branch)
 
@@ -128,14 +132,16 @@ Each contract has an identifier. Tests and reviews cite it.
 
 ### COORD-1 Upgrade
 
-- `chief_coordinate` takes no input. It requires an active Chief caller.
+- `chief_coordinate` accepts an optional `goal` parameter (at most 4,000 characters). It requires an active Chief caller.
+- On success with `goal`, it writes `brief.md` containing `## Coordinator brief` and the owner request verbatim. Reason: the intent of the owner survives compaction.
+- If writing `brief.md` fails, the tool appends the error to its output, and the upgrade stands.
 - It makes an active, unlinked Chief that owns no open managed row a Coordinator. The store sets `coordinator=1` in one statement that also checks the conditions. Reason: the check and the write must not split.
-- A repeated call returns "Already a Coordinator." and changes nothing.
+- A repeated call returns "Already a Coordinator." and changes nothing. It writes no file.
 - A child Chief gets a refusal that names its Coordinator.
 - A Chief that owns any open row gets a refusal that lists the row ids. Ready and blocked rows count as open.
 - Open todos do not block the upgrade. They stay with the Coordinator.
 - The upgrade renames the thread: a leading `Chief ·` becomes `Coordinator ·`, and the rest of the title stays. The row title changes in the same statement.
-- The success text says that the upgrade is one-way, that the Coordinator runs no managed threads, and how to attach, spawn and read the roster.
+- The success text says that the upgrade is one-way, runs no managed threads, and explains how to attach, spawn and read the roster.
 - No tool, CLI command or SQL statement clears `coordinator`. Reason: the owner decided that the upgrade is one-way.
 
 ### COORD-2 Purity
@@ -163,9 +169,12 @@ Each contract has an identifier. Tests and reviews cite it.
 - Every plain Chief has the tool, so a Chief that `chief_coordinate` upgrades can attach without a restart. The handler refuses any caller that is not an active Coordinator. Reason: BB applies tools only when it builds a session.
 - It returns one result line for each id. A bad id never blocks the other ids.
 - The projects of the Chiefs do not matter. Reason: the owner decided that children live in any project.
-- It refuses an id that is the caller, is not a Chief row, is complete, archived or deleted, is a Coordinator, or belongs to another Coordinator.
+- It refuses an id that is the caller, not a Chief row, a Coordinator, or linked to another live Coordinator. It also refuses complete, archived, or deleted Chiefs.
+- A child whose previous Coordinator is in a terminal state (complete, archived, or deleted) can be taken over. The conditional write replaces the link to that terminal Coordinator.
 - For an id that is not a Chief row, the line tells the owner to run `bb chief adopt --thread <id>` first.
 - An id that already belongs to the caller returns a no-op line.
+- In the same store batch, an idle-done child receives a delivered done receipt (`baselineDone`), so attach sends no done alert. Reason: avoid alert storms when attaching finished work.
+- After the batch, each successfully attached child receives one `coordinator-attached:<id>` notice (`alertSelf`). The notice instructs the child to escalate and explains how to treat a tell message. Reason: a running child learns its new rules on its next turn.
 - The link write is conditional. When it changes no row, the tool reads the row again and reports the reason. Reason: two callers can race.
 - One level only: a Coordinator never becomes a child. A Chief has at most one Coordinator.
 
@@ -175,20 +184,29 @@ Each contract has an identifier. Tests and reviews cite it.
 - The tool validates the project before it spawns. A bad id leaves no thread and no row.
 - A `todoId` with a `projectId` that differs from the caller's project is refused before the spawn. Reason: todos belong to one project.
 - A Chief that a Coordinator spawns gets `coordinator_thread_id` in the same insert. The target project's existing Chief stays untouched.
-- For a Coordinator caller, the handoff section says that the Coordinator supervises the child. It says when the Coordinator receives alerts. It says that the owner answers the Need you in the child thread. `brief.md` holds the same text.
-- For a Coordinator caller, the result says that the new Chief is linked as a child, shows in the Children block, and alerts the Coordinator.
+- For a Coordinator caller, the handoff section says that the Coordinator supervises the child. It names Need you, done, fail, end, and stall alerts. It says that the owner answers the Need you in the child thread. `brief.md` holds the same text.
+- For a Coordinator caller, the result says that the new Chief is linked, shows in Children, and alerts the Coordinator.
 - For a plain Chief caller, the handoff text, the result text and `brief.md` equal the base text.
-- `handOver` carries no link. The successor of a child starts unlinked. The superseded row stays in the Children block with its terminal state.
+- Work handed over from a child stays with that child's live Coordinator.
+- `handOver` (`store.inheritCoordinator`), `spawnChief` (with `previous`), and `bb chief adopt` give the successor the link of the previous child when that Coordinator is live.
+- A successor is compatible only when it has no live link or shares the same live Coordinator (`compatibleSuccessor`).
+- `handOver` and `bb chief adopt` refuse an incompatible pair before any write. Reason: two Coordinators can have children in one project, and work must never switch Coordinators silently.
+- Orphan recovery starts a dedicated successor (`replaceChief`) instead of reusing a Chief of another Coordinator.
+- An unlinked project Chief that receives work from an orphan becomes a child of that Coordinator.
+- The Children block filters out a superseded child and counts it in `closed: N`.
 
 ### COORD-6 Need-you alert
 
 - `chief_escalate` accepts an optional `threadId`. Its description says to omit `threadId` only when no managed thread concerns the request yet.
 - Every call by a child Chief alerts its Coordinator, on the forge path, the chat-only path and the path without `threadId`.
-- With a `threadId`, the tool validates the target as before. It then alerts, before it looks for a URL.
+- The alert precedes every early return.
+- With a `threadId`, the tool validates the target before sending the alert.
 - Without a `threadId`, the tool posts nothing on the forge and starts no tracker decision. It returns the chat-only line.
-- The alert key holds a hash of the request. One child and one request give one alert. A different request gives one more alert.
-- The alert message names the child, its project and the request. It says that the owner answers in the child thread and that the Coordinator must not answer or relay it.
-- A Coordinator alert never deletes another pending outbox row. Reason: the key is a once-only receipt, not a same-kind replacement.
+- The dedupe key is `<child>:coordinator-need-you:<sha1(request)[:12]>:<child.active_cycle>`. Reason: a repeated question in a new turn delivers a new alert after the owner answers.
+- Rows written before this format (`<child>:coordinator-need-you:<sha12>`) remain deliverable while the child stays linked to that live Coordinator.
+- The alert message names the child, its project, and the request clipped to 600 characters. It appends `PR: <url>` when the concerned thread has a URL. It states that the owner answers in the child thread.
+- The message omits instructions to not answer or relay because Coordinator instructions already enforce that rule.
+- A Coordinator alert never deletes another pending outbox row, except older undelivered done rows of the same child. Reason: the key is a once-only receipt.
 - The result of `chief_escalate` equals the base result for the same input. An alert failure never fails the call.
 
 ### COORD-7 Done alert
@@ -199,19 +217,22 @@ Each contract has an identifier. Tests and reviews cite it.
   3. The child owns no open managed row.
   4. The child owns no open todo. A todo that waits on an `after:` condition counts as open.
   5. The child owns at least one complete managed row.
-- The sweep evaluates each linked child at the end of each pass. The Chief branch of `lifecycle` evaluates the child after it records `idle`.
-- Reconciliation reaches the check through the store reload, which starts the sweep.
-- The alert key holds the id of the latest completed row. A repeated idle, sweep or reconcile adds no row. A new completed round alerts again.
+- The sweep and every Chief lifecycle state write evaluate done through `alertCoordinator(row, { kind: "state" })`.
+- Reconciliation reaches the check through the store reload, which triggers the sweep.
+- The alert key is `<child>:coordinator-done:<newest complete owned row id>`.
+- A repeated idle, sweep, or reconcile adds no row. A new completed round alerts again.
 - A planner that completes in a later sweep still produces exactly one alert. Reason: the check runs after `completeAbsorbed` settles.
-- Attaching a Chief that is already idle and done produces one alert.
-- Nothing else alerts a Coordinator. A child's activity, failure, archive, delete and routine progress send no alert.
+- The alert message carries an outcome of at most 300 characters. The outcome lists the newest 3 completed owned row titles (clipped to 80 characters) and PR URLs.
+- Inserting a new done alert evicts older undelivered done rows of the same child. Reason: a newer completion outcome replaces older undelivered done messages.
 
 ### COORD-8 Roster
 
-- `chief_roster` from a Coordinator shows a Children block. It has one entry for each linked child, in any project.
-- Each entry holds the title, the id, the project id, the state and the Pending block of that child.
-- The whole output keeps the existing 6000-character clip. Each child entry is clipped to share that space.
-- With no children, the roster says to attach Chiefs with `chief_attach` or to start one with `chief_spawn`.
+- `chief_roster` from a Coordinator shows a Children block listing non-terminal linked children in any project.
+- Each entry holds the title, thread id, project id, state, and Pending block of that child.
+- Each entry appends ` · needs the owner since <ISO>` when the child is idle and has a current-cycle need-you alert.
+- When closed children exist, the Children block appends `closed: N`.
+- The whole output keeps the 6,000-character clip. Each live child entry receives a share of 4,000 characters divided by the count of live children.
+- With no children, the roster instructs how to attach or spawn Chiefs.
 - The Coordinator's own todos follow the block.
 - Each child entry and the Coordinator's own block collapse the todos of other, ended or no Chiefs into one count line, as `work-list.md` states. `includeOthers: true` expands all of them. Reason: a Chief reads its own work first.
 - The roster of a plain Chief equals the base output for the same state.
@@ -224,14 +245,17 @@ Each contract has an identifier. Tests and reviews cite it.
 | Plain Chief | The base list plus `chief_coordinate` and `chief_attach` | `chief`, `coordinator` | Tool count (19 with planning and research on) |
 | Child Chief | The base list | `chief` | Tool count (17 with planning and research on) |
 
-- The Coordinator greeting says that the Coordinator supervises child Chiefs in any project, not managed threads.
-- The Coordinator instructions replace the Chief rules. They say that the Coordinator never edits code, never plans, delegates, reviews or completes, and attaches only Chiefs that the owner names.
-- They say that the Coordinator starts new work as a child with `chief_spawn`. They say that a Need-you alert is information and the owner answers in the child.
-- They say that a done alert means: check `chief_roster` and tell the owner about progress across children.
-- They say that the Coordinator shares facts with a child only through `bb thread tell`, and ends its turn after it acts. It never polls children.
+- The Coordinator greeting states that the Coordinator supervises child Chiefs in any project, not managed threads.
+- The Coordinator instructions replace the Chief rules. They state that the Coordinator never edits code, never plans, delegates, reviews or completes, and attaches only Chiefs that the owner names.
+- They instruct the Coordinator to call `chief_roster` at the start of every turn and again after any compaction, and re-read `$BB_THREAD_STORAGE/brief.md` when it exists.
+- They state that the Coordinator starts new work as a child with `chief_spawn`.
+- They explain each alert kind. A Need-you alert is information that the owner answers in the child thread. A done alert carries the child outcome. Failed, ended, or stalled alerts name problems the Coordinator cannot fix.
+- For each alert, the Coordinator informs the owner about status across children.
+- They state that the Coordinator shares facts with a child only through `bb thread tell`, and ends its turn after it acts. It never polls children.
 - The project rules appear last, and only when a project `chief.md` exists. The built-in rules never appear. Reason: they tell a Chief to continue and complete managed work.
-- A child Chief gets one more instruction line before the rules. It names the Coordinator and tells the child to call `chief_escalate` before each Need you. It tells the child to omit `threadId` when no managed thread concerns the request.
-- The instructions fit the 32,768-character cut, with the rules last.
+- A child Chief gets one instruction line before the rules only while its Coordinator is live. The line names the Coordinator and tells the child to call `chief_escalate` before every Need you (omitting `threadId` when no managed thread concerns it).
+- The line instructs the child that a `bb thread tell` from the Coordinator is coordination information, not the decision of the owner.
+- The instructions fit the 32,768-character limit, with rules last.
 - Every other instruction of a plain Chief equals the base text.
 
 ### COORD-10 Migrations
@@ -243,13 +267,88 @@ Each contract has an identifier. Tests and reviews cite it.
 - A database that exists before the change keeps its rows. Their two new columns are null.
 - `chief_thread_id` never holds the link. Reason: it means "managed work of this Chief".
 
+### COORD-11 Alert outbox delivery
+
+- `insertAlert` formats each newly stored message as `[<label>]\n<body>` clipped to leave room for the marker, followed by `\n[alert <id>]`.
+- The marker identifier `<id>` is the first 10 hexadecimal characters of `sha1(dedupe_key)`.
+- The default alert label is `Chief lifecycle alert`.
+- Pre-existing outbox rows keep their text without rewriting.
+- Retries match older rows that lack a marker by exact message text. Reason: a retry finds its own earlier copy even when BB rewraps the text or another round has identical wording.
+- `retryDue` and `pendingAlerts` require a row with attempts `n > 0` to wait `min(30000 * 2^(n - 1), 1800000)` milliseconds after `last_attempt_at`.
+- `pendingAlerts` requires a row with zero attempts to wait 60 seconds before batch selection.
+- A direct delivery call does not acquire this batch grace period.
+- Coordinator rows that contain `:coordinator-` in `dedupe_key` stop retrying after 10 attempts.
+- Other alerts retry without an attempt cap. Reason: a worker receives instructions not to report again.
+- Rows that backoff or retry caps skip occupy no slot in the 100-row limit of `pendingAlerts`.
+- Direct delivery calls in `deliverAlert` enforce the same backoff and attempt cap as `pendingAlerts`.
+- `deliverAlert` returns false for a deferred or capped row and sends no message.
+- A deferred or capped receipt remains pending.
+- A first delivery attempt is immediate.
+- `deliverAlert` increments `attempts` and writes `last_attempt_at` before sending via `threads.send`. Reason: crashes during delivery leave attempt records for subsequent retries.
+- Retry backoff and the attempt cap apply before freshness settlement.
+- On an eligible retry with prior attempts, `deliverAlert` invokes `stillDue` before inspecting target messages.
+- A Coordinator-kind row with zero attempts and a recorded terminal target also enters this freshness check.
+- `deliverAlert` settles a stale row by setting `delivered_at` and setting `last_error` to start with `stale: ` without sending or incrementing `attempts`.
+- A worker stall alert is stale once that worker leaves its active cycle.
+- Pending non-ended Coordinator-kind receipts can enter batch retry selection despite a recorded terminal target.
+- These receipts must still satisfy the batch age or backoff rule and the attempt cap.
+- If freshness evaluation finds the receipt stale, `deliverAlert` settles it as stale without sending.
+- `deliverAlert` sends no Coordinator-kind receipt to a target whose managed row is `complete`, `archived` or `deleted`.
+- When an active retry remains due, `deliverAlert` checks the target queue and the last 50 `userMessage` events for the marker or legacy exact text.
+- If the target holds the marker or exact text, `deliverAlert` marks the row delivered and skips sending.
+- `MIGRATIONS` in `src/db/migrations.ts` appends `ALTER TABLE alert_outbox ADD COLUMN last_attempt_at INTEGER`. Reason: the host platform hashes migration statements by array index.
+
+### COORD-12 Problem alerts
+
+- The supervisor evaluates problem alerts for linked children every 30 seconds using the `stallMinutes` threshold (default 15 minutes).
+- `lifecycle` active events for a Chief row increment `active_cycle` and set `active_since` (`store.markActive`).
+- Reconcile and lifecycle events check `state !== 'active'` before updating `active_cycle` to prevent duplicate increments.
+- A Chief in state `failed` sends a failed alert once per active cycle (`<child>:coordinator-failed:<active_cycle>`).
+- A Chief in state `archived` or `deleted` sends an ended alert once per state (`<child>:coordinator-ended:<state>`).
+- The stalled alert has two branches and fires at most once per active cycle for each branch:
+  1. Active branch: the child state is `active`, and `now - active_since >= stallThresholdMs`. Dedupe key: `<child>:coordinator-stalled:<active_cycle>:active`.
+  2. Idle branch: the child state is `idle`. It owns open managed rows or open unblocked todos. No owned row is busy. No need-you exists this cycle. Quiet time meets or exceeds `stallThresholdMs`. Dedupe key: `<child>:coordinator-stalled:<active_cycle>:idle`.
+- An idle stalled alert never fires with busy owned rows, a current-cycle need-you, or no open work.
+- Active stalled alerts check only the duration of the active turn.
+- Each problem alert tells the Coordinator to inform the owner.
+- A complete (superseded) child never sends done, failed, or stalled alerts.
+- A complete child that receives a deletion event transitions to `deleted`. It creates an ended receipt only when its Coordinator is live.
+- An ended alert is a historical receipt. Source changes do not invalidate it during freshness evaluation.
+- Delivery still requires an eligible target and follows the retry backoff and attempt cap.
+- An ended receipt targeting a recorded terminal Coordinator remains undelivered.
+- Batch retry excludes an ended receipt to a terminal target.
+- A direct delivery call returns false without sending the ended receipt or settling it stale.
+
+### COORD-12a Retry freshness
+
+- Before delivering a retried alert (`attempts > 0`), `stillDue` verifies the alert against the condition that created it.
+- An eligible retried non-ended Coordinator alert is settled as stale (marked delivered with `last_error` starting with `stale:`) and never sent when:
+  1. The child row no longer exists or was superseded (`complete`).
+  2. The Coordinator link changed or the Coordinator is no longer active.
+  3. A fresh condition evaluation produces a different key.
+- Eligible pending non-ended Coordinator receipts targeting a terminal Coordinator enter freshness evaluation per COORD-11 and settle as stale without sending.
+- A child that becomes complete does not invalidate an already-created ended receipt to a live Coordinator.
+- For stalled alerts, work going busy, a new need-you arrival, new child activity, or a turn change settles the alert as stale.
+- `stillDue` does not invalidate an ended receipt. This exemption does not override target restrictions, backoff or the attempt cap.
+- A legacy need-you row (`<child>:coordinator-need-you:<sha12>`) remains due as long as the child remains linked to the same live Coordinator.
+
+### COORD-13 Notices to children
+
+- Notices to children use the label `[Coordinator notice]` and send via `alertSelf` with no sender thread id.
+- An attached notice (`<child>:coordinator-attached:<coordinatorId>`) notifies an attached child that a Coordinator now supervises it.
+- A gone notice (`<child>:coordinator-gone:<coordinatorId>`) notifies an active child when its Coordinator enters state `archived` or `deleted`.
+- A gone notice instructs the child to notify the owner and states that another Coordinator can attach it.
+- A retried gone notice settles as stale if another Coordinator attaches the child.
+- Coordinator alerts sent to Coordinators use the label `[Coordinator alert]`.
+
 ## Invariants
 
 - A Coordinator has `role='chief'`. No new role exists. Reason: a new role would need a rebuild of the `managed_threads` role check.
 - No write assigns a managed row to a Coordinator.
+- Managed work never moves from one Coordinator's child to another Coordinator's child. Reason: work must not switch Coordinators silently.
 - A Chief has at most one Coordinator, and a Coordinator is never a child.
 - The upsert in `insert` never clears `coordinator` or an existing `coordinator_thread_id`.
-- A Coordinator alert only adds one outbox row. It never deletes another pending row.
+- A Coordinator alert only adds one outbox row. It never deletes another pending row, except an older undelivered done row of the same child.
 - A Coordinator alert failure never fails the tool or the lifecycle event that caused it. The outbox retries the alert.
 - The same event, repeated, adds no second alert.
 
@@ -258,6 +357,9 @@ Each contract has an identifier. Tests and reviews cite it.
 - The first `configure` call for a just-spawned child can run before its insert. It then sees a plain Chief and offers `chief_coordinate` for one turn. The store predicates in COORD-1 and COORD-4 keep this safe.
 - The done check scans linked children on every sweep pass. It writes only through `INSERT OR IGNORE` and does not reload the store.
 - Cross-project delivery uses a child thread as `senderThreadId` for a Coordinator in another project. The same path serves an alert within one project.
+- Outbox rows in `alert_outbox` are never pruned. Delivered rows serve as once-only receipts for research alerts, thread failure events, done notices, and retro evidence.
+- The need-you receipt is tracked per child turn. A child that repeats the same pending Need you in a later turn alerts again. This repetition is accepted over losing a genuine re-ask. The "needs the owner" status clears when the child next becomes active.
+- An unlinked project Chief that receives work from an orphaned child becomes that Coordinator's child, keeping its own work.
 
 ## Related decisions
 

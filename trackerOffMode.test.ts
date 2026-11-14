@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, TEST_WAVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, setup, start, status, wave } from "./test/harness";
+import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, TEST_WAVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { mapStrings, shrinkPlannerAlert } from "./test/shrinkEdits";
@@ -76,7 +76,7 @@ async function trackerOracleRun(mode: TrackerOracleMode) {
   return {
     results,
     tools,
-    alerts: state.sent.map((message) => [message.threadId, norm(String(message.input?.[0]?.text))]),
+    alerts: state.sent.map((message) => [message.threadId, norm(withoutAlertMarker(String(message.input?.[0]?.text)))]),
     forge: (state.db.prepare("SELECT dedupe_key, project_id, thread_id, target, body, mention, attempts, posted_at IS NOT NULL AS posted, gave_up_at IS NOT NULL AS gave_up FROM forge_comments ORDER BY dedupe_key").all() as object[])
       .map((row) => JSON.parse(norm(JSON.stringify(row)))),
     exec: execFileMock.mock.calls.map(([file, args]: [string, string[]]) => [file, args.map(norm)] as [string, string[]]),

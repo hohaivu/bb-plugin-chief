@@ -43,11 +43,18 @@ export function registerRosterTool(ctx: Ctx) {
       }
       if (ctx.isCoordinator(caller)) {
         const children = store.all().filter((row) => row.role === "chief" && row.coordinator_thread_id === caller.thread_id);
-        const share = Math.floor(4_000 / Math.max(children.length, 1));
+        const live = children.filter((row) => !ctx.INACTIVE_CHIEF_STATES.includes(row.state));
+        const share = Math.floor(4_000 / Math.max(live.length, 1));
+        // An idle child with a Need you from this turn is waiting for the owner, not for work.
+        const needsOwner = (child: typeof children[number]) => {
+          if (child.state !== "idle") return "";
+          const asked = ctx.needYouAt(child);
+          return asked === null ? "" : ` · needs the owner since ${new Date(asked).toISOString()}`;
+        };
         return clip([
-          ...(children.length
-            ? ["## Children", ...children.map((child) => clip(`- “${clip(child.title, 120)}” (${child.thread_id}) · project ${child.project_id} · ${child.state}\n${ctx.pendingBlock(child.thread_id, includeWaiting, share, includeOthers).replace(/\n/g, "\n  ")}`, share))]
-            : ["No child Chiefs. Attach ones the owner names with chief_attach, or start one with chief_spawn."]),
+          ...(live.length ? ["## Children", ...live.map((child) => clip(`- “${clip(child.title, 120)}” (${child.thread_id}) · project ${child.project_id} · ${child.state}${needsOwner(child)}\n${ctx.pendingBlock(child.thread_id, includeWaiting, share, includeOthers).replace(/\n/g, "\n  ")}`, share))] : []),
+          ...(children.length > live.length ? [`closed: ${children.length - live.length}`] : []),
+          ...(live.length ? [] : ["No child Chiefs. Attach ones the owner names with chief_attach, or start one with chief_spawn."]),
           note + ctx.pendingBlock(caller.thread_id, includeWaiting, 1_500, includeOthers),
         ].join("\n"), 6_000);
       }

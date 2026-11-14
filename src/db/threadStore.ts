@@ -65,6 +65,9 @@ export interface ThreadStoreHooks {
   onReload: () => void;
 }
 
+/** SQL guard: the Chief row has no Coordinator link, or its link points at a Coordinator that is complete, archived or deleted. */
+const UNLINKED_OR_DEAD = `(coordinator_thread_id IS NULL OR coordinator_thread_id IN (SELECT thread_id FROM managed_threads WHERE state IN ('complete','archived','deleted')))`;
+
 /** One module owns the managed_threads rows and the cache of them: the cache is replaced only here, and every
  * write reloads it, once per write or once per batch. Other tables stay with their callers. */
 export function createThreadStore<Row extends { thread_id: string; role: string; state: string }>(db: Database, hooks: ThreadStoreHooks) {
@@ -175,8 +178,20 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     /** chief_attach: links a live plain Chief to a Coordinator, once. Returns whether the row changed. */
     linkToCoordinator(childId: string, coordinatorId: string, now: number) {
       const { changes } = db.prepare(`UPDATE managed_threads SET coordinator_thread_id=?, updated_at=?
-        WHERE thread_id=? AND role='chief' AND coordinator_thread_id IS NULL AND COALESCE(coordinator,0)=0
+        WHERE thread_id=? AND role='chief' AND COALESCE(coordinator,0)=0
+        AND ${UNLINKED_OR_DEAD}
         AND state NOT IN ('complete','archived','deleted')`).run(coordinatorId, now, childId);
+      if (changes) wrote();
+      return changes > 0;
+    },
+    /** handOver: the successor takes the previous child's link while that Coordinator is live. Never sets a link on a Coordinator and never overwrites a live link. */
+    inheritCoordinator(previousId: string, nextId: string, now: number) {
+      const link = db.prepare(`SELECT p.coordinator_thread_id AS id FROM managed_threads p JOIN managed_threads c ON c.thread_id=p.coordinator_thread_id
+        WHERE p.thread_id=? AND c.role='chief' AND c.coordinator=1 AND c.state NOT IN ('complete','archived','deleted')`).get(previousId) as { id: string } | undefined;
+      if (!link) return false;
+      const { changes } = db.prepare(`UPDATE managed_threads SET coordinator_thread_id=?, updated_at=?
+        WHERE thread_id=? AND role='chief' AND COALESCE(coordinator,0)=0
+        AND ${UNLINKED_OR_DEAD}`).run(link.id, now, nextId);
       if (changes) wrote();
       return changes > 0;
     },

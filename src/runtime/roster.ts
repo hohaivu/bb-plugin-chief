@@ -85,6 +85,19 @@ export function createRoster(ctx: Ctx) {
     return !!row && row.role === "chief" && row.coordinator === 1;
   }
 
+  /** The live Coordinator a Chief row is linked to, or undefined: a link to a complete, archived or deleted Coordinator does not count. */
+  function liveCoordinatorId(row: ManagedRow | undefined): string | undefined {
+    const link = row?.coordinator_thread_id;
+    const coordinator = link ? store.get(link) : undefined;
+    return link && isCoordinator(coordinator) && !INACTIVE_CHIEF_STATES.includes(coordinator!.state) ? link : undefined;
+  }
+
+  /** Work moves from previous to next only when next has no live Coordinator of its own, or the same one. */
+  function compatibleSuccessor(previous: ManagedRow | undefined, next: ManagedRow | undefined): boolean {
+    const own = liveCoordinatorId(next);
+    return !own || own === liveCoordinatorId(previous);
+  }
+
   /** A child Chief is a Chief row linked to its Coordinator. */
   function isLinkedChild(row: ManagedRow | undefined): boolean {
     return !!row && row.role === "chief" && !!row.coordinator_thread_id;
@@ -440,6 +453,6 @@ export function createRoster(ctx: Ctx) {
   function pendingBlock(chiefThreadId: string, includeWaiting = false, limit = 6_000, includeOthers = false) {
     return clipPendingBlock(pendingLines([...rosterForChief(chiefThreadId)].filter((row) => row.thread_id !== chiefThreadId).reverse(), todoLines(store.get(chiefThreadId)?.project_id, !includeWaiting, chiefThreadId, !includeOthers)), limit);
   }
-  return { INACTIVE_CHIEF_STATES, belongsToChief, chiefStats, controlledTarget, controlsThread, isActiveChief, isCoordinator, isLinkedChild, pendingBlock, pendingLines, replacesCall, requireChiefCaller, rerouteSteps, resolveTarget, rosterFor, rosterForChief, rosterRowLines, statsText, taskReviews, todoLine, todoLines };
+  return { INACTIVE_CHIEF_STATES, belongsToChief, chiefStats, controlledTarget, controlsThread, isActiveChief, isCoordinator, isLinkedChild, compatibleSuccessor, liveCoordinatorId, pendingBlock, pendingLines, replacesCall, requireChiefCaller, rerouteSteps, resolveTarget, rosterFor, rosterForChief, rosterRowLines, statsText, taskReviews, todoLine, todoLines };
 }
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
-import { CLOSE_OUT, chiefReview, delegate, disposeAll, setup, start, status } from "./test/harness";
+import { CLOSE_OUT, chiefReview, delegate, disposeAll, elapse, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -544,6 +544,7 @@ describe("Chief backend", () => {
     }, { threadId: worker.threadId, projectId: "proj_1" });
     state.live.set(chief.threadId, { ...state.live.get(chief.threadId)!, archivedAt: Date.now() });
     await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(chief.threadId)! });
+    elapse(31_000);
     await state.supervisorCycle();
     const rows = (await status(state)).threads;
     const replacement = rows.find((row) => row.role === "chief" && row.threadId !== chief.threadId);
@@ -611,6 +612,7 @@ describe("Chief backend", () => {
     }, { threadId: worker.threadId, projectId: "proj_1" });
     expect(result).toContain("Report queued for Chief");
     expect(state.sent).toHaveLength(0);
+    elapse(31_000);
     await state.supervisorCycle();
     expect(state.sent).toHaveLength(1);
     expect(state.sent[0].threadId).toBe(chief.threadId);

@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rename, unlink, writeFile } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { type PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import plugin from "../server";
 import { MIGRATIONS } from "../src/db/migrations";
@@ -44,12 +44,21 @@ export const spliceAfter = (base: string, anchor: string, line: string, expected
   return out;
 };
 export const withReviewerLine = (base: string, count = 1) => spliceAfter(base, REVIEWER_ANCHOR, REVIEWER_NATIVE_LINE, count);
+/** Every stored alert ends with `[alert <10 hex>]` (COORD-11). Returns the text before that line and throws when the marker is missing, so an oracle comparing alert text still proves the marker. */
+export const withoutAlertMarker = (text: string) => {
+  const marker = /\n\[alert [0-9a-f]{10}\]$/;
+  if (!marker.test(text)) throw new Error(`alert has no trailing marker: ${text.slice(-80)}`);
+  return text.replace(marker, "");
+};
 export const snapshotText = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "fixtures", name), "utf8");
 
+/** Moves the wall clock forward: a failed alert waits 30 s before its first retry (COORD-11). disposeAll restores the real clock. */
+export const elapse = (ms: number) => vi.setSystemTime(Date.now() + ms);
 export const disposals: Array<() => Promise<void>> = [];
 export const disposeAll = async () => {
   while (disposals.length) await disposals.pop()!();
   execFileMock.mockReset();
+  vi.useRealTimers();
 };
 // Every plan test needs a NOT-doing heading, so a single fixture keeps the wording pinned in one place.
 export const PLAN_FIXTURE = "# Plan\n\n## Contracts to verify\n- Totals stay non-negative\n\n## What we're NOT doing\n- x";
