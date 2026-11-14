@@ -399,6 +399,58 @@ describe("chief_research", () => {
     expect(spawn.prompt).toContain('"question":"Who calls this?"');
   });
 
+  // Contracts (stacked-branch worktrees, wave 1): Chief's researcher started on a branch reads its own fresh worktree on it; only Chief may name a branch.
+  describe("branch", () => {
+    const BRANCH = "feature/pr-head";
+    const researcherSpawn = (state: Awaited<ReturnType<typeof setup>>) => state.spawned.findLast((args) => args.pluginMetadata?.role === "researcher");
+
+    test("a Chief's researcher with a branch launches in a fresh managed worktree on it, records the branch, says so in the reply, and keeps branch out of the child's prompt JSON", async () => {
+      const state = await setup();
+      workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => done });
+      const chief = await roleThread(state, "chief");
+      const reply = await call(state, chief, survey({ branch: BRANCH })) as string;
+      expect(reply).toContain(`It runs the survey in a fresh worktree on branch ${BRANCH} and reports through chief_report`);
+      const spawn = researcherSpawn(state);
+      expect(spawn.environment).toEqual({ type: "host", hostId: expect.any(String), workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: BRANCH } } });
+      const row = state.db.prepare("SELECT branch FROM managed_threads WHERE role='researcher'").get() as { branch: string | null };
+      expect(row.branch).toBe(BRANCH);
+      const json = JSON.parse((spawn.prompt as string).match(/```json\n(.*)\n```/)![1]!);
+      expect(json).toMatchObject({ mode: "survey", question: "Who calls this?", items: ["a.ts"] });
+      expect(json).not.toHaveProperty("branch");
+      expect(execFileMock).not.toHaveBeenCalled();
+    });
+
+    test("without a branch the researcher reuses Chief's environment and records no branch", async () => {
+      const state = await setup();
+      const chief = await roleThread(state, "chief");
+      await call(state, chief, survey());
+      expect(researcherSpawn(state).environment).toEqual({ type: "reuse", environmentId: state.live.get(chief)!.environmentId });
+      expect((state.db.prepare("SELECT branch FROM managed_threads WHERE role='researcher'").get() as { branch: string | null }).branch).toBeNull();
+    });
+
+    test("a branch needs no reusable Chief environment, which a researcher without a branch does", async () => {
+      const state = await setup();
+      const chief = await roleThread(state, "chief");
+      state.live.set(chief, { ...state.live.get(chief)!, environmentId: undefined } as any);
+      await expect(call(state, chief, survey())).rejects.toThrow(/Chief's checkout cannot be shared with a researcher thread/);
+      expect(researcherSpawn(state)).toBeUndefined();
+      await expect(call(state, chief, survey({ branch: BRANCH }))).resolves.toContain("Started researcher thread");
+      expect(researcherSpawn(state).environment.workspace.baseBranch).toEqual({ kind: "named", name: BRANCH });
+    });
+
+    test("a researcher thread that names a branch is refused before any run or spawn", async () => {
+      const state = await setup();
+      workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => done });
+      const chief = await roleThread(state, "chief");
+      await call(state, chief, survey());
+      const researcher = (await status(state)).threads.find((row) => row.role === "researcher")!.threadId;
+      const spawned = state.spawned.length;
+      await expect(call(state, researcher, survey({ branch: BRANCH }))).rejects.toThrow(/branch is for Chief only/);
+      expect(state.spawned).toHaveLength(spawned);
+      expect(calls("run")).toHaveLength(0);
+    });
+  });
+
   test("Chief's chief_research fails closed when its own provider and model cannot be read", async () => {
     const state = await setup();
     workflowsCli({ run: () => ({ runId: "wfr_1" }), status: () => done });
