@@ -1300,6 +1300,57 @@ describe("impact slice base of a stacked or branch-based plan wave", () => {
   }, 60_000);
 });
 
+describe("unpinned whole-plan review: the primary diff base of a stacked or branch-based plan wave", () => {
+  // Topology: waves 1/2 on feature/a, waves 3/4 (stackOn 1) on feature/b. All ready, no PR, so every target is unpinned.
+  // Contract: a target with a plan base is diffed against origin/<plan base>, never the project default; an unresolved base makes the range unavailable.
+  const twoChains = (planBaseOf: (row: ManagedRow) => { base: string } | { skipped: string } | null) => {
+    const w = world({ planBaseOf });
+    w.worker("W1", { branch: "feature/a", planWave: 1 });
+    w.worker("W3", { branch: "feature/b", planWave: 3 });
+    w.covering(["W1", "W3"]);
+    return w;
+  };
+  const lineFor = (w: ReturnType<typeof world>, branch: string) =>
+    (w.launches[0]!.args.prompt as string).split("\n").filter((line) => line.startsWith(`- branch ${branch},`));
+  const DEFAULT_RANGE = "git diff <the project's default branch>...";
+
+  test("the stacked chain is diffed against its plan base, the unstacked chain keeps the default branch", async () => {
+    const w = twoChains((row) => (row.branch === "feature/b" ? { base: "feature/a" } : null));
+    await w.review.startReview(w.chief, "W1");
+
+    const [stacked] = lineFor(w, "feature/b");
+    expect(lineFor(w, "feature/b")).toHaveLength(1);
+    expect(stacked).toContain("then review `git diff origin/feature/a...origin/feature/b`");
+    expect(stacked).not.toContain(DEFAULT_RANGE);
+    expect(lineFor(w, "feature/a")[0]).toContain(`then review \`${DEFAULT_RANGE}origin/feature/a\``);
+  });
+
+  test("an unresolved plan base makes the stacked chain's range unavailable and never names the default branch", async () => {
+    const skipped = "stack base unresolved: wave 1's chain has no task branch yet";
+    const w = twoChains((row) => (row.branch === "feature/b" ? { skipped } : null));
+    await w.review.startReview(w.chief, "W1");
+
+    const [stacked] = lineFor(w, "feature/b");
+    expect(stacked).toContain(skipped);
+    expect(stacked).not.toMatch(/`git diff [^`]*`/);
+    expect(stacked).not.toContain(DEFAULT_RANGE);
+    expect(stacked).not.toContain("origin/feature/a");
+    expect(lineFor(w, "feature/a")[0]).toContain(`then review \`${DEFAULT_RANGE}origin/feature/a\``);
+  });
+
+  test("a pinned pull request keeps its own base, whatever the plan base says", async () => {
+    const w = world({ heads: { [pr(2)]: { branch: "feature/b", sha: SHA_B, base: "develop" } }, planBaseOf: () => ({ base: "feature/a" }) });
+    w.worker("W1", { branch: "feature/a", planWave: 1 });
+    w.worker("W3", { prUrl: pr(2), branch: "feature/b", planWave: 3 });
+    w.covering(["W1", "W3"]);
+    await w.review.startReview(w.chief, "W1");
+    const lines = (w.launches[0]!.args.prompt as string).split("\n");
+    const pinnedLine = lines.find((line) => line.startsWith(`- ${pr(2)} `));
+    expect(pinnedLine).toContain(`then review \`git diff origin/develop...${SHA_B}\``);
+    expect(pinnedLine).not.toContain("origin/feature/a");
+  });
+});
+
 describe("rule blocks follow the slice's changed paths (Git listings of a real repository)", () => {
   // Contract: the test audit renders when some changed path looks like test code, and not otherwise; `## Docs ownership` renders on a docs/ history or path, and not otherwise.
   // Regression: collecting paths from the text diff headers (a binary or mode-only change names none), reading the quoted form of a non-ASCII path, matching the
