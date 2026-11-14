@@ -110,11 +110,12 @@ export function createArtifacts(ctx: Ctx) {
    * a new environment provisions; the artifact copy goes to the project's host without asking for the thread's storage
    * location. Each write fails alone and persistBrief never throws. */
   async function persistBrief(threadId: string, projectId: string, prompt: string) {
-    const hostId = await ctx.projectHostId(projectId);
     await Promise.all([
       retryWhileProvisioning(() => writeStorageFile(threadId, "brief.md", prompt))
         .catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`)),
-      retryWhileProvisioning(() => writeArtifact(threadId, projectId, "brief.md", prompt, hostId ?? undefined))
+      // The host lookup lives in this branch so a slow lookup never delays the storage copy.
+      ctx.projectHostId(projectId)
+        .then((hostId) => retryWhileProvisioning(() => writeArtifact(threadId, projectId, "brief.md", prompt, hostId ?? undefined)))
         .catch((error) => bb.log.warn(`Could not write ${threadId}'s brief artifact: ${String(error)}`)),
     ]);
   }
