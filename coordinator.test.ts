@@ -1177,6 +1177,15 @@ describe("Coordinator", () => {
       expect(coreEnd(plain.instructions)).toBeLessThan(CHIEF_BUDGET);
     });
 
+    test("a plain Chief has 19 tools, a child Chief 17 and a Coordinator 3, with planning and research on", async () => {
+      const state = await setup();
+      const plain = await make(state);
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord)).id;
+      const count = async (id: string) => (await configure(state, id)).tools.length;
+      expect([await count(plain), await count(child), await count(coord)]).toEqual([19, 17, 3]);
+    });
+
     test("the coordinator skill declares the name the plain Chief's configure lists", async () => {
       const skill = await readFile(join(dirname(fileURLToPath(import.meta.url)), "skills", "coordinator", "SKILL.md"), "utf8");
       expect(skill.startsWith("---\nname: coordinator\n")).toBe(true);
@@ -1850,6 +1859,223 @@ describe("Coordinator", () => {
       expect(outbox(state, key).delivered_at).not.toBeNull();
       expect(outbox(state, key).last_error).toMatch(/^stale: /);
       expect(state.sent.filter((sent) => String(sent.input[0].text).includes(marker(key)))).toEqual([]);
+    });
+  });
+
+  describe("handover keeps work with its Coordinator (COORD-5)", () => {
+    const archive = async (state: S, id: string) => {
+      state.live.set(id, { ...state.live.get(id)!, archivedAt: new Date().toISOString() });
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(id)! });
+      await settle();
+    };
+    /** Coordinator C in proj_1 with child X (proj_1) that owns one open worker. */
+    async function orphaned(state: S) {
+      const coord = await coordinator(state);
+      const child = (await spawnChild(state, coord, { title: "Checkout" })).id;
+      const worker = (await delegate(state, child, "Fix totals")).threadId;
+      return { coord, child, worker };
+    }
+    const rosterOf = (state: S, coord: string) => call(state, "chief_roster", {}, coord);
+
+    test("no other project Chief: the supervisor starts a successor that stays C's child and takes the work; the old row is closed", async () => {
+      const state = await setup();
+      const { coord, child, worker } = await orphaned(state);
+      await archive(state, child);
+      await state.supervisorCycle();
+      const successor = row(state, worker).chief_thread_id as string;
+      expect(successor).not.toBe(child);
+      expect(row(state, successor)).toMatchObject({ role: "chief", coordinator_thread_id: coord, coordinator: null });
+      expect(row(state, child).state).toBe("complete");
+      const roster = await rosterOf(state, coord);
+      expect(roster).toContain(`(${successor})`);
+      expect(roster).not.toContain(`(${child})`);
+      expect(roster).toContain("closed: 1");
+    });
+
+    test("an unlinked project Chief receives the work and becomes C's child, keeping its own work", async () => {
+      const state = await setup();
+      const { coord, child, worker } = await orphaned(state);
+      const project = await make(state);
+      const own = (await delegate(state, project, "Own work")).threadId;
+      await archive(state, child);
+      await state.supervisorCycle();
+      expect(row(state, worker).chief_thread_id).toBe(project);
+      expect(row(state, own).chief_thread_id).toBe(project);
+      expect(row(state, project)).toMatchObject({ coordinator_thread_id: coord, coordinator: null });
+      expect(row(state, child).state).toBe("complete");
+      expect(await rosterOf(state, coord)).toContain(`(${project})`);
+    });
+
+    test("a project Chief linked to another Coordinator is not given the work: a dedicated successor is started and the other Coordinator's child is untouched", async () => {
+      const state = await setup();
+      const { coord, child, worker } = await orphaned(state);
+      const other = await coordinator(state, "proj_2");
+      const foreign = (await spawnChild(state, other, { projectId: "proj_1" }, "proj_2")).id;
+      const before = { ...row(state, foreign) };
+      await archive(state, child);
+      await state.supervisorCycle();
+      const successor = row(state, worker).chief_thread_id as string;
+      expect(successor).not.toBe(foreign);
+      expect(successor).not.toBe(child);
+      expect(row(state, successor)).toMatchObject({ role: "chief", coordinator_thread_id: coord });
+      expect(row(state, foreign)).toMatchObject({ role: "chief", project_id: "proj_1", title: before.title, coordinator_thread_id: other, chief_thread_id: before.chief_thread_id });
+      expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads WHERE chief_thread_id=?").get(foreign)).toEqual({ n: 0 });
+      expect(row(state, child).state).toBe("complete");
+      const otherRoster = await rosterOf(state, other);
+      expect(otherRoster).toContain(`(${foreign})`);
+      expect(otherRoster).not.toContain("closed:");
+    });
+
+    test("a superseded child sends no failed, ended or stalled alert afterwards", async () => {
+      const state = await setup();
+      await state.harness.behavior.setSettings({ stallMinutes: "1" });
+      const { child } = await orphaned(state);
+      await archive(state, child);
+      await state.supervisorCycle();
+      expect(row(state, child).state).toBe("complete");
+      const known = kinds(state).map((alert) => alert.key);
+      for (const event of ["thread.failed", "thread.archived"] as const) {
+        state.live.set(child, { ...state.live.get(child)!, status: "error" });
+        await state.harness.behavior.emitThreadEvent(event, { thread: state.live.get(child)!, error: null });
+        await settle();
+      }
+      elapse(3_600_000);
+      await state.supervisorCycle();
+      expect(kinds(state).map((alert) => alert.key).filter((key) => key.includes(`${child}:coordinator-`) && !known.includes(key))).toEqual([]);
+    });
+
+    test("bb chief adopt refuses a thread linked to a Coordinator that the project's Chief does not share: nothing changes and the thread is not renamed", async () => {
+      const state = await setup();
+      const other = await coordinator(state, "proj_2");
+      const foreign = (await spawnChild(state, other, { projectId: "proj_1" }, "proj_2")).id;
+      const plain = await make(state);
+      const worker = (await delegate(state, plain, "Plain work")).threadId;
+      const snapshot = () => ({
+        rows: state.db.prepare("SELECT thread_id, state, chief_thread_id, coordinator_thread_id FROM managed_threads ORDER BY thread_id").all(),
+        title: state.live.get(foreign)!.title,
+      });
+      const before = snapshot();
+      const result = await cli(state, ["adopt", "--thread", foreign]);
+      expect(result.exitCode).not.toBe(0);
+      expect(`${result.stderr}${result.stdout}`).toContain(other);
+      expect(snapshot()).toEqual(before);
+      expect(row(state, worker).chief_thread_id).toBe(plain);
+    });
+
+    test("bb chief adopt of a fresh thread in a Coordinator's child's project takes the child's work and keeps its Coordinator", async () => {
+      const state = await setup();
+      const { coord, child, worker } = await orphaned(state);
+      state.addLive("thr_fresh", "proj_1");
+      const result = await cli(state, ["adopt", "--thread", "thr_fresh"]);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(row(state, worker).chief_thread_id).toBe("thr_fresh");
+      expect(row(state, "thr_fresh")).toMatchObject({ role: "chief", coordinator_thread_id: coord });
+      expect(row(state, child).state).toBe("complete");
+    });
+
+    test("a Chief whose Coordinator is archived can be attached by another Coordinator; one whose Coordinator is live cannot", async () => {
+      const state = await setup();
+      const first = await coordinator(state);
+      const child = (await spawnChild(state, first)).id;
+      const second = await coordinator(state);
+      expect(await call(state, "chief_attach", { threadIds: [child] }, second)).toBe(`${child}: not attached: already belongs to Coordinator ${first}.`);
+      expect(row(state, child).coordinator_thread_id).toBe(first);
+      await archive(state, first);
+      expect(await call(state, "chief_attach", { threadIds: [child] }, second)).toBe(`${child}: attached.`);
+      expect(row(state, child).coordinator_thread_id).toBe(second);
+    });
+  });
+
+  describe("roster signals (COORD-8)", () => {
+    const header = (text: string, id: string) => text.split("\n").find((line) => line.includes(`(${id})`))!;
+    const activate = async (state: S, id: string) => {
+      state.live.set(id, { ...state.live.get(id)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(id)! });
+      await settle();
+    };
+
+    test("a child that asked the owner this turn shows when, until it starts its next turn", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const asking = (await spawnChild(state, coord, { title: "Asking" })).id;
+      const quiet = (await spawnChild(state, coord, { title: "Quiet" })).id;
+      await idle(state, asking);
+      await idle(state, quiet);
+      elapse(0);
+      await call(state, "chief_escalate", { request: "Which team owns this?" }, asking);
+      await settle();
+      const at = (state.db.prepare("SELECT created_at FROM alert_outbox WHERE dedupe_key LIKE '%:coordinator-need-you:%'").get() as { created_at: number }).created_at;
+      const roster = await call(state, "chief_roster", {}, coord);
+      expect(header(roster, asking)).toMatch(new RegExp(` · needs the owner since ${new Date(at).toISOString().replace(/[.]/g, "\\.")}$`));
+      expect(header(roster, quiet)).not.toContain("needs the owner");
+      await activate(state, asking);
+      expect(header(await call(state, "chief_roster", {}, coord), asking)).not.toContain("needs the owner");
+      await idle(state, asking);
+      expect(header(await call(state, "chief_roster", {}, coord), asking)).not.toContain("needs the owner");
+    });
+
+    test("an archived child is left out of the list and counted as closed", async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      const kept = (await spawnChild(state, coord, { title: "Kept" })).id;
+      const gone = (await spawnChild(state, coord, { title: "Gone" })).id;
+      state.live.set(gone, { ...state.live.get(gone)!, archivedAt: new Date().toISOString() });
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(gone)! });
+      await settle();
+      const roster = await call(state, "chief_roster", {}, coord);
+      expect(roster).toContain(`(${kept})`);
+      expect(roster).not.toContain(`(${gone})`);
+      expect(roster).toContain("closed: 1");
+      expect(await call(state, "chief_roster", {}, coord)).not.toContain("closed: 2");
+    });
+  });
+
+  describe("goal on upgrade (COORD-1)", () => {
+    const briefPath = (state: S, id: string) => join(state.storageRoot, id, "brief.md");
+    const GOAL = "Keep the checkout and loyalty teams moving in parallel; ask me before touching billing.";
+
+    test("a goal is written to brief.md under the Coordinator heading, verbatim; no goal writes no file", async () => {
+      const state = await setup();
+      const withGoal = await make(state);
+      const text = await call(state, "chief_coordinate", { goal: GOAL }, withGoal);
+      expect(text).toContain("now a Coordinator");
+      const brief = await readFile(briefPath(state, withGoal), "utf8");
+      expect(brief).toContain("## Coordinator brief");
+      expect(brief).toContain(GOAL);
+      const without = await make(state);
+      await call(state, "chief_coordinate", {}, without);
+      await expect(readFile(briefPath(state, without), "utf8")).rejects.toThrow();
+    });
+
+    test("a repeated call answers Already a Coordinator and leaves brief.md as it was", async () => {
+      const state = await setup();
+      const id = await make(state);
+      await call(state, "chief_coordinate", { goal: GOAL }, id);
+      const before = await readFile(briefPath(state, id), "utf8");
+      expect(await call(state, "chief_coordinate", { goal: "A different goal." }, id)).toBe("Already a Coordinator.");
+      expect(await readFile(briefPath(state, id), "utf8")).toBe(before);
+    });
+
+    test("a brief.md write that fails is reported, and the upgrade stands", async () => {
+      const state = await setup();
+      const id = await make(state);
+      state.failWritesMatching(/brief\.md/);
+      const text = await call(state, "chief_coordinate", { goal: GOAL }, id);
+      state.failWritesMatching(null);
+      expect(text).toContain("brief.md not saved");
+      expect(row(state, id).coordinator).toBe(1);
+    });
+
+    test.each([["4000 characters", "g".repeat(4_000), true], ["4001 characters", "g".repeat(4_001), false], ["only spaces", "   ", false]])("a goal of %s is %s", async (_label, goal, accepted) => {
+      const state = await setup();
+      const id = await make(state);
+      if (accepted) {
+        await call(state, "chief_coordinate", { goal }, id);
+        expect(row(state, id).coordinator).toBe(1);
+      } else {
+        await expect(call(state, "chief_coordinate", { goal }, id)).rejects.toThrow();
+        expect(row(state, id).coordinator).toBeFalsy();
+      }
     });
   });
 });
