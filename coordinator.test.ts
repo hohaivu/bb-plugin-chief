@@ -1359,4 +1359,248 @@ describe("Coordinator", () => {
       expect(Date.now()).toBeGreaterThan(t0);
     });
   });
+
+  describe("child signals to the Coordinator (COORD-6, COORD-12)", () => {
+    const sha12 = (text: string) => createHash("sha1").update(text).digest("hex").slice(0, 12);
+    const PR = "https://github.com/acme/shop/pull/8";
+    const activate = async (state: S, id: string) => {
+      state.live.set(id, { ...state.live.get(id)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(id)! });
+      await settle();
+    };
+    const fail = async (state: S, id: string) => {
+      state.live.set(id, { ...state.live.get(id)!, status: "failed" });
+      await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(id)!, error: null });
+      await settle();
+    };
+    const end = async (state: S, id: string, event: "thread.archived" | "thread.deleted") => {
+      state.live.set(id, { ...state.live.get(id)!, ...(event === "thread.archived" ? { archivedAt: new Date().toISOString() } : { deletedAt: new Date().toISOString() }) });
+      await state.harness.behavior.emitThreadEvent(event, { thread: state.live.get(id)! });
+      await settle();
+    };
+    const keysOf = (state: S, kind: string) => kinds(state).filter((alert) => alert.key.includes(`:coordinator-${kind}:`)).map((alert) => alert.key);
+    const linked = async (state: S) => {
+      const coord = await coordinator(state);
+      return { coord, child: (await spawnChild(state, coord)).id };
+    };
+
+    describe("need-you receipt per child turn", () => {
+      test("the same request twice in one turn is one row and one message; after the child's next turn it is a second row and a second message", async () => {
+        const state = await setup();
+        const { coord, child } = await linked(state);
+        const request = "Which team owns this?";
+        const sends = () => sentToCoordinator(state, coord).filter((sent) => String(sent.input[0].text).includes(request)).length;
+        const cycle = row(state, child).active_cycle as number;
+        await call(state, "chief_escalate", { request }, child);
+        await call(state, "chief_escalate", { request }, child);
+        await settle();
+        expect(keysOf(state, "need-you")).toEqual([`${child}:coordinator-need-you:${sha12(request)}:${cycle}`]);
+        expect(sends()).toBe(1);
+
+        await activate(state, child);
+        await idle(state, child);
+        expect(row(state, child).active_cycle).toBe(cycle + 1);
+        await call(state, "chief_escalate", { request }, child);
+        await settle();
+        expect(keysOf(state, "need-you")).toEqual([`${child}:coordinator-need-you:${sha12(request)}:${cycle}`, `${child}:coordinator-need-you:${sha12(request)}:${cycle + 1}`]);
+        expect(sends()).toBe(2);
+      });
+
+      test("the message carries the pull request of the concerned thread as its own line; a chat-only message carries none", async () => {
+        const state = await setup();
+        const { coord, child } = await linked(state);
+        const worker = await delegate(state, child, "Fix totals", { prUrl: PR });
+        await call(state, "chief_escalate", { threadId: worker.threadId, request: "Pick a rounding rule." }, child);
+        await call(state, "chief_escalate", { request: "Which team owns this?" }, child);
+        await settle();
+        const text = (needle: string) => String(sentToCoordinator(state, coord).find((sent) => String(sent.input[0].text).includes(needle))!.input[0].text);
+        expect(text("Pick a rounding rule.").split("\n")).toContain(`PR: ${PR}`);
+        expect(text("Which team owns this?")).not.toContain("PR:");
+      });
+
+      const legacyKey = (child: string, request: string) => `${child}:coordinator-need-you:${sha12(request)}`;
+      const seedLegacy = (state: S, coord: string, child: string, request: string) => {
+        const key = legacyKey(child, request);
+        const message = `[Coordinator alert]\nChild Chief ${child} is blocked on a Need you:\n${request}\nThe owner answers it in ${child}.\n[alert ${createHash("sha1").update(key).digest("hex").slice(0, 10)}]`;
+        state.db.prepare("INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, created_at, attempts, last_attempt_at) VALUES (?, ?, ?, ?, ?, 1, ?)").run(key, coord, child, message, Date.now() - 120_000, Date.now() - 120_000);
+        return { key, message };
+      };
+
+      test("a need-you row written before the cycle suffix is still delivered while the child stays linked to that Coordinator, whatever its cycle", async () => {
+        const state = await setup();
+        const { coord, child } = await linked(state);
+        for (let turn = 0; turn < 3; turn += 1) { await activate(state, child); await idle(state, child); }
+        expect(row(state, child).active_cycle).toBeGreaterThanOrEqual(3);
+        const { key, message } = seedLegacy(state, coord, child, "Which team owns this?");
+        await state.supervisorCycle();
+        expect(sentToCoordinator(state, coord).map((sent) => String(sent.input[0].text))).toEqual([message]);
+        expect(state.db.prepare("SELECT delivered_at, last_error FROM alert_outbox WHERE dedupe_key=?").get(key)).toMatchObject({ last_error: null });
+      });
+
+      test("a need-you row written before the cycle suffix is never sent once its Coordinator is archived and another one took the child over", async () => {
+        const state = await setup();
+        const { coord, child } = await linked(state);
+        seedLegacy(state, coord, child, "Which team owns this?");
+        await end(state, coord, "thread.archived");
+        const successor = await coordinator(state);
+        expect(await call(state, "chief_attach", { threadIds: [child] }, successor)).toBe(`${child}: attached.`);
+        elapse(31_000);
+        await state.supervisorCycle();
+        expect(state.sent.filter((sent) => String(sent.input[0].text).includes("Which team owns this?"))).toEqual([]);
+      });
+    });
+
+    describe("Chief active cycle", () => {
+      test("an active event counts one cycle and stamps active_since; a repeat changes neither; idle clears active_since; the next active counts again", async () => {
+        const state = await setup();
+        const { child } = await linked(state);
+        elapse(0);
+        const start = row(state, child).active_cycle as number;
+        await activate(state, child);
+        const first = row(state, child);
+        expect(first).toMatchObject({ active_cycle: start + 1, state: "active" });
+        expect(first.active_since).toBe(Date.now());
+        elapse(5_000);
+        await activate(state, child);
+        expect(row(state, child)).toMatchObject({ active_cycle: start + 1, active_since: first.active_since });
+        await idle(state, child);
+        expect(row(state, child)).toMatchObject({ active_cycle: start + 1, active_since: null, state: "idle" });
+        await activate(state, child);
+        expect(row(state, child)).toMatchObject({ active_cycle: start + 2 });
+      });
+
+      test("reconcile that finds a Chief active counts one cycle, once however many cycles follow", async () => {
+        const state = await setup();
+        const { child } = await linked(state);
+        const start = row(state, child).active_cycle as number;
+        state.live.set(child, { ...state.live.get(child)!, status: "active" }); // the host never delivered thread.active
+        await state.supervisorCycle();
+        await state.supervisorCycle();
+        expect(row(state, child)).toMatchObject({ state: "active", active_cycle: start + 1 });
+        expect(row(state, child).active_since).not.toBeNull();
+      });
+    });
+
+    describe("failed, ended and stalled (COORD-12)", () => {
+      test("a failed child alerts once per cycle: a repeat adds none, a new turn that fails again adds one", async () => {
+        const state = await setup();
+        const { coord, child } = await linked(state);
+        await activate(state, child);
+        const cycle = row(state, child).active_cycle as number;
+        await fail(state, child);
+        await fail(state, child);
+        expect(keysOf(state, "failed")).toEqual([`${child}:coordinator-failed:${cycle}`]);
+        expect(sentToCoordinator(state, coord).filter((sent) => String(sent.input[0].text).includes("failed"))).toHaveLength(1);
+        await activate(state, child);
+        await fail(state, child);
+        expect(keysOf(state, "failed")).toEqual([`${child}:coordinator-failed:${cycle}`, `${child}:coordinator-failed:${cycle + 1}`]);
+      });
+
+      test.each(["thread.archived", "thread.deleted"] as const)("a %s child alerts once for that state", async (event) => {
+        const state = await setup();
+        const { coord, child } = await linked(state);
+        const state_ = event === "thread.archived" ? "archived" : "deleted";
+        await end(state, child, event);
+        await end(state, child, event);
+        await state.supervisorCycle();
+        expect(keysOf(state, "ended")).toEqual([`${child}:coordinator-ended:${state_}`]);
+        expect(sentToCoordinator(state, coord).filter((sent) => String(sent.input[0].text).includes(`was ${state_}`))).toHaveLength(1);
+      });
+
+      describe("stalled", () => {
+        const THRESHOLD = 60_000;
+        /** An idle child that owns one ready worker, quiet since now. */
+        async function idleWithReadyWorker(state: S) {
+          await state.harness.behavior.setSettings({ stallMinutes: "1" });
+          const { coord, child } = await linked(state);
+          const worker = (await delegate(state, child, "Fix totals")).threadId;
+          await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker);
+          await activate(state, child);
+          await idle(state, child);
+          elapse(0);
+          return { coord, child, worker };
+        }
+        const stalled = (state: S) => keysOf(state, "stalled");
+
+        test("an idle child with open work, no busy row, no Need you and a quiet threshold alerts once for that cycle", async () => {
+          const state = await setup();
+          const { child } = await idleWithReadyWorker(state);
+          elapse(THRESHOLD - 1_000);
+          await state.supervisorCycle();
+          expect(stalled(state)).toEqual([]);
+          elapse(2_000);
+          await state.supervisorCycle();
+          await state.supervisorCycle();
+          expect(stalled(state)).toEqual([`${child}:coordinator-stalled:${row(state, child).active_cycle}:idle`]);
+        });
+
+        test("an idle child whose only open work is a ready todo alerts; one whose only open work waits on an after: condition does not", async () => {
+          const state = await setup();
+          await state.harness.behavior.setSettings({ stallMinutes: "1" });
+          const { child } = await linked(state);
+          await activate(state, child);
+          await idle(state, child);
+          await call(state, "chief_roster", { todo: { text: "Later", after: "the release" } }, child);
+          elapse(0);
+          elapse(THRESHOLD + 1_000);
+          await state.supervisorCycle();
+          expect(stalled(state)).toEqual([]);
+          await call(state, "chief_roster", { todo: { text: "Now" } }, child);
+          elapse(THRESHOLD + 1_000);
+          await state.supervisorCycle();
+          expect(stalled(state)).toEqual([`${child}:coordinator-stalled:${row(state, child).active_cycle}:idle`]);
+        });
+
+        test.each([
+          ["a busy owned row", async (state: S, ctx: { child: string; worker: string }) => { await activate(state, ctx.worker); }],
+          ["a Need you in this cycle", async (state: S, ctx: { child: string }) => { await call(state, "chief_escalate", { request: "Which team owns this?" }, ctx.child); await settle(); }],
+          ["no open work (the worker is complete)", async (state: S, ctx: { child: string; worker: string }) => { await completeWorker(state, ctx.child, ctx.worker); }],
+        ])("an idle child past the threshold gets no stalled alert with %s", async (_label, block) => {
+          const state = await setup();
+          const ctx = await idleWithReadyWorker(state);
+          await block(state, ctx);
+          elapse(THRESHOLD + 1_000);
+          await state.supervisorCycle();
+          expect(stalled(state)).toEqual([]);
+        });
+
+        test("an active child alerts once per cycle at exactly the threshold, not a millisecond before; a later turn alerts again", async () => {
+          const state = await setup();
+          await state.harness.behavior.setSettings({ stallMinutes: "1" });
+          const { child } = await linked(state);
+          elapse(0);
+          await activate(state, child);
+          const cycle = row(state, child).active_cycle as number;
+          elapse(THRESHOLD - 1);
+          await state.supervisorCycle();
+          expect(stalled(state)).toEqual([]);
+          elapse(1);
+          await state.supervisorCycle();
+          await state.supervisorCycle();
+          expect(stalled(state)).toEqual([`${child}:coordinator-stalled:${cycle}:active`]);
+          await idle(state, child);
+          await activate(state, child);
+          elapse(THRESHOLD);
+          await state.supervisorCycle();
+          expect(stalled(state)).toEqual([`${child}:coordinator-stalled:${cycle}:active`, `${child}:coordinator-stalled:${cycle + 1}:active`]);
+        });
+
+        test("the worker stall loop still skips Chiefs: an active Chief past twice the threshold gets no stall row or message, while a worker in the same state does", async () => {
+          const state = await setup();
+          await state.harness.behavior.setSettings({ stallMinutes: "1" });
+          const plain = await make(state);
+          const worker = (await delegate(state, plain, "Fix totals")).threadId;
+          elapse(0);
+          await activate(state, plain);
+          await activate(state, worker);
+          elapse(2 * THRESHOLD + 1_000);
+          await state.supervisorCycle();
+          const stallKeys = (state.db.prepare("SELECT dedupe_key AS key FROM alert_outbox WHERE dedupe_key LIKE '%:stall:%'").all() as { key: string }[]).map((alert) => alert.key);
+          expect(stallKeys.filter((key) => key.startsWith(`${worker}:`)).length).toBeGreaterThan(0);
+          expect(stallKeys.filter((key) => key.startsWith(`${plain}:`))).toEqual([]);
+          expect(state.sent.filter((sent) => String(sent.input[0].text).includes(`Chief “`) && String(sent.input[0].text).includes("has been active for"))).toEqual([]);
+        });
+      });
+    });
+  });
 });
