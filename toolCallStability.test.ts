@@ -9,6 +9,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
+import { acceptStackedBranchDelta } from "./test/stackedBranchToolDelta";
 import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, chiefPreloadTail } from "./test/toolConfigFixture";
 import { withHostCompaction } from "./test/shrinkEdits";
 
@@ -159,6 +160,8 @@ describe("tool-call stability", () => {
     for (const [name, definition] of Object.entries(now.catalog)) {
       // Plan 2 contract 6: the Spec Writer wording moved; asserted, then restored to base so the rest still compares.
       // Reviewer-prompt wave: chief_review's focus/acceptedGaps and chief_report's plan flags; asserted, then restored to base (before the wording restore below rewrites the plan text).
+      // Stacked-branch worktrees: optional branch / stackOn and one forge `base` sentence; asserted, then removed.
+      acceptStackedBranchDelta(definition, name);
       acceptReviewerToolDelta(definition, base.catalog[name], name);
       acceptSpecLaneWording(definition, base.catalog[name], name);
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.

@@ -6,6 +6,7 @@ import { disposeAll } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { withHostCompaction } from "./test/shrinkEdits";
+import { acceptStackedBranchDelta } from "./test/stackedBranchToolDelta";
 import { INSTRUCTIONS_CAP, acceptCoordinateGoalDelta, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, type ToolConfig, toolConfigCases, toolConfigFixture } from "./test/toolConfigFixture";
 
 provideSdk(sdkTesting);
@@ -36,6 +37,8 @@ export function assertPreserved(base: ToolConfig, original: ToolConfig) {
       now.description = now.description.replace(ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD);
     }
     acceptCoordinateGoalDelta(now, name);
+    // The stacked-branch additions are removed here (a no-op on base); their exact shape is checked by compareToolConfig.
+    acceptStackedBranchDelta(now, name, false);
     if (JSON.stringify(now) !== JSON.stringify(base.catalog[name])) fail(`catalog ${name}`);
   }
   if (head.entries.length !== base.entries.length) fail("entry count");

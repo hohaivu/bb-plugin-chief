@@ -2,6 +2,7 @@ import { configurationContext, setup, start } from "./harness";
 import { GAPS_PROPERTY, FOCUS_PROPERTY, withPlanFlags } from "./reviewerToolDelta";
 import { ATTACH_DEFINITION, acceptEvidenceOnlyDelta } from "./specLaneWording";
 import { withHostCompaction } from "./shrinkEdits";
+import { acceptStackedBranchDelta } from "./stackedBranchToolDelta";
 
 // The tool-config capture of toolCallStability.test.ts (lines 20-69, same cases, same normalization), reused to snapshot another commit.
 // test/fixtures/tool-config-9689364.txt was captured by running it unchanged on base 9689364; tool-config-7178582.txt stays frozen.
@@ -123,6 +124,7 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
     };
     acceptEvidenceOnlyDelta(now, name);
     acceptCoordinateGoalDelta(now, name);
+    acceptStackedBranchDelta(now, name);
     if (name === "chief_delegate") edit(now, "kind", KIND_OLD, KIND_NEW, was.inputSchema.properties.kind!.description!);
     if (name === "chief_complete") edit(now, "skipReview", SKIP_OLD, SKIP_NEW, was.inputSchema.properties.skipReview!.description!);
     if (name === "chief_review") {

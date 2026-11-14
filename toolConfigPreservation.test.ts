@@ -162,6 +162,27 @@ describe("tool config: base 9689364 to head", () => {
       expect(run).toThrow("key, tools or skills");
     });
     const delegate = (head: ToolConfig) => head.catalog["chief_delegate"]!.inputSchema as { required?: string[]; properties: Record<string, any> };
+    // Stacked-branch worktrees: the exact optional branch / stackOn / forge `base` sentence is the only schema addition allowed for them.
+    test("chief_plan.branch description changed", async () => {
+      const run = await mutated((head) => { (head.catalog["chief_plan"]!.inputSchema.properties["branch"] as { description: string }).description += " Extra."; });
+      expect(run).toThrow("chief_plan.branch");
+    });
+    test("chief_consult.branch made required", async () => {
+      const run = await mutated((head) => { const schema = head.catalog["chief_consult"]!.inputSchema; schema.required = [...(schema.required ?? []), "branch"]; });
+      expect(run).toThrow("chief_consult.branch");
+    });
+    test("chief_research.branch copied onto another tool", async () => {
+      const run = await mutated((head) => { (head.catalog["chief_inspect"]!.inputSchema.properties as Record<string, unknown>)["branch"] = head.catalog["chief_research"]!.inputSchema.properties["branch"]; });
+      expect(run).toThrow("chief_inspect (description or schema)");
+    });
+    test("chief_report plan wave stackOn description changed", async () => {
+      const run = await mutated((head) => { (head.catalog["chief_report"]!.inputSchema.properties["plan"] as any).anyOf[1].items.properties.stackOn.description += " Extra."; });
+      expect(run).toThrow("chief_report plan wave: stackOn");
+    });
+    test("chief_forge_init.base sentence reworded", async () => {
+      const run = await mutated((head) => { const base = head.catalog["chief_forge_init"]!.inputSchema.properties["base"]!; base.description = base.description!.replace("a stacked or branch-based plan fixes it", "a plan fixes it"); });
+      expect(run).toThrow("chief_forge_init.base");
+    });
     test("chief_delegate.evidenceOnly missing", async () => {
       const run = await mutated((head) => { delete delegate(head).properties["evidenceOnly"]; });
       expect(run).toThrow("chief_delegate.evidenceOnly");
