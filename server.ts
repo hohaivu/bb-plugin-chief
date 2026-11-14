@@ -98,6 +98,13 @@ export default async function plugin(bb: BbPluginApi) {
   registerResearchTool(ctx);
   ctx.bb.background.schedule("retro", "*/10 * * * *", async () => { await ctx.retroTick(Date.now()); });
   ctx.bb.background.schedule("daily-report", "0 8 * * *", async () => { await runDailyReport(ctx); });
+  // BB starts services only after the previous generation is disposed, so the replay sees its late rows and its finalizer cannot delete them.
+  ctx.bb.background.service("brief-replay", {
+    async start(signal) {
+      ctx.resumeBriefs();
+      await new Promise<void>((resolve) => { if (signal.aborted) resolve(); else signal.addEventListener("abort", () => resolve(), { once: true }); });
+    },
+  });
   registerHost(ctx);
   registerCli(ctx);
   const { settings, store } = ctx;

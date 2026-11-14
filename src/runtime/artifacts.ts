@@ -8,6 +8,9 @@ import type { Ctx } from "./context";
 
 export function createArtifacts(ctx: Ctx) {
   const { bb, db } = ctx;
+  // A disposed instance's writes fail on a stale handle: its row stays for the next generation to replay.
+  let disposed = false;
+  bb.onDispose(() => { disposed = true; });
   /** The server, not the planner, owns writing the plan: the planner submits it
    * through chief_report and this lands it in the shared artifact folder (see artifactDir). */
   async function writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string) {
@@ -108,17 +111,45 @@ export function createArtifacts(ctx: Ctx) {
   /** Best-effort: keeps the exact spawn prompt in the thread's own storage so it can re-read its brief after a compaction,
    * and as the brief.md Chief artifact, which cleanup never clears. The two copies run independently, each retried while
    * a new environment provisions; the artifact copy goes to the project's host without asking for the thread's storage
-   * location. Each write fails alone and persistBrief never throws. */
+   * location. The brief is held in pending_briefs until both copies settle, so a plugin reload does not lose it.
+   * Each write fails alone, DB failures only warn, and persistBrief never throws. */
   async function persistBrief(threadId: string, projectId: string, prompt: string) {
-    await Promise.all([
-      retryWhileProvisioning(() => writeStorageFile(threadId, "brief.md", prompt))
-        .catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`)),
-      // The host lookup lives in this branch so a slow lookup never delays the storage copy.
-      ctx.projectHostId(projectId)
-        .then((hostId) => retryWhileProvisioning(() => writeArtifact(threadId, projectId, "brief.md", prompt, hostId ?? undefined)))
-        .catch((error) => bb.log.warn(`Could not write ${threadId}'s brief artifact: ${String(error)}`)),
-    ]);
+    try {
+      db.prepare(`INSERT OR REPLACE INTO pending_briefs (thread_id, project_id, prompt, at) VALUES (?, ?, ?, ?)`).run(threadId, projectId, prompt, Date.now());
+    } catch (error) {
+      bb.log.warn(`Could not record ${threadId}'s pending brief: ${String(error)}`);
+    }
+    try {
+      await Promise.all([
+        retryWhileProvisioning(() => writeStorageFile(threadId, "brief.md", prompt))
+          .catch((error) => bb.log.warn(`Could not write ${threadId}'s brief: ${String(error)}`)),
+        // The host lookup lives in this branch so a slow lookup never delays the storage copy.
+        ctx.projectHostId(projectId)
+          .then((hostId) => retryWhileProvisioning(() => writeArtifact(threadId, projectId, "brief.md", prompt, hostId ?? undefined)))
+          .catch((error) => bb.log.warn(`Could not write ${threadId}'s brief artifact: ${String(error)}`)),
+      ]);
+    } finally {
+      if (!disposed) {
+        try {
+          db.prepare(`DELETE FROM pending_briefs WHERE thread_id=?`).run(threadId);
+        } catch (error) {
+          bb.log.warn(`Could not clear ${threadId}'s pending brief: ${String(error)}`);
+        }
+      }
+    }
   }
-  return { persistBrief, readArtifact, writeArtifact, writePlan, writeStorageFile };
+
+  /** Replays briefs a reload interrupted; called once per plugin generation by the brief-replay service. Returns at once. */
+  function resumeBriefs() {
+    let rows: { thread_id: string; project_id: string; prompt: string }[];
+    try {
+      rows = db.prepare(`SELECT thread_id, project_id, prompt FROM pending_briefs`).all() as typeof rows;
+    } catch (error) {
+      bb.log.warn(`Could not read pending briefs: ${String(error)}`);
+      return;
+    }
+    for (const row of rows) void persistBrief(row.thread_id, row.project_id, row.prompt);
+  }
+  return { persistBrief, resumeBriefs, readArtifact, writeArtifact, writePlan, writeStorageFile };
 }
 

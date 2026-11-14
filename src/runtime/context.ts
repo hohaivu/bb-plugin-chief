@@ -187,6 +187,7 @@ export interface Ctx {
   trackerSync: ReturnType<typeof createForgeWiring>["trackerSync"];
   readArtifact: ReturnType<typeof createArtifacts>["readArtifact"];
   persistBrief: ReturnType<typeof createArtifacts>["persistBrief"];
+  resumeBriefs: ReturnType<typeof createArtifacts>["resumeBriefs"];
   writeArtifact: ReturnType<typeof createArtifacts>["writeArtifact"];
   writePlan: ReturnType<typeof createArtifacts>["writePlan"];
   writeStorageFile: ReturnType<typeof createArtifacts>["writeStorageFile"];
