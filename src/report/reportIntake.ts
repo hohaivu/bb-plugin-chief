@@ -42,7 +42,7 @@ export interface ReportIntakeAdapters {
 
 export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 
-type WaveInput = { body: string; dependsOn?: number[]; design?: boolean; test?: boolean; spec?: boolean; feature?: boolean; reshape?: boolean };
+type WaveInput = { body: string; dependsOn?: number[]; stackOn?: number; design?: boolean; test?: boolean; spec?: boolean; feature?: boolean; reshape?: boolean };
 
 /** One Markdown bullet per finding of the given severity, never clipped. */
 export function findingLines(list: ReportFinding[], severity: ReportFinding["severity"]) {
@@ -274,6 +274,19 @@ export function checkPlan(plan: string | unknown[]): string[] {
     if (parent === null) errors.push(`plan wave ${n} is test: true but starts a chain; set dependsOn [k] with k the chain's last implementation wave.`);
     else if (parent !== undefined && (designs[parent - 1] || tests[parent - 1])) errors.push(`plan wave ${n} is test: true but builds on ${designs[parent - 1] ? "design" : "test"} wave ${parent}; build it on the chain's last implementation wave.`);
   });
+  // stackOn: an earlier implementation wave, on another chain, that a chain head builds on. Skipped on a wave whose dependsOn is invalid.
+  items.forEach((item, index) => {
+    const stackOn = typeof item === "object" && item !== null ? (item as { stackOn?: unknown }).stackOn : undefined;
+    if (stackOn === undefined) return;
+    const n = index + 1;
+    const bad = (what: string, fix: string) => errors.push(`plan wave ${n} stackOn is ${JSON.stringify(stackOn)}, ${what}; ${fix}`);
+    if (typeof stackOn !== "number" || !Number.isInteger(stackOn)) bad(`${kind(stackOn)}, not an integer`, "use the 1-based earlier wave number.");
+    else if (stackOn < 1 || stackOn >= n) bad("not an earlier wave", n === 1 ? "wave 1 stacks on nothing; drop stackOn." : `use one wave from 1 to ${n - 1}.`);
+    else {
+      if (parents[index] !== undefined && parents[index] !== null) bad("but wave " + n + " is not a chain head", "stackOn goes on a wave with dependsOn [].");
+      if (tests[stackOn - 1] || designs[stackOn - 1]) bad(`${tests[stackOn - 1] ? "test" : "design"} wave ${stackOn}`, "stack on an implementation wave.");
+    }
+  });
   const taken = new Set<number>();
   parents.forEach((parent, index) => {
     if (parent === undefined || parent === null) return;
@@ -475,6 +488,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof planInput === "string" ? planInput : planInput[index]!.body)!,
         title: waveTitle(typeof planInput === "string" ? planInput : planInput[index]!.body),
         ...(typeof planInput !== "string" && planInput[index]!.dependsOn ? { dependsOn: planInput[index]!.dependsOn } : {}),
+        ...(typeof planInput !== "string" && planInput[index]!.stackOn !== undefined ? { stackOn: planInput[index]!.stackOn } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.test ? { test: true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.spec ? { spec: true } : {}),

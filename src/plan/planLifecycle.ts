@@ -29,6 +29,8 @@ export interface Admission {
   waveTotal?: number;
   waveNext: number | null;
   waveIndependent: boolean;
+  /** The plan base a fresh chain head is stacked on (its branch and PR are based on it); absent on the project default. */
+  stackBase?: string;
   designWave: boolean;
   implementsDesign: number | null;
   contracts?: string;
@@ -54,7 +56,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
   ledger: { taskChain(workerThreadId: string): string[] },
   reviewRefusal: (planner: Row) => string | null,
 ) {
-  const { planWavesFor, waveWorkers, specWriters, writersAt, latestWorker, specWave, specChain, writerPending, latestWriter, chainOwner, chainTests, laneFor, sideLane } = schedule;
+  const { planWavesFor, waveWorkers, specWriters, writersAt, latestWorker, specWave, specChain, writerPending, latestWriter, chainOwner, chainTests, laneFor, sideLane, planBase } = schedule;
 
   /** Admits or refuses one chief_delegate. kind is the one the caller named (undefined: not named), resolvedKind the one
    * resolveDelegation gave; branch is the one the caller named. */
@@ -67,6 +69,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
     let waveTotal: number | undefined;
     let waveNext: number | null = null;
     let waveIndependent = false;
+    let stackBase: string | undefined;
     let designWave = false;
     let implementsDesign: number | null = null;
     let contracts: string | undefined;
@@ -204,6 +207,13 @@ export function createPlanLifecycle<Row extends PlanRow>(
           ? `Wave ${wave}'s chain (waves ${chain.join(", ")}) already has worker ${chainWorker.thread_id} on wave ${chainWorker.plan_wave}; a chain has one branch, PR and worktree. Continue it with replaces: ${chainWorker.thread_id} — ${sameChain}.`
           : `Wave ${wave} builds on wave ${parentOf(waves, wave)}: delegate its chain head, wave ${chainLead}, first (chief_forge_init, then chief_delegate), then continue with replaces: the chain's latest worker.`);
       }
+      // A fresh chain head on a plan base starts only once the base is ready and cut on a branch: never from the default base.
+      const pb = !prior && parent === null && (lane !== "side" || !owner) ? planBase(planThreadId, wave) : null;
+      if (pb) {
+        if (pb.waiting || !pb.base) throw new Error(`Wave ${wave} is stacked: ${pb.waiting ?? pb.unresolved}. Delegate it after that.`);
+        if (!request.branch) throw new Error(`Wave ${wave} stacks on ${pb.base}: run chief_forge_init (planThreadId: ${planThreadId}, wave: ${wave}) and pass its branch.`);
+        stackBase = pb.base;
+      }
       if (lane === "side") baseline = !!scheduled.baseline;
       if (kind === "tester") {
         for (let n: number | null = wave; n !== null; n = parentOf(waves, n)) {
@@ -249,7 +259,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
       for (const writer of chain.filter((row) => isWriter(row?.kind)).reverse()) specDocs.push(`Spec Writer ${writer!.thread_id}: report ${writer!.report_path ?? "none"}`);
     }
     // A Spec Writer's brief never lists the Spec Writer reports.
-    return { kind, planPath, waveTotal, waveNext, waveIndependent, designWave, implementsDesign, contracts, specSources, specDocs: isWriter(kind) ? [] : specDocs, baseline, specWave: planFirst, lane, sideChain };
+    return { kind, planPath, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, specSources, specDocs: isWriter(kind) ? [] : specDocs, baseline, specWave: planFirst, lane, sideChain };
   }
 
   /** chief_skip_tests's plan-side admission: refuses a wave that is not a test wave and a complete latest worker; the caller

@@ -95,6 +95,15 @@ export function createNextAction(ctx: Ctx) {
    * wave is ready (named once, on the plan's first reviewable tip, unless forAlert) — or, with no
    * plan link at all, its own review call. */
   function workerReadyNextStep(row: ManagedRow, forAlert = false): string | null {
+    const line = workerReadyStepLine(row, forAlert);
+    if (!line || !row.plan_thread_id || row.plan_wave == null || schedule.sideLane(row)) return line;
+    // A chain stacked on this wave starts now that this worker is ready.
+    const waves = planWavesFor(row.plan_thread_id);
+    const stacked = schedule.undelegatedHeads(row.plan_thread_id, waves).undelegated.filter((m) => waves[m - 1]?.stackOn === row.plan_wave);
+    return line + stacked.map((m) => ` Wave ${m} is stacked on this chain: run chief_forge_init (planThreadId: ${row.plan_thread_id}, wave: ${m}), then chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${m}).`).join("");
+  }
+
+  function workerReadyStepLine(row: ManagedRow, forAlert: boolean): string | null {
     const step = progress.readyStep(row, forAlert);
     if (!step) return null;
     switch (step.kind) {
@@ -218,12 +227,13 @@ export function createNextAction(ctx: Ctx) {
       const refusal = planReviewRefusal(row);
       if (refusal) return refusal;
       const waves = planWavesFor(row.thread_id);
-      const { heads, undelegated } = schedule.undelegatedHeads(row.thread_id, waves);
-      if (!undelegated.length) return null;
+      const { heads, undelegated, waiting } = schedule.undelegatedHeads(row.thread_id, waves);
+      const waitingLine = waiting.length ? ` Waves ${waiting.join(", ")} are stacked and start once their parent wave is ready.` : "";
+      if (!undelegated.length) return waiting.length ? waitingLine.trim() : null;
       if (heads.length === 1) {
-        return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${row.thread_id}, wave: 1), then chief_delegate (planThreadId: ${row.thread_id}, wave: 1).${specFirstLine(row.thread_id, waves, 1)} The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`;
+        return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${row.thread_id}, wave: 1), then chief_delegate (planThreadId: ${row.thread_id}, wave: 1).${specFirstLine(row.thread_id, waves, 1)} The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
       }
-      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${row.thread_id}, wave: N), then chief_delegate (planThreadId: ${row.thread_id}, wave: N), all in this turn. Each of these is an independent chain head and gets its own task title, branch, PR and worktree from the default base (chief_forge_init without base); its later waves continue that chain with replaces: the chain's latest worker, never a worker of another chain.${undelegated.map((n) => specFirstLine(row.thread_id, waves, n)).join("")} The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.`;
+      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${row.thread_id}, wave: N), then chief_delegate (planThreadId: ${row.thread_id}, wave: N), all in this turn. Each of these is an independent chain head and gets its own task title, branch, PR and worktree from its plan base (chief_forge_init derives it; omit base); its later waves continue that chain with replaces: the chain's latest worker, never a worker of another chain.${undelegated.map((n) => specFirstLine(row.thread_id, waves, n)).join("")} The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
     }
     if (row.role === "worker") {
       // A reviewer that still covers this worker's latest report — either busy
@@ -325,7 +335,7 @@ export function createNextAction(ctx: Ctx) {
 
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn: ctx.managedSpawn, controlsThread: (...a) => ctx.controlsThread(...a),
-    plan: { reviewRefusal, retestDebts: progress.retestDebts, reviewTargetsFor, planWavesFor, specWriters, taskWriters: ctx.taskWriters },
+    plan: { reviewRefusal, retestDebts: progress.retestDebts, reviewTargetsFor, planWavesFor, specWriters, taskWriters: ctx.taskWriters, planBase: ctx.planBase },
     host: {
       settledLive: async (worker) => {
         const live = await waitIdleAfterReport(worker);

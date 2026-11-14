@@ -10,7 +10,7 @@ import { REVIEW_ONLY } from "../core/roles";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "../core/text";
 import { terminal } from "../types";
 import type { ThreadStore } from "../db/threadStore";
-import { chainOf, isWriter, type PlanWave } from "../plan/waveSchedule";
+import { chainOf, isWriter, type PlanBase, type PlanWave } from "../plan/waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 type LiveThread = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["get"]>>;
@@ -454,6 +454,8 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
     specWriters?: (planThreadId: string, wave?: number) => Row[];
     /** The Spec Writers of one task: its replaces: chain's writers plus the side-lane writers of its plan chain (taskChain ids passed in). Optional: older callers omit it, and only the replaces: chain's writers count. */
     taskWriters?: (row: Row, chainIds: string[]) => Row[];
+    /** A plan wave's chain base (stacked or branch-based), or null for the project default. Optional: older callers omit it, and every wave is unstacked. */
+    planBase?: (planThreadId: string, wave: number) => PlanBase | null;
   };
   controlsThread: (row: Row, callerChiefId: string) => boolean;
   host: ReviewHost<Row>;
@@ -541,7 +543,10 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const sha = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${row.branch}^{commit}`])
         ?? await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${row.branch}^{commit}`]);
       if (!sha) return { skipped: `branch ${row.branch} not found locally` };
-      const baseRef = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+      // A stacked or branch-based plan wave is reviewed against its plan base, never origin/HEAD.
+      const pb = row.plan_thread_id && row.plan_wave != null ? deps.plan.planBase?.(row.plan_thread_id, row.plan_wave) : null;
+      if (pb && !pb.base) return { skipped: `stack base unresolved: ${pb.unresolved}` };
+      const baseRef = pb ? `origin/${pb.base}` : await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
       if (!baseRef) return { skipped: "origin/HEAD not set" };
       return await computeImpactSlice({ ...options(), sha, baseRef, fetchRef: row.branch });
     };

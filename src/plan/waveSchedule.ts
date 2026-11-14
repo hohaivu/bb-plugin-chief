@@ -2,8 +2,9 @@
  * baseline: a spec wave whose `## Spec baseline` heading names new docs/specs files whose current behaviour its Spec Writer documents first; set at intake, never re-parsed.
  * specsSkipped: Chief's reason for going without that Spec Writer (chief_skip_specs, until a Spec Writer was delegated on the wave).
  * testsSkipped: Chief's recorded reason for going without this test wave (chief_skip_tests). absent is never persisted:
- * planWavesFor sets it on a waived wave no worker was ever delegated on, and the graph helpers then skip that wave. */
-export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; design?: boolean; test?: boolean; testsSkipped?: string; spec?: boolean; baseline?: boolean; specsSkipped?: string; feature?: boolean; reshape?: boolean; title?: string; absent?: boolean };
+ * planWavesFor sets it on a waived wave no worker was ever delegated on, and the graph helpers then skip that wave.
+ * stackOn: a chain head (dependsOn: []) whose chain builds on wave k's changes, which live on another chain: its branch and PR stack on that chain's branch. */
+export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; stackOn?: number; design?: boolean; test?: boolean; testsSkipped?: string; spec?: boolean; baseline?: boolean; specsSkipped?: string; feature?: boolean; reshape?: boolean; title?: string; absent?: boolean };
 
 /** The first heading, else the first non-empty line, of a wave body: what the wave is about, for the tracking issue's schedule. */
 export function waveTitle(body: string): string | undefined {
@@ -51,7 +52,12 @@ interface WaveRow {
   plan_wave: number | null;
   plan_waves: string | null;
   replaces_thread_id: string | null;
+  branch: string | null;
 }
+
+/** What a chain head is based on. base: the branch it is cut from and targets, null while unresolved (unresolved says why);
+ * waiting: why a fresh head may not start yet. null from planBase = the project default. */
+export type PlanBase = { stacked: true; base: string | null; unresolved?: string; waiting?: string };
 
 const FINISHED = ["complete", "archived", "deleted"];
 /** Ready, or idle after a ready report: a later non-report turn moves a row off ready, not its report. */
@@ -229,14 +235,35 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     });
   }
 
+  /** The one owner of a chain's base, for the head of wave n's chain. Identity (durable): a stackOn head is based on the branch of
+   * wave k's chain implementation owner (a side-lane Spec Writer alone does not count), else the planner's recorded branch, else null
+   * (project default). Readiness (live): a stackOn head waits until wave k's latest implementation worker is ready or complete. */
+  function planBase(planThreadId: string, n: number): PlanBase | null {
+    const waves = rawWaves(planThreadId);
+    const head = chainOf(waves, n)[0]!;
+    const k = waves[head - 1]?.stackOn;
+    if (k !== undefined) {
+      const base = chainOwner(planThreadId, waves, k)?.branch ?? null;
+      const worker = latestWorker(planThreadId, k);
+      return {
+        stacked: true, base,
+        ...(base ? {} : { unresolved: `wave ${k}'s chain has no task branch yet` }),
+        ...(worker && isSettled(worker) ? {} : { waiting: `wave ${head} stacks on wave ${k}, whose worker has not reported ready yet` }),
+      };
+    }
+    const branch = rows().get(planThreadId)?.branch;
+    return branch ? { stacked: true, base: branch } : null;
+  }
+
   /** A planner's chain heads, and those of them still to delegate. One chain: any linked implementation worker counts as
-   * delegated, as before parallel waves existed. */
+   * delegated, as before parallel waves existed. waiting: undelegated heads on a plan base that cannot launch yet; not in undelegated. */
   function undelegatedHeads(planThreadId: string, waves: PlanWave[]) {
     const chainHeads = heads(waves);
-    const undelegated = chainHeads.length === 1
+    const open = chainHeads.length === 1
       ? (waveWorkers(planThreadId).length ? [] : chainHeads)
       : chainHeads.filter((head) => !waveWorkers(planThreadId, head).length);
-    return { heads: chainHeads, undelegated };
+    const blocked = (head: number) => { const pb = planBase(planThreadId, head); return !!pb && (!pb.base || !!pb.waiting); };
+    return { heads: chainHeads, undelegated: open.filter((head) => !blocked(head)), waiting: open.filter(blocked) };
   }
 
   /** The rows one review of this chain tip covers, in wave order: the latest implementation row of every wave,
@@ -264,5 +291,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(latestWorker(worker.plan_thread_id!, tip)?.state ?? ""));
   }
 
-  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }

@@ -74,6 +74,7 @@ export interface Ctx {
   insertTodo: ReturnType<typeof createCore>["insertTodo"];
   chainOwner: ReturnType<typeof createCore>["chainOwner"];
   chainStarted: ReturnType<typeof createCore>["chainStarted"];
+  planBase: ReturnType<typeof createCore>["planBase"];
   coexists: ReturnType<typeof createCore>["coexists"];
   isDesignWave: ReturnType<typeof createCore>["isDesignWave"];
   isTestWave: ReturnType<typeof createCore>["isTestWave"];
