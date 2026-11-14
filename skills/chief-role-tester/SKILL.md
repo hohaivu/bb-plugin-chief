@@ -20,6 +20,7 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 - The docs, the plan and the design are the source of truth for test cases (your brief lists them). Derive test cases from them; never derive an expected result from the implementation.
 - Tests check behaviour, never doc or prose wording. Docs, specs and the plan tell you which behaviour to test; the test runs the code and asserts on what it does. Never write a test that reads README, CHANGELOG, docs/, SKILL.md, any other markdown or prose file, or a spec file and asserts on its text. A plan contract that only states doc wording ("the README says X") is not a test contract: do not test it, name it in your report as not tested under this rule, and list any docs gap under `## Docs needed`. Text the product itself emits at runtime (a rendered prompt, a CLI reply, a file it writes) is behaviour. A field a program parses from such a file (frontmatter `name:`, a config block the product loads) is data. Both stay testable.
 - Reading the implementation to find the public boundary or to diagnose a failure is allowed.
+- Task isolation limits apply before setup or discovery. A fake-only task never invokes a real device service. Stub or deny each external mutation boundary the exercised path can reach. Keep required runtime tools real. Make unexpected external calls fail. Use call logs when absence of a call is a contract.
 
 ## 3. Owner testing rules
 
@@ -38,7 +39,7 @@ Writing tests
 
 Maintaining tests
 - A test the change breaks is part of the change: fix the test, or report the code for a worker. Never skip, delete or loosen it to pass without saying why.
-- A test that was already failing on the base is not a blocker: don't fix it, list it in your report.
+- A test that was already failing on the base is not a blocker: don't fix it, list it in your report. A required exit-0 receipt is the exception (section 6).
 - When the change is a refactor or migration meant to keep behaviour, the base commit is the oracle: where practical, compare old and new behaviour through tests on the same inputs, report the comparison under Automated Verification, and explain every difference.
 
 Running tests
@@ -85,6 +86,10 @@ Reject a test that matches a junk pattern, unless it independently guards a publ
 
 A regression test must be shown failing on the pre-fix code (or a reverted control) for the intended reason. One regression at the owner boundary covers the bug.
 
+Persist required behavioral proofs in the existing test harness unless the brief explicitly requests run-only evidence. Map each proof to a receipt that executes it. Reuse existing coverage.
+
+Execute a mutation only when the brief requires it. Name the assertion that must fail and record that failure. A timeout or unrelated setup error is not proof. Never edit tracked product code for this check. Use a pre-fix commit or an isolated untracked copy of the real entry point. Do not add a production seam. Record restoration evidence and rerun the unmodified target. If this cannot respect your scope, report blocked.
+
 ## 5. Campaigns
 
 Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN.md](CAMPAIGN.md) beside this skill. Never start one on your own.
@@ -92,15 +97,17 @@ Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN
 ## 6. Report
 
 - Never change docs/, with or without a `## Spec` block: list a needed docs change under `## Docs needed` in your ready result.
+- When your brief names a task branch, before you read any file, sync the checkout: require a clean tree, run `git fetch origin <branch>` then `git merge --ff-only origin/<branch>`, and record the synced `git rev-parse HEAD` as your Base commit (below). Reading the SKILL.md files of the skills your brief orders loaded is the only exception: load them first, then sync. When the fast-forward fails, report blocked.
 - When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report; reviewers check your scope against it.
 - When you report, record `git rev-parse HEAD` as `Head commit: <sha>`; reviewers bound your scope with it.
+- Compare the synced commit with any target SHA the brief requires. Report a mismatch before testing. Base commit records your starting checkout. It does not prove a failure predates the feature.
+- For each receipt, record the working directory, tested commit, exact command and process exit status. Capture the status before another command. Preserve pipeline failures with pipefail. Run required receipts after your final test commit. Rerun affected receipts if the tested code changes. For a branch task, confirm the pushed branch names your reported Head commit. A required exit-0 receipt that fails blocks ready, even if it also fails at Base commit.
 - When your brief has a `## Spec` block, the committed docs are the source of truth: derive tests from them and the plan contracts, not from the code.
-  - Before you read any file, sync the checkout: require a clean tree, run `git fetch origin <branch>` then `git merge --ff-only origin/<branch>`, and record the synced `git rev-parse HEAD` as your Base commit (above). Reading the SKILL.md files of the skills your brief orders loaded is the only exception: load them first, then sync. When the fast-forward fails, report blocked.
   - Before you derive tests, run `git merge-base --is-ancestor <Fold head> HEAD` for each Spec Writer your brief lists, using the Fold head in that writer's report. On failure, report blocked: that writer's docs are not in your HEAD. A report with no Fold head needs no check.
   - Code contradicts the docs: blocked, recommend `kind: worker`.
   - Docs are wrong: blocked, recommend `kind: spec-writer`.
   - The Spec delta cannot be built: blocked, recommend a fresh `chief_plan`.
   - A new spec's baseline (named in the Spec Writer's report) is a source for regression tests, the same as the Spec delta's contracts. When the delta changes a baseline statement, test only the delta's value. Behaviour under the Spec Writer's Open questions is not a contract: do not test it as one.
-- Ready: tests committed and pushed; every test you ran passes, or fails only on the base (listed). Automated Verification lists each filtered command with its exit status and maps each test to the contract it proves and the mutation it catches.
+- Ready: tests committed and pushed; every test you ran passes, or fails only on the base (listed) and is not a required exit-0 receipt. Automated Verification lists each filtered command with its exit status and maps each test to the contract it proves and the mutation it catches.
 - Blocked when a test fails because product code is wrong: commit and push the tests; the blocker names the failing tests, the filtered command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: worker)` with the failures as its mission.
 - Missing tooling or a first-of-kind test also reports blocked.
