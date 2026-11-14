@@ -155,7 +155,9 @@ export async function setup(options: { /** projects.get rejects these ids, as th
           if (failedWrites?.test(path)) throw new Error(`write refused for ${path}`);
           // A reviewer's attempt folder (review-<report>/<attempt>/) is written on the host the reviewer runs on, here host_1; every other file goes to host_storage.
           const attemptFolder = /\/review-\d+\/[0-9a-f]{8}\//.test(path);
-          if (hostId !== "host_storage" && !(attemptFolder && hostId === "host_1")) throw new Error(`wrote ${path} to host ${hostId}`);
+          // A brief's Chief artifact copy goes to the project's host (host_1) without asking for the thread's storage location.
+          const briefArtifact = /\/brief\.md\.tmp-/.test(path);
+          if (hostId !== "host_storage" && !((attemptFolder || briefArtifact) && hostId === "host_1")) throw new Error(`wrote ${path} to host ${hostId}`);
           await mkdir(dirname(path), { recursive: true });
           await writeFile(path, content);
           return {};
