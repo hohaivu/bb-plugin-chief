@@ -13,10 +13,12 @@ import type { Ctx } from "./context";
 export const ALERT_RETRY_BASE_MS = 30_000;
 export const ALERT_RETRY_MAX_MS = 1_800_000;
 export const COORDINATOR_ALERT_MAX_ATTEMPTS = 10;
+/** The backoff doubles up to this many times; it keeps the SQL shift from overflowing, the ALERT_RETRY_MAX_MS cap does the rest. */
+export const ALERT_RETRY_MAX_DOUBLINGS = 6;
 /** A row with attempts > 0 may be resent: its backoff elapsed and, for a Coordinator-kind row, it is under the cap. */
 export function retryDue(row: { dedupe_key: string; attempts: number; last_attempt_at: number | null }, now: number) {
   if (row.attempts >= COORDINATOR_ALERT_MAX_ATTEMPTS && row.dedupe_key.includes(":coordinator-")) return false;
-  return (row.last_attempt_at ?? 0) + Math.min(ALERT_RETRY_BASE_MS * 2 ** Math.min(row.attempts - 1, 6), ALERT_RETRY_MAX_MS) <= now;
+  return (row.last_attempt_at ?? 0) + Math.min(ALERT_RETRY_BASE_MS * 2 ** Math.min(row.attempts - 1, ALERT_RETRY_MAX_DOUBLINGS), ALERT_RETRY_MAX_MS) <= now;
 }
 
 /** The stallMinutes setting in ms; a value that is not a positive number means the default of 15 minutes. */
@@ -141,7 +143,7 @@ export function createCore(ctx: Ctx) {
   // A row never attempted waits 60 s: the report intake writes a fallback row in its transaction and replaces it with the full alert, so a retry must not race that.
   const pendingAlerts = db.prepare<[number, number]>(
     `SELECT * FROM alert_outbox WHERE delivered_at IS NULL
-      AND ((attempts = 0 AND created_at <= ?) OR (attempts > 0 AND COALESCE(last_attempt_at, 0) + MIN(${ALERT_RETRY_BASE_MS} << MIN(attempts - 1, 6), ${ALERT_RETRY_MAX_MS}) <= ?))
+      AND ((attempts = 0 AND created_at <= ?) OR (attempts > 0 AND COALESCE(last_attempt_at, 0) + MIN(${ALERT_RETRY_BASE_MS} << MIN(attempts - 1, ${ALERT_RETRY_MAX_DOUBLINGS}), ${ALERT_RETRY_MAX_MS}) <= ?))
       AND (attempts < ${COORDINATOR_ALERT_MAX_ATTEMPTS} OR dedupe_key NOT LIKE '%:coordinator-%')
       AND NOT EXISTS (
       SELECT 1 FROM managed_threads WHERE thread_id=alert_outbox.target_thread_id AND state IN ('complete','archived','deleted')

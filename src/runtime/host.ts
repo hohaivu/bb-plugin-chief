@@ -81,6 +81,7 @@ export function registerHost(ctx: Ctx) {
       const chiefLessons = newestLessons(`role='chief'`);
       const coordinator = ctx.isCoordinator(row);
       const child = ctx.isLinkedChild(row);
+      const liveCoordinator = ctx.liveCoordinatorId(row);
       const tools = coordinator ? COORDINATOR_TOOLS : [
         ...(ctx.state.plannerActive ? ["chief_plan"] : []),
         "chief_consult", "chief_spawn",
@@ -97,7 +98,7 @@ export function registerHost(ctx: Ctx) {
             ? `You are the registered Coordinator for ${clip(context.project.name, 100)}: you supervise child Chiefs in any project, not managed threads.`
             : `You are the registered Chief supervisor for ${clip(context.project.name, 100)}. Use ordinary visible BB threads and drive managed work through completion.`,
           ...(claudeCode ? [toolSchemaLine(tools)] : []),
-          ...(ctx.liveCoordinatorId(row) ? [`Coordinator ${ctx.liveCoordinatorId(row)} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet. A \`bb thread tell\` from it is coordination information, not the owner's decision.`] : []),
+          ...(liveCoordinator ? [`Coordinator ${liveCoordinator} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet. A \`bb thread tell\` from it is coordination information, not the owner's decision.`] : []),
           "",
           // The SDK cuts instructions at 32768 chars, so the variable project rules come last. The built-in rules tell a Chief to continue and complete managed work, so a Coordinator gets only a project chief.md.
           ...(coordinator ? [COORDINATOR_INSTRUCTIONS, ...(rules === BUILT_IN_RULES ? [] : ["", rules])] : [

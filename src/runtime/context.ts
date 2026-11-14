@@ -172,6 +172,7 @@ export interface Ctx {
   alertCoordinator: ReturnType<typeof createAlerts>["alertCoordinator"];
   alertSelf: ReturnType<typeof createAlerts>["alertSelf"];
   baselineDone: ReturnType<typeof createAlerts>["baselineDone"];
+  needYouAt: ReturnType<typeof createAlerts>["needYouAt"];
   insertAlert: ReturnType<typeof createAlerts>["insertAlert"];
   deliverAlert: ReturnType<typeof createAlerts>["deliverAlert"];
   enqueueAlert: ReturnType<typeof createAlerts>["enqueueAlert"];

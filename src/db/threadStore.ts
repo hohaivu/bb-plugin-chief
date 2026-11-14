@@ -65,6 +65,9 @@ export interface ThreadStoreHooks {
   onReload: () => void;
 }
 
+/** SQL guard: the Chief row has no Coordinator link, or its link points at a Coordinator that is complete, archived or deleted. */
+const UNLINKED_OR_DEAD = `(coordinator_thread_id IS NULL OR coordinator_thread_id IN (SELECT thread_id FROM managed_threads WHERE state IN ('complete','archived','deleted')))`;
+
 /** One module owns the managed_threads rows and the cache of them: the cache is replaced only here, and every
  * write reloads it, once per write or once per batch. Other tables stay with their callers. */
 export function createThreadStore<Row extends { thread_id: string; role: string; state: string }>(db: Database, hooks: ThreadStoreHooks) {
@@ -176,7 +179,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     linkToCoordinator(childId: string, coordinatorId: string, now: number) {
       const { changes } = db.prepare(`UPDATE managed_threads SET coordinator_thread_id=?, updated_at=?
         WHERE thread_id=? AND role='chief' AND COALESCE(coordinator,0)=0
-        AND (coordinator_thread_id IS NULL OR coordinator_thread_id IN (SELECT thread_id FROM managed_threads WHERE state IN ('complete','archived','deleted')))
+        AND ${UNLINKED_OR_DEAD}
         AND state NOT IN ('complete','archived','deleted')`).run(coordinatorId, now, childId);
       if (changes) wrote();
       return changes > 0;
@@ -188,7 +191,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       if (!link) return false;
       const { changes } = db.prepare(`UPDATE managed_threads SET coordinator_thread_id=?, updated_at=?
         WHERE thread_id=? AND role='chief' AND COALESCE(coordinator,0)=0
-        AND (coordinator_thread_id IS NULL OR coordinator_thread_id IN (SELECT thread_id FROM managed_threads WHERE state IN ('complete','archived','deleted')))`).run(link.id, now, nextId);
+        AND ${UNLINKED_OR_DEAD}`).run(link.id, now, nextId);
       if (changes) wrote();
       return changes > 0;
     },

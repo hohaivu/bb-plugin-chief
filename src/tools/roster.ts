@@ -4,7 +4,7 @@ import { type TodoRow } from "./shapes";
 import type { Ctx } from "../runtime/context";
 
 export function registerRosterTool(ctx: Ctx) {
-  const { closedTodosForProject, db, insertTodo, store, todoById, updateTodo } = ctx;
+  const { closedTodosForProject, insertTodo, store, todoById, updateTodo } = ctx;
   ctx.registerChiefTool({
     name: "chief_roster",
     presentation: { label: { pending: "Reading roster…", completed: "Read roster" } },
@@ -48,8 +48,8 @@ export function registerRosterTool(ctx: Ctx) {
         // An idle child with a Need you from this turn is waiting for the owner, not for work.
         const needsOwner = (child: typeof children[number]) => {
           if (child.state !== "idle") return "";
-          const asked = db.prepare(`SELECT MAX(created_at) AS at FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${child.thread_id}:coordinator-need-you:%:${child.active_cycle}`) as { at: number | null };
-          return asked.at === null ? "" : ` · needs the owner since ${new Date(asked.at).toISOString()}`;
+          const asked = ctx.needYouAt(child);
+          return asked === null ? "" : ` · needs the owner since ${new Date(asked).toISOString()}`;
         };
         return clip([
           ...(live.length ? ["## Children", ...live.map((child) => clip(`- “${clip(child.title, 120)}” (${child.thread_id}) · project ${child.project_id} · ${child.state}${needsOwner(child)}\n${ctx.pendingBlock(child.thread_id, includeWaiting, share, includeOthers).replace(/\n/g, "\n  ")}`, share))] : []),
