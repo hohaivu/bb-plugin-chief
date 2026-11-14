@@ -141,7 +141,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - A Chief that owns any open row gets a refusal that lists the row ids. Ready and blocked rows count as open.
 - Open todos do not block the upgrade. They stay with the Coordinator.
 - The upgrade renames the thread: a leading `Chief ·` becomes `Coordinator ·`, and the rest of the title stays. The row title changes in the same statement.
-- The success text says that the upgrade is one-way, that the Coordinator runs no managed threads, and how to attach, spawn and read the roster.
+- The success text says that the upgrade is one-way, runs no managed threads, and explains how to attach, spawn and read the roster.
 - No tool, CLI command or SQL statement clears `coordinator`. Reason: the owner decided that the upgrade is one-way.
 
 ### COORD-2 Purity
@@ -185,7 +185,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - A `todoId` with a `projectId` that differs from the caller's project is refused before the spawn. Reason: todos belong to one project.
 - A Chief that a Coordinator spawns gets `coordinator_thread_id` in the same insert. The target project's existing Chief stays untouched.
 - For a Coordinator caller, the handoff section says that the Coordinator supervises the child. It names Need you, done, fail, end, and stall alerts. It says that the owner answers the Need you in the child thread. `brief.md` holds the same text.
-- For a Coordinator caller, the result says that the new Chief is linked as a child, shows in the Children block, and alerts the Coordinator.
+- For a Coordinator caller, the result says that the new Chief is linked, shows in Children, and alerts the Coordinator.
 - For a plain Chief caller, the handoff text, the result text and `brief.md` equal the base text.
 - Work handed over from a child stays with that child's live Coordinator.
 - `handOver` (`store.inheritCoordinator`), `spawnChief` (with `previous`), and `bb chief adopt` give the successor the link of the previous child when that Coordinator is live.
@@ -193,7 +193,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - `handOver` and `bb chief adopt` refuse an incompatible pair before any write. Reason: two Coordinators can have children in one project, and work must never switch Coordinators silently.
 - Orphan recovery starts a dedicated successor (`replaceChief`) instead of reusing a Chief of another Coordinator.
 - An unlinked project Chief that receives work from an orphan becomes a child of that Coordinator.
-- The superseded row stays in the Children block with its terminal state.
+- The Children block filters out a superseded child and counts it in `closed: N`.
 
 ### COORD-6 Need-you alert
 
@@ -229,7 +229,7 @@ Each contract has an identifier. Tests and reviews cite it.
 
 - `chief_roster` from a Coordinator shows a Children block listing non-terminal linked children in any project.
 - Each entry holds the title, thread id, project id, state, and Pending block of that child.
-- Each entry appends ` · needs the owner since <ISO>` when the child is idle and a need-you alert exists for its current active cycle.
+- Each entry appends ` · needs the owner since <ISO>` when the child is idle and has a current-cycle need-you alert.
 - When closed children exist, the Children block appends `closed: N`.
 - The whole output keeps the 6,000-character clip. Each live child entry receives a share of 4,000 characters divided by the count of live children.
 - With no children, the roster instructs how to attach or spawn Chiefs.
@@ -286,6 +286,8 @@ Each contract has an identifier. Tests and reviews cite it.
 - On any retry with prior attempts, `deliverAlert` invokes `stillDue` before inspecting target messages.
 - `deliverAlert` settles a stale row by setting `delivered_at` and setting `last_error` to start with `stale: ` without sending.
 - A worker stall alert is stale once that worker leaves its active cycle.
+- Pending Coordinator receipts targeting a terminal Coordinator remain reachable for retry freshness settlement so `deliverAlert` settles them as stale.
+- `deliverAlert` never sends messages to terminal targets.
 - When an active retry remains due, `deliverAlert` checks the target queue and the last 50 `userMessage` events for the marker or legacy exact text.
 - If the target holds the marker or exact text, `deliverAlert` marks the row delivered and skips sending.
 - `MIGRATIONS` in `src/db/migrations.ts` appends `ALTER TABLE alert_outbox ADD COLUMN last_attempt_at INTEGER`. Reason: the host platform hashes migration statements by array index.
@@ -297,22 +299,26 @@ Each contract has an identifier. Tests and reviews cite it.
 - Reconcile and lifecycle events check `state !== 'active'` before updating `active_cycle` to prevent duplicate increments.
 - A Chief in state `failed` sends a failed alert once per active cycle (`<child>:coordinator-failed:<active_cycle>`).
 - A Chief in state `archived` or `deleted` sends an ended alert once per state (`<child>:coordinator-ended:<state>`).
-- The stalled alert has two branches and fires at most once per active cycle:
+- The stalled alert has two branches and fires at most once per active cycle for each branch:
   1. Active branch: the child state is `active`, and `now - active_since >= stallThresholdMs`. Dedupe key: `<child>:coordinator-stalled:<active_cycle>:active`.
-  2. Idle branch: the child state is `idle`, owns at least one open managed row or open unblocked todo, no owned open row is busy, no current-cycle need-you exists, and quiet time meets or exceeds `stallThresholdMs`. Dedupe key: `<child>:coordinator-stalled:<active_cycle>:idle`.
-- Stalled alerts never fire when an owned row is busy, when a need-you exists for the current cycle, or when no open work remains.
+  2. Idle branch: the child state is `idle`. It owns open managed rows or open unblocked todos. No owned row is busy. No need-you exists this cycle. Quiet time meets or exceeds `stallThresholdMs`. Dedupe key: `<child>:coordinator-stalled:<active_cycle>:idle`.
+- An idle stalled alert never fires with busy owned rows, a current-cycle need-you, or no open work.
+- Active stalled alerts check only the duration of the active turn.
 - Each problem alert tells the Coordinator to inform the owner.
-- A complete (superseded) child never sends failed, ended, or stalled alerts.
+- A complete (superseded) child never sends done, failed, or stalled alerts.
+- A complete child that receives a deletion event transitions to `deleted` and sends an ended alert.
+- An ended alert is a historical receipt and is always delivered.
 
 ### COORD-12a Retry freshness
 
 - Before delivering a retried alert (`attempts > 0`), `stillDue` verifies the alert against the condition that created it.
 - A retried alert is settled as stale (marked delivered with `last_error` starting with `stale:`) and never sent when:
   1. The child row no longer exists or was superseded (`complete`).
-  2. The Coordinator link changed or is no longer an active Coordinator.
+  2. The Coordinator link changed or the Coordinator is no longer active.
   3. A fresh condition evaluation produces a different key.
+- Pending Coordinator receipts targeting a terminal Coordinator remain reachable for retry freshness evaluation and settle as stale without sending any message.
 - For stalled alerts, work going busy, a new need-you arrival, new child activity, or a turn change settles the alert as stale.
-- An ended alert is historical and remains always due.
+- An ended alert is a historical receipt and remains always due.
 - A legacy need-you row (`<child>:coordinator-need-you:<sha12>`) remains due as long as the child remains linked to the same live Coordinator.
 
 ### COORD-13 Notices to children
