@@ -205,8 +205,17 @@ Secret settings have no default. The code handles an undefined value. The plugin
 - Each copy retries while bb answers HTTP 409 "Thread environment is unavailable".
 - The retry waits 1, 2, 4, 8, 15 and 30 seconds (at most 7 attempts, about 60 s).
 - Chief does not retry any other error.
-- After the last attempt, the copy logs a warning and is lost.
+- After the last attempt, the copy logs a warning and is not retried. Only a reload while the retries run replays it.
 - `persistBrief` never fails the spawn.
+- `persistBrief` records the brief in the Chief DB table `pending_briefs` (`thread_id`, `project_id`, `prompt`, `at`) before any copy starts.
+  Reason: the retries last about 60 s. A reload in that window would otherwise drop the brief.
+- `persistBrief` removes the row after both copies settle. A copy settles when it lands or fails for good.
+- If recording or removing the row fails, `persistBrief` logs a warning. It still attempts both copies and never rejects. A row that stays is replayed by a later generation.
+- A generation is one plugin instance. `bb plugin reload` starts a new generation and disposes the old one.
+- A disposed generation does not remove its rows. The next generation replays them.
+- The `brief-replay` background service (`server.ts`) calls `resumeBriefs` (`src/runtime/artifacts.ts`) once per generation. It restarts `persistBrief` for each row and does not wait for the writes. Then it waits until BB aborts it.
+  Reason: BB starts services only after the old generation is disposed. A replay in the plugin factory could miss a row that the old generation writes late, or the old generation could delete a row that the replay reads.
+- Trade-off: the outbox replays after activation instead of flushing on dispose. Dispose cannot wait about 60 s, and the bb handle is stale after dispose. A replay rewrites an existing copy with the same content. `atomicWrite` is remove-then-move, not a concurrency fence, so generations avoid overlap by ordering, not locking.
 - The Chief artifact copy goes to the host of the project (`projectHostId`). It does not ask bb for the storage location of the thread.
   Reason: the storage location is unavailable while the environment provisions, and the retro reads this copy, so it must not depend on that call.
 - Trade-off: the artifact copy uses the host of the project, not the host of the thread. On a single-host setup they are the same machine.
