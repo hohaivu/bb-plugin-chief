@@ -1562,6 +1562,7 @@ describe("Coordinator", () => {
 
         test.each([
           ["a busy owned row", async (state: S, ctx: { child: string; worker: string }) => { await activate(state, ctx.worker); }],
+          ["a starting owned row", async (state: S, ctx: { worker: string }) => { state.live.set(ctx.worker, { ...state.live.get(ctx.worker)!, status: "starting" }); await state.supervisorCycle(); }],
           ["a Need you in this cycle", async (state: S, ctx: { child: string }) => { await call(state, "chief_escalate", { request: "Which team owns this?" }, ctx.child); await settle(); }],
           ["no open work (the worker is complete)", async (state: S, ctx: { child: string; worker: string }) => { await completeWorker(state, ctx.child, ctx.worker); }],
         ])("an idle child past the threshold gets no stalled alert with %s", async (_label, block) => {
@@ -1569,6 +1570,8 @@ describe("Coordinator", () => {
           const ctx = await idleWithReadyWorker(state);
           await block(state, ctx);
           elapse(THRESHOLD + 1_000);
+          // Backdate every row's last change: the blocker alone, not a recent update, must hold the alert back.
+          state.db.prepare("UPDATE managed_threads SET updated_at = updated_at - ?").run(THRESHOLD + 1_000);
           await state.supervisorCycle();
           expect(stalled(state)).toEqual([]);
         });
