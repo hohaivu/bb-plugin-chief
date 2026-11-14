@@ -13,7 +13,7 @@ const STORAGE = join("/storage/thr_1", "brief.md");
 const e409 = () => new Error("HTTP 409: Thread environment is unavailable");
 
 /** createArtifacts over in-memory host files (fake timers cannot flush real disk I/O) and a scripted storageLocation. */
-function world(opts: { projectHost?: string | null; storageLocation?: (call: number) => Error | undefined } = {}) {
+function world(opts: { projectHost?: string | null; projectHostId?: () => Promise<string | null>; storageLocation?: (call: number) => Error | undefined } = {}) {
   const files = new Map<string, string>();
   const warn = vi.fn();
   let storageLocationCalls = 0;
@@ -41,7 +41,7 @@ function world(opts: { projectHost?: string | null; storageLocation?: (call: num
   };
   const ctx = {
     bb, db: {}, state: { dataDirs: new Map([["host_1", "/data"]]) },
-    projectHostId: async () => (opts.projectHost === undefined ? "host_1" : opts.projectHost),
+    projectHostId: opts.projectHostId ?? (async () => (opts.projectHost === undefined ? "host_1" : opts.projectHost)),
   };
   const artifacts = createArtifacts(ctx as never);
   return { files, warn, artifacts, storageLocationCalls: () => storageLocationCalls, persist: () => artifacts.persistBrief("thr_1", "proj_1", PROMPT) };
@@ -113,6 +113,28 @@ describe("persistBrief", () => {
     expect(w.files.get(ARTIFACT)).toBe(PROMPT);
     expect(w.files.get(STORAGE)).toBe(PROMPT);
     expect(w.warn).not.toHaveBeenCalled();
+  });
+
+  test("while the project host lookup is still pending the storage copy has already landed; once released the artifact copy lands and persistBrief resolves with no warning", async () => {
+    let release!: (hostId: string) => void;
+    const w = world({ projectHostId: () => new Promise<string>((resolve) => { release = resolve; }) });
+    const done = w.persist();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(w.files.get(STORAGE)).toBe(PROMPT);
+    expect(w.files.has(ARTIFACT)).toBe(false);
+    release("host_1");
+    await expect(done).resolves.toBeUndefined();
+    expect(w.files.get(ARTIFACT)).toBe(PROMPT);
+    expect(w.warn).not.toHaveBeenCalled();
+  });
+
+  test("a project host lookup that rejects costs only the artifact copy: one artifact warning, the storage copy landed and persistBrief resolves", async () => {
+    const w = world({ projectHostId: async () => { throw new Error("projects.get failed"); } });
+    await expect(w.persist()).resolves.toBeUndefined();
+    expect(w.files.get(STORAGE)).toBe(PROMPT);
+    expect(w.files.has(ARTIFACT)).toBe(false);
+    expect(w.warn).toHaveBeenCalledTimes(1);
+    expect(w.warn.mock.calls[0][0]).toMatch(/^Could not write thr_1's brief artifact: .*projects\.get failed/);
   });
 });
 
