@@ -179,6 +179,7 @@ describe("evidence-only tester brief", () => {
     // test/fixtures/briefs-matrix-7687ebf.json: a sha256 of each complete worker, designer, tester and evidence-only tester output (prompt and brief,
     // nothing masked), and the full base text of the 8 Spec Writer cells with findings=false prior=false verify=npm test specDocs=1.
     // Only the Spec Writer Inputs sentence changes, by the one named edit below applied to the BASE text.
+    // The 32 tester cells with a verify command hold the hash of the BASE text plus one swap (tester Verify baseline sentence, 96 characters longer, plan-chains.md line 301); every other cell hash is the base's.
     // Regression: any byte changed in a non-writer brief; an Inputs line that keeps the old allowance or is missing in either lane; a changed Baseline line.
     describe("equal to base 7687ebfd", () => {
       const base = readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "briefs-matrix-7687ebf.json"), "utf8").then((text) => JSON.parse(text) as { hashes: Record<string, string>; writers: Record<string, string> });

@@ -85,7 +85,8 @@ describe("tester verify command", () => {
     expect(verify).not.toContain("runs tests (a tester's)");
     expect(verify).not.toContain("do not run it or change code");
     expect(verify).toContain("Never change product code to make it pass.");
-    expect(verify).toContain("A failure that also occurs at your Base commit is a baseline: list it and do not fix it.");
+    expect(verify).toContain("A failure at your Base commit is present before your test edits, not proof it predates the feature. List it without changing product code. It does not waive an explicit exit-0 receipt.");
+    expect(verify).not.toContain("is a baseline: list it and do not fix it");
   });
 
   // Regression: the full-suite sentence rendered twice, or not at all.
