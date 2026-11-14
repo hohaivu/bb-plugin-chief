@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { delegate, disposeAll } from "./test/harness";
-import { NO_TESTER, PR, type World, world } from "./test/docsGateWorld";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { TEST_WAVE, approvePlan, delegate, disposeAll, status, wave } from "./test/harness";
+import { NO_TESTER, PR, type World, git, world } from "./test/docsGateWorld";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { readyIdle, refusal, reviewed, tool } from "./test/testerHelpers";
+import { READY, ctxOf, delegateWave, readyIdle, refusal, report, reviewed, tool, workerOn } from "./test/testerHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -183,6 +185,111 @@ describe("skipReview docs/ ownership gate", () => {
       expect(result.stdout).toContain("without a matching approve");
       expect(w.rowState(id)).toBe("complete");
       expect(w.docsReads()).toEqual([]);
+    });
+  });
+
+  // Stacked-branch worktrees: a stacked or branch-based plan wave is docs-checked against its plan base (origin/<base>), never origin/HEAD. Source: docs/specs/plan-chains.md.
+  describe("a stacked or branch-based plan wave is checked against its plan base", () => {
+    const contracts = (n: number) => `# Wave ${n}\nDo the work.\n\n## Contracts to verify\n- Wave ${n} keeps its invariant\n\n## What we're NOT doing\n- x`;
+    /** Wave 3 stacks on wave 1 (branch feature-a, one docs/ commit of its own); the pushed `task` branch sits on top of it. The parent's docs/ commit has no trailer. */
+    async function stacked(w: World, opts: { plannerBranch?: string; stackOn?: number } = {}) {
+      const peer = join(w.workDir, "..", "peer");
+      await git(peer, "checkout", "-q", "-B", "feature-a", "main");
+      await mkdir(dirname(join(peer, "docs/specs/parent.md")), { recursive: true });
+      await writeFile(join(peer, "docs/specs/parent.md"), "parent wave docs\n");
+      await git(peer, "add", "-A");
+      await git(peer, "commit", "-q", "-m", "docs: parent wave");
+      await git(peer, "push", "-q", "origin", "feature-a");
+      await git(peer, "checkout", "-q", "task");
+      await git(peer, "rebase", "-q", "feature-a");
+      await git(peer, "push", "-q", "-f", "origin", "HEAD:task");
+      await w.call("chief_plan", { title: "Rework checkout", mission: "Propose how to fix totals", ...(opts.plannerBranch ? { branch: opts.plannerBranch } : {}) });
+      const planner = (await status(w.state)).threads.filter((row) => row.role === "planner" && row.chiefThreadId === w.chief.threadId).at(-1)!;
+      const waves = [{ body: contracts(1) }, TEST_WAVE(2), { body: wave(3), dependsOn: [], ...(opts.stackOn ? { stackOn: opts.stackOn } : {}) }, TEST_WAVE(4, [3])];
+      await report(w.state, planner.threadId, { state: "ready", result: "Plan summary.", plan: waves });
+      await approvePlan(w.state, w.chief.threadId, planner.threadId);
+      for (const test of [2, 4]) await w.call("chief_skip_tests", { planThreadId: planner.threadId, wave: test, reason: "tests are not under test here" });
+      return planner;
+    }
+    const launch = async (w: World, planThreadId: string, waveNo: number, extra: object) => {
+      await delegateWave(w.state, w.chief.threadId, planThreadId, waveNo, extra);
+      const id = workerOn(w.state, planThreadId, waveNo).thread_id as string;
+      await readyIdle(w.state, id, READY);
+      return id;
+    };
+    const complete = (w: World, threadId: string) => w.call("chief_complete", { threadId, skipReview: "small change" });
+
+    test("stackOn: the parent wave's docs/ commit is outside the range, so the wave completes with no note; a docs/ commit of its own is still refused", async () => {
+      const w = await world();
+      const planner = await stacked(w, { stackOn: 1 });
+      await launch(w, planner.threadId, 1, { branch: "feature-a" });
+      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      w.gitCalls.length = 0;
+      const own = await w.commit("docs/specs/own.md", "docs: by the wave worker");
+      const message = await refusal(complete(w, id));
+      expect(message).toContain(own.slice(0, 9));
+      expect(message).not.toContain("docs: parent wave");
+      expect(w.gitCalls).toContainEqual(["fetch", "origin", "feature-a"]);
+      expect(w.rowState(id)).not.toBe("complete");
+    });
+
+    test("stackOn with only the parent's docs/ commit: completes with no note and fetches origin/<plan base>", async () => {
+      const w = await world();
+      const planner = await stacked(w, { stackOn: 1 });
+      await launch(w, planner.threadId, 1, { branch: "feature-a" });
+      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      w.gitCalls.length = 0;
+      const reply = await complete(w, id);
+      expect(reply).toContain("without a review (reason recorded)");
+      expect(reply).not.toContain("docs/ check skipped");
+      expect(w.rowState(id)).toBe("complete");
+      expect(w.docsReads()).toHaveLength(1);
+      expect(w.gitCalls).toContainEqual(["fetch", "origin", "feature-a"]);
+    });
+
+    test("the same wave with no plan base is read against origin/HEAD: the parent's docs/ commit is then refused", async () => {
+      const w = await world();
+      const planner = await stacked(w);
+      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      const message = await refusal(complete(w, id));
+      expect(message).toContain("docs: parent wave");
+      expect(w.gitCalls).not.toContainEqual(["fetch", "origin", "feature-a"]);
+    });
+
+    test("a plan started on a branch checks its waves against that branch", async () => {
+      const w = await world();
+      const planner = await stacked(w, { plannerBranch: "feature-a" });
+      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      const reply = await complete(w, id);
+      expect(reply).not.toContain("docs/ check skipped");
+      expect(w.rowState(id)).toBe("complete");
+      expect(w.gitCalls).toContainEqual(["fetch", "origin", "feature-a"]);
+    });
+
+    test("an unresolved plan base skips the check with its reason, and the skip still completes", async () => {
+      const w = await world();
+      const planner = await stacked(w, { stackOn: 1 });
+      await launch(w, planner.threadId, 1, { branch: "feature-a" });
+      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      w.state.db.prepare("UPDATE managed_threads SET branch=NULL WHERE plan_thread_id=? AND plan_wave=1").run(planner.threadId);
+      await readyIdle(w.state, id, READY); // the thread store reloads its row cache on its next write
+      w.gitCalls.length = 0;
+      const reply = await complete(w, id);
+      expect(reply).toContain("docs/ check skipped: stack base unresolved: wave 1's chain has no task branch yet; skipReview proceeded without it.");
+      expect(w.rowState(id)).toBe("complete");
+      expect(w.docsReads()).toEqual([]);
+    });
+
+    test("with a pull request the check is unchanged: the PR's own base, not the plan base", async () => {
+      let head = "";
+      const w = await world({ ghHead: () => JSON.stringify({ headRefName: "task", headRefOid: head, baseRefName: "main" }) });
+      const planner = await stacked(w, { stackOn: 1 });
+      await launch(w, planner.threadId, 1, { branch: "feature-a" });
+      const id = await launch(w, planner.threadId, 3, { branch: "task", prUrl: PR });
+      head = await w.headSha();
+      const message = await refusal(complete(w, id));
+      expect(message).toContain("docs: parent wave");
+      expect(w.gitCalls).not.toContainEqual(["fetch", "origin", "feature-a"]);
     });
   });
 });
