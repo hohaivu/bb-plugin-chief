@@ -328,8 +328,12 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   return { prompt, brief, reviewerBrief };
 }
 
+const branchLine = (branch: string) => `Your worktree is based on branch ${branch} (an open branch, not the project default). Read and plan against it.`;
+
 export type PlannerBriefInput = {
   title: string; chiefThreadId: string; mission: string; context?: string; research: boolean;
+  /** An open branch the planner's worktree is based on; chain heads of its plan stack on it. */
+  branch?: string;
   /** Set for chief_plan revises: the plan its one advisor review sent back, and that advice. */
   revision?: {
     plannerThreadId: string;
@@ -344,9 +348,10 @@ export type PlannerBriefInput = {
 
 /** A planner's prompt: the problem and the plan contract. */
 export function plannerBrief(input: PlannerBriefInput): string {
-  const { title, chiefThreadId, mission, context, revision } = input;
+  const { title, chiefThreadId, mission, context, revision, branch } = input;
   return [
     `You are the managed planner for “${title}”. Report to Chief thread ${chiefThreadId}.`,
+    ...(branch ? [branchLine(branch), `Chain heads of this plan stack on ${branch}: chief_forge_init bases their branches and pull requests on it.`] : []),
     "", "## Problem", mission,
     ...(context ? ["", "## Context", context] : []),
     ...(revision ? [
@@ -383,15 +388,18 @@ export type AdvisorBriefInput = {
     report_path: string | null;
   };
   reviews: VerdictRow[];
+  /** An open branch a no-worker or plan consult's worktree is based on. */
+  branch?: string;
   /** Set for a plan review (chief_consult planThreadId): the planner, its plan files, result and report. */
   plan?: { plannerThreadId: string; paths: string[]; summary: string | null; reportPath: string | null };
 };
 
 /** An advisor's prompt: the question, and with a worker its brief, verdicts, branch and report. */
 export function advisorBrief(input: AdvisorBriefInput): string {
-  const { title, chiefThreadId, mission, context, worker, reviews, plan } = input;
+  const { title, chiefThreadId, mission, context, worker, reviews, plan, branch } = input;
   return [
     `You are the managed advisor for “${title}”. Report to Chief thread ${chiefThreadId}.`,
+    ...(branch ? [branchLine(branch)] : []),
     "You are a strategic advisor and debugger of last resort: find the root cause and the smallest credible way forward.",
     "", "## Question", mission,
     ...(context ? ["", "## Context", context] : []),

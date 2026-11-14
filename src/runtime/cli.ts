@@ -36,8 +36,8 @@ export function registerCli(ctx: Ctx) {
     "  bb chief start [--project proj_id] [--json]",
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
-    "  bb chief plan [--title \"…\"] --mission \"…\" [--context \"…\"] [--revises thr_id] [--json]",
-    "  bb chief consult [--title \"…\"] --mission \"…\" [--context \"…\"] [--worker thr_id | --plan-thread thr_id] [--json]",
+    "  bb chief plan [--title \"…\"] --mission \"…\" [--context \"…\"] [--revises thr_id] [--branch feature/…] [--json]",
+    "  bb chief consult [--title \"…\"] --mission \"…\" [--context \"…\"] [--worker thr_id | --plan-thread thr_id] [--branch feature/…] [--json]",
     "  bb chief delegate [--title \"…\"] --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|tester|spec-writer] [--evidence-only] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
@@ -56,8 +56,8 @@ export function registerCli(ctx: Ctx) {
       { name: "start", summary: "Start or return the latest Chief for a project", usage: "bb chief start [--project proj_id] [--json]" },
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
-      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan [--title \"…\"] --mission \"…\" [--revises thr_id] [--json]" },
-      { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult [--title \"…\"] --mission \"…\" [--worker thr_id | --plan-thread thr_id] [--json]" },
+      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan [--title \"…\"] --mission \"…\" [--revises thr_id] [--branch feature/…] [--json]" },
+      { name: "consult", summary: "Start a read-only advisor on a hard problem or a change that keeps failing review", usage: "bb chief consult [--title \"…\"] --mission \"…\" [--worker thr_id | --plan-thread thr_id] [--branch feature/…] [--json]" },
       { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate [--title \"…\"] --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|tester|spec-writer] [--evidence-only] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
@@ -148,7 +148,7 @@ export function registerCli(ctx: Ctx) {
         if (command === "plan") {
           const parsed = planParams.safeParse({
             title: args.one("title"), mission: args.one("mission"), context: args.one("context"),
-            revises: args.one("revises"),
+            revises: args.one("revises"), branch: args.one("branch"),
           });
           if (!parsed.success) return fail(`Invalid plan brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await ctx.startPlan(parsed.data, context.threadId);
@@ -157,7 +157,7 @@ export function registerCli(ctx: Ctx) {
         if (command === "consult") {
           const parsed = consultParams.safeParse({
             title: args.one("title"), mission: args.one("mission"), context: args.one("context"),
-            workerThreadId: args.one("worker"), planThreadId: args.one("plan-thread"),
+            workerThreadId: args.one("worker"), planThreadId: args.one("plan-thread"), branch: args.one("branch"),
           });
           if (!parsed.success) return fail(`Invalid consult brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await ctx.startConsult(parsed.data, context.threadId);

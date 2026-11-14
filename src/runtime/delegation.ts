@@ -16,22 +16,34 @@ const MAX_LOG_READ = 30;
 
 export function createDelegation(ctx: Ctx) {
   const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, progress, reviewerFails, store } = ctx;
-  /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout. Nothing is implemented until Chief delegates. */
+  /** A fresh managed worktree based on an open branch: the environment of a read-only role started with `branch`. */
+  async function branchEnvironment(projectId: string, branch: string) {
+    return {
+      type: "host" as const,
+      hostId: ((await ctx.projectHostId(projectId)) ?? await ctx.defaultHostId()) as string,
+      workspace: { type: "managed-worktree" as const, baseBranch: { kind: "named" as const, name: branch } },
+    };
+  }
+
+  /** A plan is read-only work in the project-default environment — its own worktree in projects whose default is a worktree, else the project checkout; with a branch, a fresh worktree on it. Nothing is implemented until Chief delegates. */
   async function startPlan(params: z.infer<typeof planParams>, callerThreadId?: string | null) {
     if (!(await ctx.plannerEnabled())) {
       throw new Error("Planning is off. Turn on “Plan before delegating” in Chief's settings, or delegate this work directly.");
     }
     const { chief, projectId } = await ctx.owningChief(callerThreadId);
     const revision = params.revises ? revisionInput(params.revises, chief.thread_id) : undefined;
+    // A revision stays on the branch its original planner read.
+    const branch = params.branch ?? (params.revises ? store.get(params.revises)?.branch ?? undefined : undefined);
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: "planner", hostId: await ctx.projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = plannerBrief({
       title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context,
-      research: researchLine("planner", await ctx.researchSettings()) !== null, revision,
+      research: researchLine("planner", await ctx.researchSettings()) !== null, revision, branch,
     });
-    const warning = await ctx.freshenChiefCheckout(chief, "planner");
-    const thread = await ctx.managedSpawn.launch(prepared, { projectId, environment: { type: "project-default" }, title, prompt },
-      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null },
+    const warning = branch ? null : await ctx.freshenChiefCheckout(chief, "planner");
+    const thread = await ctx.managedSpawn.launch(prepared,
+      { projectId, environment: branch ? await branchEnvironment(projectId, branch) : { type: "project-default" }, title, prompt },
+      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null, ...(branch ? { branch } : {}) },
       // Earlier revision attempts that failed or stopped are superseded atomically with the new one.
       params.revises ? (newId) => {
         const now = Date.now();
@@ -72,6 +84,7 @@ export function createDelegation(ctx: Ctx) {
   async function startConsult(params: z.infer<typeof consultParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await ctx.owningChief(callerThreadId);
     if (params.planThreadId) return startPlanConsult(params, params.planThreadId, chief.thread_id, projectId);
+    if (params.workerThreadId && params.branch) throw new Error(`The advisor reuses worker ${params.workerThreadId}'s worktree and branch; omit branch.`);
     const worker = params.workerThreadId ? store.get(params.workerThreadId) : undefined;
     if (params.workerThreadId && (!worker || worker.role !== "worker" || !ctx.controlsThread(worker, chief.thread_id))) {
       throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
@@ -87,14 +100,14 @@ export function createDelegation(ctx: Ctx) {
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: "advisor", hostId });
     const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
     const reviews = worker ? ctx.taskReviews(worker) : [];
-    const prompt = advisorBrief({ title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context, worker, reviews });
+    const prompt = advisorBrief({ title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context, worker, reviews, branch: params.branch });
     const thread = await ctx.managedSpawn.launch(prepared, {
       projectId,
       environment: worker
         ? { type: "reuse", environmentId: workerLive!.environmentId! }
-        : { type: "project-default" },
+        : params.branch ? await branchEnvironment(projectId, params.branch) : { type: "project-default" },
       title, prompt,
-    }, { role: "advisor", chiefThreadId: chief.thread_id, workerThreadId: worker?.thread_id ?? null });
+    }, { role: "advisor", chiefThreadId: chief.thread_id, workerThreadId: worker?.thread_id ?? null, ...(params.branch ? { branch: params.branch } : {}) });
     return { threadId: thread.id, title, projectId };
   }
 
@@ -112,17 +125,19 @@ export function createDelegation(ctx: Ctx) {
     }
     const { inFlight } = ctx.planAdvisors(plannerId);
     if (inFlight) throw new Error(`Plan ${plannerId} is already in review by ${inFlight.thread_id}: wait for ${inFlight.thread_id}, or chief_stop it first.`);
+    const branch = params.branch ?? planner.branch ?? undefined;
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: "advisor", hostId: await ctx.projectHostId(projectId) });
     const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
     const prompt = advisorBrief({
-      title: params.title, chiefThreadId, mission: params.mission, context: params.context, reviews: [],
+      title: params.title, chiefThreadId, mission: params.mission, context: params.context, reviews: [], branch,
       plan: {
         plannerThreadId: plannerId, paths: planWavesFor(plannerId).map((wave) => wave.path),
         summary: planner.result ? clip(planner.result, 1_500) : null, reportPath: planner.report_path,
       },
     });
-    const thread = await ctx.managedSpawn.launch(prepared, { projectId, environment: { type: "project-default" }, title, prompt },
-      { role: "advisor", chiefThreadId, planThreadId: plannerId });
+    const thread = await ctx.managedSpawn.launch(prepared,
+      { projectId, environment: branch ? await branchEnvironment(projectId, branch) : { type: "project-default" }, title, prompt },
+      { role: "advisor", chiefThreadId, planThreadId: plannerId, ...(branch ? { branch } : {}) });
     return { threadId: thread.id, title, projectId };
   }
   function delegate(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {

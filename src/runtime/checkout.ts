@@ -73,7 +73,8 @@ export function createCheckout(ctx: Ctx) {
       }
       if ("skipped" in co) return warn(co.skipped);
       const candidates = store.all().filter((row) => row.chief_thread_id === chief.thread_id && !terminal(row.state)
-        && (row.role === "researcher" || (row.role === "planner" && sharing !== "no")));
+        // A row with a recorded branch runs in its own managed worktree, never in Chief's checkout.
+        && ((row.role === "researcher" && !row.branch) || (row.role === "planner" && !row.branch && sharing !== "no")));
       // A live read that fails or times out counts as running.
       const running = (await Promise.all(candidates.map(async (row) => {
         const live = await read(() => bb.sdk.threads.get({ threadId: row.thread_id })).catch(() => null);
@@ -100,8 +101,10 @@ export function createCheckout(ctx: Ctx) {
       const deadline = Date.now() + STAMP_MS;
       const co = await serverCheckout(threadId, stageRead(deadline));
       if ("skipped" in co) return null;
-      const stamp = await commitStamp({ cwd: co.path, env: forgeEnv(), branch: co.branch, deadline });
-      return stamp ? stampLine(stamp, co.branch) : null;
+      // The reader's own selected branch, else its environment's default branch.
+      const branch = store.get(threadId)?.branch ?? co.branch;
+      const stamp = await commitStamp({ cwd: co.path, env: forgeEnv(), branch, deadline });
+      return stamp ? stampLine(stamp, branch) : null;
     } catch {
       return null;
     }
