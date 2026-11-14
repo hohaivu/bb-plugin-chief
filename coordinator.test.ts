@@ -2081,4 +2081,154 @@ describe("Coordinator", () => {
       }
     });
   });
+
+  describe("owner boundaries after review (COORD-5, COORD-11, COORD-12a)", () => {
+    const sha = (text: string, length: number) => createHash("sha1").update(text).digest("hex").slice(0, length);
+    const marker = (key: string) => `[alert ${sha(key, 10)}]`;
+    const stored = (state: S, key: string) => state.db.prepare("SELECT attempts, delivered_at, last_error FROM alert_outbox WHERE dedupe_key=?").get(key) as { attempts: number; delivered_at: number | null; last_error: string | null };
+    const sentWith = (state: S, needle: string) => state.sent.filter((sent) => String(sent.input[0].text).includes(needle));
+    const activate = async (state: S, id: string) => {
+      state.live.set(id, { ...state.live.get(id)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(id)! });
+      await settle();
+    };
+    const end = async (state: S, id: string, event: "thread.archived" | "thread.deleted") => {
+      state.live.set(id, { ...state.live.get(id)!, ...(event === "thread.archived" ? { archivedAt: new Date().toISOString() } : { deletedAt: new Date().toISOString() }) });
+      await state.harness.behavior.emitThreadEvent(event, { thread: state.live.get(id)! });
+      await settle();
+    };
+    const REQUEST = "Which team owns this?";
+    const needYou = (child: string, cycle: number) => `${child}:coordinator-need-you:${sha(REQUEST, 12)}:${cycle}`;
+
+    describe("a pending Coordinator receipt to a dead Coordinator is settled stale and never sent", () => {
+      test.each([
+        ["archived", async (state: S, coord: string) => { await end(state, coord, "thread.archived"); }],
+        ["deleted", async (state: S, coord: string) => { await end(state, coord, "thread.deleted"); }],
+        ["archived, then the child taken over by another Coordinator", async (state: S, coord: string, child: string) => {
+          await end(state, coord, "thread.archived");
+          const successor = await coordinator(state);
+          expect(await call(state, "chief_attach", { threadIds: [child] }, successor)).toBe(`${child}: attached.`);
+        }],
+      ])("a failed need-you whose Coordinator was %s: the next due retry through the supervisor sets delivered_at, last_error starts stale:, and nothing is sent", async (_label, kill) => {
+        const state = await setup();
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        const key = needYou(child, row(state, child).active_cycle);
+        state.failNextSend();
+        await call(state, "chief_escalate", { request: REQUEST }, child);
+        await settle();
+        expect(stored(state, key)).toMatchObject({ attempts: 1, delivered_at: null });
+        await kill(state, coord, child);
+        elapse(31_000);
+        await state.supervisorCycle();
+        expect(stored(state, key)).toMatchObject({ attempts: 1 });
+        expect(stored(state, key).delivered_at).not.toBeNull();
+        expect(stored(state, key).last_error).toMatch(/^stale: /);
+        expect(sentWith(state, marker(key))).toEqual([]);
+      });
+
+      test("a receipt never attempted (attempts 0) whose Coordinator is dead is settled stale by the supervisor, not sent", async () => {
+        const state = await setup();
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        await end(state, coord, "thread.archived");
+        const key = needYou(child, row(state, child).active_cycle);
+        state.db.prepare("INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, created_at, attempts) VALUES (?, ?, ?, ?, ?, 0)")
+          .run(key, coord, child, `[Coordinator alert]\nchild asks\n${marker(key)}`, Date.now() - 120_000);
+        await state.supervisorCycle();
+        expect(stored(state, key).delivered_at).not.toBeNull();
+        expect(stored(state, key).last_error).toMatch(/^stale: /);
+        expect(sentWith(state, marker(key))).toEqual([]);
+      });
+
+      test("an ended receipt to a dead Coordinator is never sent either", async () => {
+        const state = await setup();
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord)).id;
+        await end(state, coord, "thread.archived");
+        const key = `${child}:coordinator-ended:archived`;
+        state.db.prepare("INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, created_at, attempts, last_attempt_at) VALUES (?, ?, ?, ?, ?, 1, ?)")
+          .run(key, coord, child, `[Coordinator alert]\nended\n${marker(key)}`, Date.now() - 3_600_000, Date.now() - 3_600_000);
+        await state.supervisorCycle();
+        expect(sentWith(state, marker(key))).toEqual([]);
+      });
+    });
+
+    describe("a failed worker stall alert is re-entered through the supervisor", () => {
+      test("nothing is sent and stall_alerted_cycle stays unmarked before the backoff; at the backoff it is sent once and marked", async () => {
+        const state = await setup();
+        await state.harness.behavior.setSettings({ stallMinutes: "1" });
+        const chief = await make(state);
+        const worker = (await delegate(state, chief, "Fix totals")).threadId;
+        elapse(0);
+        await activate(state, worker);
+        const cycle = row(state, worker).active_cycle as number;
+        const key = `${worker}:stall:${cycle}`;
+        const unmarked = row(state, worker).stall_alerted_cycle;
+        expect(unmarked).not.toBe(cycle);
+        const toChief = () => sentWith(state, marker(key)).filter((sent) => sent.threadId === chief);
+        state.failNextSend();
+        elapse(60_000);
+        await state.supervisorCycle();
+        expect(stored(state, key)).toMatchObject({ attempts: 1, delivered_at: null });
+        for (const afterMs of [0, 15_000, 14_999]) {
+          elapse(afterMs);
+          await state.supervisorCycle();
+          await state.supervisorCycle();
+          expect(stored(state, key)).toMatchObject({ attempts: 1, delivered_at: null });
+          expect(row(state, worker).stall_alerted_cycle).toBe(unmarked);
+          expect(toChief()).toEqual([]);
+        }
+        elapse(1); // exactly 30 s after the failed attempt
+        await state.supervisorCycle();
+        await state.supervisorCycle();
+        expect(stored(state, key)).toMatchObject({ attempts: 2 });
+        expect(stored(state, key).delivered_at).not.toBeNull();
+        expect(row(state, worker).stall_alerted_cycle).toBe(cycle);
+        expect(toChief()).toHaveLength(1);
+      });
+    });
+
+    describe("handover to an existing Chief of the same Coordinator", () => {
+      test("the orphan's work moves to the sibling child that is already linked to C; the sibling keeps its own work, link and row; no Chief is started", async () => {
+        const state = await setup();
+        const coord = await coordinator(state);
+        const orphan = (await spawnChild(state, coord, { title: "Orphan" })).id;
+        const sibling = (await spawnChild(state, coord, { title: "Sibling" })).id;
+        const orphanWork = (await delegate(state, orphan, "Orphan work")).threadId;
+        const siblingWork = (await delegate(state, sibling, "Sibling work")).threadId;
+        const spawnedBefore = state.spawned.length;
+        await end(state, orphan, "thread.archived");
+        await state.supervisorCycle();
+        expect(state.spawned).toHaveLength(spawnedBefore);
+        expect(row(state, orphanWork).chief_thread_id).toBe(sibling);
+        expect(row(state, siblingWork).chief_thread_id).toBe(sibling);
+        expect(row(state, sibling)).toMatchObject({ role: "chief", coordinator_thread_id: coord, state: expect.not.stringMatching(/^(complete|archived|deleted)$/) });
+        expect(row(state, orphan).state).toBe("complete");
+        const roster = await call(state, "chief_roster", {}, coord);
+        expect(roster).toContain(`(${sibling})`);
+        expect(roster).not.toContain(`(${orphan})`);
+      });
+    });
+
+    describe("a legacy need-you row after its source child was superseded", () => {
+      test("the retry settles it stale and sends nothing", async () => {
+        const state = await setup();
+        const coord = await coordinator(state);
+        const child = (await spawnChild(state, coord, { title: "Checkout" })).id;
+        await delegate(state, child, "Fix totals");
+        await end(state, child, "thread.archived");
+        await state.supervisorCycle();
+        expect(row(state, child).state).toBe("complete");
+        const key = `${child}:coordinator-need-you:${sha(REQUEST, 12)}`;
+        state.db.prepare("INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, created_at, attempts, last_attempt_at) VALUES (?, ?, ?, ?, ?, 1, ?)")
+          .run(key, coord, child, `[Coordinator alert]\n${REQUEST}\n${marker(key)}`, Date.now() - 120_000, Date.now() - 120_000);
+        await state.supervisorCycle();
+        expect(stored(state, key)).toMatchObject({ attempts: 1 });
+        expect(stored(state, key).delivered_at).not.toBeNull();
+        expect(stored(state, key).last_error).toMatch(/^stale: /);
+        expect(sentWith(state, REQUEST)).toEqual([]);
+      });
+    });
+  });
 });
