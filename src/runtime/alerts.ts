@@ -3,7 +3,8 @@ import { ALERT_MARKER_ROOM, MAX_ALERT_LENGTH, clip } from "../core/text";
 import { createHash } from "node:crypto";
 import { bounded } from "./exec";
 import type { Ctx } from "./context";
-import { retryDue } from "./core";
+import { retryDue, stallThresholdMs } from "./core";
+import { BUSY_STATUSES } from "./constants";
 
 /** One worker a reviewer covers: the report and PR head its verdict is bound to. */
 interface AlertRow {
@@ -67,12 +68,37 @@ export function createAlerts(ctx: Ctx) {
 
   /** A delivery call that stalls longer than this fails like any other, so its in-flight entry clears and the outbox retries it. */
   const ALERT_CALL_MS = 30_000;
-  /** Why a retried alert no longer applies, or null. Key shape `<source>:<kind>:<rest>`; only a worker stall (`<cycle>[:hard]`) is checked here. */
+  /** Why a retried alert no longer applies, or null. Key shape `<source>:<kind>:<rest>`. A Coordinator kind is checked against the same live
+   * condition that created it (coordinatorOf, childDone, stalledKey), so a retry is due exactly when a fresh evaluation gives the same key. */
   async function stillDue(alert: AlertRow): Promise<string | null> {
-    const [source, kind, cycle] = alert.dedupe_key.split(":");
-    if (kind !== "stall") return null;
-    const row = store.get(source);
-    return row && row.state === "active" && row.active_cycle === Number(cycle) ? null : "stall no longer applies";
+    const [source, kind, ...parts] = alert.dedupe_key.split(":");
+    const rest = parts.join(":");
+    if (kind === "stall") {
+      const row = store.get(source);
+      return row && row.state === "active" && row.active_cycle === Number(parts[0]) ? null : "stall no longer applies";
+    }
+    if (!kind.startsWith("coordinator-") || kind === "coordinator-ended") return null;
+    const child = store.get(source);
+    if (!child) return `${kind} source is gone`;
+    const stale = `${kind} no longer applies`;
+    const coordinator = coordinatorOf(child);
+    switch (kind) {
+      case "coordinator-need-you":
+        // A key from before the cycle suffix (one part) has no cycle: the relation check alone decides, and the hash is never read as a cycle.
+        return coordinator === alert.target_thread_id && (parts.length === 1 || child.active_cycle === Number(parts[1])) ? null : stale;
+      case "coordinator-done":
+        return coordinator === alert.target_thread_id && childDone(child)?.thread_id === rest ? null : stale;
+      case "coordinator-failed":
+        return coordinator === alert.target_thread_id && child.state === "failed" && child.active_cycle === Number(rest) ? null : stale;
+      case "coordinator-stalled":
+        return coordinator === alert.target_thread_id && stalledKey(child, stallThresholdMs(await ctx.settings.get()), Date.now()) === rest ? null : stale;
+      case "coordinator-attached":
+        return ctx.isActiveChief(child) && ctx.liveCoordinatorId(child) === rest ? null : stale;
+      case "coordinator-gone":
+        return ctx.isActiveChief(child) && child.coordinator_thread_id === rest && deadCoordinator(child) ? null : stale;
+      default:
+        return null;
+    }
   }
 
   async function deliverAlert(key: string) {
@@ -155,39 +181,112 @@ export function createAlerts(ctx: Ctx) {
     return latest && !db.prepare(`SELECT 1 FROM chief_todos WHERE chief_thread_id=? AND state='open'`).get(child.thread_id) ? latest : undefined;
   }
 
-  /** The one door to a Coordinator's alerts. A child Chief's Need you (chief_escalate) or done state (the sweep, the idle event) alerts its
-   * active Coordinator once per receipt key: one outbox row, never a deletion of another pending row. Any other row is ignored; a failure
-   * is logged, never thrown: retryAlerts redelivers the row. */
-  function alertCoordinator(child: ManagedRow, alert: { kind: "done" } | { kind: "need-you"; request: string; concerned?: ManagedRow }) {
+  /** The Coordinator a child Chief is linked to and live under, for a child that is itself still an active Chief. A superseded (complete) child has none. */
+  function coordinatorOf(child: ManagedRow) {
+    return ctx.isActiveChief(child) ? ctx.liveCoordinatorId(child) : undefined;
+  }
+
+  /** The child's Coordinator row when it is archived or deleted, else undefined. */
+  function deadCoordinator(child: ManagedRow) {
+    const coordinator = store.get(child.coordinator_thread_id ?? "");
+    return ctx.isCoordinator(coordinator) && (coordinator!.state === "archived" || coordinator!.state === "deleted") ? coordinator : undefined;
+  }
+
+  /** What an idle child still holds: its open managed rows, its open todos, and when it or any of them last changed. */
+  function openWork(child: ManagedRow) {
+    const rows = store.all().filter((row) => row.chief_thread_id === child.thread_id && !terminal(row.state));
+    const todos = (db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(after IS NULL), 0) AS ready FROM chief_todos WHERE chief_thread_id=? AND state='open'`).get(child.thread_id) as { n: number; ready: number });
+    return { rows, todos, since: Math.max(child.updated_at, ...rows.map((row) => row.updated_at)) };
+  }
+
+  /** `<cycle>:active` for a child whose turn has run thresholdMs; `<cycle>:idle` for an idle child with open work that nothing moves (no busy row, no
+   * Need you this cycle, quiet thresholdMs); else undefined. The creation and retry checks of a stalled alert both call it. */
+  function stalledKey(child: ManagedRow, thresholdMs: number, now: number) {
+    if (child.state === "active") return child.active_since !== null && now - child.active_since >= thresholdMs ? `${child.active_cycle}:active` : undefined;
+    if (child.state !== "idle") return undefined;
+    const { rows, todos, since } = openWork(child);
+    if (!rows.length && !todos.ready) return undefined;
+    if (rows.some((row) => BUSY_STATUSES.has(row.status ?? "") || BUSY_STATUSES.has(row.state))) return undefined;
+    if (db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${child.thread_id}:coordinator-need-you:%:${child.active_cycle}`)) return undefined;
+    return now - since >= thresholdMs ? `${child.active_cycle}:idle` : undefined;
+  }
+
+  /** The one door to a Coordinator's alerts. Each kind has one receipt key, so a repeat adds nothing; a retried row is re-checked by stillDue.
+   * A child whose Coordinator is archived or deleted gets a notice instead. A failure is logged, never thrown: retryAlerts redelivers the row. */
+  function alertCoordinator(child: ManagedRow, alert: { kind: "state" } | { kind: "stalled"; thresholdMs: number } | { kind: "need-you"; request: string; concerned?: ManagedRow; url?: string }) {
     try {
-      const coordinator = store.get(child.coordinator_thread_id ?? "");
-      if (!ctx.isLinkedChild(child) || !ctx.isActiveChief(coordinator) || !ctx.isCoordinator(coordinator)) return;
+      const dead = deadCoordinator(child);
+      if (dead && ctx.isActiveChief(child)) {
+        void alertSelf(child.thread_id, `coordinator-gone:${dead.thread_id}`, `Your Coordinator ${dead.thread_id} was ${dead.state}: it gets no more alerts. Tell the owner here; another Coordinator can take you over with chief_attach.`, "Coordinator notice")
+          .catch((error) => bb.log.warn(`Could not notify ${child.thread_id} of its gone Coordinator: ${String(error)}`));
+        return;
+      }
+      const coordinatorId = ctx.liveCoordinatorId(child);
+      const ended = alert.kind === "state" && (child.state === "archived" || child.state === "deleted");
+      if (!coordinatorId || !(ended || ctx.isActiveChief(child))) return;
       const label = `Child Chief “${clip(child.title, 120)}” (${child.thread_id}, project ${child.project_id})`;
       let receipt: string;
       let message: string;
       if (alert.kind === "need-you") {
-        receipt = `coordinator-need-you:${createHash("sha1").update(alert.request).digest("hex").slice(0, 12)}`;
+        receipt = `coordinator-need-you:${createHash("sha1").update(alert.request).digest("hex").slice(0, 12)}:${child.active_cycle}`;
         message = [
           `${label} is blocked on a Need you${alert.concerned ? ` about ${alert.concerned.role} “${clip(alert.concerned.title, 120)}” (${alert.concerned.thread_id})` : ""}:`,
           clip(alert.request, 600),
-          `The owner answers it in ${child.thread_id}; do not answer or relay it.`,
+          ...(alert.url ? [`PR: ${alert.url}`] : []),
+          `The owner answers it in ${child.thread_id}.`,
         ].join("\n");
-      } else {
+      } else if (alert.kind === "stalled") {
+        const now = Date.now();
+        const rest = stalledKey(child, alert.thresholdMs, now);
+        if (!rest) return;
+        receipt = `coordinator-stalled:${rest}`;
+        if (rest.endsWith(":active")) {
+          message = `${label} has been in one turn for ${Math.round((now - child.active_since!) / 60_000)} minutes (stall threshold ${Math.round(alert.thresholdMs / 60_000)}); it may be looping. Tell the owner; they can stop it in its own thread.`;
+        } else {
+          const { rows, todos, since } = openWork(child);
+          message = `${label} has been idle ${Math.round((now - since) / 60_000)} minutes with open work: ${rows.length} open threads (${rows.filter((row) => row.state === "ready").length} ready, ${rows.filter((row) => row.state === "blocked").length} blocked), ${todos.n} open todos. Tell the owner.`;
+        }
+      } else if (child.state === "idle") {
         const latest = childDone(child);
         if (!latest) return;
         receipt = `coordinator-done:${latest.thread_id}`;
-        message = `${label} finished its work: every thread it owns is complete and it has no open todo. Check chief_roster, then tell the owner how work stands across your children.`;
-      }
+        const outcome = store.all()
+          .filter((row) => row.chief_thread_id === child.thread_id && row.state === "complete")
+          .sort((a, b) => b.updated_at - a.updated_at).slice(0, 3)
+          .map((row) => `“${clip(row.title, 80)}”${row.pr_url ? ` ${row.pr_url}` : ""}`).join("; ");
+        message = `${label} finished its work. Outcome: ${clip(outcome, 300)}`;
+        // Only an older undelivered done of this child is evicted: the newest one says everything.
+        db.prepare(`DELETE FROM alert_outbox WHERE source_thread_id=? AND target_thread_id=? AND delivered_at IS NULL AND dedupe_key LIKE ? AND dedupe_key<>?`)
+          .run(child.thread_id, coordinatorId, `${child.thread_id}:coordinator-done:%`, `${child.thread_id}:${receipt}`);
+      } else if (child.state === "failed") {
+        receipt = `coordinator-failed:${child.active_cycle}`;
+        message = `${label} failed: its last turn ended in an error. Tell the owner; it can be retried in its own thread.`;
+      } else if (ended) {
+        receipt = `coordinator-ended:${child.state}`;
+        message = `${label} was ${child.state}. Its open work, if any, moves to a successor Chief that stays your child.`;
+      } else return;
       const dedupeKey = `${child.thread_id}:${receipt}`;
-      if (insertAlert(child.thread_id, coordinator.thread_id, dedupeKey, message)) void deliverAlert(dedupeKey);
+      if (insertAlert(child.thread_id, coordinatorId, dedupeKey, message, "Coordinator alert")) {
+        void deliverAlert(dedupeKey).catch((error) => bb.log.warn(`Could not deliver Coordinator alert ${dedupeKey}: ${String(error)}`));
+      }
     } catch (error) {
       bb.log.warn(`Could not alert Coordinator of ${child.thread_id}: ${String(error)}`);
+    }
+  }
+
+  /** Attach: an idle-done child's current done round is recorded as already delivered, so attaching sends no done alert. Synchronous; it sends nothing. */
+  function baselineDone(child: ManagedRow, coordinatorId: string) {
+    const latest = childDone(child);
+    if (!latest) return;
+    const key = `${child.thread_id}:coordinator-done:${latest.thread_id}`;
+    if (insertAlert(child.thread_id, coordinatorId, key, "(baseline at attach: not sent)", "Coordinator alert")) {
+      db.prepare(`UPDATE alert_outbox SET delivered_at=? WHERE dedupe_key=? AND delivered_at IS NULL`).run(Date.now(), key);
     }
   }
 
   async function retryAlerts() {
     for (const alert of pendingAlerts.all(Date.now() - 60_000, Date.now()) as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
-  return { alertChief, alertCoordinator, alertSelf, deliverAlert, enqueueAlert, insertAlert, recordFailure, retryAlerts, writeAlert };
+  return { alertChief, alertCoordinator, alertSelf, baselineDone, deliverAlert, enqueueAlert, insertAlert, recordFailure, retryAlerts, writeAlert };
 }
 

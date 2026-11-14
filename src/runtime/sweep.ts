@@ -43,7 +43,7 @@ export function createSweep(ctx: Ctx) {
       do {
         ctx.state.sweepAgain = false;
         await completeAbsorbed();
-        for (const row of store.all()) ctx.alertCoordinator(row, { kind: "done" });
+        for (const row of store.all()) ctx.alertCoordinator(row, { kind: "state" });
       } while (ctx.state.sweepAgain);
     })().catch((error) => bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`)).finally(() => { ctx.state.sweeping = null; });
     return ctx.state.sweeping;

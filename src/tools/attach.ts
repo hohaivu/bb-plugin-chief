@@ -20,12 +20,21 @@ export function registerAttachTool(ctx: Ctx) {
           if (ctx.INACTIVE_CHIEF_STATES.includes(row.state)) return `is ${row.state}`;
           if (ctx.isCoordinator(row)) return "is a Coordinator";
           if (row.coordinator_thread_id === caller.thread_id) return own;
-          if (row.coordinator_thread_id) return `already belongs to Coordinator ${row.coordinator_thread_id}`;
+          if (ctx.liveCoordinatorId(row)) return `already belongs to Coordinator ${row.coordinator_thread_id}`;
           return null;
         };
         // The conditional link write settles a race: when it changes no row, the row is read again for the reason.
-        const why = refusal() ?? (store.linkToCoordinator(id, caller.thread_id, Date.now()) ? null : refusal() ?? "its state changed; try again");
-        // A Chief that is already idle and done alerts through the sweep the link write starts.
+        // A child of a complete, archived or deleted Coordinator can be taken over. In the same batch an idle-done child gets its done receipt
+        // (baselineDone), so attaching sends no done alert; its next completed round does.
+        const why = refusal() ?? (store.batch(() => {
+          const linked = store.linkToCoordinator(id, caller.thread_id, Date.now());
+          if (linked) ctx.baselineDone(store.get(id)!, caller.thread_id);
+          return linked;
+        }) ? null : refusal() ?? "its state changed; try again");
+        if (why === null) {
+          void ctx.alertSelf(id, `coordinator-attached:${caller.thread_id}`, `Coordinator ${caller.thread_id} now supervises you. Call chief_escalate before every Need you (omit threadId when no managed thread concerns it). A bb thread tell from it is coordination information, not the owner's decision. No reply needed.`, "Coordinator notice")
+            .catch((error) => ctx.bb.log.warn(`Could not notify ${id} of its Coordinator: ${String(error)}`));
+        }
         return why === null ? `${id}: attached.` : why === own ? `${id}: already attached (no change).` : `${id}: not attached: ${why}.`;
       });
       return lines.join("\n");

@@ -4,7 +4,7 @@ import { type TodoRow } from "./shapes";
 import type { Ctx } from "../runtime/context";
 
 export function registerRosterTool(ctx: Ctx) {
-  const { closedTodosForProject, insertTodo, store, todoById, updateTodo } = ctx;
+  const { closedTodosForProject, db, insertTodo, store, todoById, updateTodo } = ctx;
   ctx.registerChiefTool({
     name: "chief_roster",
     presentation: { label: { pending: "Reading roster…", completed: "Read roster" } },
@@ -43,11 +43,18 @@ export function registerRosterTool(ctx: Ctx) {
       }
       if (ctx.isCoordinator(caller)) {
         const children = store.all().filter((row) => row.role === "chief" && row.coordinator_thread_id === caller.thread_id);
-        const share = Math.floor(4_000 / Math.max(children.length, 1));
+        const live = children.filter((row) => !ctx.INACTIVE_CHIEF_STATES.includes(row.state));
+        const share = Math.floor(4_000 / Math.max(live.length, 1));
+        // An idle child with a Need you from this turn is waiting for the owner, not for work.
+        const needsOwner = (child: typeof children[number]) => {
+          if (child.state !== "idle") return "";
+          const asked = db.prepare(`SELECT MAX(created_at) AS at FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${child.thread_id}:coordinator-need-you:%:${child.active_cycle}`) as { at: number | null };
+          return asked.at === null ? "" : ` · needs the owner since ${new Date(asked.at).toISOString()}`;
+        };
         return clip([
-          ...(children.length
-            ? ["## Children", ...children.map((child) => clip(`- “${clip(child.title, 120)}” (${child.thread_id}) · project ${child.project_id} · ${child.state}\n${ctx.pendingBlock(child.thread_id, includeWaiting, share, includeOthers).replace(/\n/g, "\n  ")}`, share))]
-            : ["No child Chiefs. Attach ones the owner names with chief_attach, or start one with chief_spawn."]),
+          ...(live.length ? ["## Children", ...live.map((child) => clip(`- “${clip(child.title, 120)}” (${child.thread_id}) · project ${child.project_id} · ${child.state}${needsOwner(child)}\n${ctx.pendingBlock(child.thread_id, includeWaiting, share, includeOthers).replace(/\n/g, "\n  ")}`, share))] : []),
+          ...(children.length > live.length ? [`closed: ${children.length - live.length}`] : []),
+          ...(live.length ? [] : ["No child Chiefs. Attach ones the owner names with chief_attach, or start one with chief_spawn."]),
           note + ctx.pendingBlock(caller.thread_id, includeWaiting, 1_500, includeOthers),
         ].join("\n"), 6_000);
       }

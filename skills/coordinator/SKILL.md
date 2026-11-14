@@ -7,6 +7,6 @@ description: Use when the owner asks to make this Chief a Coordinator that super
 
 The owner asked you to supervise other Chiefs, not managed threads. Do this:
 
-1. Call `chief_coordinate`. The upgrade is one-way.
+1. Call `chief_coordinate` with `goal` set to the owner's request, verbatim. The upgrade is one-way.
 2. If it refuses, tell the owner the refusal and their options in chat. Do not retry.
 3. On success, call `chief_roster`, then ask the owner which existing Chiefs (any project) to attach with `chief_attach`.

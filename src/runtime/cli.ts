@@ -132,12 +132,16 @@ export function registerCli(ctx: Ctx) {
             return fail(`Thread ${threadId} is already a managed ${registered.role} (“${registered.title}”). Adopting it would discard its branch, forge links, and report.`);
           }
           const thread = await bb.sdk.threads.get({ threadId });
+          const previous = ctx.chiefForProject(thread.projectId);
+          if (previous && previous.thread_id !== threadId && registered && !ctx.compatibleSuccessor(previous, registered)) {
+            return fail(`Thread ${threadId} belongs to Coordinator ${ctx.liveCoordinatorId(registered)}; the project's Chief ${previous.thread_id} does not. Adopting it would move that work to another Coordinator.`);
+          }
           const sectionId = await ctx.ensureSection();
           const title = `Chief · ${await ctx.projectName(thread.projectId)}`;
           await bb.sdk.threads.update({ threadId, sectionId, visibility: "visible", title });
-          const previous = ctx.chiefForProject(thread.projectId);
           if (previous && previous.thread_id !== threadId) ctx.handOver(previous.thread_id, threadId, thread.projectId);
-          store.insert({ threadId, role: "chief", projectId: thread.projectId, title, state: thread.status === "active" ? "active" : "idle", status: thread.status });
+          store.insert({ threadId, role: "chief", projectId: thread.projectId, title, state: thread.status === "active" ? "active" : "idle", status: thread.status,
+            coordinatorThreadId: previous ? ctx.liveCoordinatorId(previous) : undefined });
           await ctx.readRules(thread.projectId);
           return ok({ threadId, projectId: thread.projectId, title }, `Adopted ${threadId} as “${title}”.`);
         }

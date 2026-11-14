@@ -42,7 +42,7 @@ export function createChiefs(ctx: Ctx) {
     if (previous && previous.thread_id !== thread.id) handOver(previous.thread_id, thread.id, target);
     store.insert({
       threadId: thread.id, role: "chief", projectId: target, title, state: "starting", status: thread.status,
-      coordinatorThreadId: handoff?.coordinatorThreadId,
+      coordinatorThreadId: handoff?.coordinatorThreadId ?? (previous ? ctx.liveCoordinatorId(previous) : undefined),
     });
     return { threadId: thread.id, created: true as const };
   }
@@ -52,7 +52,7 @@ export function createChiefs(ctx: Ctx) {
     return [
       "## Handed-off task",
       handoff.coordinatorThreadId
-        ? `Handed off by Coordinator ${handoff.fromChiefThreadId}. It supervises you as a child Chief and sees you in its Children block. It gets an alert when you call chief_escalate and when you finish all your work. The owner answers every Need you in this thread, never through the Coordinator.`
+        ? `Handed off by Coordinator ${handoff.fromChiefThreadId}. It supervises you as a child Chief and sees you in its Children block. It gets an alert when you call chief_escalate, finish all your work, fail, end, or stall (a turn that runs too long, or idle with open work). The owner answers every Need you in this thread, never through the Coordinator.`
         : `Handed off by Chief ${handoff.fromChiefThreadId}. It keeps no link to you: it will not see your roster or alerts, and you do not report to it.`,
       "",
       "### Owner's request (verbatim)",
@@ -68,9 +68,11 @@ export function createChiefs(ctx: Ctx) {
   /** Supersedes a Chief: marks it complete and moves its open work, todos and undelivered alerts to its successor. */
   function handOver(previousId: string, nextId: string, projectId: string) {
     if (ctx.isCoordinator(store.get(previousId)) || ctx.isCoordinator(store.get(nextId))) throw new Error("A Coordinator owns no managed work: it cannot hand work over or take it.");
+    if (!ctx.compatibleSuccessor(store.get(previousId), store.get(nextId))) throw new Error(`Chief ${nextId} belongs to another Coordinator: work from ${previousId} cannot move to it.`);
     const now = Date.now();
     store.batch(() => {
       store.completeChief(previousId, now);
+      store.inheritCoordinator(previousId, nextId, now);
       store.moveOpenWork(nextId, now, projectId, previousId);
       db.prepare(`UPDATE alert_outbox SET target_thread_id=?
         WHERE target_thread_id=? AND delivered_at IS NULL`).run(nextId, previousId);
@@ -96,6 +98,10 @@ export function createChiefs(ctx: Ctx) {
 
   async function createChief(projectId: string, handoff?: ChiefHandoff) {
     return spawnChief(projectId, undefined, handoff);
+  }
+  /** A dedicated successor for an orphan whose project Chief belongs to another Coordinator: it hands over from the orphan and inherits its live link. */
+  function replaceChief(orphaned: ManagedRow) {
+    return spawnChief(orphaned.project_id, orphaned);
   }
   async function ensureChief(projectId?: string) {
     const values = await settings.get();
@@ -124,6 +130,6 @@ export function createChiefs(ctx: Ctx) {
   }
 
   const managedSpawn = createManagedSpawn({ bb, db, spawnExecution: ctx.spawnExecution, ensureSection: ctx.ensureSection, readRules: ctx.readRules, lifecycleOwner: ctx.lifecycleOwner, insertThread: store.insert, persistBrief: (...a) => ctx.persistBrief(...a) });
-  return { createChief, ensureChief, handOver, handoffSection, managedSpawn, unpinPendingTab };
+  return { createChief, ensureChief, replaceChief, handOver, handoffSection, managedSpawn, unpinPendingTab };
 }
 

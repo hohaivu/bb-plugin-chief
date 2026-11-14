@@ -19,6 +19,12 @@ export function retryDue(row: { dedupe_key: string; attempts: number; last_attem
   return (row.last_attempt_at ?? 0) + Math.min(ALERT_RETRY_BASE_MS * 2 ** Math.min(row.attempts - 1, 6), ALERT_RETRY_MAX_MS) <= now;
 }
 
+/** The stallMinutes setting in ms; a value that is not a positive number means the default of 15 minutes. */
+export function stallThresholdMs(values: { stallMinutes: string }) {
+  const parsed = Number(values.stallMinutes);
+  return (Number.isFinite(parsed) && parsed > 0 ? parsed : 15) * 60_000;
+}
+
 export function createCore(ctx: Ctx) {
   const { bb } = ctx;
   const settings = bb.settings.define({
