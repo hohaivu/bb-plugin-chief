@@ -436,4 +436,6 @@ export const MIGRATIONS = [
     `CREATE UNIQUE INDEX chief_lessons_proposal ON chief_lessons(proposal_key)`,
     // communication rows only: the plugin's observed counts and the judge's signals as JSON, so the daily report can total them without reopening retro.md.
     `ALTER TABLE chief_scores ADD COLUMN detail TEXT`,
+    // When the last delivery try started (written before the send): the outbox backoff reads it.
+    `ALTER TABLE alert_outbox ADD COLUMN last_attempt_at INTEGER`,
 ];

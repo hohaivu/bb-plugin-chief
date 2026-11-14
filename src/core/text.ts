@@ -1,4 +1,6 @@
 export const MAX_ALERT_LENGTH = 3_000;
+/** Room for the last line `insertAlert` adds to every stored alert. */
+export const ALERT_MARKER_ROOM = "\n[alert 0123456789]".length;
 
 export function clip(value: string, limit = MAX_ALERT_LENGTH) {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;

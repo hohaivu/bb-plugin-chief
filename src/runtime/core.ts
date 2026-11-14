@@ -10,6 +10,15 @@ import { createWaveSchedule } from "../plan/waveSchedule";
 import { BUSY_STATUSES } from "./constants";
 import type { Ctx } from "./context";
 
+export const ALERT_RETRY_BASE_MS = 30_000;
+export const ALERT_RETRY_MAX_MS = 1_800_000;
+export const COORDINATOR_ALERT_MAX_ATTEMPTS = 10;
+/** A row with attempts > 0 may be resent: its backoff elapsed and, for a Coordinator-kind row, it is under the cap. */
+export function retryDue(row: { dedupe_key: string; attempts: number; last_attempt_at: number | null }, now: number) {
+  if (row.attempts >= COORDINATOR_ALERT_MAX_ATTEMPTS && row.dedupe_key.includes(":coordinator-")) return false;
+  return (row.last_attempt_at ?? 0) + Math.min(ALERT_RETRY_BASE_MS * 2 ** Math.min(row.attempts - 1, 6), ALERT_RETRY_MAX_MS) <= now;
+}
+
 export function createCore(ctx: Ctx) {
   const { bb } = ctx;
   const settings = bb.settings.define({
@@ -121,10 +130,14 @@ export function createCore(ctx: Ctx) {
   );
   // An alert to a Chief that is complete, archived or deleted can never land (handOver
   // retargets a superseded Chief's alerts), so it must not hold one of the 100 retry slots.
-  // A live Chief's alerts retry until they land: the worker was told not to report again.
+  // A live Chief's worker and report alerts retry without a cap: the worker was told not to report again. Coordinator alerts stop at COORDINATOR_ALERT_MAX_ATTEMPTS.
+  // A retried row waits its backoff (see retryDue, the same numbers); rows not due take no slot of the 100.
   // A row never attempted waits 60 s: the report intake writes a fallback row in its transaction and replaces it with the full alert, so a retry must not race that.
-  const pendingAlerts = db.prepare<[number]>(
-    `SELECT * FROM alert_outbox WHERE delivered_at IS NULL AND (attempts > 0 OR created_at <= ?) AND NOT EXISTS (
+  const pendingAlerts = db.prepare<[number, number]>(
+    `SELECT * FROM alert_outbox WHERE delivered_at IS NULL
+      AND ((attempts = 0 AND created_at <= ?) OR (attempts > 0 AND COALESCE(last_attempt_at, 0) + MIN(${ALERT_RETRY_BASE_MS} << MIN(attempts - 1, 6), ${ALERT_RETRY_MAX_MS}) <= ?))
+      AND (attempts < ${COORDINATOR_ALERT_MAX_ATTEMPTS} OR dedupe_key NOT LIKE '%:coordinator-%')
+      AND NOT EXISTS (
       SELECT 1 FROM managed_threads WHERE thread_id=alert_outbox.target_thread_id AND state IN ('complete','archived','deleted')
     ) ORDER BY created_at ASC LIMIT 100`,
   );

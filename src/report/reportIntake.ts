@@ -6,7 +6,7 @@ import type { Role } from "../core/roles";
 import { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../types";
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
-import { COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
+import { ALERT_MARKER_ROOM, COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
 import { waveTitle } from "../plan/waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
@@ -317,7 +317,7 @@ export function reportAlert(input: ReportAlertInput) {
   const FIELD_ROOM = 600;
   const ACTION_ROOM = 1_200;
   const MIN_RESULT_ROOM = 200;
-  const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length;
+  const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length - ALERT_MARKER_ROOM;
   const longLabel = "Result (clipped, full text in the report file): ";
   const inlineIntro = "Plan files, wave 1 first. To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):";
   const cost = (lines: string[]) => lines.reduce((total, line) => total + line.length + 1, 0);

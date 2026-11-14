@@ -339,7 +339,7 @@ export function createRetro(ctx: Ctx) {
       const item = event.data.item as Record<string, any> | undefined;
       if (!item) continue;
       const user = item.type === "userMessage" ? textOf(item.content) : "";
-      const keep = item.type === "userMessage" ? !/^\s*(\[Chief lifecycle alert\]|\[bb message from thread:)/.test(user)
+      const keep = item.type === "userMessage" ? !/^\s*(\[Chief lifecycle alert\]|\[Coordinator (alert|notice)\]|\[bb message from thread:)/.test(user)
         : item.type === "toolCall" ? /chief_/.test(String(item.tool)) && names(JSON.stringify(item.arguments ?? {}))
         : item.type === "commandExecution" ? /bb thread tell/.test(String(item.command)) && names(String(item.command)) : false;
       const line = keep ? render(event) : null;

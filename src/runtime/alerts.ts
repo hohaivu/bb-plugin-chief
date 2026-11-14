@@ -1,8 +1,9 @@
 import { type ManagedRow, terminal } from "../types";
-import { clip } from "../core/text";
+import { ALERT_MARKER_ROOM, MAX_ALERT_LENGTH, clip } from "../core/text";
 import { createHash } from "node:crypto";
 import { bounded } from "./exec";
 import type { Ctx } from "./context";
+import { retryDue } from "./core";
 
 /** One worker a reviewer covers: the report and PR head its verdict is bound to. */
 interface AlertRow {
@@ -14,6 +15,7 @@ interface AlertRow {
   attempts: number;
   last_error: string | null;
   created_at: number;
+  last_attempt_at: number | null;
 }
 
 export function createAlerts(ctx: Ctx) {
@@ -33,12 +35,14 @@ export function createAlerts(ctx: Ctx) {
   }
 
   /** One outbox row, once: a repeated key adds nothing and returns false. */
-  function insertAlert(sourceId: string, targetId: string | null, dedupeKey: string, message: string) {
+  function insertAlert(sourceId: string, targetId: string | null, dedupeKey: string, message: string, label = "Chief lifecycle alert") {
+    // The last line is an id a retry finds in the target's queue or events; it is never clipped.
+    const id = createHash("sha1").update(dedupeKey).digest("hex").slice(0, 10);
     return db.prepare(`INSERT OR IGNORE INTO alert_outbox
       (dedupe_key, target_thread_id, source_thread_id, message, created_at)
       VALUES (?, ?, ?, ?, ?)`).run(
       dedupeKey, targetId, sourceId,
-      clip(`[Chief lifecycle alert]\n${message}`), Date.now(),
+      `${clip(`[${label}]\n${message}`, MAX_ALERT_LENGTH - ALERT_MARKER_ROOM)}\n[alert ${id}]`, Date.now(),
     ).changes > 0;
   }
 
@@ -63,32 +67,49 @@ export function createAlerts(ctx: Ctx) {
 
   /** A delivery call that stalls longer than this fails like any other, so its in-flight entry clears and the outbox retries it. */
   const ALERT_CALL_MS = 30_000;
+  /** Why a retried alert no longer applies, or null. Key shape `<source>:<kind>:<rest>`; only a worker stall (`<cycle>[:hard]`) is checked here. */
+  async function stillDue(alert: AlertRow): Promise<string | null> {
+    const [source, kind, cycle] = alert.dedupe_key.split(":");
+    if (kind !== "stall") return null;
+    const row = store.get(source);
+    return row && row.state === "active" && row.active_cycle === Number(cycle) ? null : "stall no longer applies";
+  }
+
   async function deliverAlert(key: string) {
     const existing = ctx.state.alertDeliveries.get(key);
     if (existing) return existing;
     const delivery = (async () => {
       const alert = db.prepare<[string]>(`SELECT * FROM alert_outbox WHERE dedupe_key=?`).get(key) as AlertRow | undefined;
       if (!alert || alert.delivered_at !== null) return true;
-      // ponytail: no idempotency key, so a retry matches the text: a message BB left queued, or one already
-      // in Chief's last 50 completed items. A rewritten or older-than-50 message misses and may duplicate.
+      // Every direct caller meets the same backoff and cap as the batch; a deferred row is not sent and not counted as delivered.
       if (alert.attempts > 0) {
+        if (!retryDue(alert, Date.now())) return false;
+        const stale = await stillDue(alert);
+        if (stale) {
+          db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=? WHERE dedupe_key=?`).run(Date.now(), clip(`stale: ${stale}`, 1_000), key);
+          return true;
+        }
+        // A retry matches its earlier copy by the marker line, or by exact text for a row stored before markers.
         try {
           const text = clip(alert.message);
+          const marker = `[alert ${createHash("sha1").update(key).digest("hex").slice(0, 10)}]`;
+          const matches = (part: { type: string; text?: string }) => part.type === "text" && !!part.text && (part.text.includes(marker) || part.text === text);
           const queued = await bounded(() => bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id }), ALERT_CALL_MS);
-          const alreadyQueued = queued.some((message) =>
-            message.content.some((part) => part.type === "text" && part.text === text));
-          const alreadySent = alreadyQueued || (await bounded(() => bb.sdk.threads.events.list({
-            threadId: alert.target_thread_id, types: ["item/completed"], order: "desc", limit: "50",
-          }), ALERT_CALL_MS)).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
-            && event.data.item.content.some((part) => part.type === "text" && part.text === text));
+          const alreadySent = queued.some((message) => message.content.some(matches))
+            || (await bounded(() => bb.sdk.threads.events.list({
+              threadId: alert.target_thread_id, types: ["item/completed"], order: "desc", limit: "50",
+            }), ALERT_CALL_MS)).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
+              && event.data.item.content.some(matches));
           if (alreadySent) {
-            db.prepare(`UPDATE alert_outbox SET delivered_at=?, attempts=attempts+1, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
+            db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
             return true;
           }
         } catch {
           // Fall through to the send below.
         }
       }
+      // Counted before the send: a crash after it leaves attempts > 0, so the retry checks for the marker.
+      db.prepare(`UPDATE alert_outbox SET attempts=attempts+1, last_attempt_at=? WHERE dedupe_key=?`).run(Date.now(), key);
       try {
         await bounded(() => bb.sdk.threads.send({
           threadId: alert.target_thread_id,
@@ -96,11 +117,11 @@ export function createAlerts(ctx: Ctx) {
           mode: "queue-if-active",
           input: [{ type: "text", text: clip(alert.message), mentions: [] }],
         }), ALERT_CALL_MS);
-        db.prepare(`UPDATE alert_outbox SET delivered_at=?, attempts=attempts+1, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
+        db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
         return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        db.prepare(`UPDATE alert_outbox SET attempts=attempts+1, last_error=? WHERE dedupe_key=?`).run(clip(message, 1_000), key);
+        db.prepare(`UPDATE alert_outbox SET last_error=? WHERE dedupe_key=?`).run(clip(message, 1_000), key);
         bb.log.warn(`Could not deliver Chief alert ${key}: ${message}`);
         return false;
       }
@@ -114,9 +135,9 @@ export function createAlerts(ctx: Ctx) {
   }
 
   /** An alert from a Chief to itself, once per key. Sent without a sender: a thread cannot message itself as its own sender. */
-  async function alertSelf(chiefThreadId: string, key: string, message: string) {
+  async function alertSelf(chiefThreadId: string, key: string, message: string, label?: string) {
     const dedupeKey = `${chiefThreadId}:${key}`;
-    insertAlert(chiefThreadId, chiefThreadId, dedupeKey, message);
+    insertAlert(chiefThreadId, chiefThreadId, dedupeKey, message, label);
     return deliverAlert(dedupeKey);
   }
 
@@ -165,7 +186,7 @@ export function createAlerts(ctx: Ctx) {
   }
 
   async function retryAlerts() {
-    for (const alert of pendingAlerts.all(Date.now() - 60_000) as AlertRow[]) await deliverAlert(alert.dedupe_key);
+    for (const alert of pendingAlerts.all(Date.now() - 60_000, Date.now()) as AlertRow[]) await deliverAlert(alert.dedupe_key);
   }
   return { alertChief, alertCoordinator, alertSelf, deliverAlert, enqueueAlert, insertAlert, recordFailure, retryAlerts, writeAlert };
 }
