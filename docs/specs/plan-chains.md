@@ -14,6 +14,8 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Chain**: an ordered sequence of waves from a head wave to a tip wave.
 - **Chain head**: a plan wave with no parent dependency.
 - **Chain tip**: a plan wave that has no successor wave.
+- **Stacked chain**: a chain whose head has the optional `stackOn: k` field. Its task branch and pull request build on the task branch of wave `k`'s chain.
+- **Plan base**: the base branch that a stacked or branch-based chain is fixed to. The server derives it, and `null` means the project default.
 - **Task branch**: the Git branch created for a plan chain.
 - **Worker environment**: the managed worktree environment assigned to a worker thread.
 - **Spec wave**: a plan wave marked `spec: true` that a test, design, or skipped-specs rule does not exclude.
@@ -46,7 +48,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 
 Seven modules own the plan chains domain:
 
-1. `src/plan/waveSchedule.ts` owns graph traversal, wave relationships, wave absence, the lane predicate `sideLane`, and `writerPending`.
+1. `src/plan/waveSchedule.ts` owns graph traversal, wave relationships, wave absence, the lane predicate `sideLane`, `writerPending`, and the plan base of a chain head (`planBase`).
 2. `src/plan/planLifecycle.ts` owns delegation admission, role progression, and waivers.
 3. `src/runtime/delegation.ts` owns `startWorker`, which launches workers and Spec Writers. `src/tools/forgeInit.ts` owns forge initialization. `src/runtime/cleanup.ts` owns cleanup steps.
 4. `src/plan/planProgress.ts` owns progress checks, review readiness, the release route to the tester, legacy restack rules, and the repair decision after a reviewer verdict.
@@ -65,6 +67,7 @@ Callers interact with these entry points:
 - `sideLane(row)`: returns true for a side-lane Spec Writer. It is the only lane predicate.
 - `chainOwner(planThreadId, chain)`: returns the latest implementation-lane row of a chain. It never returns a side-lane Spec Writer.
 - `chainStarted(planThreadId, chain)`: returns any row of a chain, in any lane.
+- `planBase(planThreadId, wave)`: returns null, or the plan base of a chain head, with its `unresolved` or `waiting` reason.
 - `taskWriters(row, chainIds)`: returns the Spec Writers of this task. It never returns a writer of another plan, another chain, or another unplanned task.
 - `specWriters(planThreadId, wave?)`: returns the side-lane Spec Writers, oldest first. `waveWorkers` returns the implementation-lane rows only.
 - `writerPending(planThreadId, waves, n)`: returns true when wave `n` is a spec wave with a pending writer.
@@ -150,6 +153,20 @@ Shared worktree cleanup coordinates action ownership:
   - Reason: a side worktree checks out its own `bb/` side branch, so it never blocks the task branch.
 - `startWorker` rejects a delegation when `params.branch` differs from the branch of the prior worker. Reason: replacement workers must remain on the established chain branch.
 
+### Stacked Chain Base
+
+- A plan wave accepts `stackOn: k` only when it heads a chain. `k` is an integer from 1 to n-1, and wave `k` is neither a test wave nor a design wave. Reason: only an implementation wave of another chain gives a base to build on.
+- `checkReport` refuses `stackOn` on any other wave, with one error line for each broken rule. Reason: a non-head wave continues the branch of its parent.
+- `planBase` derives the base of a chain head in this order. Reason: one owner gives forge, admission, review and completion one value.
+  1. A head with `stackOn: k` takes the task branch of the implementation owner of wave `k`'s chain. Until that chain has a task branch, the base is unresolved. Reason: only the implementation lane holds the code of wave `k`, and a side-lane Spec Writer does not count.
+  2. Otherwise, a planner with a recorded branch gives that branch to every head. Reason: a plan started on a branch stacks its chains on that branch.
+  3. Otherwise the base is `null`, which means the project default. Reason: a plan with no stack and no branch keeps the default base.
+- `planBase` reports readiness apart from the base. A stacked head waits while wave `k` has no worker, or its latest worker is not settled. A worker is settled when it is ready, idle after a ready report, or complete. Reason: the stacked chain needs the code of wave `k`, not only its start.
+- Once the base resolves, a later unsettled state of wave `k`'s worker sets `waiting` and leaves the base unchanged. Reason: a started chain keeps its branch when wave `k` re-enters a fix round.
+- Launch needs a non-null base with no `waiting`. Review and completion use a non-null base whatever the readiness. Reason: launch needs the parent code, and review needs the base that the chain was cut from.
+- A stacked chain with a null base skips each check that needs a base, and never reads origin/HEAD. Reason: the default branch lacks the changes of the parent wave, so its diff gives a wrong scope.
+- The server never restacks a stacked chain and never retargets its pull request. Reason: a restack rewrites the history of started work. GitHub retargets a pull request only when its base branch is deleted.
+
 ### Chain Admission and Delegation
 
 - `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
@@ -162,6 +179,9 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
 - `admitDelegation` permits a tester wave to start fresh on a new branch when the tested worker completed. Reason: post-merge testing verifies code after branch deletion.
 - `admitDelegation` permits a fresh plan wave 1 delegation to replace a blocked row of another plan. The rule applies to each lane. Reason: re-planning allows recovery on the blocked worktree or side worktree.
+- `admitDelegation` refuses a fresh delegation (without `replaces:`) to a chain head with a plan base, while that base waits or is unresolved. Reason: the head must not build before its parent code exists.
+- `admitDelegation` refuses a fresh delegation to such a head without `branch`, and it never falls back to the project default. Reason: forge init cuts the branch from the plan base, so admission, forge and review agree on one value.
+- `undelegatedHeads` excludes the waiting and unresolved heads, and returns them as `waiting`. Reason: the planner must see why a head does not launch.
 
 ### Evidence-Only Tester Brief
 
@@ -259,10 +279,10 @@ Only a Spec Writer changes `docs/`. The sections above define the lanes. This se
 - Any other docs commit is blocking in review. The exception is a commit that a later Spec Writer of this task lists under `## Adopted docs commits`, when the final docs are correct. Reason: history is append-only, so only an accountable correction cures a violation.
 - A missing trailer means unknown ownership. It does not prove that a non-writer made the commit. Reason: legacy Spec Writer commits have no trailer.
 - Every review keeps every earlier Spec Writer report in its context, on spec and non-spec chains. Other earlier rows stay capped at four. Reason: the range of a legacy writer must reach the reviewer.
-- `chief_complete` with `skipReview` reads the pushed head of the task. With a pull request, it reads the PR head SHA against the PR base. Without one, it reads freshly fetched `origin/<branch>` against `origin/HEAD`. It never reads a local task ref. Reason: a stale local ref must never count as a clean check.
+- `chief_complete` with `skipReview` reads the pushed head of the task. With a pull request, it reads the PR head SHA against the PR base. Without one, it reads freshly fetched `origin/<branch>` against `origin/HEAD`, or against `origin/<plan base>` for a stacked or branch-based plan wave. It never reads a local task ref. Reason: a stale local ref must never count as a clean check.
 - `skipReview` is refused when a non-merge docs commit has no trailer, or a trailer that names no Spec Writer of this task. The text lists the commits and three routes: `chief_review`, a Spec Writer correction first, or `override`. Reason: `skipReview` has no reviewer.
 - A writer correction after the offending commit leaves `skipReview` refused. Reason: history is append-only, and the cure is a review or an `override`.
-- When the check cannot run, `skipReview` proceeds and the `chief_complete` reply says `docs/ check skipped: <reason>`. The causes are no local checkout, a remote host, an unreadable pull request, no task branch, a failed fetch, or the 20 second deadline. Reason: Chief decided to fail open with an explicit note.
+- When the check cannot run, `skipReview` proceeds and the `chief_complete` reply says `docs/ check skipped: <reason>`. The causes are no local checkout, a remote host, an unreadable pull request, no task branch, an unresolved plan base, a failed fetch, or the 20 second deadline. Reason: Chief decided to fail open with an explicit note.
 - The check does not run on an approve or an `override`. Reason: an approve had the reviewer rule, and an override is Chief's stated decision.
 - `docsCommits` in `src/review/impactSlice.ts` reads the history and never throws. A failure returns a skip reason.
 
@@ -357,6 +377,10 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 - `chief_forge_init` clips the planner summary at 1,500 characters in the pull request body. Reason: bounded summaries keep the pull request readable.
 - `chief_forge_init` formats the tracking issue body to state one pull request per chain. Reason: the tracking issue text must describe the chain pull request model.
 - `chief_forge_init` formats unplanned pull request bodies identically to base commit behavior. Reason: unplanned tasks follow single-task forge conventions without plan chains.
+- On a plan wave with a plan base, `chief_forge_init` uses that base when `base` is omitted. Reason: the branch and pull request must match the base that admission and review read.
+- `chief_forge_init` refuses an explicit `base` that differs from a non-null plan base, before any forge effect. Reason: an explicit base never sets a second base for the chain.
+- `chief_forge_init` refuses a stacked head while its plan base waits or is unresolved. Its text names the reason and offers no explicit base. Reason: an explicit base never bypasses the readiness rule.
+- On a plan wave without a plan base, and on unplanned work, `chief_forge_init` keeps a free explicit `base`. Reason: only a stacked or branch-based chain fixes its base.
 
 ### Review Worktree
 
@@ -368,6 +392,7 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 - `startReview` launches a fresh managed worktree when `reusableEnvironment` returns null, rejects, or times out. Reason: review launches must continue without failure when reuse cannot complete safely.
 - `startReview` uses the live environment of the worker for an unpinned review. Reason: unpinned reviews run directly in the environment of the worker.
 - `startReview` never selects an unpinned review environment for later reviewer reuse. Reason: unpinned reviews record no pinned commit SHA and belong to workers.
+- Without a pinned head, the impact slice of a stacked or branch-based plan wave compares against `origin/<plan base>`. When the plan base is unresolved, the slice is skipped. Reason: a stacked chain builds on its parent branch, so only that base gives its own scope.
 
 ### Shared Worktree Cleanup
 
@@ -409,9 +434,12 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 - A satisfied consult still shows consult advice. `chief_delegate` decides whether the `replaces:` proceeds. Reason: advice stays plan-wide wording.
 - `src/runtime/nextAction.ts` `nextAction` formats the result of `reviewAdvice` and makes no repair decision of its own. Reason: one module reads plan state and reviewer state together, and the server only writes sentences.
 - The report alert, `chief_roster` Pending, and the action panel read the same `reviewAdvice` answer. Reason: the three surfaces must never give different advice.
+- The task branch and pull request of a stacked or branch-based chain are based on its plan base. They never start from `origin/HEAD`, `main`, or `master`. Reason: the pull request must show only the changes of its own chain.
+- A plan with no `stackOn` and a planner with no branch behaves as before. Reason: existing plans must not change.
 
 ## Related Decisions
 
 - [Spec Writer runs in parallel on a side worktree](../decisions/2026-11-10-spec-writer-parallel-side-worktree.md)
 - [Retest after a fix round gates the review](../decisions/2026-11-10-retest-after-fix-round.md)
 - [Only a Spec Writer changes docs](../decisions/2026-11-10-docs-owned-by-spec-writer.md)
+- [Stacked chains use a stackOn field](../decisions/2026-11-14-stacked-chains-stackon.md)

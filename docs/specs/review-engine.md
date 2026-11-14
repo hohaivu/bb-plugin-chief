@@ -117,6 +117,16 @@ Chief decides every known verification gap before the review. The reviewer never
 
 Each lookup has its own failure handling, and a failure leaves the rest of the slice unchanged. Reason: the conditional blocks need the full path list and the full commit history, not the text diff.
 
+### Base of the impact slice
+
+The review start chooses the base ref of the slice for each target without a pinned head.
+
+- A stacked or branch-based plan wave compares against `origin/<plan base>`. Reason: the chain builds on that base, not on the default branch.
+- When the plan base is unresolved, the slice is skipped with the reason `stack base unresolved: <reason>`. Reason: the slice never falls back to the default branch.
+- An unstacked plan wave and unplanned work compare against `origin/HEAD`, as before.
+- A target with a pinned head compares against `origin/<head.base>`, as before.
+- The plan base is defined in [plan-chains.md](plan-chains.md) under Stacked Chain Base.
+
 ### Starting a review
 
 `startReview` covers one worker, or every branch of a plan.
