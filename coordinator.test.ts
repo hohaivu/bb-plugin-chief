@@ -10,7 +10,7 @@ import { loadBaseBuild } from "./scripts/loadBaseBuild";
 import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { PRELOAD_OLD_TAIL, acceptRosterOthersDelta, chiefPreloadTail } from "./test/toolConfigFixture";
-import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, rowOf, setup, start, status, wave } from "./test/harness";
+import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, elapse, readyAction, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { replaceText } from "./test/harness";
@@ -1180,6 +1180,183 @@ describe("Coordinator", () => {
     test("the coordinator skill declares the name the plain Chief's configure lists", async () => {
       const skill = await readFile(join(dirname(fileURLToPath(import.meta.url)), "skills", "coordinator", "SKILL.md"), "utf8");
       expect(skill.startsWith("---\nname: coordinator\n")).toBe(true);
+    });
+  });
+
+  describe("alert outbox delivery (COORD-11)", () => {
+    const sha = (text: string, length: number) => createHash("sha1").update(text).digest("hex").slice(0, length);
+    const markerOf = (key: string) => `[alert ${sha(key, 10)}]`;
+    const outbox = (state: S, key: string) => state.db.prepare("SELECT * FROM alert_outbox WHERE dedupe_key=?").get(key) as { message: string; attempts: number; delivered_at: number | null; last_error: string | null; last_attempt_at: number | null };
+    const textsTo = (state: S, target: string) => state.sent.filter((message) => message.threadId === target).map((message) => String(message.input[0].text));
+    /** A row as an older build or a crash between the write and the send leaves it. */
+    function seedRow(state: S, key: string, source: string, target: string, over: { message?: string; attempts?: number; ageMs?: number; lastAttemptAgeMs?: number } = {}) {
+      const now = Date.now();
+      state.db.prepare("INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, created_at, attempts, last_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(key, target, source, over.message ?? `[Chief lifecycle alert]\nseeded ${key}\n${markerOf(key)}`, now - (over.ageMs ?? 0), over.attempts ?? 0, over.lastAttemptAgeMs === undefined ? null : now - over.lastAttemptAgeMs);
+    }
+    /** A plain Chief that owns a worker: its source rows are never Coordinator kinds, so they retry without a cap. */
+    async function plainWithWorker(state: S) {
+      const chief = await make(state);
+      return { chief, worker: (await delegate(state, chief, "Fix totals")).threadId };
+    }
+    async function linked(state: S) {
+      const coord = await coordinator(state);
+      return { coord, child: (await spawnChild(state, coord)).id };
+    }
+    const escalate = async (state: S, child: string, request: string) => { await call(state, "chief_escalate", { request }, child); await settle(); };
+    const needYouKey = (child: string, request: string, cycle = 0) => `${child}:coordinator-need-you:${sha(request, 12)}:${cycle}`;
+
+    test("a worker's ready alert with a 5000-character result is stored with the marker last, within 3000 characters, keeps its action line and report path whole, and is sent as stored", async () => {
+      const state = await setup();
+      const { chief, worker } = await plainWithWorker(state);
+      await call(state, "chief_report", { state: "ready", summary: "S".repeat(800), result: `${"R".repeat(5_000)}${NO_DEVIATIONS}` }, worker);
+      await settle();
+      const stored = state.db.prepare("SELECT dedupe_key, message FROM alert_outbox WHERE source_thread_id=? AND message LIKE '%State: ready%'").get(worker) as { dedupe_key: string; message: string };
+      const reportPath = row(state, worker).report_path as string;
+      expect(reportPath).toBeTruthy();
+      expect(stored.message.length).toBeLessThanOrEqual(3_000);
+      expect(stored.message.endsWith(`\n${markerOf(stored.dedupe_key)}`)).toBe(true);
+      expect(stored.message.split("\n")).toContain(readyAction(worker));
+      expect(stored.message).toContain(reportPath);
+      expect(textsTo(state, chief)).toContain(stored.message);
+    });
+
+    test.each([["queued message", "queue"], ["recent event", "event"]])("a failed send counts one attempt before it is made; once BB shows the %s with the marker inside rewrapped text, the retry marks it delivered and sends nothing", async (_label, where) => {
+      const state = await setup();
+      const { coord, child } = await linked(state);
+      const request = "Which team owns this?";
+      state.failNextSend();
+      await escalate(state, child, request);
+      const key = needYouKey(child, request);
+      expect(outbox(state, key)).toMatchObject({ attempts: 1, delivered_at: null });
+      expect(outbox(state, key).last_attempt_at).toBeGreaterThan(0);
+      const rewrapped = `Message from ${child}:\n${outbox(state, key).message}\n(forwarded)`;
+      if (where === "queue") state.seedQueuedMessage(coord, rewrapped);
+      else state.seedEvents(coord, [{ type: "item/completed", seq: 1, createdAt: Date.now(), data: { item: { type: "userMessage", content: [{ type: "text", text: rewrapped }] } } }]);
+      elapse(31_000);
+      await state.supervisorCycle();
+      expect(outbox(state, key)).toMatchObject({ attempts: 1, last_error: null });
+      expect(outbox(state, key).delivered_at).not.toBeNull();
+      expect(textsTo(state, coord).filter((text) => text.includes(request))).toEqual([]);
+    });
+
+    test("a retry that finds no marker in the queue or events sends the stored text again", async () => {
+      const state = await setup();
+      const { coord, child } = await linked(state);
+      const request = "Which team owns this?";
+      state.failNextSend();
+      await escalate(state, child, request);
+      state.seedQueuedMessage(coord, `[alert ${"0".repeat(10)}] some other alert`);
+      elapse(31_000);
+      await state.supervisorCycle();
+      expect(textsTo(state, coord)).toContain(outbox(state, needYouKey(child, request)).message);
+      expect(outbox(state, needYouKey(child, request)).delivered_at).not.toBeNull();
+    });
+
+    test("a row stored before markers is matched by its exact text: queued means delivered without a send; absent means it is sent with its text unchanged", async () => {
+      const state = await setup();
+      const { chief: seen, worker: seenWorker } = await plainWithWorker(state);
+      const { chief: lost, worker: lostWorker } = await plainWithWorker(state);
+      const legacy = (worker: string) => `[Chief lifecycle alert]\nWorker ${worker} reported (written before markers).`;
+      seedRow(state, `${seenWorker}:legacy-kind:1`, seenWorker, seen, { message: legacy(seenWorker), attempts: 1, lastAttemptAgeMs: 60_000 });
+      seedRow(state, `${lostWorker}:legacy-kind:1`, lostWorker, lost, { message: legacy(lostWorker), attempts: 1, lastAttemptAgeMs: 60_000 });
+      state.seedQueuedMessage(seen, legacy(seenWorker));
+      await state.supervisorCycle();
+      expect(outbox(state, `${seenWorker}:legacy-kind:1`)).toMatchObject({ attempts: 1 });
+      expect(outbox(state, `${seenWorker}:legacy-kind:1`).delivered_at).not.toBeNull();
+      expect(textsTo(state, seen)).toEqual([]);
+      expect(textsTo(state, lost)).toEqual([legacy(lostWorker)]);
+      expect(outbox(state, `${lostWorker}:legacy-kind:1`)).toMatchObject({ attempts: 2 });
+    });
+
+    test("a failed alert waits 30 s, then 60 s, between sends; a call before its backoff sends nothing", async () => {
+      const state = await setup();
+      const { coord, child } = await linked(state);
+      const request = "Which team owns this?";
+      const key = needYouKey(child, request);
+      state.failNextSend();
+      state.failNextSend();
+      await escalate(state, child, request);
+      const attempts = async (afterMs: number) => { elapse(afterMs); await state.supervisorCycle(); return outbox(state, key).attempts; };
+      expect(await attempts(0)).toBe(1);
+      expect(await attempts(29_000)).toBe(1);
+      expect(await attempts(2_000)).toBe(2); // 31 s after the first attempt: failed again
+      expect(await attempts(31_000)).toBe(2); // 62 s after the first attempt, 31 s after the second: still inside its 60 s
+      expect(await attempts(30_000)).toBe(3); // 61 s after the second attempt
+      expect(outbox(state, key).delivered_at).not.toBeNull();
+      expect(textsTo(state, coord).filter((text) => text.includes(request))).toHaveLength(1);
+    });
+
+    test("a row never attempted is not picked by the supervisor until it is 60 s old", async () => {
+      const state = await setup();
+      const { chief, worker } = await plainWithWorker(state);
+      const key = `${worker}:legacy-kind:1`;
+      seedRow(state, key, worker, chief);
+      await state.supervisorCycle();
+      expect(textsTo(state, chief)).toEqual([]);
+      elapse(59_000);
+      await state.supervisorCycle();
+      expect(textsTo(state, chief)).toEqual([]);
+      elapse(2_000);
+      await state.supervisorCycle();
+      expect(textsTo(state, chief)).toEqual([outbox(state, key).message]);
+    });
+
+    test.each([[9, true], [10, false]])("a Coordinator row at %i attempts is retried: %s", async (attempts, retried) => {
+      const state = await setup();
+      const { coord, child } = await linked(state);
+      const key = `${child}:coordinator-ended:archived`;
+      seedRow(state, key, child, coord, { attempts, lastAttemptAgeMs: 2_000_000 });
+      await state.supervisorCycle();
+      expect(textsTo(state, coord).filter((text) => text.includes(markerOf(key)))).toHaveLength(retried ? 1 : 0);
+      expect(outbox(state, key).attempts).toBe(retried ? attempts + 1 : attempts);
+    });
+
+    test("a worker alert has no attempt cap: it is retried at 10 attempts and at 25", async () => {
+      const state = await setup();
+      const { chief, worker } = await plainWithWorker(state);
+      for (const attempts of [10, 25]) seedRow(state, `${worker}:legacy-kind:${attempts}`, worker, chief, { attempts, lastAttemptAgeMs: 2_000_000 });
+      await state.supervisorCycle();
+      expect(textsTo(state, chief)).toHaveLength(2);
+    });
+
+    test("a gone notice that always fails stops at exactly 10 attempts through the supervisor, alertSelf and sweep", async () => {
+      const state = await setup();
+      const { coord, child } = await linked(state);
+      for (let index = 0; index < 14; index += 1) state.failNextSend();
+      state.live.set(coord, { ...state.live.get(coord)!, archivedAt: new Date().toISOString() }); // reconcile reads the host's state, which must agree with the event
+      await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(coord)! });
+      await settle();
+      const key = `${child}:coordinator-gone:${coord}`;
+      expect(outbox(state, key).attempts).toBe(1);
+      for (let cycle = 0; cycle < 15; cycle += 1) {
+        elapse(1_900_000);
+        await state.supervisorCycle();
+      }
+      expect(outbox(state, key)).toMatchObject({ attempts: 10, delivered_at: null });
+      expect(textsTo(state, child)).toEqual([]);
+    });
+
+    test("a worker stall alert whose send failed is settled as stale once the worker leaves its cycle, and is never sent", async () => {
+      const state = await setup();
+      await state.harness.behavior.setSettings({ stallMinutes: "1" });
+      const { chief, worker } = await plainWithWorker(state);
+      const t0 = Date.now();
+      state.live.set(worker, { ...state.live.get(worker)!, status: "active" });
+      await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker)! });
+      state.failNextSend();
+      elapse(61_000);
+      await state.supervisorCycle();
+      const key = `${worker}:stall:${row(state, worker).active_cycle}`;
+      expect(outbox(state, key)).toMatchObject({ attempts: 1, delivered_at: null });
+      state.live.set(worker, { ...state.live.get(worker)!, status: "idle" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(worker)!, lastAssistantText: "done" });
+      elapse(31_000);
+      await state.supervisorCycle();
+      expect(outbox(state, key).delivered_at).not.toBeNull();
+      expect(outbox(state, key).last_error).toMatch(/^stale: /);
+      expect(textsTo(state, chief).filter((text) => text.includes(markerOf(key)))).toEqual([]);
+      expect(Date.now()).toBeGreaterThan(t0);
     });
   });
 });
