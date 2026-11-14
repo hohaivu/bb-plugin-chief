@@ -3,7 +3,7 @@ import { clip } from "../core/text";
 import { z } from "zod";
 import { bounded } from "./exec";
 import { BUSY_STATUSES } from "./constants";
-import { forgeEnv } from "../forge/forge";
+import { forgeEnv, prMerged } from "../forge/forge";
 import type { Ctx } from "./context";
 
 export function createCleanup(ctx: Ctx) {
@@ -215,7 +215,12 @@ export function createCleanup(ctx: Ctx) {
       if (!source?.hostId) return kept("no source host recorded for the project", true);
       if (!source.path) return kept("the project has no checkout path");
       if (source.hostId !== config.primaryHostId) return kept("the project checkout is on a remote host, not the plugin server");
-      const result = await bounded(() => deleteSafeBranch({ cwd: source.path!, env: forgeEnv(), branch: job.branch!, deadlineMs: CLEANUP_CALL_MS }), CLEANUP_CALL_MS + 5_000);
+      // A worker or spec-writer row carries its chain's pr_url; a reviewer's PRs come from the workers it covered.
+      const urls = [...new Set([row.pr_url, ...ledger.targets(id).map((target) => store.get(target.worker_thread_id)?.pr_url)].filter((url): url is string => !!url))];
+      const mergedHeads = urls.length
+        ? () => bounded(async () => (await Promise.all(urls.map((url) => prMerged(url, source.path!)))).flatMap((merged) => merged?.merged && merged.head ? [merged.head] : []), CLEANUP_CALL_MS)
+        : undefined;
+      const result = await bounded(() => deleteSafeBranch({ cwd: source.path!, env: forgeEnv(), branch: job.branch!, deadlineMs: CLEANUP_CALL_MS, mergedHeads }), 2 * CLEANUP_CALL_MS + 5_000);
       if ("error" in result) throw new Error(result.error);
       if ("kept" in result) return kept(result.kept, true);
       return cleanupMove(job, "storage", { outcome: "deleted" in result ? `branch deleted${result.note ? ` (${result.note})` : ""}` : "branch already gone" });
