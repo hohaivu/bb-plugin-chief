@@ -115,13 +115,16 @@ export function createAlerts(ctx: Ctx) {
       const alert = db.prepare<[string]>(`SELECT * FROM alert_outbox WHERE dedupe_key=?`).get(key) as AlertRow | undefined;
       if (!alert || alert.delivered_at !== null) return true;
       // Every direct caller meets the same backoff and cap as the batch; a deferred row is not sent and not counted as delivered.
-      if (alert.attempts > 0) {
-        if (!retryDue(alert, Date.now())) return false;
+      // A Coordinator receipt whose target is dead can never land: it is settled stale when it no longer applies, else left unsent.
+      const deadTarget = key.includes(":coordinator-") && ["complete", "archived", "deleted"].includes(store.get(alert.target_thread_id)?.state ?? "");
+      if (alert.attempts > 0 || deadTarget) {
+        if (alert.attempts > 0 && !retryDue(alert, Date.now())) return false;
         const stale = await stillDue(alert);
         if (stale) {
           db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=? WHERE dedupe_key=?`).run(Date.now(), clip(`stale: ${stale}`, 1_000), key);
           return true;
         }
+        if (deadTarget) return false;
         // A retry matches its earlier copy by the marker line, or by exact text for a row stored before markers.
         try {
           const text = clip(alert.message);

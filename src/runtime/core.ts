@@ -138,6 +138,7 @@ export function createCore(ctx: Ctx) {
   );
   // An alert to a Chief that is complete, archived or deleted can never land (handOver
   // retargets a superseded Chief's alerts), so it must not hold one of the 100 retry slots.
+  // A pending Coordinator receipt (not ended) to a dead target is still selected so deliverAlert can settle it stale; deliverAlert never sends it.
   // A live Chief's worker and report alerts retry without a cap: the worker was told not to report again. Coordinator alerts stop at COORDINATOR_ALERT_MAX_ATTEMPTS.
   // A retried row waits its backoff (see retryDue, the same numbers); rows not due take no slot of the 100.
   // A row never attempted waits 60 s: the report intake writes a fallback row in its transaction and replaces it with the full alert, so a retry must not race that.
@@ -145,9 +146,9 @@ export function createCore(ctx: Ctx) {
     `SELECT * FROM alert_outbox WHERE delivered_at IS NULL
       AND ((attempts = 0 AND created_at <= ?) OR (attempts > 0 AND COALESCE(last_attempt_at, 0) + MIN(${ALERT_RETRY_BASE_MS} << MIN(attempts - 1, ${ALERT_RETRY_MAX_DOUBLINGS}), ${ALERT_RETRY_MAX_MS}) <= ?))
       AND (attempts < ${COORDINATOR_ALERT_MAX_ATTEMPTS} OR dedupe_key NOT LIKE '%:coordinator-%')
-      AND NOT EXISTS (
+      AND (dedupe_key LIKE '%:coordinator-%' AND dedupe_key NOT LIKE '%:coordinator-ended:%' OR NOT EXISTS (
       SELECT 1 FROM managed_threads WHERE thread_id=alert_outbox.target_thread_id AND state IN ('complete','archived','deleted')
-    ) ORDER BY created_at ASC LIMIT 100`,
+    )) ORDER BY created_at ASC LIMIT 100`,
   );
   const roleModelRow = db.prepare<[string, string]>(
     `SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`,
