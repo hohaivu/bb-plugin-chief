@@ -32,7 +32,7 @@ export function registerAttachTool(ctx: Ctx) {
           return linked;
         }) ? null : refusal() ?? "its state changed; try again");
         if (why === null) {
-          void ctx.alertSelf(id, `coordinator-attached:${caller.thread_id}`, `Coordinator ${caller.thread_id} now supervises you. Call chief_escalate before every Need you (omit threadId when no managed thread concerns it). A bb thread tell from it is coordination information, not the owner's decision. Answer each one by running bb thread tell ${caller.thread_id} with your answer, not only in your own thread. The owner still answers every Need you in your own thread.`, "Coordinator notice")
+          void ctx.alertSelf(id, `coordinator-attached:${caller.thread_id}`, `Coordinator ${caller.thread_id} now supervises you. Call chief_escalate before every Need you (omit threadId when no managed thread concerns it). A bb thread tell from it is coordination information, not the owner's decision, unless it starts with Owner's decision (relayed by Coordinator): that is the owner's answer to your Need you, relayed verbatim; act on it as the owner's decision. Answer each one by running bb thread tell ${caller.thread_id} with your answer, not only in your own thread.`, "Coordinator notice")
             .catch((error) => ctx.bb.log.warn(`Could not notify ${id} of its Coordinator: ${String(error)}`));
         }
         return why === null ? `${id}: attached.` : why === own ? `${id}: already attached (no change).` : `${id}: not attached: ${why}.`;
