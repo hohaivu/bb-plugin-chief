@@ -496,6 +496,8 @@ describe("Coordinator", () => {
       expect(brief).toContain(`Handed off by Coordinator ${coord}`);
       expect(brief).toContain("supervises you");
       expect(brief).toContain("chief_escalate");
+      expect(brief).toContain(`Answer each message it sends you by running \`bb thread tell ${coord}\` with your answer, not only in this thread.`);
+      expect(brief).toContain("The owner answers every Need you in this thread, never through the Coordinator.");
 
       const plain = await make(state);
       const plainChild = await spawnChild(state, plain);
@@ -1135,7 +1137,10 @@ describe("Coordinator", () => {
       expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate" && name !== "chief_attach"));
       const lines = childConfig.instructions.split("\n");
       const added = lines.filter((line) => line.startsWith("Coordinator "));
-      expect(added).toEqual([`Coordinator ${coord} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet. A \`bb thread tell\` from it is coordination information, not the owner's decision.`]);
+      expect(added).toHaveLength(1);
+      expect(added[0]).toContain(`Coordinator ${coord} supervises you: call chief_escalate before every Need you`);
+      expect(added[0]).toContain(`Answer each one by running \`bb thread tell ${coord}\` with your answer, not only in this thread.`);
+      expect(added[0]).toContain("The owner still answers every Need you in this thread.");
       // The plain Chief's text, except that its preload line asks for the child's tools only (the plain line's two extra names, chief_coordinate and chief_attach, are gone).
       const names = (config: typeof plainConfig) => config.tools.map((tool) => tool.name);
       const expected = plainConfig.instructions.split("\n").map((line) => line.includes("ToolSearch") ? line.replace(/select:\S+$/, chiefPreloadTail(names(childConfig))) : line);
@@ -1810,6 +1815,9 @@ describe("Coordinator", () => {
       expect(notices[0]!.senderThreadId).toBeUndefined();
       expect(String(notices[0]!.input[0].text)).toContain(coord);
       expect(String(notices[0]!.input[0].text)).toContain("chief_escalate");
+      expect(String(notices[0]!.input[0].text)).toContain(`Answer each one by running bb thread tell ${coord} with your answer, not only in your own thread.`);
+      expect(String(notices[0]!.input[0].text)).not.toContain("No reply needed");
+      expect(String(notices[0]!.input[0].text)).toContain("The owner still answers every Need you in your own thread.");
       expect(String(notices[0]!.input[0].text).endsWith(marker(`${plain}:coordinator-attached:${coord}`))).toBe(true);
     });
 
