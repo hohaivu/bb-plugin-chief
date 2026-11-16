@@ -257,7 +257,7 @@ export function createAlerts(ctx: Ctx) {
           `${label} is blocked on a Need you${alert.concerned ? ` about ${alert.concerned.role} “${clip(alert.concerned.title, 120)}” (${alert.concerned.thread_id})` : ""}:`,
           clip(alert.request, 600),
           ...(alert.url ? [`PR: ${alert.url}`] : []),
-          `The owner answers it in ${child.thread_id}.`,
+          `The owner answers it in ${child.thread_id} or here; relay an answer given here with \`bb thread tell ${child.thread_id}\`, starting with \`Owner's decision (relayed by Coordinator):\`.`,
         ].join("\n");
       } else if (alert.kind === "stalled") {
         if (rest.endsWith(":active")) {

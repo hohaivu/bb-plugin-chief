@@ -232,7 +232,7 @@ Ask a Chief to run `/coordinator` to make it a Coordinator. The upgrade is one-w
 
 - A Coordinator supervises child Chiefs in any project. It runs no planner, worker, reviewer, tester, advisor or researcher, and `chief_plan`, `chief_delegate`, `chief_complete` and the other work tools refuse it.
 - Attach existing Chiefs the owner names with `chief_attach`. Start new ones with `chief_spawn` and `projectId`. `chief_roster` shows a Children block with each child's state and pending items.
-- It gets an alert each time a child calls `chief_escalate` (a Need you) and once when a child finishes all its work. The owner still answers a Need you in the child's own thread.
+- It gets an alert each time a child calls `chief_escalate` (a Need you) and once when a child finishes all its work. The owner answers a Need you in the child's own thread or in the Coordinator's thread; the Coordinator relays an answer given there to the child verbatim, marked as the owner's decision.
 - There is one level: a child cannot become a Coordinator, and a Coordinator cannot be attached or handed work.
 
 ## CLI

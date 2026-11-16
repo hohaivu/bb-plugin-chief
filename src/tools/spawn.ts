@@ -43,7 +43,7 @@ export function registerSpawnTool(ctx: Ctx) {
       };
       const { threadId } = await ctx.createChief(target, handoff);
       const lines = [coordinator
-        ? `Started Chief “${params.title}” in thread ${threadId}, project ${target}. It is linked as your child: it shows in your Children block and alerts you when it needs the owner or finishes. The owner answers it in its own thread.`
+        ? `Started Chief “${params.title}” in thread ${threadId}, project ${target}. It is linked as your child: it shows in your Children block and alerts you when it needs the owner or finishes. The owner answers its Need you there or here; relay an answer given here to it verbatim with bb thread tell.`
         : `Started Chief “${params.title}” in thread ${threadId}. It owns this task now and is not your managed work: it is not in your roster, sends you no alerts, and you cannot inspect or steer it.`];
       if (todo) {
         // Check-and-set: the todo may have changed owner or state while the Chief was starting.

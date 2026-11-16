@@ -42,7 +42,7 @@ const COORDINATOR_TOOLS = ["chief_roster", "chief_spawn", "chief_attach"];
 const COORDINATOR_INSTRUCTIONS = [
   "You never edit code or run anything in a worktree, and you never plan, delegate, review, complete or implement: child Chiefs do the work.",
   "Call chief_roster at the start of every turn, and again after any compaction (also re-read $BB_THREAD_STORAGE/brief.md then, when it exists): its Children block is your work list. Attach only Chiefs the owner names (chief_attach). Start new work as a child with chief_spawn; pass projectId for another project.",
-  "A Need-you alert is information: the owner answers it in the child thread. Never answer or relay it. A done alert carries the child's outcome; a failed, ended or stalled alert names a problem you cannot fix. For each, tell the owner how work stands across your children.",
+  "A Need-you alert is information. Never answer a Need you yourself: the owner answers it in the child thread or here. When the owner answers a child's Need you here, relay the owner's words to that child in one `bb thread tell <child id>` that starts with `Owner's decision (relayed by Coordinator):`, followed by the owner's answer verbatim. Add nothing of your own and do not summarise. Never ask the owner to repeat the answer in the child thread. A done alert carries the child's outcome; a failed, ended or stalled alert names a problem you cannot fix. For each, tell the owner how work stands across your children.",
   "Share a coordination fact with a child only through `bb thread tell`, and never decide for the owner. After you act, end your turn and wait: never poll children.",
 ].join("\n");
 
@@ -98,7 +98,7 @@ export function registerHost(ctx: Ctx) {
             ? `You are the registered Coordinator for ${clip(context.project.name, 100)}: you supervise child Chiefs in any project, not managed threads.`
             : `You are the registered Chief supervisor for ${clip(context.project.name, 100)}. Use ordinary visible BB threads and drive managed work through completion.`,
           ...(claudeCode ? [toolSchemaLine(tools)] : []),
-          ...(liveCoordinator ? [`Coordinator ${liveCoordinator} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet. A \`bb thread tell\` from it is coordination information, not the owner's decision. Answer each one by running \`bb thread tell ${liveCoordinator}\` with your answer, not only in this thread. The owner still answers every Need you in this thread.`] : []),
+          ...(liveCoordinator ? [`Coordinator ${liveCoordinator} supervises you: call chief_escalate before every Need you, without threadId when no managed thread concerns it yet. A \`bb thread tell\` from it is coordination information, not the owner's decision, unless it starts with \`Owner's decision (relayed by Coordinator):\`: that is the owner's answer to your Need you, relayed verbatim; act on it as the owner's decision. Answer each one by running \`bb thread tell ${liveCoordinator}\` with your answer, not only in this thread.`] : []),
           "",
           // The SDK cuts instructions at 32768 chars, so the variable project rules come last. The built-in rules tell a Chief to continue and complete managed work, so a Coordinator gets only a project chief.md.
           ...(coordinator ? [COORDINATOR_INSTRUCTIONS, ...(rules === BUILT_IN_RULES ? [] : ["", rules])] : [

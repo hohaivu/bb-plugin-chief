@@ -33,7 +33,7 @@ export function registerCoordinateTool(ctx: Ctx) {
           saved = ` brief.md not saved (${String(error)}).`;
         }
       }
-      return "This Chief is now a Coordinator. The upgrade is one-way. It runs no managed threads: it supervises child Chiefs in any project. Attach existing Chiefs the owner names with chief_attach, start new work in a child with chief_spawn (projectId names its project), and read chief_roster for the Children block. A child's Need you and its done state arrive here as alerts; the owner answers in the child thread." + saved;
+      return "This Chief is now a Coordinator. The upgrade is one-way. It runs no managed threads: it supervises child Chiefs in any project. Attach existing Chiefs the owner names with chief_attach, start new work in a child with chief_spawn (projectId names its project), and read chief_roster for the Children block. A child's Need you and its done state arrive here as alerts; the owner answers in the child thread or here; relay an answer given here to the child verbatim with bb thread tell." + saved;
     },
   });}
 

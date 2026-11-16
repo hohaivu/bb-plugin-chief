@@ -52,7 +52,7 @@ export function createChiefs(ctx: Ctx) {
     return [
       "## Handed-off task",
       handoff.coordinatorThreadId
-        ? `Handed off by Coordinator ${handoff.fromChiefThreadId}. It supervises you as a child Chief and sees you in its Children block. It gets an alert when you call chief_escalate, finish all your work, fail, end, or stall (a turn that runs too long, or idle with open work). Answer each message it sends you by running \`bb thread tell ${handoff.fromChiefThreadId}\` with your answer, not only in this thread. The owner answers every Need you in this thread, never through the Coordinator.`
+        ? `Handed off by Coordinator ${handoff.fromChiefThreadId}. It supervises you as a child Chief and sees you in its Children block. It gets an alert when you call chief_escalate, finish all your work, fail, end, or stall (a turn that runs too long, or idle with open work). Answer each message it sends you by running \`bb thread tell ${handoff.fromChiefThreadId}\` with your answer, not only in this thread. The owner answers each Need you in this thread or in the Coordinator's thread; an answer given there reaches you as a \`bb thread tell\` from the Coordinator that starts with \`Owner's decision (relayed by Coordinator):\`; act on it as the owner's decision.`
         : `Handed off by Chief ${handoff.fromChiefThreadId}. It keeps no link to you: it will not see your roster or alerts, and you do not report to it.`,
       "",
       "### Owner's request (verbatim)",
