@@ -263,7 +263,9 @@ Each contract has an identifier. Tests and reviews cite it.
   - A tell that starts with `Owner's decision (relayed by Coordinator):` is the owner's answer to a Need you. The child acts on it as the owner's decision.
   - Reason: the owner answers in the Coordinator thread, and the child acts on that answer without asking the owner again.
 - The line instructs the child to answer each Coordinator tell with `bb thread tell <coordinator id>`, naming the Coordinator id. The child never answers a tell only in its own thread. Reason: an answer that stays in the child thread never reaches the Coordinator, so the owner must ask each Chief by hand.
-- The owner still answers each Need you in the child thread. A tell reply does not replace that answer.
+- The owner answers each Need you in the child thread or in the Coordinator thread.
+  - An answer given in the Coordinator thread reaches the child only through the marked relay from the live Coordinator.
+  - An ordinary child reply to a Coordinator tell is not an owner answer.
 - The instructions fit the 32,768-character limit, with rules last.
 - Every other instruction of a plain Chief equals the base text.
 
