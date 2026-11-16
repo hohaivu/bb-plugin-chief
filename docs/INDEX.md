@@ -27,3 +27,4 @@
 - [One gated lesson store](decisions/2026-11-13-lesson-lifecycle-gate.md)
 - [Brief rules live in role skills](decisions/2026-11-13-brief-rules-in-role-skills.md)
 - [Stacked chains use a stackOn field](decisions/2026-11-14-stacked-chains-stackon.md)
+- [Owner answers reach a child through a marked relay](decisions/2026-11-16-owner-answer-relay-marker.md)

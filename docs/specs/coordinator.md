@@ -141,7 +141,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - A Chief that owns any open row gets a refusal that lists the row ids. Ready and blocked rows count as open.
 - Open todos do not block the upgrade. They stay with the Coordinator.
 - The upgrade renames the thread: a leading `Chief ·` becomes `Coordinator ·`, and the rest of the title stays. The row title changes in the same statement.
-- The success text says that the upgrade is one-way, runs no managed threads, and explains how to attach, spawn and read the roster.
+- The success text says that the upgrade is one-way, runs no managed threads, and explains how to attach, spawn and read the roster. It says that the owner answers a child's Need you in the child thread or in the Coordinator thread. The Coordinator relays an answer given in its thread to the child.
 - No tool, CLI command or SQL statement clears `coordinator`. Reason: the owner decided that the upgrade is one-way.
 
 ### COORD-2 Purity
@@ -174,7 +174,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - For an id that is not a Chief row, the line tells the owner to run `bb chief adopt --thread <id>` first.
 - An id that already belongs to the caller returns a no-op line.
 - In the same store batch, an idle-done child receives a delivered done receipt (`baselineDone`), so attach sends no done alert. Reason: avoid alert storms when attaching finished work.
-- After the batch, each successfully attached child receives one `coordinator-attached:<id>` notice (`alertSelf`). The notice instructs the child to escalate each Need you. It also instructs the child to answer each Coordinator tell with `bb thread tell <coordinator id>`. Reason: a running child learns its new rules on its next turn.
+- After the batch, each successfully attached child receives one `coordinator-attached:<id>` notice (`alertSelf`). The notice instructs the child to escalate each Need you. It also instructs the child to answer each Coordinator tell with `bb thread tell <coordinator id>`. It explains that a tell is coordination information, except a tell that starts with `Owner's decision (relayed by Coordinator):`. That tell is the owner's decision. Reason: a running child learns its new rules on its next turn.
 - The link write is conditional. When it changes no row, the tool reads the row again and reports the reason. Reason: two callers can race.
 - One level only: a Coordinator never becomes a child. A Chief has at most one Coordinator.
 
@@ -184,8 +184,8 @@ Each contract has an identifier. Tests and reviews cite it.
 - The tool validates the project before it spawns. A bad id leaves no thread and no row.
 - A `todoId` with a `projectId` that differs from the caller's project is refused before the spawn. Reason: todos belong to one project.
 - A Chief that a Coordinator spawns gets `coordinator_thread_id` in the same insert. The target project's existing Chief stays untouched.
-- For a Coordinator caller, the handoff section says that the Coordinator supervises the child. It names Need you, done, fail, end, and stall alerts. It says that the owner answers the Need you in the child thread. `brief.md` holds the same text.
-- For a Coordinator caller, the result says that the new Chief is linked, shows in Children, and alerts the Coordinator.
+- For a Coordinator caller, the handoff section says that the Coordinator supervises the child. It names Need you, done, fail, end, and stall alerts. It says that the owner answers the Need you in the child thread or in the Coordinator thread. A relayed answer arrives as a tell that starts with `Owner's decision (relayed by Coordinator):`, and the child treats it as the owner's decision. `brief.md` holds the same text.
+- For a Coordinator caller, the result says that the new Chief is linked, shows in Children, and alerts the Coordinator. It also says that the Coordinator relays an answer given in its thread to the child verbatim.
 - For a plain Chief caller, the handoff text, the result text and `brief.md` equal the base text.
 - Work handed over from a child stays with that child's live Coordinator.
 - `handOver` (`store.inheritCoordinator`), `spawnChief` (with `previous`), and `bb chief adopt` give the successor the link of the previous child when that Coordinator is live.
@@ -204,8 +204,8 @@ Each contract has an identifier. Tests and reviews cite it.
 - Without a `threadId`, the tool posts nothing on the forge and starts no tracker decision. It returns the chat-only line.
 - The dedupe key is `<child>:coordinator-need-you:<sha1(request)[:12]>:<child.active_cycle>`. Reason: a repeated question in a new turn delivers a new alert after the owner answers.
 - Rows written before this format (`<child>:coordinator-need-you:<sha12>`) remain deliverable while the child stays linked to that live Coordinator.
-- The alert message names the child, its project, and the request clipped to 600 characters. It appends `PR: <url>` when the concerned thread has a URL. It states that the owner answers in the child thread.
-- The message omits instructions to not answer or relay because Coordinator instructions already enforce that rule.
+- The alert message names the child, its project, and the request clipped to 600 characters. It appends `PR: <url>` when the concerned thread has a URL. It states that the owner answers in the child thread or in the Coordinator thread.
+- The message names the relay command, `bb thread tell <child>` with the marker. Reason: the Coordinator acts on the alert in that place.
 - A Coordinator alert never deletes another pending outbox row, except older undelivered done rows of the same child. Reason: the key is a once-only receipt.
 - The result of `chief_escalate` equals the base result for the same input. An alert failure never fails the call.
 
@@ -249,12 +249,19 @@ Each contract has an identifier. Tests and reviews cite it.
 - The Coordinator instructions replace the Chief rules. They state that the Coordinator never edits code, never plans, delegates, reviews or completes, and attaches only Chiefs that the owner names.
 - They instruct the Coordinator to call `chief_roster` at the start of every turn and again after any compaction, and re-read `$BB_THREAD_STORAGE/brief.md` when it exists.
 - They state that the Coordinator starts new work as a child with `chief_spawn`.
-- They explain each alert kind. A Need-you alert is information that the owner answers in the child thread. A done alert carries the child outcome. Failed, ended, or stalled alerts name problems the Coordinator cannot fix.
+- They explain each alert kind. A done alert carries the child outcome. Failed, ended, or stalled alerts name problems the Coordinator cannot fix.
+- A Need-you alert is information. The Coordinator never answers it.
+  - The owner answers it in the child thread or in the Coordinator thread.
+  - When the owner answers in the Coordinator thread, the Coordinator relays the answer. It sends the owner's words verbatim in one `bb thread tell <child id>`. The message starts with `Owner's decision (relayed by Coordinator):`.
+  - The relay adds nothing. The Coordinator never asks the owner to repeat the answer in the child thread.
+  - Reason: the owner answers where the alert arrives. The verbatim relay keeps the owner's words unchanged.
 - For each alert, the Coordinator informs the owner about status across children.
 - They state that the Coordinator shares facts with a child only through `bb thread tell`, and ends its turn after it acts. It never polls children.
 - The project rules appear last, and only when a project `chief.md` exists. The built-in rules never appear. Reason: they tell a Chief to continue and complete managed work.
 - A child Chief gets one instruction line before the rules only while its Coordinator is live. The line names the Coordinator and tells the child to call `chief_escalate` before every Need you (omitting `threadId` when no managed thread concerns it).
 - The line instructs the child that a `bb thread tell` from the Coordinator is coordination information, not the decision of the owner.
+  - A tell that starts with `Owner's decision (relayed by Coordinator):` is the owner's answer to a Need you. The child acts on it as the owner's decision.
+  - Reason: the owner answers in the Coordinator thread, and the child acts on that answer without asking the owner again.
 - The line instructs the child to answer each Coordinator tell with `bb thread tell <coordinator id>`, naming the Coordinator id. The child never answers a tell only in its own thread. Reason: an answer that stays in the child thread never reaches the Coordinator, so the owner must ask each Chief by hand.
 - The owner still answers each Need you in the child thread. A tell reply does not replace that answer.
 - The instructions fit the 32,768-character limit, with rules last.
@@ -353,6 +360,8 @@ Each contract has an identifier. Tests and reviews cite it.
 - A Coordinator alert only adds one outbox row. It never deletes another pending row, except an older undelivered done row of the same child.
 - A Coordinator alert failure never fails the tool or the lifecycle event that caused it. The outbox retries the alert.
 - The same event, repeated, adds no second alert.
+- A relayed answer counts as the owner's decision only in a tell from the child's own live Coordinator. Reason: any thread can send the marker text.
+- The Coordinator never decides for the owner. It relays the owner's answer only.
 
 ## Trade-offs
 
@@ -366,3 +375,4 @@ Each contract has an identifier. Tests and reviews cite it.
 ## Related decisions
 
 - [Coordinator stays a Chief row with two nullable columns](../decisions/2026-11-10-coordinator-stays-chief-row.md)
+- [Owner answers reach a child through a marked relay](../decisions/2026-11-16-owner-answer-relay-marker.md)
