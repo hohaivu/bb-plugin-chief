@@ -497,7 +497,8 @@ describe("Coordinator", () => {
       expect(brief).toContain("supervises you");
       expect(brief).toContain("chief_escalate");
       expect(brief).toContain(`Answer each message it sends you by running \`bb thread tell ${coord}\` with your answer, not only in this thread.`);
-      expect(brief).toContain("The owner answers every Need you in this thread, never through the Coordinator.");
+      expect(brief).toContain(`Owner's decision (relayed by Coordinator):`);
+      expect(brief).not.toContain("never through the Coordinator");
 
       const plain = await make(state);
       const plainChild = await spawnChild(state, plain);
@@ -506,6 +507,7 @@ describe("Coordinator", () => {
       const plainBrief = await readFile(join(state.storageRoot, plainChild.id, "brief.md"), "utf8");
       expect(plainBrief).toContain(`Handed off by Chief ${plain}`);
       expect(plainBrief).not.toMatch(/Coordinator/);
+      expect(plainBrief).not.toContain(`Owner's decision (relayed by Coordinator):`);
       expect(row(state, plainChild.id)).toMatchObject({ coordinator: null, coordinator_thread_id: null });
     });
 
@@ -544,6 +546,8 @@ describe("Coordinator", () => {
       expect(message.senderThreadId).toBe(child);
       expect(message.input[0].text).toContain(`about worker “Fix totals” (${worker.threadId})`);
       expect(message.input[0].text).toContain(`The owner answers it in ${child}`);
+      expect(message.input[0].text).toContain(`bb thread tell ${child}`);
+      expect(message.input[0].text).toContain(`Owner's decision (relayed by Coordinator):`);
     });
 
     test("a chat-only escalation (planner with no tracking issue) and one without a threadId each alert once", async () => {
@@ -1106,6 +1110,9 @@ describe("Coordinator", () => {
         expect(instructions).toContain("Call chief_roster at the start of every turn, and again after any compaction (also re-read $BB_THREAD_STORAGE/brief.md then, when it exists): its Children block is your work list.");
         expect(instructions).not.toContain("# Chief core rules");
         expect(instructions).not.toContain("# Chief operating rules");
+        expect(instructions).toContain(`Owner's decision (relayed by Coordinator):`);
+        expect(instructions).toContain("bb thread tell");
+        expect(instructions).not.toContain("Never answer or relay");
         expect(instructions.indexOf(MARKER)).toBeGreaterThan(instructions.indexOf("never poll children."));
       });
 
@@ -1140,7 +1147,8 @@ describe("Coordinator", () => {
       expect(added).toHaveLength(1);
       expect(added[0]).toContain(`Coordinator ${coord} supervises you: call chief_escalate before every Need you`);
       expect(added[0]).toContain(`Answer each one by running \`bb thread tell ${coord}\` with your answer, not only in this thread.`);
-      expect(added[0]).toContain("The owner still answers every Need you in this thread.");
+      expect(added[0]).toContain(`Owner's decision (relayed by Coordinator):`);
+      expect(plainConfig.instructions).not.toContain(`Owner's decision (relayed by Coordinator):`);
       // The plain Chief's text, except that its preload line asks for the child's tools only (the plain line's two extra names, chief_coordinate and chief_attach, are gone).
       const names = (config: typeof plainConfig) => config.tools.map((tool) => tool.name);
       const expected = plainConfig.instructions.split("\n").map((line) => line.includes("ToolSearch") ? line.replace(/select:\S+$/, chiefPreloadTail(names(childConfig))) : line);
@@ -1817,7 +1825,7 @@ describe("Coordinator", () => {
       expect(String(notices[0]!.input[0].text)).toContain("chief_escalate");
       expect(String(notices[0]!.input[0].text)).toContain(`Answer each one by running bb thread tell ${coord} with your answer, not only in your own thread.`);
       expect(String(notices[0]!.input[0].text)).not.toContain("No reply needed");
-      expect(String(notices[0]!.input[0].text)).toContain("The owner still answers every Need you in your own thread.");
+      expect(String(notices[0]!.input[0].text)).toContain(`Owner's decision (relayed by Coordinator):`);
       expect(String(notices[0]!.input[0].text).endsWith(marker(`${plain}:coordinator-attached:${coord}`))).toBe(true);
     });
 
