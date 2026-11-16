@@ -174,7 +174,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - For an id that is not a Chief row, the line tells the owner to run `bb chief adopt --thread <id>` first.
 - An id that already belongs to the caller returns a no-op line.
 - In the same store batch, an idle-done child receives a delivered done receipt (`baselineDone`), so attach sends no done alert. Reason: avoid alert storms when attaching finished work.
-- After the batch, each successfully attached child receives one `coordinator-attached:<id>` notice (`alertSelf`). The notice instructs the child to escalate and explains how to treat a tell message. Reason: a running child learns its new rules on its next turn.
+- After the batch, each successfully attached child receives one `coordinator-attached:<id>` notice (`alertSelf`). The notice instructs the child to escalate each Need you. It also instructs the child to answer each Coordinator tell with `bb thread tell <coordinator id>`. Reason: a running child learns its new rules on its next turn.
 - The link write is conditional. When it changes no row, the tool reads the row again and reports the reason. Reason: two callers can race.
 - One level only: a Coordinator never becomes a child. A Chief has at most one Coordinator.
 
@@ -255,6 +255,8 @@ Each contract has an identifier. Tests and reviews cite it.
 - The project rules appear last, and only when a project `chief.md` exists. The built-in rules never appear. Reason: they tell a Chief to continue and complete managed work.
 - A child Chief gets one instruction line before the rules only while its Coordinator is live. The line names the Coordinator and tells the child to call `chief_escalate` before every Need you (omitting `threadId` when no managed thread concerns it).
 - The line instructs the child that a `bb thread tell` from the Coordinator is coordination information, not the decision of the owner.
+- The line instructs the child to answer each Coordinator tell with `bb thread tell <coordinator id>`, naming the Coordinator id. The child never answers a tell only in its own thread.
+- The owner still answers each Need you in the child thread. A tell reply does not replace that answer.
 - The instructions fit the 32,768-character limit, with rules last.
 - Every other instruction of a plain Chief equals the base text.
 
