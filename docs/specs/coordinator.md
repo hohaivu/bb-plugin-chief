@@ -255,7 +255,7 @@ Each contract has an identifier. Tests and reviews cite it.
 - The project rules appear last, and only when a project `chief.md` exists. The built-in rules never appear. Reason: they tell a Chief to continue and complete managed work.
 - A child Chief gets one instruction line before the rules only while its Coordinator is live. The line names the Coordinator and tells the child to call `chief_escalate` before every Need you (omitting `threadId` when no managed thread concerns it).
 - The line instructs the child that a `bb thread tell` from the Coordinator is coordination information, not the decision of the owner.
-- The line instructs the child to answer each Coordinator tell with `bb thread tell <coordinator id>`, naming the Coordinator id. The child never answers a tell only in its own thread.
+- The line instructs the child to answer each Coordinator tell with `bb thread tell <coordinator id>`, naming the Coordinator id. The child never answers a tell only in its own thread. Reason: an answer that stays in the child thread never reaches the Coordinator, so the owner must ask each Chief by hand.
 - The owner still answers each Need you in the child thread. A tell reply does not replace that answer.
 - The instructions fit the 32,768-character limit, with rules last.
 - Every other instruction of a plain Chief equals the base text.
