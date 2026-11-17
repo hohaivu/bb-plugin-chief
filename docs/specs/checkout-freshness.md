@@ -24,7 +24,7 @@ The checkout freshness domain keeps Chief's checkout current before a researcher
 | --- | --- | --- |
 | `fastForward`, `commitStamp`, `stampLine` | `src/forge/checkoutSync.ts` | Run git and build the stamp text. |
 | `freshenChiefCheckout`, `syncChiefCheckout`, `reportStamp`, `serverCheckout`, `stageRead` | `src/runtime/checkout.ts` | Decide whether to fast-forward and read the stamp. `reportStamp` is an adapter of the report intake. |
-| `startResearcher`, `researchRun` | `src/research/research.ts` | Start a researcher and build the tool reply. |
+| `startResearcher` | `src/research/research.ts` | Start a researcher and build the tool reply. |
 | `startPlan`, `startConsult`, `startPlanConsult` | `src/runtime/delegation.ts` | Start a planner or advisor, in the project default or on a branch. |
 | `chief_plan`, CLI `plan` | `src/tools/plan.ts`, `src/runtime/cli.ts` | Build the tool and CLI replies. |
 | `report` (`createReportIntake`) | `src/report/reportIntake.ts` | Save a report and deliver the alert. `report-intake.md` describes it. |
@@ -37,13 +37,13 @@ This section describes the code before this change. The next sections describe t
 ### Researcher start
 
 - `chief_research` from Chief calls `startResearcher` in `src/research/research.ts`.
-- `researchPrepare` refuses on the call cap, the researcher model, the cooldown, and the quota. It returns `environmentId`, which can be null.
+- `startResearcher` refuses on the researcher model's cooldown and quota. It has no call cap. It reads `environmentId`, which can be null.
 - `startResearcher` then refuses when `environmentId` is null, because the thread has no reusable environment.
 - Every refusal happens before any thread exists.
 - The researcher reuses Chief's own environment (`{ type: "reuse" }`). The code has no fallback to a fresh worktree.
   Reason: the researcher reads Chief's working tree.
 - The code runs no git command and no freshness step before the spawn.
-- `researchRun` returns `Started researcher thread <id> (<title>). It runs the <mode> in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.`
+- `startResearcher` returns `Started researcher thread <id> (<title>). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.`
 
 ### Planner start
 
@@ -191,7 +191,6 @@ Each contract carries its reason.
 - `chief_consult` with both `workerThreadId` and `branch` is refused before any thread exists. Reason: a worker's worktree and branch belong to the worker.
 - `chief_research` with `branch` from a caller other than Chief is refused before any thread exists. Reason: a researcher thread already reads its own worktree.
 - The researcher's prompt never contains `branch`. Reason: the researcher's own `chief_research` call would refuse it.
-- A `chief_research` call with `runId` ignores `branch`. Reason: not stated in the plan.
 - A plan revision with no `branch` inherits the recorded branch of the plan it revises. Reason: the revision plans the same branch as the plan it revises.
 - A plan consult with no `branch` uses its planner's recorded branch when it has one. Reason: the advisor reviews the planner's branch.
 
@@ -233,5 +232,4 @@ Each contract carries its reason.
 - No worktree for each researcher unless Chief names a branch.
 - No fast-forward of worker, reviewer, or advisor environments.
 - No `origin/HEAD`, `main`, or `master` fallback when the environment has no `defaultBranch`.
-- No stamp on the server's `research-unreported` alert.
 - No change to the `chief_report` schema.

@@ -151,21 +151,21 @@ The researcher never polls with sleep loops.
 ## Migration
 
 - Migration `chief_models_v9` rebuilds `chief_models` with role `researcher` added. Every existing row keeps its values. Reason: the rebuild copies all columns.
-- The migration copies each host's `investigate` pick into a `researcher` row, if the host has one. Reason: the user's current choice carries over.
+- The migration copies each host's `investigate` pick into a `researcher` row, if the host has one. Reason: the user's current choice is kept.
 - The seed runs once. Later clears never re-import it. Reason: migrations run once.
 
 ## Cutover
 
 Old researcher briefs ask the researcher to call `chief_research` with `mode` and `runId`. After the reload, those calls are refused, and old workflow runs are not collected. Chief of each project that used research runs this procedure before the user merges. The user then merges and runs the documented reload.
 
-1. Find live research runs. The query looks back 2 hours, because the old timeouts cap a run at 60 minutes:
+1. Find live research runs. The query covers the last 2 hours, because the old timeouts cap a run at 60 minutes:
    ```sql
    SELECT DISTINCT run_id FROM chief_research_calls WHERE run_id IS NOT NULL AND started_at > (strftime('%s','now')-7200)*1000
    ```
    Match the ids against `bb workflows list --json` in that project. Never touch a run whose id is not in that list, because retro runs are workflows too.
 2. For each match, run `bb workflows status <run-id>`. If it is not terminal, wait for the researcher to report, or run `bb workflows stop <run-id>` and check the status again. If the status cannot be read or the stop is not confirmed, list the run id in the hand-off to the user. Do not block the merge on it.
 3. For each non-terminal managed researcher row in `chief_roster`, let it report or run `chief_stop`. Never run `chief_continue` on an old researcher after the reload. Ask again with a fresh `chief_research` call.
-4. Planners mid-flight need no action. After the reload, their `chief_research` call is refused, and the refusal points at helper threads.
+4. Planners mid-flight need no action. After the reload, their `chief_research` call is refused, and the refusal names helper threads.
 
 ## Trade-offs
 
