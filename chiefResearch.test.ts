@@ -303,7 +303,7 @@ describe("chief_research", () => {
     });
 
     // Contract (plan-1 step 5, supervision): no unread, unreported or grace-period alert is raised for a researcher any more, however long it is idle
-    // without reporting. Regression: a revived checkUnreported timer or research-unreported alert.
+    // without reporting. Regression: a revived unreported-researcher timer or alert.
     test("an idle researcher that never reports raises no research-specific alert", async () => {
       const state = await setup();
       const chief = await roleThread(state, "chief");
