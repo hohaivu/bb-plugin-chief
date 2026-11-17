@@ -1,13 +1,12 @@
 import { replaceText } from "./harness";
 
-// Stacked-branch worktrees (plan thr_h3dmnirwzn, waves 1-2): the only tool-schema differences against an older base are the optional `branch` of chief_plan, chief_consult and
-// chief_research, the optional `stackOn` of a chief_report plan wave (with its mention in the plan description), and one added sentence on chief_forge_init's `base`.
+// Stacked-branch worktrees (plan thr_h3dmnirwzn, waves 1-2): the only tool-schema differences against an older base are the optional `branch` of chief_plan and chief_consult
+// (chief_research's whole definition changed later: test/researchDelta.ts), the optional `stackOn` of a chief_report plan wave (with its mention in the plan description), and one added sentence on chief_forge_init's `base`.
 // Each literal is copied from the plan files, not read from the implementation.
 const BRANCH_FIELD = { type: "string", minLength: 1, maxLength: 300 };
 export const BRANCH_PROPERTIES: Record<string, { description: string; type: string; minLength: number; maxLength: number }> = {
   chief_plan: { description: "An open branch (for example a stacked pull request's head) to read instead of the project default: the thread runs in a fresh worktree based on it. For a plan, its chain heads stack on this branch.", ...BRANCH_FIELD },
   chief_consult: { description: "An open branch (for example a stacked pull request's head) to read instead of the project default: the thread runs in a fresh worktree based on it. Not with workerThreadId.", ...BRANCH_FIELD },
-  chief_research: { description: "Chief only: run the researcher in a fresh worktree on this branch instead of your checkout.", ...BRANCH_FIELD },
 };
 export const STACK_ON_PROPERTY = {
   description: "Chain heads only (dependsOn: []): the 1-based earlier implementation wave, on another chain, whose changes this chain builds on. Its branch and pull request stack on that chain's branch, and it starts once wave k is ready.",

@@ -3,6 +3,7 @@ import { GAPS_PROPERTY, FOCUS_PROPERTY, withPlanFlags } from "./reviewerToolDelt
 import { ATTACH_DEFINITION, acceptEvidenceOnlyDelta } from "./specLaneWording";
 import { withHostCompaction } from "./shrinkEdits";
 import { acceptStackedBranchDelta } from "./stackedBranchToolDelta";
+import { acceptResearchToolDelta, researchInstructions, researchTools } from "./researchDelta";
 
 // The tool-config capture of toolCallStability.test.ts (lines 20-69, same cases, same normalization), reused to snapshot another commit.
 // test/fixtures/tool-config-9689364.txt was captured by running it unchanged on base 9689364; tool-config-7178582.txt stays frozen.
@@ -100,6 +101,48 @@ export const chiefPreloadTail = (returned: string[]) => {
   return `select:${ordered.map((name) => `mcp__bb-bridge__${name}`).join(",")}`;
 };
 
+/** Chief's project rules are the last instruction component, so the uncapped base is the frozen text up to the marker plus the generator's own full rule input.
+ * Anchored to the frozen base: the rebuild capped at the SDK limit must equal it. Apply only the authorized edits to `baseline` BEFORE the cap; no tail byte is taken from head. */
+export function uncappedBase(old: ToolConfig["entries"][number]) {
+  const rules = toolConfigCases.find((candidate) => old.key.startsWith(`${candidate.label} |`))!.rules;
+  const cut = old.instructions!.indexOf(marker);
+  if (cut < 0) throw new Error(`${old.key}: rules marker missing in base`);
+  const baseline = old.instructions!.slice(0, cut);
+  if (`${baseline}${rules}`.slice(0, INSTRUCTIONS_CAP) !== old.instructions) throw new Error(`${old.key}: base is not prefix + rules capped`);
+  return { baseline, rules };
+}
+
+/** The retained base instructions of `old` with only the research edits applied. A plain Chief's text is rebuilt uncapped, edited, then capped again, so the cap tail moves exactly as it must. */
+export function researchedInstructions(old: ToolConfig["entries"][number]) {
+  if (!old.key.includes("| chief |") || !old.instructions) return researchInstructions(old);
+  const { baseline, rules } = uncappedBase(old);
+  return `${researchInstructions({ ...old, instructions: baseline })}${rules}`.slice(0, INSTRUCTIONS_CAP);
+}
+
+/** The exact capped instructions a plain Chief must have: the retained base entry `old` (its uncapped text rebuilt from the generator's own rules) with only the authorized edits applied BEFORE the cap. Nothing is read from head except its returned tool names (preload order). */
+export function expectedChiefInstructions(old: ToolConfig["entries"][number], returnedTools: string[]) {
+  const fail = (what: string): never => { throw new Error(`tool config differs from base outside the allowed edits: ${what}`); };
+  // Chief's research line and paragraph are rewritten in the uncapped base before the cap, like the preload line below.
+  const { baseline, rules } = uncappedBase(old);
+  const prefix = researchInstructions({ ...old, instructions: baseline })!;
+  const once = (text: string, start: string) => { const lines = text.split("\n"); const at = lines.findIndex((line) => line.startsWith(start)); if (at < 0 || lines.some((line, index) => index > at && line.startsWith(start))) fail(`${old.key}: base has not exactly one ${start} line`); return { lines, at }; };
+  // The preload edit is applied to the uncapped base before the cap, so the longer line moves the cap tail exactly as it does at head.
+  const claudeCode = old.key.includes("| claude-code |");
+  let edited = prefix;
+  if (claudeCode) {
+    const preload = once(prefix, "If your chief_* tools are deferred");
+    if (!PRELOAD_OLD_TAIL.test(preload.lines[preload.at]!)) fail(`${old.key}: base preload is not the +chief keyword form`);
+    preload.lines[preload.at] = preload.lines[preload.at]!.replace(PRELOAD_OLD_TAIL, chiefPreloadTail(returnedTools));
+    edited = preload.lines.join("\n");
+  } else if (prefix.includes("ToolSearch")) fail(`${old.key}: base has a preload line without claude-code`);
+  const tests = once(edited, "- Tests:");
+  tests.lines[tests.at] = TESTS_DOCS_LINE;
+  const skips = once(tests.lines.join("\n"), "- Skips:");
+  if (!skips.lines[skips.at]!.includes(SKIPS_OLD_PHRASE)) fail(`${old.key}: base Skips line lacks the old phrase`);
+  skips.lines[skips.at] = skips.lines[skips.at]!.replace(SKIPS_OLD_PHRASE, "Small");
+  return `${skips.lines.join("\n")}${rules}`.slice(0, INSTRUCTIONS_CAP);
+}
+
 /** Throws unless `head` equals `base` apart from: the chief_delegate `kind` clause, the chief_complete `skipReview` clause, in Chief's core rules the Tests line (now Tests, docs)
  * and the Skips line (the phrase swap only), and (#213) the chief_attach tool of a plain Chief (exact definition, right after chief_coordinate), and ("Chief keeps tool search") the
  * chief_roster `includeOthers` property plus its one description clause, and a plain Chief's claude-code preload line `query "+chief", max_results N` becoming `select:` plus every returned
@@ -125,6 +168,7 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
     acceptEvidenceOnlyDelta(now, name);
     acceptCoordinateGoalDelta(now, name);
     acceptStackedBranchDelta(now, name);
+    acceptResearchToolDelta(now, was, name);
     if (name === "chief_delegate") edit(now, "kind", KIND_OLD, KIND_NEW, was.inputSchema.properties.kind!.description!);
     if (name === "chief_complete") edit(now, "skipReview", SKIP_OLD, SKIP_NEW, was.inputSchema.properties.skipReview!.description!);
     if (name === "chief_review") {
@@ -156,33 +200,13 @@ export function compareToolConfig(base: ToolConfig, original: ToolConfig) {
       // Only the one checked insertion is removed; a duplicate stays and fails the exact tools comparison below.
       entry.tools.splice(entry.tools.indexOf("chief_coordinate") + 1, 1);
     } else if (entry.tools.includes("chief_attach")) fail(`${old.key}: chief_attach outside a plain Chief`);
-    if (entry.key !== old.key || JSON.stringify(entry.tools) !== JSON.stringify(old.tools) || JSON.stringify(entry.skills) !== JSON.stringify(old.skills)) fail(`${old.key}: key, tools or skills`);
+    if (entry.key !== old.key || JSON.stringify(entry.tools) !== JSON.stringify(researchTools(old)) || JSON.stringify(entry.skills) !== JSON.stringify(old.skills)) fail(`${old.key}: key, tools or skills`);
     // Only a non-Chief entry may match base unchanged or with the shrink-prompts compaction edit (applied to the base text); every Chief entry needs the authorized core-rule edits (and the preload edit on claude-code), so a restored base text must reach the exact comparison below.
-    if (!plainChief && entry.instructions === old.instructions) return;
-    if (!plainChief && old.instructions !== undefined && entry.instructions === withHostCompaction(old.instructions)) return;
+    // The research edits (planner and researcher lose chief_research and its line) are applied to the baseline first; everything else still compares byte for byte.
+    const researched = researchInstructions(old);
+    if (!plainChief && entry.instructions === researched) return;
+    if (!plainChief && researched !== undefined && researched !== null && entry.instructions === withHostCompaction(researched)) return;
     if (!plainChief || !entry.instructions || !old.instructions) fail(`${old.key}: instructions`);
-    // Chief's project rules are the last instruction component, so the uncapped base is the frozen text up to the marker plus the generator's own full rule input.
-    // Anchor that reconstruction to the frozen base, apply only the authorized edits BEFORE the cap, cap at the SDK limit, and require exact equality: no tail byte is taken from head.
-    const rules = toolConfigCases.find((candidate) => old.key.startsWith(`${candidate.label} |`))!.rules;
-    const cut = old.instructions!.indexOf(marker);
-    if (cut < 0) fail(`${old.key}: rules marker missing in base`);
-    const prefix = old.instructions!.slice(0, cut);
-    if (`${prefix}${rules}`.slice(0, INSTRUCTIONS_CAP) !== old.instructions) fail(`${old.key}: base is not prefix + rules capped`);
-    const once = (text: string, start: string) => { const lines = text.split("\n"); const at = lines.findIndex((line) => line.startsWith(start)); if (at < 0 || lines.some((line, index) => index > at && line.startsWith(start))) fail(`${old.key}: base has not exactly one ${start} line`); return { lines, at }; };
-    // The preload edit is applied to the uncapped base before the cap, so the longer line moves the cap tail exactly as it does at head.
-    const claudeCode = entry.key.includes("| claude-code |");
-    let edited = prefix;
-    if (claudeCode) {
-      const preload = once(prefix, "If your chief_* tools are deferred");
-      if (!PRELOAD_OLD_TAIL.test(preload.lines[preload.at]!)) fail(`${old.key}: base preload is not the +chief keyword form`);
-      preload.lines[preload.at] = preload.lines[preload.at]!.replace(PRELOAD_OLD_TAIL, chiefPreloadTail(returnedTools));
-      edited = preload.lines.join("\n");
-    } else if (prefix.includes("ToolSearch")) fail(`${old.key}: base has a preload line without claude-code`);
-    const tests = once(edited, "- Tests:");
-    tests.lines[tests.at] = TESTS_DOCS_LINE;
-    const skips = once(tests.lines.join("\n"), "- Skips:");
-    if (!skips.lines[skips.at]!.includes(SKIPS_OLD_PHRASE)) fail(`${old.key}: base Skips line lacks the old phrase`);
-    skips.lines[skips.at] = skips.lines[skips.at]!.replace(SKIPS_OLD_PHRASE, "Small");
-    if (entry.instructions !== `${skips.lines.join("\n")}${rules}`.slice(0, INSTRUCTIONS_CAP)) fail(`${old.key}: instructions`);
+    if (entry.instructions !== expectedChiefInstructions(old, returnedTools)) fail(`${old.key}: instructions`);
   });
 }

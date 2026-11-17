@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { disposeAll } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, type ToolConfig, compareToolConfig, toolConfigFixture } from "./test/toolConfigFixture";
+import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, type ToolConfig, compareToolConfig, expectedChiefInstructions, toolConfigFixture } from "./test/toolConfigFixture";
+import { RESEARCH_TOOL_DESCRIPTION, researchInstructions, researchTools } from "./test/researchDelta";
 import { withHostCompaction } from "./test/shrinkEdits";
 import { ATTACH_DEFINITION, EVIDENCE_ONLY_PROPERTY, acceptCoreRuleTrim } from "./test/specLaneWording";
 
@@ -80,7 +81,7 @@ describe("tool config: base 9689364 to head", () => {
     expect(changed.length).toBeGreaterThan(0);
     const managed = changed.filter((entry) => !entry.key.includes("| chief |"));
     expect(managed.length).toBeGreaterThan(0);
-    for (const entry of managed) expect(entry.instructions, entry.key).toBe(withHostCompaction(base.entries[head.entries.indexOf(entry)]!.instructions!));
+    for (const entry of managed) expect(entry.instructions, entry.key).toBe(withHostCompaction(researchInstructions(base.entries[head.entries.indexOf(entry)]!)!));
   });
 
   describe("negative controls: any other difference fails the comparison", () => {
@@ -116,14 +117,18 @@ describe("tool config: base 9689364 to head", () => {
       const run = await mutated((head) => { head.catalog["chief_complete"]!.inputSchema.properties["extra"] = { description: "x" }; });
       expect(run).toThrow("chief_complete");
     });
-    // The cap boundary: the two authorized core-rule edits shorten the text by one character, so head exposes one more tail character of the 32768-capped worst case than base.
+    // The cap boundary: the authorized edits (core rules, preload line, research line and paragraph) change the length of the text before the project rules, so head exposes a different tail of the 32768-capped worst case than base.
     const WORST = "worst case | chief | codex | planner true | research true";
     const worst = (head: ToolConfig) => head.entries.find((entry) => entry.key === WORST)!;
     test("the worst case is capped at exactly 32768 characters and ends where the base tail was shifted by one", async () => {
       const { base, head } = await load();
       const was = base.entries.find((entry) => entry.key === WORST)!.instructions!;
       expect([was.length, worst(head).instructions!.length]).toEqual([32768, 32768]);
-      expect([was.slice(-10), worst(head).instructions!.slice(-10)]).toEqual(["- Project ", " Project r"]);
+      // The head tail is the one the baseline rebuilds to with only the authorized edits applied before the cap, not a value read back from head; it must differ from base's tail.
+      const expected = expectedChiefInstructions(base.entries.find((entry) => entry.key === WORST)!, worst(head).tools).slice(-10);
+      expect(was.slice(-10)).toBe("- Project ");
+      expect(expected).not.toBe(was.slice(-10));
+      expect(worst(head).instructions!.slice(-10)).toBe(expected);
     });
     test("the final newly exposed byte changed (r to X)", async () => {
       const run = await mutated((head) => { const entry = worst(head); entry.instructions = `${entry.instructions!.slice(0, -1)}X`; });
@@ -160,6 +165,64 @@ describe("tool config: base 9689364 to head", () => {
     test("a duplicate chief_attach right after the first one in a plain Chief's tools", async () => {
       const run = await mutated((head) => { const entry = chiefEntries(head)[0]!; entry.tools.splice(entry.tools.indexOf("chief_attach"), 0, "chief_attach"); });
       expect(run).toThrow("key, tools or skills");
+    });
+    // "Researcher as a normal agent": the authorized research deltas are real, and each one fails when it widens.
+    const roleEntry = (head: ToolConfig, role: string, provider = "claude-code") => head.entries.find((entry) => entry.key === `short rules | ${role} | ${provider} | planner true | research true`)!;
+    test("the research deltas are really there: new chief_research definition, planner and researcher lose it, Chief keeps it", async () => {
+      const { base, head } = await load();
+      expect(base.catalog["chief_research"]!.description).not.toBe(RESEARCH_TOOL_DESCRIPTION);
+      expect(head.catalog["chief_research"]!.description).toBe(RESEARCH_TOOL_DESCRIPTION);
+      for (const role of ["planner", "researcher"]) {
+        expect(base.entries.find((entry) => entry.key === roleEntry(head, role).key)!.tools).toContain("chief_research");
+        expect(roleEntry(head, role).tools).toEqual(["chief_report"]);
+      }
+      expect(base.entries.some((entry) => researchTools(entry).length !== entry.tools.length)).toBe(true);
+      for (const entry of chiefEntries(head).filter((candidate) => candidate.key.includes("| research true"))) expect(entry.tools, entry.key).toContain("chief_research");
+      for (const entry of chiefEntries(head).filter((candidate) => candidate.key.includes("| research false"))) expect(entry.tools, entry.key).not.toContain("chief_research");
+    });
+    test("chief_research description reworded", async () => {
+      const run = await mutated((head) => { head.catalog["chief_research"]!.description += " Extra."; });
+      expect(run).toThrow("chief_research is not the planned definition: description");
+    });
+    test("chief_research gains a second required field", async () => {
+      const run = await mutated((head) => { const schema = head.catalog["chief_research"]!.inputSchema; schema.required = ["question", "branch"]; });
+      expect(run).toThrow("chief_research is not the planned definition: question must be the one required field");
+    });
+    test("chief_research keeps a retired property", async () => {
+      const run = await mutated((head) => { head.catalog["chief_research"]!.inputSchema.properties["mode"] = { description: "survey" }; });
+      expect(run).toThrow("chief_research is not the planned definition: properties");
+    });
+    test("chief_research question loses its bound", async () => {
+      const run = await mutated((head) => { (head.catalog["chief_research"]!.inputSchema.properties["question"] as { maxLength?: number }).maxLength = 8000; });
+      expect(run).toThrow("chief_research is not the planned definition: question");
+    });
+    test("a planner keeps chief_research", async () => {
+      const run = await mutated((head) => { roleEntry(head, "planner", "codex").tools.push("chief_research"); });
+      expect(run).toThrow("key, tools or skills");
+    });
+    test("a researcher keeps chief_research in its preload line", async () => {
+      const run = await mutated((head) => { const entry = roleEntry(head, "researcher"); entry.instructions = entry.instructions!.replace("select:mcp__bb-bridge__chief_report", "select:mcp__bb-bridge__chief_report,mcp__bb-bridge__chief_research"); });
+      expect(run).toThrow(": instructions");
+    });
+    test("a planner keeps its research line", async () => {
+      const run = await mutated((head) => { const entry = roleEntry(head, "planner", "codex"); entry.instructions = entry.instructions!.replace("\n\n# Project rules marker", "\nUse chief_research (modes: survey, investigate) for parallel read-only research; it waits for the result.\n\n# Project rules marker"); });
+      expect(run).toThrow(": instructions");
+    });
+    test("a planner gains a different line in place of the research line", async () => {
+      const run = await mutated((head) => { const entry = roleEntry(head, "planner", "codex"); entry.instructions = entry.instructions!.replace("\n\n# Project rules marker", "\nSpawn helper threads for a broad scan.\n\n# Project rules marker"); });
+      expect(run).toThrow(": instructions");
+    });
+    test("Chief's research line reworded", async () => {
+      const run = await mutated((head) => editLine(head, "Use chief_research", (line) => line.replace("by a researcher thread", "by a worker thread")));
+      expect(run).toThrow(": instructions");
+    });
+    test("Chief's research paragraph reworded", async () => {
+      const run = await mutated((head) => editLine(head, "chief_research is optional.", (line) => line.replace("do not rerun the same question", "rerun the same question")));
+      expect(run).toThrow(": instructions");
+    });
+    test("Chief's research paragraph names the wrong planning tool", async () => {
+      const run = await mutated((head) => { for (const entry of head.entries.filter((candidate) => candidate.key.includes("| chief |") && candidate.key.includes("| planner false |"))) entry.instructions = entry.instructions!.replace("open question to chief_consult", "open question to chief_plan"); });
+      expect(run).toThrow(": instructions");
     });
     const delegate = (head: ToolConfig) => head.catalog["chief_delegate"]!.inputSchema as { required?: string[]; properties: Record<string, any> };
     // Stacked-branch worktrees: the exact optional branch / stackOn / forge `base` sentence is the only schema addition allowed for them.

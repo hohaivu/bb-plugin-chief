@@ -7,16 +7,17 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { withHostCompaction } from "./test/shrinkEdits";
 import { acceptStackedBranchDelta } from "./test/stackedBranchToolDelta";
-import { INSTRUCTIONS_CAP, acceptCoordinateGoalDelta, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, type ToolConfig, toolConfigCases, toolConfigFixture } from "./test/toolConfigFixture";
+import { acceptResearchToolDelta, researchTools } from "./test/researchDelta";
+import { INSTRUCTIONS_CAP, acceptCoordinateGoalDelta, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, type ToolConfig, researchedInstructions, toolConfigCases, toolConfigFixture } from "./test/toolConfigFixture";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
 
-// Preservation of the "Chief keeps tool search" change, runnable UNCHANGED on base 6534bea and on head (both must pass):
+// Preservation of the "Chief keeps tool search" change against base 6534bea. The "Researcher as a normal agent" deltas (test/researchDelta.ts) are authorized too, so this passes on head only:
 // every role's tools and skills, every managed-role and codex instruction (a managed role may also carry the host's reworded compaction sentence, base -> head via withHostCompaction, nothing else), every claude-code Chief line outside the one preload line, and every tool definition except chief_roster.
 // The expected values are test/fixtures/tool-config-6534bea.txt, captured by running test/toolConfigFixture.ts's generator on base 6534bea, never by the code under test.
-// It asserts nothing about the new schema or the new preload text: those changed-behaviour checks live in toolConfigPreservation.test.ts and toolCallStability.test.ts and fail on base on purpose.
+// It asserts nothing about the new schema or the new preload text: those changed-behaviour checks live in toolConfigPreservation.test.ts and toolCallStability.test.ts.
 const dir = dirname(fileURLToPath(import.meta.url));
 const MARKER = "# Project rules marker";
 const PRELOAD = "ToolSearch call: ";
@@ -39,20 +40,24 @@ export function assertPreserved(base: ToolConfig, original: ToolConfig) {
     acceptCoordinateGoalDelta(now, name);
     // The stacked-branch additions are removed here (a no-op on base); their exact shape is checked by compareToolConfig.
     acceptStackedBranchDelta(now, name, false);
+    // "Researcher as a normal agent": the new chief_research definition is asserted exactly, then the baseline's own definition is put back.
+    acceptResearchToolDelta(now, base.catalog[name], name);
     if (JSON.stringify(now) !== JSON.stringify(base.catalog[name])) fail(`catalog ${name}`);
   }
   if (head.entries.length !== base.entries.length) fail("entry count");
   head.entries.forEach((entry, index) => {
     const old = base.entries[index]!;
     if (entry.key !== old.key) fail(`key ${old.key}`);
-    if (JSON.stringify(entry.tools) !== JSON.stringify(old.tools)) fail(`${old.key}: tools`);
+    if (JSON.stringify(entry.tools) !== JSON.stringify(researchTools(old))) fail(`${old.key}: tools`);
     if (JSON.stringify(entry.skills) !== JSON.stringify(old.skills)) fail(`${old.key}: skills`);
+    // The research edits (Chief's line and paragraph; a planner and a researcher lose chief_research and its line) are applied to the baseline text first; nothing else may differ.
+    const researched = researchedInstructions(old);
     if (!isClaudeChief(old.key)) {
-      if (entry.instructions !== old.instructions && entry.instructions !== withHostCompaction(old.instructions!)) fail(`${old.key}: instructions`);
+      if (entry.instructions !== researched && entry.instructions !== withHostCompaction(researched!)) fail(`${old.key}: instructions`);
       return;
     }
     // A claude-code Chief: the one preload line may change, so it is cut out of both texts; its position and its lead-in text are kept, and the rest up to the project rules is byte for byte.
-    const [was, now] = [old.instructions!, entry.instructions ?? ""];
+    const [was, now] = [researched!, entry.instructions ?? ""];
     const [wasAt, nowAt] = [preloadIndexes(was), preloadIndexes(now)];
     if (wasAt.length !== 1 || nowAt.length !== 1 || wasAt[0] !== nowAt[0]) fail(`${old.key}: preload line count or position`);
     const [wasLines, nowLines] = [was.split("\n"), now.split("\n")];
@@ -70,7 +75,7 @@ export function assertPreserved(base: ToolConfig, original: ToolConfig) {
   });
 }
 
-describe("tool config preservation against base 6534bea (passes on base and on head)", () => {
+describe("tool config preservation against base 6534bea (head, with the research deltas authorized)", () => {
   const load = async () => ({
     base: JSON.parse(await readFile(join(dir, "test", "fixtures", "tool-config-6534bea.txt"), "utf8")) as ToolConfig,
     head: JSON.parse(await toolConfigFixture()) as ToolConfig,
@@ -162,6 +167,13 @@ describe("tool config preservation against base 6534bea (passes on base and on h
     test("chief_roster edited beyond the roster delta", async () => {
       expect(await mutated((head) => { head.catalog["chief_roster"]!.description = head.catalog["chief_roster"]!.description.replace("leave them unless the user asks", "act on them freely"); })).toThrow("catalog chief_roster");
       expect(await mutated((head) => { (head.catalog["chief_roster"]!.inputSchema.properties as Record<string, unknown>)["includeAll"] = { type: "boolean" }; })).toThrow("catalog chief_roster");
+    });
+    test("research deltas widened: chief_research edited, a planner or researcher keeps it or its line, a codex Chief's research paragraph reworded", async () => {
+      expect(await mutated((head) => { head.catalog["chief_research"]!.description += " Extra."; })).toThrow("chief_research is not the planned definition");
+      expect(await mutated((head) => { find(head, "| planner | codex |").tools.push("chief_research"); })).toThrow(": tools");
+      expect(await mutated((head) => { find(head, "| researcher | claude-code |").tools.push("chief_research"); })).toThrow(": tools");
+      expect(await mutated((head) => { const entry = find(head, "| planner | codex |"); entry.instructions += "\nUse chief_research (modes: survey, investigate) for parallel read-only research; it waits for the result."; })).toThrow(": instructions");
+      expect(await mutated((head) => { const entry = find(head, "short rules | chief | codex | planner true | research true"); entry.instructions = entry.instructions!.replace("do not rerun the same question", "rerun the same question"); })).toThrow(": instructions");
     });
     test("a tool added to or removed from the catalog", async () => {
       expect(await mutated((head) => { head.catalog["chief_extra"] = head.catalog["chief_log"] ?? head.catalog["chief_roster"]!; })).toThrow("tool names or order");
