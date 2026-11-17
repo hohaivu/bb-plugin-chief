@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { RESEARCH_ONLY } from "./src/core/roles";
 import { MIGRATIONS } from "./src/db/migrations";
-import { configurationContext, delegate, disposals, disposeAll, execFileMock, setup, start, status } from "./test/harness";
+import { configurationContext, delegate, disposals, elapse, disposeAll, execFileMock, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -281,6 +281,56 @@ describe("chief_research", () => {
       const config = await state.harness.behavior.resolveAgentConfiguration(configurationContext(await roleThread(state, role)));
       expect(config.tools.map((tool) => tool.name)).not.toContain("chief_research");
       expect(config.instructions).not.toContain("chief_research");
+    });
+  });
+
+  describe("report and supervision", () => {
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+    const alertsTo = (state: State, chief: string) => state.sent.filter((message) => message.threadId === chief).map((message) => message.input[0].text as string);
+
+    // Contract (plan-1 step 5): a ready researcher report reaches Chief as the standard report alert whose Next line says research is advisory
+    // and nothing is left to review or complete (the alert shows the action as its own line). Regression: the generic "Inspect live evidence ... review, complete" line (it sends Chief to review a researcher).
+    test("a ready researcher report alerts Chief once with the advisory Next line", async () => {
+      const state = await setup();
+      const chief = await roleThread(state, "chief");
+      const researcher = await roleThread(state, "researcher");
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Callers: a.ts, b.ts." }, { threadId: researcher, projectId: "proj_1" });
+      const alerts = alertsTo(state, chief);
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]!.split("\n")).toContain("Research is advisory: use its findings, check anything doubtful against the code, and note any failures or partial answers it reports. Nothing to review or complete.");
+      expect(alerts[0]).toContain("Callers: a.ts, b.ts.");
+      expect(alerts[0]).not.toContain("Inspect live evidence");
+    });
+
+    // Contract (plan-1 step 5, supervision): no unread, unreported or grace-period alert is raised for a researcher any more, however long it is idle
+    // without reporting. Regression: a revived checkUnreported timer or research-unreported alert.
+    test("an idle researcher that never reports raises no research-specific alert", async () => {
+      const state = await setup();
+      const chief = await roleThread(state, "chief");
+      await roleThread(state, "researcher");
+      for (let i = 0; i < 4; i++) {
+        elapse(3 * 60 * 60 * 1000);
+        await state.supervisorCycle();
+      }
+      await settle();
+      expect(alertsTo(state, chief).filter((text) => /research-unreported|research-unread|unreported|unread/i.test(text))).toEqual([]);
+    });
+
+    // Contract (plan-1 step 5, sweep): the standard sweep completes a researcher that reported ready once its live status is idle. Regression: a ready
+    // researcher row staying open in the roster, or a busy one being completed.
+    test("the sweep completes a researcher that reported ready and leaves a busy one open", async () => {
+      const state = await setup();
+      await roleThread(state, "chief");
+      const researcher = await roleThread(state, "researcher");
+      const stateOf = () => (state.db.prepare("SELECT state FROM managed_threads WHERE thread_id=?").get(researcher) as { state: string }).state;
+      state.live.set(researcher, { ...state.live.get(researcher)!, status: "active" });
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Answer." }, { threadId: researcher, projectId: "proj_1" });
+      await settle();
+      expect(stateOf()).not.toBe("complete");
+      state.live.set(researcher, { ...state.live.get(researcher)!, status: "idle" });
+      await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(researcher)!, lastAssistantText: "done" });
+      await settle();
+      expect(stateOf()).toBe("complete");
     });
   });
 
