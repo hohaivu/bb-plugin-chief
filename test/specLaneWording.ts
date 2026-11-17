@@ -40,8 +40,13 @@ export function acceptPlanningLine(nowText: string, wasText: string) {
 }
 /** Chief's core rules (host.ts) were trimmed so a linked Chief's rules end inside the SDK cut. Each trim is one exact edit of the base line, so any other byte on the line still fails. */
 const TEST_DOCS_LINE = "- Tests, docs: only a tester writes or runs tests (a plan's test wave, or chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).";
+/** The `- Fresh worker:` core rule as of 01163a8, the text every frozen tool-config baseline from 6534bea on holds. */
+export const FRESH_WORKER_BASE_LINE = "- Fresh worker: a worker that has reported is never reused. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR; so is a plan chain's next wave); review and complete the successor.";
+/** The one authorized replacement for that line: a side-lane docs repair gets a fresh worktree, and a blocked worker with an environment blocker is answered in place. */
+export const FRESH_WORKER_LINE = "- Fresh worker: a worker that has reported is never reused for more work. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR, except a side-lane Spec Writer's docs repair, which gets a fresh worktree on the same branch; so is a plan chain's next wave); review and complete the successor. One exception: a blocked worker whose blocker is an environment or permission problem on its own task (a blocked command, a dirty build-cache file, a needed permission), not a code, test or spec defect, gets the allowed step in place with chief_continue.";
 const TRIMMED_RULES: [string, string, (old: string) => string][] = [
-  ["- Fresh worker:", "- Fresh worker:", (old) => old.replace("(same worktree, branch, PR; a plan chain has exactly one of each, so its next wave is a replaces: too)", "(same worktree, branch, PR; so is a plan chain's next wave)")],
+  // The head line replaces the base line whole, so it must equal the one authorized text (the hook-safe fold / in-place answer wave).
+  ["- Fresh worker:", "- Fresh worker:", () => FRESH_WORKER_LINE],
   ["- Review:", "- Review:", (old) => old.replace("when a worker's ready alert says to", "when a ready alert says to")],
   // The base line is "- Tests: ..."; the head line replaces it whole, so it must equal the one authorized text.
   ["- Tests, docs:", "- Tests:", () => TEST_DOCS_LINE],

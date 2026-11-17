@@ -10,6 +10,7 @@ import { READY, type State, ctxOf, delegateWave, fixedAfterRejection, followRout
 import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, disposals, disposeAll, legacyWave, reviewContextOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { inPlaceLine } from "./test/blockedAlerts";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -329,6 +330,23 @@ describe("tester role", () => {
     await delegateWave(state, chief.threadId, revision.threadId, 1);
   });
 
+  // Contract (blocked lines unchanged): only worker rows get the in-place answer; a blocked revising planner keeps its own line, which names no
+  // chief_continue. Regression: the in-place sentence leaks into rows that have no worktree to answer in.
+  test("a blocked revising planner keeps its line without the in-place answer", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const original = await plan(state, chief.threadId, [planWave(1), planWave(2), TEST_WAVE(3)]);
+    await tool(state, "chief_consult", { planThreadId: original.threadId, title: "Plan", mission: "Review this plan before delegation" }, chief.threadId);
+    const advisor = (await status(state)).threads.filter((row) => row.role === "advisor").at(-1)!;
+    await report(state, advisor.threadId, { state: "ready", result: "Split the waves differently.", verdict: "request_changes" });
+    await tool(state, "chief_plan", { title: "Revise", mission: "Propose again", revises: original.threadId }, chief.threadId);
+    const revision = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!;
+    await report(state, revision.threadId, { state: "blocked", result: "Cannot", blocker: "Needs a product decision", recommendation: "Ask" });
+    const alert = state.sent.at(-1).input[0].text as string;
+    expect(alert).toContain(`Blocked: Needs a product decision — decide or escalate to the user, then chief_plan (revises: ${original.threadId}) with the decision in context; it gets no review.`);
+    expect(alert).not.toContain("chief_continue");
+  });
+
   test("kind tester on unplanned work needs replaces:", async () => {
     const state = await setup();
     const chief = await start(state);
@@ -524,8 +542,9 @@ describe("tester role", () => {
     expect(rowOf(state, fix).retest_skipped).toBe("tests unaffected");
   });
 
-  // Contract (blocked tester): a tester that reports blocked is a test failure: the next call is a fresh worker for the
-  // product code (kind: worker), with the waiver offered on a plan wave and testsSkipped when unplanned. Once the wave
+  // Contract (blocked tester): the alert says `Tester blocked:` (never `Tests failed:`) and routes by cause: an environment or permission
+  // blocker is answered in place with chief_continue; failing tests on product code go to a fresh worker (kind: worker), with the waiver
+  // offered on a plan wave and testsSkipped when unplanned. Once the wave
   // is waived the blocked tester's line becomes the waived-wave line. Regression: the generic "Blocked: decide or
   // escalate" line returns, leaving Chief no route to the product fix.
   test.each([["a plan's tester", true], ["an unplanned tester", false]])("a blocked %s tells Chief to delegate kind: worker", async (_label, planned) => {
@@ -541,8 +560,9 @@ describe("tester role", () => {
     await report(state, tester, blocked);
     setLive(state, tester, "idle");
     const alert = state.sent.at(-1).input[0].text as string;
-    const head = `Tests failed: Totals test fails. Delegate a fresh worker to fix the product code: chief_delegate (replaces: ${tester}, kind: worker) with the failures as its mission; its ready alert then asks for a tester.`;
+    const head = `Tester blocked: Totals test fails. ${inPlaceLine(tester)} If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: ${tester}, kind: worker) with the failures as its mission; its ready alert then asks for a tester.`;
     expect(alert).toContain(head);
+    expect(alert).not.toContain("Tests failed");
     if (planner) {
       expect(alert).toContain(`If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: ${planner.threadId}, wave: 2, reason).`);
       await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: "accepted" }, chief.threadId);
@@ -553,6 +573,30 @@ describe("tester role", () => {
       expect(alert).toContain("If you judge the failures acceptable, complete it with testsSkipped (your reason).");
       expect(alert).not.toContain("chief_skip_tests");
     }
+  });
+
+  // Contract (in-place answer): the chief_continue the blocked alert advertises is accepted for a blocked worker and a blocked tester (the
+  // instruction is sent to that thread), while a ready worker is still refused. Regression: the alert advertises a call the owner rejects.
+  test("chief_continue answers a blocked worker and a blocked tester in place", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const blocked = { state: "blocked", result: "Command denied", blocker: "git push is denied", recommendation: "Allow it" };
+    const worker = (await delegate(state, chief.threadId)).threadId;
+    await report(state, worker, blocked);
+    setLive(state, worker, "idle");
+    const done = (await delegate(state, chief.threadId, "Other work")).threadId;
+    await readyIdle(state, done, "Done");
+    const tester = (await delegate(state, chief.threadId, "Tests", { kind: "tester", replaces: done })).threadId;
+    await report(state, tester, blocked);
+    setLive(state, tester, "idle");
+    for (const id of [worker, tester]) {
+      const sent = state.sent.length;
+      await tool(state, "chief_continue", { threadId: id, instruction: "Run git push once." }, chief.threadId);
+      expect(state.sent).toHaveLength(sent + 1);
+      expect(state.sent.at(-1)).toMatchObject({ threadId: id });
+      expect(JSON.stringify(state.sent.at(-1).input)).toContain("Run git push once.");
+    }
+    await expect(tool(state, "chief_continue", { threadId: done, instruction: "More" }, chief.threadId)).rejects.toThrow(`chief_delegate (replaces: ${done}`);
   });
 
   // Contract (retest): a worker that changed code on a test wave after the tests ran is told to rerun them before the
