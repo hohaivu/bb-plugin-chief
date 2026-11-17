@@ -473,4 +473,25 @@ describe("Chief backend", () => {
       state: "ready", result: "Should not land", verdict: "approve",
     }, { threadId: "thr_untrusted_insert", projectId: "proj_1" })).rejects.toThrow("available only in managed");
   });
+
+  // Contract (plan-1 step 10): `bb chief stats` research counts a Chief `spawned` row as a call AND a success; an `error` row is a call only;
+  // historical non-Chief rows count as before (succeeded/partial succeed, error does not). Regression: skipping `spawned` rows reports 0/N for a
+  // Chief that started researchers, or dropping the historical outcomes.
+  test("research stats count Chief spawned rows as calls and successes and keep historical rows as before", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = { threadId: chief.threadId, projectId: "proj_1" };
+    for (const question of ["Who calls this?", "Where is it stored?"]) await state.harness.behavior.callAgentTool("chief_research", { question }, opts);
+    const row = state.db.prepare(`INSERT INTO chief_research_calls (caller_thread_id, role, mode, run_id, outcome, started_at, ended_at) VALUES (?, ?, ?, NULL, ?, 1, 2)`);
+    row.run(chief.threadId, "chief", null, "error");
+    row.run(chief.threadId, "planner", "survey", "succeeded");
+    row.run(chief.threadId, "planner", "survey", "partial");
+    row.run(chief.threadId, "planner", "survey", "error");
+    const result = await state.harness.behavior.runCli(["stats", "--project", "proj_1", "--json"]);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout!).research).toEqual([
+      { role: "chief", mode: null, calls: 3, succeeded: 2 },
+      { role: "planner", mode: "survey", calls: 3, succeeded: 2 },
+    ]);
+  });
 });
