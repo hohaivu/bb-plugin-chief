@@ -24,6 +24,7 @@ const ROLES = [
   { role: "spec-writer", label: "Spec Writer", hint: "Keeps docs/specs, docs/INDEX.md and docs/decisions current." },
   { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
   { role: "advisor", label: "Advisor", hint: "Diagnoses work that keeps failing review." },
+  { role: "researcher", label: "Researcher", hint: "Answers Chief's read-only research questions." },
 ] as const;
 
 function Crown({ plus = false }: { plus?: boolean }) {
@@ -184,7 +185,7 @@ function ChiefModelSettings() {
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          Chief, its planners, workers, designers, reviewers, and advisors can each run on their own model. A role
+          Chief, its planners, workers, designers, reviewers, advisors, and researchers can each run on their own model. A role
           without a selection uses BB&apos;s own default for the project.
         </p>
         <button
@@ -277,22 +278,11 @@ function HostModelPicker({ hostId, value, disabled, onPick }: {
   );
 }
 
-const inRange = (value: number, max: number) => Number.isInteger(value) && value >= 1 && value <= max;
-
-type ResearchMode = keyof ResearchConfiguration["settings"]["timeoutMinutes"];
-const RESEARCH_MODE_SECTIONS: { mode: ResearchMode; label: string }[] = [
-  { mode: "survey", label: "Survey" },
-  { mode: "investigate", label: "Investigate" },
-];
-
 function ResearchSettings() {
   const rpc = useRpc<typeof rpcContract>();
   const [configuration, setConfiguration] = useState<ResearchConfiguration | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  // Cap text as typed, so an out-of-range value stays visible and marked invalid.
-  const [cap, setCap] = useState<string | null>(null);
-  const [timeouts, setTimeouts] = useState<Partial<Record<ResearchMode, string>>>({});
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -317,26 +307,12 @@ function ResearchSettings() {
   }, [load]);
 
   const saveSettings = useCallback(
-    (patch: { enabled?: boolean; maxAgentCalls?: number; timeoutMinutes?: Partial<Record<ResearchMode, number>> }) => {
+    (patch: { enabled?: boolean }) => {
       setError(null);
       void rpc.call("setResearchSettings", patch).then(
         (settings) => setConfiguration((current) => current && { ...current, settings }),
         fail,
       );
-    },
-    [fail, rpc],
-  );
-
-  const saveModel = useCallback(
-    (hostId: string, mode: ResearchMode, selection: ModelSelection | null) => {
-      setError(null);
-      setConfiguration((current) => current && {
-        ...current,
-        hosts: current.hosts.map((host) => host.hostId === hostId
-          ? { ...host, selections: { ...host.selections, [mode]: selection }, unusable: host.unusable.filter((m) => m !== mode) }
-          : host),
-      });
-      void rpc.call("setResearchModel", { hostId, mode, selection }).catch(fail);
     },
     [fail, rpc],
   );
@@ -368,107 +344,9 @@ function ResearchSettings() {
           {isLoading ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      {settings ? (() => {
-        const text = cap ?? String(settings.maxAgentCalls);
-        const valid = inRange(Number(text), 100);
-        return (
-          <label className="flex flex-wrap items-center gap-3 text-sm text-foreground">
-            Agent calls per run
-            <input
-              type="number"
-              min={1}
-              max={100}
-              aria-label="Agent calls per run"
-              aria-invalid={!valid}
-              value={text}
-              onChange={(event) => {
-                const next = event.target.value;
-                setCap(next);
-                if (inRange(Number(next), 100)) saveSettings({ maxAgentCalls: Number(next) });
-              }}
-              className={`h-7 w-20 rounded-md border bg-transparent px-2 text-xs ${valid ? "border-input" : "border-destructive"}`}
-            />
-            <span className="text-xs text-muted-foreground">1–100, shared by Chief and planners</span>
-          </label>
-        );
-      })() : null}
       <p className="text-sm text-muted-foreground">
-        One config covers Chief and planners. Each mode picks its own model and thinking level per
-        machine, and its own timeout; a mode without a pick inherits the calling thread&apos;s model.
+        The researcher&apos;s model is the Researcher row in Chief models by machine.
       </p>
-      {settings ? RESEARCH_MODE_SECTIONS.map(({ mode, label }) => {
-        const text = timeouts[mode] ?? String(settings.timeoutMinutes[mode]);
-        const valid = inRange(Number(text), 60);
-        return (
-          <section key={mode} className="space-y-3 rounded-lg border border-border p-3">
-            <h3 className="text-sm font-semibold text-foreground">{label}</h3>
-            <label className="flex flex-wrap items-center gap-3 text-sm text-foreground">
-              Timeout (minutes)
-              <input
-                type="number"
-                min={1}
-                max={60}
-                aria-label={`${label} timeout (minutes)`}
-                aria-invalid={!valid}
-                value={text}
-                onChange={(event) => {
-                  const next = event.target.value;
-                  setTimeouts((current) => ({ ...current, [mode]: next }));
-                  if (inRange(Number(next), 60)) saveSettings({ timeoutMinutes: { [mode]: Number(next) } });
-                }}
-                className={`h-7 w-20 rounded-md border bg-transparent px-2 text-xs ${valid ? "border-input" : "border-destructive"}`}
-              />
-              <span className="text-xs text-muted-foreground">1–60; the run keeps going and can be resumed by runId</span>
-            </label>
-            {configuration?.hosts.map((host) => {
-              const selection = host.selections[mode];
-              const value = selection ?? host.fallback;
-              return (
-                <div key={host.hostId}>
-                  <div className="text-sm font-medium text-foreground">
-                    {host.hostName}
-                    {host.connected ? null : " · disconnected"}
-                  </div>
-                  {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
-                  <div className="mt-2 flex flex-wrap items-center gap-3">
-                    {value ? (
-                      <HostModelPicker
-                        hostId={host.hostId}
-                        value={value}
-                        disabled={!host.connected}
-                        onPick={(selection) => saveModel(host.hostId, mode, selection)}
-                      />
-                    ) : (
-                      <span className="text-xs text-muted-foreground">No model catalog to choose from.</span>
-                    )}
-                    {selection ? (
-                      <>
-                        {host.unusable.includes(mode) ? (
-                          <span className="text-xs text-destructive">
-                            This machine cannot serve that model; research inherits the caller.
-                          </span>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => saveModel(host.hostId, mode, null)}
-                          className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
-                        >
-                          Inherit caller
-                        </button>
-                      </>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">Inherit caller · uses the calling thread&apos;s model</span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </section>
-        );
-      }) : null}
-      {configuration?.hosts.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No machines are enrolled yet.</p>
-      ) : null}
     </div>
   );
 }
@@ -575,7 +453,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "research",
     title: "Chief researcher",
-    description: "Parallel read-only research for Chief and planners: one shared switch and cap, plus per-mode models, thinking levels, and timeouts.",
+    description: "Lets Chief start read-only researcher threads that may split work across helper threads.",
     component: ResearchSettings,
   });
   // The SDK retired this slot from its typings but the host still runs it. experimental_threadAction(placement "header") only draws labelled buttons, so it cannot render the role badge.

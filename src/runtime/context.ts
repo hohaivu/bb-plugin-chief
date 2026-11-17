@@ -88,7 +88,6 @@ export interface Ctx {
   planWavesFor: ReturnType<typeof createCore>["planWavesFor"];
   plans: ReturnType<typeof createCore>["plans"];
   progress: ReturnType<typeof createCore>["progress"];
-  researchModelRow: ReturnType<typeof createCore>["researchModelRow"];
   reviewTargetsFor: ReturnType<typeof createCore>["reviewTargetsFor"];
   reviewerFails: ReturnType<typeof createCore>["reviewerFails"];
   roleModelRow: ReturnType<typeof createCore>["roleModelRow"];
@@ -124,7 +123,6 @@ export interface Ctx {
   projectHostId: ReturnType<typeof createSettingsRuntime>["projectHostId"];
   projectName: ReturnType<typeof createSettingsRuntime>["projectName"];
   projectPath: ReturnType<typeof createSettingsRuntime>["projectPath"];
-  readResearchModel: ReturnType<typeof createSettingsRuntime>["readResearchModel"];
   readRoleModel: ReturnType<typeof createSettingsRuntime>["readRoleModel"];
   readRules: ReturnType<typeof createSettingsRuntime>["readRules"];
   researchFrom: ReturnType<typeof createSettingsRuntime>["researchFrom"];
@@ -132,7 +130,6 @@ export interface Ctx {
   spawnExecution: ReturnType<typeof createSettingsRuntime>["spawnExecution"];
   storedSectionId: ReturnType<typeof createSettingsRuntime>["storedSectionId"];
   usableSelection: ReturnType<typeof createSettingsRuntime>["usableSelection"];
-  writeResearchModel: ReturnType<typeof createSettingsRuntime>["writeResearchModel"];
   writeRoleModel: ReturnType<typeof createSettingsRuntime>["writeRoleModel"];
   createChief: ReturnType<typeof createChiefs>["createChief"];
   ensureChief: ReturnType<typeof createChiefs>["ensureChief"];
@@ -227,7 +224,6 @@ export interface Ctx {
   lastProviderError: ReturnType<typeof createInspect>["lastProviderError"];
   noteCooldown: ReturnType<typeof createInspect>["noteCooldown"];
   recordedCommands: ReturnType<typeof createInspect>["recordedCommands"];
-  checkUnreported: ReturnType<typeof createResearchWiring>["checkUnreported"];
   research: ReturnType<typeof createResearchWiring>["research"];
   runWorkflowCli: ReturnType<typeof createResearchWiring>["runWorkflowCli"];
   retroTick: ReturnType<typeof createRetro>["retroTick"];

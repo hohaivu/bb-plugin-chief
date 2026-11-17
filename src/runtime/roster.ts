@@ -306,11 +306,10 @@ export function createRoster(ctx: Ctx) {
     const categoryCount = (category: string) => perTask.filter((task) => task.category === category).length;
     const researchBy = new Map<string, { role: string; mode: string | null; calls: number; succeeded: number }>();
     for (const call of db.prepare(`SELECT caller_thread_id, role, mode, outcome FROM chief_research_calls ORDER BY id`).all() as { caller_thread_id: string; role: string; mode: string | null; outcome: string }[]) {
-      // Chief's spawned call only started a researcher; that thread's own calls carry the real outcomes.
-      if (!ids.has(call.caller_thread_id) || call.outcome === "spawned") continue;
+      if (!ids.has(call.caller_thread_id)) continue;
       const entry = researchBy.get(`${call.role}\u0000${call.mode}`) ?? { role: call.role, mode: call.mode, calls: 0, succeeded: 0 };
       entry.calls += 1;
-      if (call.outcome === "succeeded" || call.outcome === "partial") entry.succeeded += 1;
+      if (call.outcome === "succeeded" || call.outcome === "partial" || call.outcome === "spawned") entry.succeeded += 1;
       researchBy.set(`${call.role}\u0000${call.mode}`, entry);
     }
     return {

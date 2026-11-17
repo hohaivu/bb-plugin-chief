@@ -1,4 +1,5 @@
 import { createResearch } from "../research/research";
+import { createWorkflowCli } from "../research/workflowCli";
 import { terminal } from "../types";
 import { clip } from "../core/text";
 import { serverPath } from "../forge/forge";
@@ -7,13 +8,13 @@ import { MAX_RESULT_LENGTH } from "./constants";
 import type { Ctx } from "./context";
 
 export function createResearchWiring(ctx: Ctx) {
-  const { anyCooldown, bb, db, store } = ctx;
-  const { research, researchSleep, checkUnreported, runWorkflowCli } = createResearch({
-    db, bb, managedRow: ctx.managedRow, roleRow: store.get, terminal, isActiveChief: ctx.isActiveChief, researchSettings: ctx.researchSettings, readResearchModel: ctx.readResearchModel,
-    environmentHostId: ctx.environmentHostId, discover: ctx.discover, catalogReader: ctx.catalogReader, usableSelection: ctx.usableSelection, anyCooldown, cooldownError: ctx.cooldownError, noteCooldown: ctx.noteCooldown, lastProviderError: ctx.lastProviderError,
-    lastOutput: ctx.lastOutput, managedSpawn: ctx.managedSpawn, alertChief: ctx.alertChief, freshenCheckout: (chief) => ctx.freshenChiefCheckout(chief, "researcher"), projectHost: ctx.projectHost, writeArtifact: ctx.writeArtifact, serverPath, clip, execFileAsync,
-    maxResultLength: MAX_RESULT_LENGTH,
+  const { bb, db } = ctx;
+  const { research, researchSleep } = createResearch({
+    db, bb, managedRow: ctx.managedRow, terminal, isActiveChief: ctx.isActiveChief, researchSettings: ctx.researchSettings,
+    environmentHostId: ctx.environmentHostId, discover: ctx.discover, managedSpawn: ctx.managedSpawn,
+    freshenCheckout: (chief) => ctx.freshenChiefCheckout(chief, "researcher"), projectHost: ctx.projectHost, projectHostId: ctx.projectHostId,
+    clip, maxResultLength: MAX_RESULT_LENGTH,
   });
-  return { checkUnreported, research, researchSleep, runWorkflowCli };
+  const runWorkflowCli = createWorkflowCli({ serverPath, execFileAsync });
+  return { research, researchSleep, runWorkflowCli };
 }
-

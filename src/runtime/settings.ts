@@ -1,4 +1,4 @@
-import { modelSelectionSchema, type ResearchMode, type ResearchSettings } from "../research/research";
+import { modelSelectionSchema, type ResearchSettings } from "../research/research";
 import { MODEL_FALLBACK, type ModelRole } from "../core/roles";
 import { type ManagedRow, type ModelSelection } from "../types";
 import { clip } from "../core/text";
@@ -12,7 +12,7 @@ const RULES_FILE = "chief.md";
 const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 
 export function createSettingsRuntime(ctx: Ctx) {
-  const { activeChiefForProject, anyCooldown, bb, cooldownFor, db, researchModelRow, roleModelRow, settings, store } = ctx;
+  const { activeChiefForProject, anyCooldown, bb, cooldownFor, db, roleModelRow, settings, store } = ctx;
   async function ensureSection(): Promise<string> {
     if (ctx.state.sectionEnsuring) return ctx.state.sectionEnsuring;
     ctx.state.sectionEnsuring = (async () => {
@@ -67,23 +67,6 @@ export function createSettingsRuntime(ctx: Ctx) {
 
   function readRoleModel(hostId: string, role: ModelRole): ModelSelection | null {
     return parseSelectionRow(roleModelRow.get(hostId, role));
-  }
-
-  function readResearchModel(hostId: string, mode: ResearchMode): ModelSelection | null {
-    return parseSelectionRow(researchModelRow.get(hostId, mode));
-  }
-
-  function writeResearchModel(hostId: string, mode: ResearchMode, selection: ModelSelection | null) {
-    if (!selection) {
-      db.prepare(`DELETE FROM research_mode_models WHERE host_id=? AND mode=?`).run(hostId, mode);
-      return;
-    }
-    db.prepare(`INSERT INTO research_mode_models (host_id, mode, provider_id, model, reasoning_level, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(host_id, mode) DO UPDATE SET provider_id=excluded.provider_id, model=excluded.model,
-        reasoning_level=excluded.reasoning_level, updated_at=excluded.updated_at`).run(
-      hostId, mode, selection.providerId, selection.model, selection.reasoningLevel, Date.now(),
-    );
   }
 
   function writeRoleModel(hostId: string, role: ModelRole, selection: ModelSelection | null) {
@@ -313,14 +296,7 @@ export function createSettingsRuntime(ctx: Ctx) {
   }
 
   function researchFrom(values: Awaited<ReturnType<typeof settings.get>>): ResearchSettings {
-    return {
-      enabled: values.researchEnabled,
-      maxAgentCalls: values.researchMaxAgentCalls,
-      timeoutMinutes: {
-        survey: values.researchSurveyTimeoutMinutes,
-        investigate: values.researchInvestigateTimeoutMinutes,
-      },
-    };
+    return { enabled: values.researchEnabled };
   }
 
   /** A live read that also refreshes the cache. The chief_research gate calls this, never the cache. */
@@ -328,6 +304,6 @@ export function createSettingsRuntime(ctx: Ctx) {
     ctx.state.researchActive = researchFrom(await settings.get());
     return ctx.state.researchActive;
   }
-  return { catalogReader, chiefForProject, cooldownError, defaultHostId, discover, ensureSection, environmentHostId, execution, hostFallback, lifecycleOwner, owningChief, plannerEnabled, projectHost, projectHostId, projectName, projectPath, readResearchModel, readRoleModel, readRules, researchFrom, researchSettings, spawnExecution, storedSectionId, usableSelection, writeResearchModel, writeRoleModel };
+  return { catalogReader, chiefForProject, cooldownError, defaultHostId, discover, ensureSection, environmentHostId, execution, hostFallback, lifecycleOwner, owningChief, plannerEnabled, projectHost, projectHostId, projectName, projectPath, readRoleModel, readRules, researchFrom, researchSettings, spawnExecution, storedSectionId, usableSelection, writeRoleModel };
 }
 

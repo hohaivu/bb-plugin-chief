@@ -1,6 +1,5 @@
 import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
 import { MAX_CARRIED_FAILS } from "../report/reportIntake";
-import { researchLine } from "../research/research";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
@@ -35,7 +34,7 @@ export function createDelegation(ctx: Ctx) {
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = plannerBrief({
       title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context,
-      research: researchLine("planner", await ctx.researchSettings()) !== null, revision, branch,
+      revision, branch,
     });
     const warning = branch ? null : await ctx.freshenChiefCheckout(chief, "planner");
     const thread = await ctx.managedSpawn.launch(prepared,

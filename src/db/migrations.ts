@@ -440,4 +440,11 @@ export const MIGRATIONS = [
     `ALTER TABLE alert_outbox ADD COLUMN last_attempt_at INTEGER`,
     // A brief persistBrief is still writing: removed once both copies settle; the brief-replay service replays what a reload interrupted.
     `CREATE TABLE IF NOT EXISTS pending_briefs (thread_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, prompt TEXT NOT NULL, at INTEGER NOT NULL)`,
+    // A Researcher model pick; no row means BB's default, like Worker.
+    `CREATE TABLE chief_models_v9 (host_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('chief','planner','worker','reviewer','advisor','designer','tester','spec-writer','researcher')), provider_id TEXT NOT NULL, model TEXT NOT NULL, reasoning_level TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host_id, role))`,
+    `INSERT INTO chief_models_v9 SELECT * FROM chief_models`,
+    `DROP TABLE chief_models`,
+    `ALTER TABLE chief_models_v9 RENAME TO chief_models`,
+    // One-time seed of the user's existing investigate pick as the Researcher pick; migrations run once, so a later clear is never re-imported.
+    `INSERT OR IGNORE INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at) SELECT host_id, 'researcher', provider_id, model, reasoning_level, updated_at FROM research_mode_models WHERE mode='investigate'`,
 ];

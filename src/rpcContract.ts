@@ -1,6 +1,6 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { researchConfigurationSchema, researchModeSchema, researchSettingsPatchSchema, researchSettingsSchema } from "./research/research";
+import { researchConfigurationSchema, researchSettingsPatchSchema, researchSettingsSchema } from "./research/research";
 import { modelRoleSchema, roleSchema, workerKindSchema } from "./core/roles";
 import { managedThreadSchema, modelConfigurationSchema, modelSelectionSchema } from "./types";
 
@@ -24,14 +24,6 @@ export const rpcContract = defineRpcContract({
   researchConfiguration: {
     input: z.null(),
     output: researchConfigurationSchema,
-  },
-  setResearchModel: {
-    input: z.object({
-      hostId: z.string().trim().min(1),
-      mode: researchModeSchema,
-      selection: modelSelectionSchema.nullable(),
-    }).strict(),
-    output: z.object({ ok: z.literal(true) }).strict(),
   },
   setResearchSettings: {
     input: researchSettingsPatchSchema,

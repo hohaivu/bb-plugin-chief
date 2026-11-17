@@ -56,7 +56,7 @@ export function createLifecycle(ctx: Ctx) {
     appendPlanLog: ctx.appendPlanLog, recordedCommands: (...a) => ctx.recordedCommands(...a), reportStamp: ctx.reportStamp,
     trackFiles: (row, files) => void ctx.trackerSync.attachFiles(row, files),
     actionLine: (current) => ctx.nextAction(current, true) ?? ctx.waveWaitLine(current)
-      ?? (current.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or timeout it reports. Nothing to review or complete." : null)
+      ?? (current.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or partial answers it reports. Nothing to review or complete." : null)
       ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     warn: (message) => bb.log.warn(message),
     event: ctx.observe.event,
@@ -216,7 +216,6 @@ export function registerLifecycle(ctx: Ctx) {
         try {
           await ctx.reconcile();
           await ctx.sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
-          await ctx.checkUnreported(store.all());
           const values = await settings.get();
           ctx.state.cleanupActive = values.cleanupApproved;
           const threshold = stallThresholdMs(values);

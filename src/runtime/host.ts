@@ -1,4 +1,4 @@
-import { researchLine, type ResearchMode, researchModeSchema } from "../research/research";
+import { researchLine } from "../research/research";
 import { managedSkills, type ModelRole, modelRoleSchema } from "../core/roles";
 import { rpcContract } from "../rpcContract";
 import { clip } from "../core/text";
@@ -23,7 +23,7 @@ const PLANNER_CHIEF_INSTRUCTIONS =
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 function researchChiefInstructions(planning: boolean) {
-  return `chief_research is optional. A call runs in a child researcher thread: end your turn and wait for its report alert. Use it for a broad multi-file scan or independent questions, or to check doubtful worker or reviewer evidence. When a run failed, was partial, or timed out, do not rerun the same fan-out: send the open question to ${planning ? "chief_plan" : "chief_consult"}, or the doubtful evidence to chief_review.`;
+  return `chief_research is optional. A call starts a researcher thread that works alone or with read-only helper threads; end your turn and wait for its report alert. Use it for a broad multi-file scan or independent questions, or to check doubtful worker or reviewer evidence. When a report is partial or failed, do not rerun the same question: send the open question to ${planning ? "chief_plan" : "chief_consult"}, or the doubtful evidence to chief_review.`;
 }
 
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
@@ -72,8 +72,7 @@ export function registerHost(ctx: Ctx) {
     if (!role) return { tools: [], skills: [] };
     const rules = ctx.state.rulesCache.get(context.project.id) ?? BUILT_IN_RULES;
     const research = researchLine(role, ctx.state.researchActive);
-    // A researcher's brief says how to use chief_research, so it has no line but still needs the tool while research is on.
-    const researchTool = !!research || (role === "researcher" && !!ctx.state.researchActive?.enabled);
+    const researchTool = !!research;
     const claudeCode = context.provider.id === "claude-code";
     // The newest 10 accepted lessons, shown oldest first; proposed and retired ones reach no prompt. better-sqlite3 is synchronous, so configure stays so.
     const newestLessons = (roleClause: string) => (db.prepare(`SELECT text FROM chief_lessons WHERE project_id=? AND status='accepted' AND ${roleClause} ORDER BY at DESC, id DESC LIMIT 10`).all(context.project.id) as { text: string }[]).reverse();
@@ -122,7 +121,7 @@ export function registerHost(ctx: Ctx) {
     const reviewLessons = role === "reviewer" ? newestLessons(`role='reviewer'`) : [];
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
     // gets only a project's chief.md; its brief and the chief-worker skills cover the rest.
-    const tools = ["chief_report", ...(role === "worker" && (row?.plan_thread_id ?? (seeded?.success ? seeded.data.planThreadId : undefined)) ? ["chief_log"] : []), ...(researchTool ? ["chief_research"] : [])];
+    const tools = ["chief_report", ...(role === "worker" && (row?.plan_thread_id ?? (seeded?.success ? seeded.data.planThreadId : undefined)) ? ["chief_log"] : [])];
     return {
       tools,
       // A designer is a worker row with kind "designer"; seeded metadata covers the pre-insertThread race.
@@ -131,7 +130,6 @@ export function registerHost(ctx: Ctx) {
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: follow the chief-worker skill's report contract; after reporting, end with one line.`,
         "After any context compaction, before acting, reload in full the chief-* skills your brief names (Skill tool, or read each SKILL.md in full) and re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
         ...(claudeCode ? [toolSchemaLine(tools)] : []),
-        ...(research ? [research] : []),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
         ...(lessons.length ? ["", clip(["## Lessons from earlier review rounds", ...lessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
         ...(reviewLessons.length ? ["", clip(["## Review lessons (known false positives and checks)", ...reviewLessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
@@ -161,6 +159,7 @@ export function registerHost(ctx: Ctx) {
           "spec-writer": ctx.readRoleModel(host.id, "spec-writer"),
           reviewer: ctx.readRoleModel(host.id, "reviewer"),
           advisor: ctx.readRoleModel(host.id, "advisor"),
+          researcher: ctx.readRoleModel(host.id, "researcher"),
         };
         // A connected machine can answer for its own picks, so say which ones it
         // would refuse instead of showing a model the next spawn will ignore.
@@ -186,47 +185,10 @@ export function registerHost(ctx: Ctx) {
         };
       })),
     }),
-    researchConfiguration: async () => ({
-      settings: await ctx.researchSettings(),
-      hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
-        const connected = host.status === "connected";
-        const selections = {
-          survey: ctx.readResearchModel(host.id, "survey"),
-          investigate: ctx.readResearchModel(host.id, "investigate"),
-        };
-        // One reader for the whole host: modes sharing a provider scan it once.
-        const read = ctx.catalogReader(host.id);
-        const [scan, flagged] = await Promise.all([
-          connected
-            ? ctx.hostFallback(host.id, read)
-            : { fallback: null, error: "Machine is disconnected; its model catalog is unavailable." },
-          Promise.all(researchModeSchema.options.map(async (mode) => {
-            const selection = selections[mode];
-            if (!connected || !selection) return null;
-            return (await ctx.usableSelection(host.id, selection, read)) ? null : mode;
-          })),
-        ]);
-        return {
-          hostId: host.id,
-          hostName: host.name,
-          connected,
-          ...scan,
-          selections,
-          unusable: flagged.filter((mode): mode is ResearchMode => mode !== null),
-        };
-      })),
-    }),
-    setResearchModel: ({ hostId, mode, selection }) => {
-      ctx.writeResearchModel(hostId, mode, selection);
-      return { ok: true as const };
-    },
+    researchConfiguration: async () => ({ settings: await ctx.researchSettings() }),
     setResearchSettings: async (patch) => {
-      const values: Record<string, boolean | number> = {};
+      const values: Record<string, boolean> = {};
       if (patch.enabled !== undefined) values.researchEnabled = patch.enabled;
-      if (patch.maxAgentCalls !== undefined) values.researchMaxAgentCalls = patch.maxAgentCalls;
-      const timeouts = patch.timeoutMinutes ?? {};
-      if (timeouts.survey !== undefined) values.researchSurveyTimeoutMinutes = timeouts.survey;
-      if (timeouts.investigate !== undefined) values.researchInvestigateTimeoutMinutes = timeouts.investigate;
       ctx.state.researchActive = ctx.researchFrom(await settings.experimental_set(values));
       return ctx.state.researchActive;
     },
