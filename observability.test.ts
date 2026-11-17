@@ -271,35 +271,34 @@ describe("tool wrapper (the real registry, only the SDK registration and the led
   });
 });
 
-describe("plugin warnings leave no workflow script, prompt or code in the Sentry envelope", () => {
+describe("plugin warnings leave no script, prompt or code in the Sentry envelope", () => {
   const fetchMock = vi.fn();
   beforeEach(() => { fetchMock.mockReset().mockResolvedValue({ ok: true, status: 200 }); vi.stubGlobal("fetch", fetchMock); });
   afterEach(() => { vi.unstubAllGlobals(); });
   const SCRIPT = "SCRIPT_SENTINEL_9f3a";
   const PROMPT = "PROMPT_SENTINEL_77c1";
   const echoed = `Command failed: bb workflows run --script export default async () => { return "${SCRIPT}" } --args {"question":"${PROMPT}"} --json`;
-  // Short sentinels: the malformed-output parser diagnostic only quotes a short preview of what it could not parse.
+  // Short sentinels: a diagnostic may quote a short preview of what it could not parse.
   const CODE = "C1_CODE";
   const TEXT = "P1_PROMPT";
 
+  // The surviving warning that carries an arbitrary diagnostic: a chief_research call whose ledger row cannot be written. A trigger makes the database error hold the sentinels, as a CLI error would.
   test.each([
-    ["an execFile timeout echoing the command", [SCRIPT, PROMPT], () => { throw Object.assign(new Error(`${echoed}\n`), { killed: true, signal: "SIGTERM", stdout: "", stderr: "" }); }],
-    ["a non-JSON failure echoing the command", [SCRIPT, PROMPT], () => { throw Object.assign(new Error(`${echoed}\nsomething broke`), { code: 1, stdout: "not json", stderr: "something broke" }); }],
-    ["a marker-free JSON error.message", [CODE, TEXT], () => { throw Object.assign(new Error("exit 1"), { code: 1, stdout: JSON.stringify({ ok: false, error: { message: `Invalid workflow: const ${CODE} = 1; prompt ${TEXT}` } }), stderr: "" }); }],
-    ["malformed CLI output", [CODE, TEXT], () => ({ stdout: `${CODE} ${TEXT}`, stderr: "" })],
-  ] as [string, string[], () => { stdout: string; stderr: string }][])("%s on a survey launch: the log keeps the diagnostic, the serialized envelope is the fixed code only", async (_name, sentinels, launch) => {
+    ["an execFile timeout echoing the command", [SCRIPT, PROMPT], echoed],
+    ["a marker-free JSON error.message", [CODE, TEXT], `Invalid workflow: const ${CODE} = 1; prompt ${TEXT}`],
+    ["malformed CLI output", [CODE, TEXT], `${CODE} ${TEXT}`],
+  ] as [string, string[], string][])("%s in a chief_research call record: the log keeps the diagnostic, the serialized envelope is the fixed code only", async (_name, sentinels, diagnostic) => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true, sentryDsn: DSN });
     const chief = await start(state);
-    const planner = await plan(state, chief.threadId);
-    execFileMock.mockImplementation(async (_file: string, args: string[]) => (args[0] === "workflows" ? launch() : { stdout: "", stderr: "" }));
+    state.db.exec(`CREATE TRIGGER refuse_call_row BEFORE INSERT ON chief_research_calls BEGIN SELECT RAISE(ABORT, '${diagnostic.replace(/'/g, "''")}'); END`);
 
-    const reply = await state.harness.behavior.callAgentTool("chief_research", { mode: "survey", question: "Who calls this?", items: ["a.ts"] }, { threadId: planner.threadId, projectId: "proj_1" }) as string;
+    const reply = await state.harness.behavior.callAgentTool("chief_research", { question: "Who calls this?" }, { threadId: chief.threadId, projectId: "proj_1" }) as string;
     await flush();
 
-    expect(reply).toContain("could not start the workflow");
+    expect(reply).toContain("Started researcher thread");
     // Non-vacuous: the local log still holds the real diagnostic with every sentinel, so the outbound copy was never built from it.
-    const local = state.harness.logEntries.filter((entry) => entry.level === "warn" && entry.message.includes("chief_research could not start a workflow"));
+    const local = state.harness.logEntries.filter((entry) => entry.level === "warn" && entry.message.includes("Could not record chief_research call"));
     expect(local.some((entry) => sentinels.every((sentinel) => entry.message.includes(sentinel)))).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
     const body = fetchMock.mock.calls[0]![1].body as string;
