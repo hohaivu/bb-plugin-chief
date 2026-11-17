@@ -184,7 +184,6 @@ export function registerHost(ctx: Ctx) {
         };
       })),
     }),
-    researchConfiguration: async () => ({ settings: await ctx.researchSettings() }),
     setResearchSettings: async (patch) => {
       const values: Record<string, boolean> = {};
       if (patch.enabled !== undefined) values.researchEnabled = patch.enabled;

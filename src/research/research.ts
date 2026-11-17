@@ -12,9 +12,6 @@ export const RESEARCH_MAX_HELPERS = 6;
 
 export const researchSettingsSchema = z.object({ enabled: z.boolean() });
 export type ResearchSettings = z.infer<typeof researchSettingsSchema>;
-/** Model picks live in modelConfiguration, under the researcher role. */
-export const researchConfigurationSchema = z.object({ settings: researchSettingsSchema });
-export type ResearchConfiguration = z.infer<typeof researchConfigurationSchema>;
 export const researchSettingsPatchSchema = z.object({ enabled: z.boolean().optional() }).strict();
 /** One flat object: tool parameters must publish as a JSON Schema of type object. */
 export const researchParams = z.object({

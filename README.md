@@ -177,8 +177,8 @@ is supervised like every other managed thread, by the stall alert and `chief_sto
 
 The researcher's model is the **Researcher** row in Settings → Chief models by machine, picked like
 the Worker row. A researcher without a pick, or whose pick the machine can no longer serve, runs
-on BB's default model for the project, and so do its helpers. Settings → **Chief researcher** holds
-only the switch.
+on BB's default model for the project, and so do its helpers. The **Researcher** switch sits with
+the other Chief switches in the plugin settings.
 
 Before the researcher starts, Chief fast-forwards its checkout to `origin/<default branch>` (`git fetch` + `git merge --ff-only`). It skips this, appending one `Did not fast-forward…` line to the tool result and still starting the researcher, when a researcher or planner of this Chief is running, tracked files have uncommitted changes, the branch has local commits, git or a lookup fails or times out, or the checkout is on another host. Every researcher report alert says `Read at <sha>` (the commit it read) and, when the default branch has moved since, that the answer may be stale.
 
