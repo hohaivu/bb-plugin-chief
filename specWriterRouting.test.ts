@@ -565,8 +565,13 @@ describe("tester role", () => {
       const { chief, planner } = await specPlan(state);
       const s1 = await legacyRow(state, chief.threadId, planner.threadId, 1, "spec-writer", null, "feature/legacy");
       await readyIdle(state, s1);
+      const priorEnv = state.live.get(s1)!.environmentId;
       await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: s1, kind });
-      expect(ownerOn(state, planner.threadId, 1)).toMatchObject({ kind: kind === "worker" ? null : kind, replaces_thread_id: s1, branch: "feature/legacy" });
+      const successor = ownerOn(state, planner.threadId, 1);
+      expect(successor).toMatchObject({ kind: kind === "worker" ? null : kind, replaces_thread_id: s1, branch: "feature/legacy" });
+      // Wave 2 C8: the legacy hand-off is implementation-lane, so it reuses the prior writer's environment (never a fresh managed worktree).
+      expect(state.spawned.at(-1).environment).toEqual({ type: "reuse", environmentId: priorEnv });
+      expect(state.live.get(successor.thread_id as string)!.environmentId).toBe(priorEnv);
     });
 
     test("a ready legacy S2 that replaced W1 is handed off as the implementation row and is never completed by itself", async () => {
@@ -580,8 +585,10 @@ describe("tester role", () => {
       await readyIdle(state, s2);
       await expect(tool(state, "chief_complete", { threadId: s2, skipReview: "docs only" }, chief.threadId)).rejects.toThrow(
         `Refusing to complete ${s2}: a Spec Writer's docs need their worker — chief_delegate (planThreadId: ${P}, wave: 2, replaces: ${s2}, kind: worker).`);
+      const priorEnv = state.live.get(s2)!.environmentId;
       await delegateWave(state, chief.threadId, P, 2, { replaces: s2, kind: "worker" });
       expect(ownerOn(state, P, 2)).toMatchObject({ kind: null, replaces_thread_id: s2 });
+      expect(state.spawned.at(-1).environment).toEqual({ type: "reuse", environmentId: priorEnv });
     });
 
     /** A blocked wave-1 side-lane writer on plan P (branch A) and a fresh plan Q with `waves`. */
