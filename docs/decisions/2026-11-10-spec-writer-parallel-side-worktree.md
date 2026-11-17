@@ -13,7 +13,8 @@ Rejected: a second task branch or pull request, and a write in a shared worktree
 ## Consequence
 
 - A reused checkout fast-forwards to the task branch before it reads.
-- A rejected push fetches, rebases with no autostash, and pushes again. It never force-pushes.
+- A rejected push fetches, rebases only the writer's own commits (from B, then the previous U) with no autostash, and pushes again. It never force-pushes.
+- A docs repair writer gets a fresh worktree from the task branch and rewrites the delta. Reason: a stale or half-rebased side checkout must never reach the fold.
 - The Reviewer scopes a writer by its fold range.
 - Pre-plan specs can be stale. The plan wins for the Worker.
 - The writer works from the Spec delta and does not read the code again.
