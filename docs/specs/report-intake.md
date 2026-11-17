@@ -114,7 +114,7 @@ A reviewer report with a verdict, a written verdict file, and a result shows a p
 
 The Next line has these texts:
 
-- Researcher: `Research is advisory: use its findings, check anything doubtful against the code, and note any failures or timeout it reports. Nothing to review or complete.`
+- Researcher: `Research is advisory: use its findings, check anything doubtful against the code, and note any failures or partial answers it reports. Nothing to review or complete.`
 - Last choice: `Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.`
 
 The final alert key is `report:<cycle>:<first 16 hex of the sha1 of the alert text>`. It has the same `report:` kind as the pending alert. `writeAlert` deletes undelivered alerts of the same source and kind with another key. So the final alert evicts the pending alert while Chief has not received it.
