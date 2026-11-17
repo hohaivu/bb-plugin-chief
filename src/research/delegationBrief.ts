@@ -242,7 +242,9 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Git workflow",
       ...(side ? [`Side branch cut from ${branch}: commit only docs/ on it and push only through the \`## Fold\` steps.`]
         : branch ? [`Task branch: ${branch}. After loading your skills and before any other file read, sync and record \`${tester ? "Base commit" : "Local sync"}: <sha>\`; push every commit with \`git push origin HEAD:${branch}\`; follow the git workflow in your loaded skills.`] : []),
-      ...(prior ? [`This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them.${prior.result ? "" : ` Its last report: bb chief inspect ${prior.thread_id}`}`] : []),
+      ...(prior ? [`${side
+        ? `Your worktree is fresh from ${branch}; it does not hold the previous Spec Writer's (${prior.thread_id}) commits. Write the Spec delta again on the current docs of ${branch}; never cherry-pick or merge the previous writer's commits.`
+        : `This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them.`}${prior.result ? "" : ` Its last report: bb chief inspect ${prior.thread_id}`}`] : []),
       ...(issueUrl ? [`Tracking issue: ${issueUrl}`] : []),
       ...(prUrl ? [`Draft pull request: ${prUrl}`] : []),
     ] : []),

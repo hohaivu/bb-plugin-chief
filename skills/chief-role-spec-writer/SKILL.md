@@ -105,7 +105,7 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
 
 ## 9. Report
 
-- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start, and as `Head commit: <sha>` when you report.
+- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start, and as `Head commit: <sha>` when you report. In a blocked fold report, Head commit is the checkout as it is; Pre-fold head is H.
 - List each changed docs file by path. When the docs already show a delta item, say so: it needs no commit.
 - Automated Verification:
   1. With a `## Fold` section: the `git diff --name-only $U..HEAD` of fold step 4 shows only `docs/` paths, with its exit status. Without one: `git diff --name-only <base>..HEAD` shows only `docs/` paths, with its exit status.
@@ -121,14 +121,16 @@ When the bb-global `asd-ste100` skill is available, you may use it to check draf
 
 Commit only `docs/` on your worktree branch, each commit with the `Chief-Spec-Writer` trailer, after each meaningful step (a passing sub-change, before any risky edit, before reporting). The only push you make is the fold into `<branch>`: never push the side branch or any other branch, and push only through the steps below. The folded branch is what the reviewer sees. Commit your docs, fold them, then report ready; never create, merge, or mark ready any pull request. Before you report ready, fold the commits onto the task branch `<branch>`:
 
+Set B to your Base commit (section 9) once, before the first attempt.
+
 1. Require a clean tree: `git status --porcelain` prints nothing.
-2. `git fetch origin <branch>`, then note `U=$(git rev-parse origin/<branch>)`.
-3. `git rebase --no-autostash origin/<branch>`. On a conflict, run `git rebase --abort` and report blocked. Recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.
+2. `git fetch origin <branch>`, then note `U=$(git rev-parse origin/<branch>)` and `H=$(git rev-parse HEAD)`.
+3. `git rebase --no-autostash --onto origin/<branch> $B`. It replays only your own commits (`$B..HEAD`), never commits the worker already rewrote. On a conflict: run `git rebase --quit` and stop. Do not try to restore the checkout: it may stay detached, partial or unmerged, and no one reuses it (a docs repair gets a fresh worktree). Never run `git rebase --abort`, `git restore`, `git reset --hard`, `git checkout -- <path>` or a forced checkout. Report blocked with `Pre-fold head: H`, `Fold attempt base: B`, `U`, the conflicting paths and the command output, and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.
 3a. Optional: `git grep` each code identifier that your docs name, at HEAD. When an identifier is missing, the worker may not have pushed yet: list it under `## Unverified names` in your report and continue. Never wait for the worker, and never read the branch diff.
 4. `git diff --name-only $U..HEAD` lists only `docs/` paths. Any other path: report blocked.
-5. `git push origin HEAD:<branch>`. Never pass `--force`. If the push is rejected, repeat from step 1.
+5. `git push origin HEAD:<branch>`. Never pass `--force`. If the push is rejected, set `B=$U` (this attempt's U) and repeat from step 1.
 
 - Record `Fold base: <U of the successful attempt>` and `Fold head: <the pushed sha>` in your report.
 - When no docs change was needed, record `Fold: none` with Fold base and Fold head both equal to U.
 - Never use autostash, never force, never touch another worktree. The fold keeps the `Chief-Spec-Writer` trailer on every commit: never squash or amend it away.
-- A docs repair writer that replaces a side-lane writer reuses that worktree and folds the same way.
+- A docs repair writer that replaces a side-lane writer gets a fresh worktree cut from <branch>. It records its own Base commit, writes the Spec delta again on the current docs, and folds the same way. It never imports the previous writer's commits.
