@@ -358,7 +358,7 @@ export function createRoster(ctx: Ctx) {
       `Tasks: ${tasks.total} — ${tasks.completed} completed, ${tasks.open} open, ${tasks.dropped} dropped · todos: ${todos.open} open, ${todos.done} done, ${todos.dropped} dropped`,
       `Task kinds: ${tasks.planned} planned, ${tasks.unplanned_planner_on} unplanned (planner on), ${tasks.unplanned_planner_off} unplanned (planner off), ${tasks.simple} simple, ${tasks.unknown} unknown`,
       `Reviews: ${verdicts.approve} approve, ${verdicts.request_changes} request_changes`,
-      `Research: ${research.length ? research.map((entry) => `${entry.role} ${entry.mode ?? "resume"} ${entry.succeeded}/${entry.calls} succeeded`).join(", ") : "no calls"}`,
+      `Research: ${research.length ? research.map((entry) => `${entry.role} ${entry.mode ?? "calls"} ${entry.succeeded}/${entry.calls} succeeded`).join(", ") : "no calls"}`,
       `Repairs: ${plural(repairs.replacements, "replacement round")}, ${repairs.requestChanges} request_changes (${plural(repairs.regressions, "regression")}), ${plural(repairs.consults, "consult")}`,
       `Failures: provider ${failures.usageLimit + failures.connection} (usage limit ${failures.usageLimit}, connection ${failures.connection}) · timing ${failures.busyRejections + failures.stalls + failures.hardStalls} (busy rejections ${failures.busyRejections}, stalls ${failures.stalls}, hard stalls ${failures.hardStalls}) · rejected reviews ${failures.rejectedReviews} · thread errors ${failures.threadErrors}`,
       `Wall time (${wallTimeMs.completed} completed): median ${duration(wallTimeMs.median)}, total ${duration(wallTimeMs.total)}`,
