@@ -10,6 +10,7 @@ import { provideSdk } from "./test/sdk";
 import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording, assertSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { acceptStackedBranchDelta } from "./test/stackedBranchToolDelta";
+import { acceptResearchToolDelta, researchInstructions, researchTools } from "./test/researchDelta";
 import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, ROSTER_OTHERS_NEW, ROSTER_OTHERS_OLD, chiefPreloadTail } from "./test/toolConfigFixture";
 import { withHostCompaction } from "./test/shrinkEdits";
 
@@ -162,6 +163,8 @@ describe("tool-call stability", () => {
       // Reviewer-prompt wave: chief_review's focus/acceptedGaps and chief_report's plan flags; asserted, then restored to base (before the wording restore below rewrites the plan text).
       // Stacked-branch worktrees: optional branch / stackOn and one forge `base` sentence; asserted, then removed.
       acceptStackedBranchDelta(definition, name);
+      // "Researcher as a normal agent": the new chief_research definition is asserted exactly, then the baseline's own definition is put back.
+      acceptResearchToolDelta(definition, base.catalog[name], name);
       acceptReviewerToolDelta(definition, base.catalog[name], name);
       acceptSpecLaneWording(definition, base.catalog[name], name);
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
@@ -186,7 +189,7 @@ describe("tool-call stability", () => {
     const NEW_CAP = 32768;
     now.entries.forEach((entry, index) => {
       const old = base.entries[index]!;
-      expect(entry.tools, entry.key).toEqual(old.tools);
+      expect(entry.tools, entry.key).toEqual(researchTools(old));
       expect(entry.skills, entry.key).toEqual(old.skills);
       expect(preloadLine(old), entry.key).toEqual([]);
       // Allowed differences (g) and (h): the core-rule trims and the planning line are undone with their own wording checks, so any other byte still fails.
@@ -201,13 +204,18 @@ describe("tool-call stability", () => {
       if (!entry.instructions || !old.instructions) { expect(entry.instructions, entry.key).toBe(old.instructions); return; }
       const restored = accepted(preloaded ? withoutPreload(entry.instructions) : entry.instructions);
       // Wave 2's one named edit, applied to the base text: the managed roles' compaction sentence also asks for the skill reload.
-      if (old.instructions.length < OLD_CAP) expect(restored, entry.key).toBe(entry.key.includes("| chief |") ? old.instructions : withHostCompaction(old.instructions));
+      // The research edits (Chief's line and paragraph; a planner loses its research line) are applied to the base text first, forward, so nothing else may differ.
+      const researched = researchInstructions(old)!;
+      if (old.instructions.length < OLD_CAP) expect(restored, entry.key).toBe(entry.key.includes("| chief |") ? researched : withHostCompaction(researched));
       else {
         // The base text was cut at the old cap and the head text at the new one: the base is a prefix of the head, so a cut that eats Chief's rules still fails.
         cut += 1;
         expect(old.instructions.length, entry.key).toBe(OLD_CAP);
         expect(entry.instructions.length, entry.key).toBe(NEW_CAP);
-        expect(restored.startsWith(old.instructions), entry.key).toBe(true);
+        // The research lines sit before the project rules, inside the old cut: edit the base text up to its rules marker, keep its capped rules as they are.
+        const rules = old.instructions.indexOf("# Project rules marker");
+        expect(rules, entry.key).toBeGreaterThan(0);
+        expect(restored.startsWith(`${researchInstructions({ ...old, instructions: old.instructions.slice(0, rules) })}${old.instructions.slice(rules)}`), entry.key).toBe(true);
       }
     });
     // Only Chief's worst case reaches the cut, and it does so for every planner and research combination.
@@ -269,18 +277,18 @@ describe("tool-call stability", () => {
       if (entry.key.includes("| chief |")) {
         expect(at, entry.key).toBe(1);
         expect(at, entry.key).toBeLessThan(after("Call chief_roster at the start of every turn"));
+        if (entry.key.includes("research true")) expect(after("Use chief_research"), entry.key).toBeGreaterThan(at);
         continue;
       }
       expect(at, entry.key).toBe(2);
       expect(after("# Project rules marker"), entry.key).toBeGreaterThan(at);
       expect(after("## Lessons from earlier review rounds"), entry.key).toBeGreaterThan(at);
-      if (entry.key.includes("research true") && (entry.key.includes("| planner |") || entry.key.includes("| researcher |"))) {
-        const research = after("Use chief_research");
-        if (research !== -1) expect(research, entry.key).toBeGreaterThan(at);
-      }
+      // A planner and a researcher have no chief_research and no research line, whatever the switch says.
+      if (entry.key.includes("| planner |") || entry.key.includes("| researcher |")) expect(entry.instructions, entry.key).not.toContain("chief_research");
     }
-    // The lines under test exist: a planner with research on has a research line, and a reviewer shows its review lessons.
-    expect(entries.find((entry) => entry.key.includes("| planner | claude-code | planner true | research true"))!.instructions).toContain("Use chief_research");
+    // The lines under test exist: Chief with research on has its research line after the preload line, and a reviewer shows its review lessons.
+    expect(entries.find((entry) => entry.key.includes("| chief | claude-code | planner true | research true"))!.instructions).toContain("Use chief_research");
+    expect(entries.some((entry) => entry.key.includes("| planner | claude-code | planner true | research true"))).toBe(true);
     expect(entries.find((entry) => entry.key.includes("| reviewer |"))!.instructions).toContain("## Review lessons");
   });
 
