@@ -1,6 +1,6 @@
 import { configurationContext, setup, start } from "./harness";
 import { GAPS_PROPERTY, FOCUS_PROPERTY, withPlanFlags } from "./reviewerToolDelta";
-import { ATTACH_DEFINITION, acceptEvidenceOnlyDelta } from "./specLaneWording";
+import { ATTACH_DEFINITION, FRESH_WORKER_BASE_LINE, FRESH_WORKER_LINE, acceptEvidenceOnlyDelta } from "./specLaneWording";
 import { withHostCompaction } from "./shrinkEdits";
 import { acceptStackedBranchDelta } from "./stackedBranchToolDelta";
 import { acceptResearchToolDelta, researchInstructions, researchTools } from "./researchDelta";
@@ -112,11 +112,17 @@ export function uncappedBase(old: ToolConfig["entries"][number]) {
   return { baseline, rules };
 }
 
+/** The lines of `text` and the index of the one line starting with `start`; throws unless the text has exactly one. */
+const lineOnce = (key: string, text: string, start: string) => { const lines = text.split("\n"); const at = lines.findIndex((line) => line.startsWith(start)); if (at < 0 || lines.some((line, index) => index > at && line.startsWith(start))) throw new Error(`tool config differs from base outside the allowed edits: ${key}: base has not exactly one ${start} line`); return { lines, at }; };
 /** The retained base instructions of `old` with only the research edits applied. A plain Chief's text is rebuilt uncapped, edited, then capped again, so the cap tail moves exactly as it must. */
 export function researchedInstructions(old: ToolConfig["entries"][number]) {
   if (!old.key.includes("| chief |") || !old.instructions) return researchInstructions(old);
   const { baseline, rules } = uncappedBase(old);
-  return `${researchInstructions({ ...old, instructions: baseline })}${rules}`.slice(0, INSTRUCTIONS_CAP);
+  const researched = researchInstructions({ ...old, instructions: baseline })!;
+  const fresh = lineOnce(old.key, researched, "- Fresh worker:");
+  if (fresh.lines[fresh.at] !== FRESH_WORKER_BASE_LINE) throw new Error(`${old.key}: base Fresh worker line is not the 01163a8 text`);
+  fresh.lines[fresh.at] = FRESH_WORKER_LINE;
+  return `${fresh.lines.join("\n")}${rules}`.slice(0, INSTRUCTIONS_CAP);
 }
 
 /** The exact capped instructions a plain Chief must have: the retained base entry `old` (its uncapped text rebuilt from the generator's own rules) with only the authorized edits applied BEFORE the cap. Nothing is read from head except its returned tool names (preload order). */
@@ -125,7 +131,7 @@ export function expectedChiefInstructions(old: ToolConfig["entries"][number], re
   // Chief's research line and paragraph are rewritten in the uncapped base before the cap, like the preload line below.
   const { baseline, rules } = uncappedBase(old);
   const prefix = researchInstructions({ ...old, instructions: baseline })!;
-  const once = (text: string, start: string) => { const lines = text.split("\n"); const at = lines.findIndex((line) => line.startsWith(start)); if (at < 0 || lines.some((line, index) => index > at && line.startsWith(start))) fail(`${old.key}: base has not exactly one ${start} line`); return { lines, at }; };
+  const once = (text: string, start: string) => lineOnce(old.key, text, start);
   // The preload edit is applied to the uncapped base before the cap, so the longer line moves the cap tail exactly as it does at head.
   const claudeCode = old.key.includes("| claude-code |");
   let edited = prefix;
@@ -135,7 +141,11 @@ export function expectedChiefInstructions(old: ToolConfig["entries"][number], re
     preload.lines[preload.at] = preload.lines[preload.at]!.replace(PRELOAD_OLD_TAIL, chiefPreloadTail(returnedTools));
     edited = preload.lines.join("\n");
   } else if (prefix.includes("ToolSearch")) fail(`${old.key}: base has a preload line without claude-code`);
-  const tests = once(edited, "- Tests:");
+  // The one authorized wording change of the hook-safe fold wave: the Fresh worker line is replaced whole, after the base line is proven to be the 01163a8 text. Like Tests and Skips, it is applied before the cap.
+  const fresh = once(edited, "- Fresh worker:");
+  if (fresh.lines[fresh.at] !== FRESH_WORKER_BASE_LINE) fail(`${old.key}: base Fresh worker line is not the 01163a8 text`);
+  fresh.lines[fresh.at] = FRESH_WORKER_LINE;
+  const tests = once(fresh.lines.join("\n"), "- Tests:");
   tests.lines[tests.at] = TESTS_DOCS_LINE;
   const skips = once(tests.lines.join("\n"), "- Skips:");
   if (!skips.lines[skips.at]!.includes(SKIPS_OLD_PHRASE)) fail(`${old.key}: base Skips line lacks the old phrase`);

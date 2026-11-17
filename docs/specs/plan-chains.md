@@ -52,7 +52,7 @@ Seven modules own the plan chains domain:
 2. `src/plan/planLifecycle.ts` owns delegation admission, role progression, and waivers.
 3. `src/runtime/delegation.ts` owns `startWorker`, which launches workers and Spec Writers. `src/tools/forgeInit.ts` owns forge initialization. `src/runtime/cleanup.ts` owns cleanup steps.
 4. `src/plan/planProgress.ts` owns progress checks, review readiness, the release route to the tester, legacy restack rules, and the repair decision after a reviewer verdict.
-5. `src/runtime/nextAction.ts` and `src/runtime/completion.ts` own the text of the next call and the completion rules.
+5. `src/runtime/nextAction.ts` and `src/runtime/completion.ts` own the text of the next call and the completion rules. `src/runtime/host.ts` (`chiefCoreRules`) owns the core rule that sends follow-up work to a fresh worker, with its one in-place exception.
 6. `src/research/delegationBrief.ts` owns the worker brief. `src/review/reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
 7. `src/review/reviewLedger.ts` owns reviewer tracking, coverage checks, and historical task chain queries.
 
@@ -106,10 +106,11 @@ A spec wave adds a Spec Writer that runs in parallel with the wave worker:
 2. The server launches the Spec Writer in a new side worktree on a `bb/` side branch cut from the task branch. It completes no row and repoints no row.
 3. The Spec Writer commits only `docs/` files on its side branch.
 4. Before it reports ready, the Spec Writer folds its commits onto the task branch. It runs these steps on a clean tree:
-   1. Fetch the task branch and note the commit `U`.
-   2. Rebase onto `U` with no autostash. On a conflict, abort the rebase and report blocked.
-   3. Check that the diff `U..HEAD` lists only `docs/` paths.
-   4. Push `HEAD` to the task branch with a plain push. A rejected push repeats the steps from the fetch.
+   1. Set `B` to the writer's Base commit, once, before the first attempt.
+   2. Fetch the task branch and note the commit `U` and the commit `H` of `HEAD`.
+   3. Rebase the writer's own commits (`B..HEAD`) onto `U` with no autostash: `git rebase --no-autostash --onto origin/<branch> $B`. On a conflict, run `git rebase --quit` and report blocked with `Pre-fold head: H`, `B`, `U` and the conflicting paths. The writer does not restore the checkout, and nothing reuses it.
+   4. Check that the diff `U..HEAD` lists only `docs/` paths.
+   5. Push `HEAD` to the task branch with a plain push. A rejected push sets `B` to this attempt's `U` and repeats the steps from the fetch.
 5. The Spec Writer records Fold base and Fold head, or `Fold: none`.
 6. The tester call of the test wave waits until every Spec Writer of the chain reports ready. Then Chief delegates the tester with `replaces:` referencing the chain owner of the parent wave.
 
@@ -143,7 +144,7 @@ Shared worktree cleanup coordinates action ownership:
 
 - The server assigns exactly one task branch, one pull request, and one implementation worktree to each plan chain. A side-lane Spec Writer adds a private side worktree. It adds no second task branch, review branch, or pull request. Reason: shared environments reduce worktree disk use across dependent waves, and one chain keeps one pull request.
 - The server creates a fresh managed worktree for each independent chain head. Reason: independent chains must execute in parallel without shared worktree state.
-- `startWorker` reuses the environment of the prior worker when `replaces:` is present. Reason: chain waves share installed dependencies and build outputs.
+- `startWorker` reuses the environment of the prior worker when `replaces:` is present and the replaced row is in the implementation lane. A side-lane Spec Writer repair gets a fresh worktree instead (see Spec Writer Side Lane). Reason: chain waves share installed dependencies and build outputs. A side checkout can be stale.
 - `startWorker` checks every non-terminal row on the same branch, except the row in `replaces:`. Reason: git prohibits simultaneous checkouts of one branch in different worktrees.
   - A same-plan implementation-lane row and same-plan side-lane Spec Writers coexist.
   - Side-lane Spec Writers of different waves of one plan coexist.
@@ -238,7 +239,7 @@ An evidence-only tester runs the commands that the mission names, on the commits
   - The call carries the branch and pull request of the chain. A different branch is rejected.
 - The call order of the Spec Writer and the worker does not matter. Writer first never makes the worker `replaces:` the writer. Reason: the two rows are in different lanes.
 - `startWorker` launches a first side-lane Spec Writer with a managed worktree whose base branch is the task branch. It completes no row and repoints no row. Reason: the writer must never take over the implementation worktree.
-- `replaces:` a side-lane Spec Writer with `kind: spec-writer` is a docs repair. The new writer reuses the side worktree and completes the old writer. Reason: a repair keeps the fold history of the side branch.
+- `replaces:` a side-lane Spec Writer with `kind: spec-writer` is a docs repair. The new writer gets a fresh managed worktree cut from the task branch, completes the old writer, and repoints the reviewer ledger. It writes the Spec delta again and never imports the old writer's commits. Reason: the old side checkout can hold stale or half-rebased docs commits.
 - `replaces:` a side-lane Spec Writer with another kind is rejected, and the text names the chain owner. Reason: a product repair belongs to the implementation lane.
 - A worker or designer may replace a ready writer only when the wave has no implementation-lane row. Reason: this legacy hand-off covers a head Spec Writer that ran before its worker.
 - A `spec-writer` that replaced a worker, designer, or tester is in the implementation lane, and its hand-off stays normal. A `spec-writer` without a plan is never in the side lane. Reason: no data migration is needed.
@@ -251,7 +252,8 @@ An evidence-only tester runs the commands that the mission names, on the commits
 - A side-lane Spec Writer completes with a covering approve, `skipReview`, or `override`. An implementation-lane `spec-writer` keeps the rejection, except on a waived test wave. Reason: a side writer has its own report and fold head.
 - `chief_skip_specs` is rejected after the wave has any `spec-writer` row. It works while only the worker exists. Reason: it only bypasses a Spec Writer that Chief never delegated.
 - A spec waiver waives the planned Spec delta only. It does not block an incidental docs correction. Reason: a waiver and a docs repair are different decisions.
-- A side-lane Spec Writer folds with a plain fast-forward push and never force-pushes. Reason: a force-push can erase the commits of the worker.
+- A side-lane Spec Writer folds by rebasing only its own commits (`B..HEAD`) onto the task branch, then pushes with a plain push. It never force-pushes. Reason: a force-push can erase the commits of the worker, and a full-branch rebase replays commits that the worker already rewrote.
+- On a fold conflict, a side-lane Spec Writer runs `git rebase --quit` and reports blocked. It does not restore its checkout, and the checkout may stay detached or partial. Nothing reuses that checkout. The writer never runs `git rebase --abort`, `git restore`, `git reset --hard`, `git checkout -- <path>` or a forced checkout. Reason: a user safety hook blocks those commands.
 - The Spec Writer takes its content from the `## Spec delta` of the wave only. It reads code only to check a name or path that the delta states. Reason: the planner already read the code, and a second read costs tokens and can give a second, conflicting reading.
 - The planner names the code path of each delta item as file and symbol. Reason: the writer does not read code to find it.
 - Before the fold, the Spec Writer may check each identifier that its docs name with `git grep` at HEAD. The writer lists a missing name under `## Unverified names` and does not wait for the worker. Reason: the writer runs in parallel, so the code of the worker may not exist yet.
@@ -260,6 +262,14 @@ An evidence-only tester runs the commands that the mission names, on the commits
 - A Tester checks that the Fold head of each listed Spec Writer is an ancestor of its HEAD. Reason: the Tester must test against the folded docs.
 - The Reviewer scopes a side-lane writer by Fold base to Fold head. `Fold: none` means an empty scope. A docs commit inside a fold range is not drift in the range of a worker. Reason: the fold commits land in the task branch while the worker runs.
 - A worker or designer on a spec wave treats the plan as its source of truth, and pre-plan specs can be stale. Reason: the Spec Writer records the change in parallel.
+
+### Blocked Alerts
+
+- A blocked worker, Tester or Spec Writer alert offers `chief_continue` for an environment or permission blocker, beside its existing replacement route. Examples are a blocked command, a dirty build-cache file, or a needed permission. The alert names the allowed step, and the thread keeps its worktree. Reason: a fresh thread for a blocked command repeats the same blocked step.
+- A blocked Tester alert starts `Tester blocked:`, never `Tests failed:`. Reason: the wrong label routes Chief to a product fix.
+- The core rule names this in-place answer as its one exception to the fresh-worker rule (`chiefCoreRules` in `src/runtime/host.ts`). Code, test and spec defects, review findings and ready or complete follow-up still go to a fresh worker. Reason: an environment blocker has no product defect to fix, so a fresh thread repeats the same blocked step.
+- A side-lane Spec Writer alert says the retry gets a fresh worktree. An implementation-lane or unplanned writer alert makes no worktree claim. Reason: only a side-lane writer gets a fresh worktree on repair.
+- `continueThread` refusals for a side-lane Spec Writer say `starts a fresh worktree on the same branch and pull request`. Other refusals keep `keeps the same worktree, branch, and pull request`. Reason: the text must match the worktree that the repair gets.
 
 ### Docs Ownership
 

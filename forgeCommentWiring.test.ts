@@ -7,6 +7,7 @@ import { APPROVE, NO_DEVIATIONS, chiefReview, completeWorker, delegate, disposal
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { dropSkippedNote } from "./test/docsOwnership";
+import { inPlaceLine } from "./test/blockedAlerts";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -74,7 +75,7 @@ describe("forge comments", () => {
       return {
         chief: chief.threadId, prefix: "blocked:", act, result: "Report delivered to Chief.",
         row: { id: worker.threadId, fields: { state: "blocked", last_report_state: "blocked", report_seq: 1, blocker: "Totals test fails", recommendation: "Fix the product code", result: "Tests fail" } },
-        report: { from: worker.threadId, text: `[Chief lifecycle alert]\nWorker report from Fix totals (${worker.threadId})\nState: blocked\nBlocked: Totals test fails — decide or escalate to the user.\nBlocker: Totals test fails\nRecommendation: Fix the product code\nResult: Tests fail` },
+        report: { from: worker.threadId, text: `[Chief lifecycle alert]\nWorker report from Fix totals (${worker.threadId})\nState: blocked\nBlocked: Totals test fails — decide or escalate to the user. ${inPlaceLine(worker.threadId)}\nBlocker: Totals test fails\nRecommendation: Fix the product code\nResult: Tests fail` },
       };
     }],
     ["reviewer verdict", async (state, pr) => {

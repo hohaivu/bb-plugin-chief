@@ -5,7 +5,7 @@ import { createReviewStart } from "../review/reviewStart";
 import { terminal, type ManagedRow } from "../types";
 import { clip } from "../core/text";
 import { chainOf, isWriter, type PlanWave } from "../plan/waveSchedule";
-import { BUSY_STATUSES } from "./constants";
+import { BUSY_STATUSES, MAX_NUDGE_LENGTH } from "./constants";
 import { bounded } from "./exec";
 import { forgeEnv, prHead } from "../forge/forge";
 import type { Ctx } from "./context";
@@ -35,6 +35,9 @@ export function createNextAction(ctx: Ctx) {
     const plans = row.plan_thread_id ? planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ") : "";
     return `If the spec is wrong: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) with the fix. If the Spec delta cannot be built: start a fresh chief_plan with ${plans ? `the plan files (${plans}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}.`;
   }
+
+  /** A blocked worker's in-place route: an environment or permission blocker is answered with the allowed step, not a fresh worker. */
+  const inPlaceLine = (row: ManagedRow) => `If the blocker is an environment or permission problem (a blocked command, a dirty build-cache file, a needed permission), not a code, test or spec defect: answer it in place with chief_continue (threadId: ${row.thread_id}, instruction: the allowed step, at most ${MAX_NUDGE_LENGTH} characters); it keeps its worktree.`;
 
   /** One sentence per owed tester rerun, then the waiver. The one renderer of retest debt: the review refusal and the ready alert read it. */
   function retestLines(row: ManagedRow, debts: RetestDebt<ManagedRow>[]): string {
@@ -206,21 +209,21 @@ export function createNextAction(ctx: Ctx) {
       const testWave = isTestWave(row) ? planWavesFor(row.plan_thread_id)[row.plan_wave! - 1]! : undefined;
       if (testWave?.testsSkipped) return waivedLine(row);
       if (row.kind === "tester" && onSpecChain(row)) {
-        return `Tests failed: ${clip(row.blocker ?? "", 200)}. Tester's recommendation: ${clip(row.recommendation ?? "none", 300)}. Route by cause. If the product code is wrong: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${specRoutes(row)} ${testWave
+        return `Tester blocked: ${clip(row.blocker ?? "", 200)}. Tester's recommendation: ${clip(row.recommendation ?? "none", 300)}. Route by cause. ${inPlaceLine(row)} If tests fail on product code: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${specRoutes(row)} ${testWave
           ? `If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason).`
           : "If you judge the failures acceptable, complete it with testsSkipped (your reason)."}`;
       }
       if (isWriter(row.kind)) {
-        return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route. If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}, kind: spec-writer.`;
+        return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route${schedule.sideLane(row) ? ` (the retry gets a fresh worktree from ${row.branch})` : ""}. If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}, kind: spec-writer.`;
       }
-      if (row.kind !== "tester" && onSpecChain(row)) return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user. ${specRoutes(row)}`;
+      if (row.kind !== "tester" && onSpecChain(row)) return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user. ${inPlaceLine(row)} ${specRoutes(row)}`;
       if (row.kind === "tester") {
-        return `Tests failed: ${clip(row.blocker ?? "", 200)}. Delegate a fresh worker to fix the product code: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${testWave
+        return `Tester blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${testWave
           ? `If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason).`
           : "If you judge the failures acceptable, complete it with testsSkipped (your reason)."}`;
       }
     }
-    if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.`;
+    if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     if (row.state !== "ready") return null;
     if (row.role === "planner") {
       if (!row.plan_waves) return null;

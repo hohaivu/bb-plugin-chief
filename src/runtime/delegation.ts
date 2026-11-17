@@ -244,10 +244,10 @@ export function createDelegation(ctx: Ctx) {
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
       specDocs, specWave, lane, evidenceOnly: params.evidenceOnly,
     });
-    // A first side-lane writer never reuses the chain's worktree: its own managed worktree is cut from the chain branch.
+    // A side-lane writer, first or repair, never reuses a worktree: its own managed worktree is cut from the chain branch, so a stale or half-rebased side checkout never reaches the fold.
     const thread = await ctx.managedSpawn.launch(prepared, {
       projectId,
-      environment: prior
+      environment: prior && lane !== "side"
         ? { type: "reuse", environmentId: priorLive!.environmentId! }
         : worktreeEnvironment(hostId as string, branch),
       title: params.title, prompt,
@@ -276,7 +276,7 @@ export function createDelegation(ctx: Ctx) {
     const effectiveChiefId = (callerChief && callerChief.role === "chief")
       ? callerChief.thread_id
       : (row.chief_thread_id ?? undefined);
-    const handoff = `Hand it to a fresh worker instead: ${ctx.replacesCall(row)} keeps the same worktree, branch, and pull request.`;
+    const handoff = `Hand it to a fresh worker instead: ${ctx.replacesCall(row)} ${ctx.sideLane(row) ? "starts a fresh worktree on the same branch and pull request" : "keeps the same worktree, branch, and pull request"}.`;
     if (row.role === "worker" && (row.state === "ready" || row.state === "complete")) {
       throw new Error(`Worker ${threadId} already reported ${row.state}. chief_continue never reuses a finished worker for more work — deferred acceptance criteria, a rebase or restack, or a new task. ${handoff}`);
     }

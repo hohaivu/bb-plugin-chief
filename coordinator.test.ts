@@ -15,6 +15,7 @@ import { PRELOAD_OLD_TAIL, acceptRosterOthersDelta, chiefPreloadTail } from "./t
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, elapse, readyAction, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { inPlaceLine } from "./test/blockedAlerts";
 import { replaceText } from "./test/harness";
 
 provideSdk(sdkTesting);
@@ -1005,10 +1006,13 @@ describe("Coordinator", () => {
       expect(added[2]).toBe("ALTER TABLE managed_threads ADD COLUMN retest_skipped TEXT");
     });
 
-    // One named edit: the ready worker's alert action no longer overflows its room, so no report file exists and its roster `report:` line is gone.
-    test("roster: a plain Chief's roster equals base apart from the one report-file line", () => {
+    // Two named edits: the ready worker's alert action no longer overflows its room, so no report file exists and its roster `report:` line is gone;
+    // the blocked worker's Pending line gains the in-place route (hook-safe fold wave, step 6).
+    test("roster: a plain Chief's roster equals base apart from the report-file line and the blocked worker's in-place route", () => {
       requireBase();
-      expect(head.roster).toBe(replaceText(base.roster, "  report: <storage>/chief/proj_1/thr_2/report-1.md\n", "", 1));
+      const blocked = "Blocked: Missing staging credentials — decide or escalate to the user.";
+      const noReport = replaceText(base.roster, "  report: <storage>/chief/proj_1/thr_2/report-1.md\n", "", 1);
+      expect(head.roster).toBe(replaceText(noReport, blocked, `${blocked} ${inPlaceLine("thr_3")}`, 1));
       expect(base.roster).toContain("Blocked work");
       expect(base.roster).toContain("Follow up with the owner");
     });
@@ -1100,7 +1104,8 @@ describe("Coordinator", () => {
     };
     const MARKER = "# Project rules marker";
     // Chief's own budget for the core rules (keeps the rules small), not the SDK cut. The exact select: preload line (about 600 characters for a plain Chief) moved it from 4096/4000.
-    const CHIEF_BUDGET = 5_000;
+    // The hook-safe fold wave's Fresh worker rule (plan wave 1 step 1, verbatim) is 363 characters longer than the rule this budget was set with; the budget grew by the same rounded amount.
+    const CHIEF_BUDGET = 5_300;
     const GREETING = "You are the registered Coordinator for Asha: you supervise child Chiefs in any project, not managed threads.";
 
     test.each([["short chief.md", `${MARKER}\n- Keep rules small.`, false], ["32,000-char chief.md", `${MARKER}\n${"- Project rule text.\n".repeat(1_600)}`.slice(0, 32_000), true]])(

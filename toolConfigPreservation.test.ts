@@ -9,7 +9,7 @@ import { provideSdk } from "./test/sdk";
 import { CHIEF_HOST_ORDER, INCLUDE_OTHERS_PROPERTY, type ToolConfig, compareToolConfig, expectedChiefInstructions, toolConfigFixture } from "./test/toolConfigFixture";
 import { RESEARCH_TOOL_DESCRIPTION, researchInstructions, researchTools } from "./test/researchDelta";
 import { withHostCompaction } from "./test/shrinkEdits";
-import { ATTACH_DEFINITION, EVIDENCE_ONLY_PROPERTY, acceptCoreRuleTrim } from "./test/specLaneWording";
+import { ATTACH_DEFINITION, EVIDENCE_ONLY_PROPERTY, FRESH_WORKER_LINE, acceptCoreRuleTrim } from "./test/specLaneWording";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -408,7 +408,7 @@ describe("acceptCoreRuleTrim: the Review, Fresh worker and Tests lines accept on
   const FRESH = "- Fresh worker: a worker that has reported is never reused. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR; a plan chain has exactly one of each, so its next wave is a replaces: too); review and complete the successor.";
   const TESTS = "- Tests: workers and designers never write or run tests; a tester (kind: tester) does, as a plan's test wave or via chief_delegate (replaces: the worker, kind: tester). Spec waves: see the chief skill.";
   const REVIEW_HEAD = REVIEW.replace("when a worker's ready alert says to", "when a ready alert says to");
-  const FRESH_HEAD = FRESH.replace("(same worktree, branch, PR; a plan chain has exactly one of each, so its next wave is a replaces: too)", "(same worktree, branch, PR; so is a plan chain's next wave)");
+  const FRESH_HEAD = FRESH_WORKER_LINE;
   const TESTS_HEAD = "- Tests, docs: only a tester writes or runs tests (a plan's test wave, or chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).";
   test.each([["Review", REVIEW, REVIEW_HEAD], ["Fresh worker", FRESH, FRESH_HEAD], ["Tests, docs", TESTS, TESTS_HEAD]])("%s: the exact authorized edit is accepted and the base line comes back", (_name, base, head) => {
     expect(acceptCoreRuleTrim(head, base)).toBe(base);

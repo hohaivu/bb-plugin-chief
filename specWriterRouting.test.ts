@@ -7,6 +7,7 @@ import { READY, type State, ctxOf, delegateWave, followRoute, plan, planWave, pl
 import { TEST_WAVE, approvePlan, delegate, disposals, disposeAll, latestReviewContext, legacyWave, planFile, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+import { inPlaceLine } from "./test/blockedAlerts";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -356,11 +357,11 @@ describe("tester role", () => {
       expect(rowOf(state, writer).state).not.toBe("complete");
     });
 
-    // Wave 1 contracts 4 and 7 (holder matrix + docs repair): the side-lane writer is replaced by a writer only; the repair reuses its
-    // environment and branch and completes it; every other kind is refused naming the chain's owner; a live writer is not replaced by
-    // a second one. Regression: any kind may replace a writer (the worker takes over the side worktree), or the repair starts a new
-    // worktree and strands the writer's checkout.
-    test("a side-lane writer's docs repair reuses its worktree; every other kind is refused naming the chain's worker", async () => {
+    // Wave 1 contracts 4 and 7 (holder matrix + docs repair): the side-lane writer is replaced by a writer only; the repair gets a fresh
+    // managed worktree cut from the task branch (never the old side checkout, which may hold stale or half-rebased docs commits), completes
+    // the old writer and repoints its open reviewer; every other kind is refused naming the chain's owner; a live writer is not replaced by
+    // a second one. Regression: any kind may replace a writer (the worker takes over the side worktree), or the repair reuses the old checkout.
+    test("a side-lane writer's docs repair gets a fresh worktree on the task branch; every other kind is refused naming the chain's worker", async () => {
       const state = await setup();
       const { chief, planner, worker, writer } = await withBoth(state);
       const P = planner.threadId;
@@ -368,6 +369,8 @@ describe("tester role", () => {
       await expect(delegateWave(state, chief.threadId, P, 1, { kind: "spec-writer" })).rejects.toThrow(
         `Wave 1's Spec Writer ${writer} is still live: fix its docs with chief_delegate (planThreadId: ${P}, wave: 1, replaces: ${writer}, kind: spec-writer).`);
       await putWriter(state, chief.threadId, writer, "blocked");
+      const reviewer = "thr_open_reviewer";
+      state.db.prepare(`INSERT INTO managed_threads (thread_id, role, project_id, chief_thread_id, worker_thread_id, title, state, reviewed_report_seq, created_at, updated_at) VALUES (?, 'reviewer', 'proj_1', ?, ?, 'Review', 'active', 1, 1, 1)`).run(reviewer, chief.threadId, writer);
       const rows = countRows(state);
       for (const kind of ["worker", "designer", "tester"]) {
         await expect(delegateWave(state, chief.threadId, P, 1, { replaces: writer, kind })).rejects.toThrow(
@@ -378,8 +381,14 @@ describe("tester role", () => {
       await delegateWave(state, chief.threadId, P, 1, { replaces: writer, kind: "spec-writer" });
       const repair = writerOn(state, P, 1);
       expect(repair).toMatchObject({ kind: "spec-writer", replaces_thread_id: writer, plan_wave: 1, branch: CHAIN });
-      expect(state.live.get(repair.thread_id)!.environmentId).toBe(environment);
+      expect(state.spawned.at(-1).environment).toEqual({ type: "host", hostId: expect.any(String), workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: CHAIN } } });
+      expect(state.live.get(repair.thread_id)!.environmentId).not.toBe(environment);
+      const brief = String(state.spawned.at(-1).prompt);
+      expect(brief).toContain("Your worktree is fresh from");
+      expect(brief).not.toContain("already holds the previous worker's changes");
+      expect(brief).toContain("never cherry-pick or merge the previous writer's commits");
       expect(rowOf(state, writer).state).toBe("complete");
+      expect(rowOf(state, reviewer).worker_thread_id).toBe(repair.thread_id);
       expect(countRows(state)).toBe(rows + 1);
       expect(ownerOn(state, P, 1).thread_id).toBe(worker);
     });
@@ -393,6 +402,21 @@ describe("tester role", () => {
       if (how === "ready") setLive(state, writer, "idle");
       await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: writer, kind: "spec-writer" });
       expect(writerOn(state, planner.threadId, 1)).toMatchObject({ replaces_thread_id: writer });
+    });
+
+    // Wave 1 contract 5 (continue refusal): a ready side-lane writer is never continued; the refusal names its fresh-worktree retry, while a ready
+    // chain worker's refusal still says its worktree is kept. Regression: the side-lane refusal promises the same worktree the repair no longer gets.
+    test("chief_continue on a ready side-lane writer says the retry starts a fresh worktree; a ready chain worker keeps its worktree", async () => {
+      const state = await setup();
+      const { chief, worker, writer } = await withBoth(state);
+      await putWriter(state, chief.threadId, writer, "ready");
+      await readyIdle(state, worker);
+      const sent = state.sent.length;
+      await expect(tool(state, "chief_continue", { threadId: writer, instruction: "Keep going" }, chief.threadId)).rejects.toThrow(
+        `chief_delegate (replaces: ${writer}, kind: spec-writer) for a docs fix starts a fresh worktree on the same branch and pull request`);
+      await expect(tool(state, "chief_continue", { threadId: worker, instruction: "Keep going" }, chief.threadId)).rejects.toThrow(
+        /keeps the same worktree, branch, and pull request/);
+      expect(state.sent).toHaveLength(sent);
     });
 
     // Wave 1 contract 3 (first side writer): it needs the chain's branch (a mismatch is refused) and, on a later wave with no worker
@@ -541,8 +565,13 @@ describe("tester role", () => {
       const { chief, planner } = await specPlan(state);
       const s1 = await legacyRow(state, chief.threadId, planner.threadId, 1, "spec-writer", null, "feature/legacy");
       await readyIdle(state, s1);
+      const priorEnv = state.live.get(s1)!.environmentId;
       await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: s1, kind });
-      expect(ownerOn(state, planner.threadId, 1)).toMatchObject({ kind: kind === "worker" ? null : kind, replaces_thread_id: s1, branch: "feature/legacy" });
+      const successor = ownerOn(state, planner.threadId, 1);
+      expect(successor).toMatchObject({ kind: kind === "worker" ? null : kind, replaces_thread_id: s1, branch: "feature/legacy" });
+      // Wave 2 C8: the legacy hand-off is implementation-lane, so it reuses the prior writer's environment (never a fresh managed worktree).
+      expect(state.spawned.at(-1).environment).toEqual({ type: "reuse", environmentId: priorEnv });
+      expect(state.live.get(successor.thread_id as string)!.environmentId).toBe(priorEnv);
     });
 
     test("a ready legacy S2 that replaced W1 is handed off as the implementation row and is never completed by itself", async () => {
@@ -556,8 +585,10 @@ describe("tester role", () => {
       await readyIdle(state, s2);
       await expect(tool(state, "chief_complete", { threadId: s2, skipReview: "docs only" }, chief.threadId)).rejects.toThrow(
         `Refusing to complete ${s2}: a Spec Writer's docs need their worker — chief_delegate (planThreadId: ${P}, wave: 2, replaces: ${s2}, kind: worker).`);
+      const priorEnv = state.live.get(s2)!.environmentId;
       await delegateWave(state, chief.threadId, P, 2, { replaces: s2, kind: "worker" });
       expect(ownerOn(state, P, 2)).toMatchObject({ kind: null, replaces_thread_id: s2 });
+      expect(state.spawned.at(-1).environment).toEqual({ type: "reuse", environmentId: priorEnv });
     });
 
     /** A blocked wave-1 side-lane writer on plan P (branch A) and a fresh plan Q with `waves`. */
@@ -623,18 +654,22 @@ describe("tester role", () => {
       const { chief, planner, tester } = await blockedTester(state, true);
       const paths = [1, 2].map((n) => planFile(state, planner.threadId, n)).join(", ");
       const worker = `chief_delegate (replaces: ${tester}, kind: worker) with the failures as its mission; its ready alert then asks for a tester.`;
-      const full = `Tests failed: Totals test fails. Tester's recommendation: Fix the product code. Route by cause. If the product code is wrong: ${worker} `
+      const full = `Tester blocked: Totals test fails. Tester's recommendation: Fix the product code. Route by cause. ${inPlaceLine(tester)} If tests fail on product code: ${worker} `
         + `If the spec is wrong: chief_delegate (replaces: ${tester}, kind: spec-writer) with the fix. `
         + `If the Spec delta cannot be built: start a fresh chief_plan with the plan files (${paths}), this blocked report (bb chief inspect ${tester}), branch ${rowOf(state, tester).branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${tester}. `
         + `If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: ${planner.threadId}, wave: 2, reason).`;
       expect(lastAlert(state)).toContain(full.slice(0, full.indexOf("with the plan files")));
       expect(await roster(state, chief.threadId)).toContain(full);
+      expect(lastAlert(state)).not.toContain("Tests failed");
+      expect(lastAlert(state)).toContain(`chief_continue (threadId: ${tester}`);
 
       const plain = await setup();
       const noSpec = await blockedTester(plain, false);
-      expect(lastAlert(plain)).toContain(`Tests failed: Totals test fails. Delegate a fresh worker to fix the product code: chief_delegate (replaces: ${noSpec.tester}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. `
+      expect(lastAlert(plain)).toContain(`Tester blocked: Totals test fails. ${inPlaceLine(noSpec.tester)} If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: ${noSpec.tester}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. `
         + `If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: ${noSpec.planner.threadId}, wave: 2, reason).`);
       expect(lastAlert(plain)).not.toMatch(/spec-writer|Spec delta/);
+      expect(lastAlert(plain)).not.toContain("Tests failed");
+      expect(lastAlert(plain)).toContain(`chief_continue (threadId: ${noSpec.tester}`);
     });
 
     // Wave 1 contract 16 (blocked side-lane writer): the retry route (a fold conflict takes it too) and the fresh-plan route, never a worker.
@@ -644,12 +679,30 @@ describe("tester role", () => {
       await report(state, writer, { state: "blocked", result: "Cannot write the delta", blocker: "Delta names no domain", recommendation: "Re-plan" });
       const alert = lastAlert(state);
       const paths = [1, 2].map((n) => planFile(state, planner.threadId, n)).join(", ");
-      const full = `Spec Writer blocked: Delta names no domain. Retry it with the fix: chief_delegate (replaces: ${writer}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route. `
+      const full = `Spec Writer blocked: Delta names no domain. ${inPlaceLine(writer)} Retry it with the fix: chief_delegate (replaces: ${writer}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route (the retry gets a fresh worktree from ${rowOf(state, writer).branch}). `
         + `If the Spec delta cannot be written: start a fresh chief_plan with the plan files (${paths}), this blocked report (bb chief inspect ${writer}), branch ${rowOf(state, writer).branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${writer}, kind: spec-writer.`;
       expect(alert).toContain(full.slice(0, full.indexOf("with the plan files")));
       expect(await roster(state, chief.threadId)).toContain(full);
       expect(alert).not.toContain("kind: worker");
       expect(full).not.toContain("kind: worker");
+    });
+
+    // Wave 1 contract 16 (blocked alerts, other lanes): a blocked chain worker's alert offers the in-place answer beside its spec routes; a blocked
+    // implementation-lane Spec Writer's alert offers it too but makes no fresh-worktree claim (its retry reuses the checkout). Regression: the
+    // in-place line is dropped from a spec chain, or the fresh-worktree claim leaks to a lane that still reuses its worktree.
+    test("a blocked chain worker's alert offers the in-place answer; an implementation-lane writer's alert claims no fresh worktree", async () => {
+      const state = await setup();
+      const { chief, worker } = await withBoth(state);
+      await report(state, worker, { state: "blocked", result: "Command denied", blocker: "git push is denied", recommendation: "Allow it" });
+      expect(lastAlert(state)).toContain(`Blocked: git push is denied — decide or escalate to the user. ${inPlaceLine(worker)}`);
+      expect(await roster(state, chief.threadId)).toContain(`${inPlaceLine(worker)} If the spec is wrong: chief_delegate (replaces: ${worker}, kind: spec-writer) with the fix.`);
+
+      const lane = await setup();
+      const { chief: c2, planner, tester } = await fullChain(lane);
+      const onTest = await swap(lane, c2, planner.threadId, 2, tester, "spec-writer");
+      await report(lane, onTest, { state: "blocked", result: "Cannot write", blocker: "Delta names no domain", recommendation: "Re-plan" });
+      expect(lastAlert(lane)).toContain(`Spec Writer blocked: Delta names no domain. ${inPlaceLine(onTest)} Retry it with the fix: chief_delegate (replaces: ${onTest}, kind: spec-writer)`);
+      expect(lastAlert(lane)).not.toContain("fresh worktree");
     });
 
     // Wave 1 contract 16 (ready routing): a ready implementation-lane writer on a test wave asks for the rerun; a ready side-lane writer

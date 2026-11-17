@@ -30,14 +30,14 @@ blocked tester alert:
 [Chief lifecycle alert]
 Worker report from Wave 2 (thr_4)
 State: blocked
-Tests failed: Totals test fails. Delegate a fresh worker to fix the product code: chief_delegate (replaces: thr_4, kind: worker) with the failures as its mission; its ready alert then asks for a tester. If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: thr_2, wave: 2, reason).
+Tester blocked: Totals test fails. If the blocker is an environment or permission problem (a blocked command, a dirty build-cache file, a needed permission), not a code, test or spec defect: answer it in place with chief_continue (threadId: thr_4, instruction: the allowed step, at most 500 characters); it keeps its worktree. If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: thr_4, kind: worker) with the failures as its mission; its ready alert then asks for a tester. If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: thr_2, wave: 2, reason).
 Blocker: Totals test fails
 Recommendation: Fix the product code
 Result: Two tests fail
 === roster ===
 roster:
 Pending:
-- worker “Wave 2” (thr_4): Tests failed: Totals test fails. Delegate a fresh worker to fix the product code: chief_delegate (replaces: thr_4, kind: worker) with the failures as its mission; its ready alert then asks for a tester. If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: thr_2, wave: 2, reason).
+- worker “Wave 2” (thr_4): Tester blocked: Totals test fails. If the blocker is an environment or permission problem (a blocked command, a dirty build-cache file, a needed permission), not a code, test or spec defect: answer it in place with chief_continue (threadId: thr_4, instruction: the allowed step, at most 500 characters); it keeps its worktree. If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: thr_4, kind: worker) with the failures as its mission; its ready alert then asks for a tester. If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: thr_2, wave: 2, reason).
 worker | blocked | live:idle | Wave 2 | thr_4
   kind: tester
   wave: 2 of 2 (plan thr_2)
