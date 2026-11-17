@@ -494,4 +494,16 @@ describe("Chief backend", () => {
       { role: "planner", mode: "survey", calls: 3, succeeded: 2 },
     ]);
   });
+
+  // Regression (review thr_qcg8bngpwt): a fresh researcher start records mode=null, and the text CLI rendered it as "chief resume 1/1".
+  // A normal start is not a resumed run; the text must call it "calls".
+  test("stats text labels a fresh chief_research start as calls, never resume", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await state.harness.behavior.callAgentTool("chief_research", { question: "Who calls this?" }, { threadId: chief.threadId, projectId: "proj_1" });
+    const result = await state.harness.behavior.runCli(["stats", "--project", "proj_1"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Research: chief calls 1/1 succeeded");
+    expect(result.stdout).not.toContain("resume");
+  });
 });
