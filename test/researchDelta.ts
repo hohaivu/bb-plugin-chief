@@ -61,7 +61,16 @@ export function researchInstructions(base: Entry) {
     if (lines.some((line) => line.startsWith(LINE_START) || line.startsWith(PARAGRAPH_START))) throw new Error(`${key}: research off but the baseline has a research line`);
     return text;
   }
-  lines[once(lines, LINE_START, key)] = RESEARCH_LINE_NEW;
-  lines[once(lines, PARAGRAPH_START, key)] = researchParagraphNew(key.includes("| planner true |"));
+  return chiefResearchEdit(text, key);
+}
+
+/** A plain Chief's baseline text with its research line and paragraph rewritten (research on). Whether the paragraph names chief_plan or chief_consult is read from the baseline's own paragraph. */
+export function chiefResearchEdit(text: string, label = "a plain Chief") {
+  const lines = text.split("\n");
+  const paragraph = lines[once(lines, PARAGRAPH_START, label)]!;
+  const planning = paragraph.includes("send the open question to chief_plan,");
+  if (!planning && !paragraph.includes("send the open question to chief_consult,")) throw new Error(`${label}: baseline research paragraph names neither chief_plan nor chief_consult`);
+  lines[once(lines, LINE_START, label)] = RESEARCH_LINE_NEW;
+  lines[once(lines, PARAGRAPH_START, label)] = researchParagraphNew(planning);
   return lines.join("\n");
 }
