@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { modelSelectionSchema, researchParams } from "./src/research/research";
+import { modelSelectionSchema, researchSettingsPatchSchema } from "./src/research/research";
 
 describe("reasoningLevel validation", () => {
   const pick = { providerId: "codex", model: "gpt-6-astra" };
@@ -12,13 +12,12 @@ describe("reasoningLevel validation", () => {
     expect(modelSelectionSchema.safeParse({ ...pick, reasoningLevel: "" }).success).toBe(false);
     expect(modelSelectionSchema.safeParse({ ...pick, reasoningLevel: "   " }).success).toBe(false);
   });
+});
 
-  test("the chief_research tool input still rejects a level outside the enum", () => {
-    const call = (reasoningLevel: string) => researchParams.safeParse({
-      mode: "survey", question: "q", items: ["a"],
-      models: { scan: { provider: "codex", model: "gpt-6-astra", reasoningLevel } },
-    }).success;
-    expect(call("high")).toBe(true);
-    expect(call("provider-auto")).toBe(false);
+describe("research settings patch", () => {
+  test("accepts only enabled; the removed cap and timeouts are rejected", () => {
+    expect(researchSettingsPatchSchema.safeParse({ enabled: false }).success).toBe(true);
+    expect(researchSettingsPatchSchema.safeParse({ maxAgentCalls: 4 }).success).toBe(false);
+    expect(researchSettingsPatchSchema.safeParse({ timeoutMinutes: { survey: 5 } }).success).toBe(false);
   });
 });
