@@ -43,10 +43,12 @@ The research domain lets Chief start a read-only researcher thread for one quest
 
 ### Caller check
 
+The first failing check decides the refusal.
+
 | Caller | Outcome |
 | --- | --- |
 | Active registered Chief, research on | Allowed. |
-| Inactive or finished Chief | Refused: `chief_research requires an active registered Chief thread.` |
+| Finished Chief (state `complete`, `archived` or `deleted`) | Refused: `chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads (chief-role-read-only skill).` |
 | Planner, researcher, worker, reviewer, advisor or unmanaged thread | Refused: `chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads (chief-role-read-only skill).` |
 | Research switched off | Refused: `chief_research is off in Chief settings → Chief researcher.` |
 
