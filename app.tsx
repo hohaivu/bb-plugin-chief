@@ -495,12 +495,13 @@ function ChiefHeaderBadge({
   }, [rpc, threadId]);
 
   if (!role) return null;
-  const isChief = role === "chief";
-  const label = isChief ? "Chief supervisor" : `Chief ${role}`;
+  const crowned = role === "chief" || role === "researcher";
+  const name = ROLES.find((entry) => entry.role === role)?.label ?? role.charAt(0).toUpperCase() + role.slice(1);
+  const accessibleName = role === "chief" ? "Chief supervisor" : `Chief ${name}`;
   return (
     <span
-      aria-label={label}
-      title={label}
+      aria-label={accessibleName}
+      title={accessibleName}
       style={{
         alignItems: "center",
         background: "color-mix(in srgb, var(--primary) 10%, transparent)",
@@ -515,8 +516,8 @@ function ChiefHeaderBadge({
         padding: isCompactViewport ? "0 6px" : "0 9px",
       }}
     >
-      {isChief ? <Crown /> : null}
-      {isChief ? (isCompactViewport ? null : "Chief") : role.charAt(0).toUpperCase() + role.slice(1)}
+      {crowned ? <Crown /> : null}
+      {crowned && isCompactViewport ? null : name}
     </span>
   );
 }

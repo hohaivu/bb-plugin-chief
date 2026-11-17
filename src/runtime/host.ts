@@ -144,7 +144,11 @@ export function registerHost(ctx: Ctx) {
     start: ({ projectId }) => ctx.ensureChief(projectId ?? undefined),
     create: ({ projectId }) => ctx.createChief(projectId),
     // The header badge asks for one thread's role on every thread it renders on: not the roster.
-    role: ({ threadId }) => ({ role: store.get(threadId)?.role ?? null }),
+    // A designer, tester or spec-writer is a worker row; its kind names it.
+    role: ({ threadId }) => {
+      const row = store.get(threadId);
+      return { role: !row ? null : row.role === "worker" ? row.kind ?? ("worker" as const) : row.role };
+    },
     modelConfiguration: async () => ({
       hosts: await Promise.all((await bb.sdk.hosts.list()).map(async (host) => {
         const connected = host.status === "connected";

@@ -217,11 +217,66 @@ test("shows the role chip on managed threads and nothing on others", async () =>
     return rendered;
   };
   const managed = render(worker.threadId);
-  await vi.waitFor(() => expect(managed.getByLabelText("Chief worker").textContent).toBe("Worker"));
+  await vi.waitFor(() => expect(managed.getByLabelText("Chief Worker").textContent).toBe("Worker"));
   managed.lifecycle.unmount();
   const other = render("thr_other");
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(other.queryByLabelText(/Chief/)).toBeNull();
+});
+
+// Contract (header badge): one label per role id; Crown only on chief and researcher; compact view shows the Crown alone for those two;
+// the accessible name stays `Chief supervisor` for chief and is `Chief <label>` for the rest, compact or not; rpc role null renders nothing.
+// Regression: a designer, tester or spec-writer id read "Worker"/"Spec-writer", and researcher got no Crown.
+describe("header badge per role", () => {
+  const cases = [
+    { id: "chief", label: "Chief", name: "Chief supervisor", crown: true },
+    { id: "planner", label: "Planner", name: "Chief Planner", crown: false },
+    { id: "worker", label: "Worker", name: "Chief Worker", crown: false },
+    { id: "designer", label: "Designer", name: "Chief Designer", crown: false },
+    { id: "tester", label: "Tester", name: "Chief Tester", crown: false },
+    { id: "spec-writer", label: "Spec Writer", name: "Chief Spec Writer", crown: false },
+    { id: "reviewer", label: "Reviewer", name: "Chief Reviewer", crown: false },
+    { id: "advisor", label: "Advisor", name: "Chief Advisor", crown: false },
+    { id: "researcher", label: "Researcher", name: "Chief Researcher", crown: true },
+  ] as const;
+  const badge = (role: string | null, isCompactViewport: boolean) => {
+    const rendered = renderSlot<{ threadId: string; projectId: string; isCompactViewport: boolean }, typeof rpcContract>(
+      app.threadHeaderActions.find((action) => action.id === "chief-role")!,
+      { threadId: "thr_1", projectId: "proj_1", isCompactViewport },
+      { rpc: { role: () => ({ role: role as any }) } },
+    );
+    unmounts.push(() => rendered.lifecycle.unmount());
+    return rendered;
+  };
+
+  test.each(cases)("$id shows $label, Crown $crown, named $name", async ({ id, label, name, crown }) => {
+    const rendered = badge(id, false);
+    const pill = await vi.waitFor(() => rendered.getByLabelText(name));
+    expect(pill.textContent).toBe(label);
+    expect(pill.querySelector("svg") !== null).toBe(crown);
+    expect(pill.getAttribute("title")).toBe(name);
+  });
+
+  test.each(cases.filter((c) => c.crown))("$id in a compact viewport shows the Crown only and keeps its accessible name", async ({ id, name }) => {
+    const rendered = badge(id, true);
+    const pill = await vi.waitFor(() => rendered.getByLabelText(name));
+    expect(pill.textContent).toBe("");
+    expect(pill.querySelector("svg")).not.toBeNull();
+  });
+
+  test.each(cases.filter((c) => !c.crown))("$id in a compact viewport still shows its label and no Crown", async ({ id, label, name }) => {
+    const rendered = badge(id, true);
+    const pill = await vi.waitFor(() => rendered.getByLabelText(name));
+    expect(pill.textContent).toBe(label);
+    expect(pill.querySelector("svg")).toBeNull();
+  });
+
+  test("rpc role null renders nothing", async () => {
+    const rendered = badge(null, false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(rendered.queryByLabelText(/Chief/)).toBeNull();
+    expect(rendered.container.textContent).toBe("");
+  });
 });
 
 test("picks a scanned model per role and clears back to the BB default", async () => {

@@ -268,4 +268,4 @@ npm test
 bb plugin build
 ```
 
-The plugin adds a project-aware **Start Chief** launcher (with a project picker on the projectless screen) to BB's New Thread screen a compact Crown + Chief badge to Chief thread headers, and a **New Chief** button (Crown + plus) to every thread header outside the personal project that creates an additional, independent Chief for the thread's project without replacing the active one. It has no standalone Chief workspace, custom sidebar replacement, or task-management UI.
+The plugin adds a project-aware **Start Chief** launcher (with a project picker on the projectless screen) to BB's New Thread screen a role badge to managed thread headers (Crown + Chief on Chief threads, Crown + Researcher on researcher threads, and the role name — Planner, Worker, Designer, Tester, Spec Writer, Reviewer, Advisor — on other managed threads), and a **New Chief** button (Crown + plus) to every thread header outside the personal project that creates an additional, independent Chief for the thread's project without replacing the active one. It has no standalone Chief workspace, custom sidebar replacement, or task-management UI.
