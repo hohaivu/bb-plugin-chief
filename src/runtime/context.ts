@@ -228,7 +228,6 @@ export interface Ctx {
   runWorkflowCli: ReturnType<typeof createResearchWiring>["runWorkflowCli"];
   retroTick: ReturnType<typeof createRetro>["retroTick"];
   collectRetroBundle: ReturnType<typeof createRetro>["collectRetroBundle"];
-  researchSleep: ReturnType<typeof createResearchWiring>["researchSleep"];
   registerChiefTool: ReturnType<typeof createToolRegistry>["registerChiefTool"];
   touchCallerChief: ReturnType<typeof createToolRegistry>["touchCallerChief"];
 }

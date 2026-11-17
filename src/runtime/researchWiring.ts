@@ -9,12 +9,12 @@ import type { Ctx } from "./context";
 
 export function createResearchWiring(ctx: Ctx) {
   const { bb, db } = ctx;
-  const { research, researchSleep } = createResearch({
+  const { research } = createResearch({
     db, bb, managedRow: ctx.managedRow, terminal, isActiveChief: ctx.isActiveChief, researchSettings: ctx.researchSettings,
     environmentHostId: ctx.environmentHostId, discover: ctx.discover, managedSpawn: ctx.managedSpawn,
     freshenCheckout: (chief) => ctx.freshenChiefCheckout(chief, "researcher"), projectHost: ctx.projectHost, projectHostId: ctx.projectHostId,
     clip, maxResultLength: MAX_RESULT_LENGTH,
   });
   const runWorkflowCli = createWorkflowCli({ serverPath, execFileAsync });
-  return { research, researchSleep, runWorkflowCli };
+  return { research, runWorkflowCli };
 }
