@@ -18,8 +18,8 @@ describe("checkout freshness", () => {
   type State = Awaited<ReturnType<typeof setup>>;
   const PRIMARY = { config: async () => ({ primaryHostId: "host_1" }), usageLimits: async () => ({}) };
   const CTX = { projectId: "proj_1" };
-  const SURVEY = (question: string) => ({ mode: "survey", question, items: ["a.ts"] });
-  const FIRST_LINE = /^Started researcher thread thr_\d+ \(.*\)\. It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert\. Do not poll: end your turn\.$/;
+  const SURVEY = (question: string) => ({ question });
+  const FIRST_LINE = /^Started researcher thread thr_\d+ \(.*\)\. It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert\. Do not poll: end your turn\.$/;
   const WARNING = /^Did not fast-forward your checkout to origin\/(main|the default branch): .+\. The (researcher|planner) reads it as it is\.$/;
 
   let realExecPromise: Promise<(file: string, args: string[], options: object) => Promise<{ stdout: string; stderr: string }>> | undefined;
@@ -442,9 +442,15 @@ describe("checkout freshness", () => {
     const ctxOf = (w: World) => w.ctx;
     test.each<[string, (w: World) => Promise<unknown>, RegExp]>([
       ["research on a cooling model", async (w) => {
+        await w.state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "researcher", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" } });
         w.state.db.prepare("INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES ('codex', 'gpt-6-astra', ?, 'x', 0)").run(Date.now() + 600_000);
         return w.research();
       }, /cooling down/],
+      ["research on a provider out of quota", async (w) => {
+        await w.state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "researcher", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" } });
+        w.state.harness.sdk.stub("system.usageLimits", async () => ({ codex: { status: "ok", windows: [{ label: "5h", usedPercent: 100 }] } }));
+        return w.research();
+      }, /out of quota/],
       ["research switched off", async (w) => {
         await w.state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
         return w.research();
@@ -682,7 +688,7 @@ describe("checkout freshness", () => {
 
     test("the researcher reply says where it runs, and a researcher without a branch still says your checkout", async () => {
       const w = await world();
-      expect(await starts[0]![1](w)).toContain(`runs the survey in a fresh worktree on branch ${BRANCH} and reports`);
+      expect(await starts[0]![1](w)).toContain(`answers in a fresh worktree on branch ${BRANCH} and reports`);
       expect(await w.research()).toContain("in your checkout");
     });
 

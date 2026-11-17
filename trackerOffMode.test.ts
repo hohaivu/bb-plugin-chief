@@ -2,6 +2,7 @@ import { ATTACH_DEFINITION, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSp
 import { acceptRosterOthersDelta } from "./test/toolConfigFixture";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { acceptStackedBranchDelta } from "./test/stackedBranchToolDelta";
+import { acceptResearchToolDelta } from "./test/researchDelta";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
@@ -151,6 +152,8 @@ describe("tracker off-mode equivalence with base 310043a", () => {
       for (const tool of shown) acceptSpecLaneWording(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       // Stacked-branch worktrees: optional branch / stackOn and one forge `base` sentence; asserted, then removed.
       for (const tool of shown) acceptStackedBranchDelta(tool, tool.name);
+      // "Researcher as a normal agent": the new chief_research definition is asserted exactly, then the recorded one is put back.
+      for (const tool of shown) acceptResearchToolDelta(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       for (const tool of shown) acceptReviewerToolDelta(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       for (const tool of shown) acceptRetestDelta(tool, baseSchemas.find((entry: any) => entry.name === tool.name), tool.name);
       // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.

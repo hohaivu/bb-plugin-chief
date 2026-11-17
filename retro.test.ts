@@ -49,6 +49,22 @@ describe("retro eligibility", () => {
     expect(args.cap).toBe(9);
   });
 
+  // Contract (plan-1 step 11, observability spec): the judge runs on the Researcher role pick of the Chief's machine, or on the workflow's own default
+  // when none is set or the pick is no longer usable. Regression: judging on a research-mode pick (survey/investigate rows) or on a pick the catalog dropped.
+  test.each([
+    ["a usable researcher pick", { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" }, { provider: "codex", model: "gpt-6-astra", reasoningLevel: "high" }],
+    ["no researcher pick", null, {}],
+    ["a researcher pick the catalog dropped", { providerId: "codex", model: "gone", reasoningLevel: "high" }, {}],
+  ])("the judge run takes its model from the researcher role: %s", async (_name, pick, expected) => {
+    const { state, stubs, tick } = await judged(() => null);
+    // An old investigate pick must not leak into the judge: only the role row counts.
+    state.db.prepare("INSERT INTO research_mode_models (host_id, mode, provider_id, model, reasoning_level, updated_at) VALUES ('host_1', 'investigate', 'claude-code', 'claude-opus-5', 'low', 1)").run();
+    if (pick) await state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "researcher", selection: pick } as never);
+    await tick();
+    const argv = stubs.run.mock.calls[0]![0];
+    expect(JSON.parse(argv[argv.indexOf("--args") + 1]!).models).toEqual({ judge: expected });
+  });
+
   test.each([
     ["retroJudge is off", async (state: Awaited<ReturnType<typeof setup>>) => { await state.harness.behavior.setSettings({ retroJudge: false }); }, undefined],
     ["the plan finished before retros_since", async (state: Awaited<ReturnType<typeof setup>>) => { state.db.prepare(`UPDATE plugin_meta SET value=? WHERE key='retros_since'`).run(String(Date.now() + 3_600_000)); }, undefined],

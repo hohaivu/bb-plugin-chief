@@ -10,6 +10,7 @@ import { loadBaseBuild } from "./scripts/loadBaseBuild";
 import { ATTACH_DEFINITION, acceptCoreRuleTrim, acceptPlanningLine, acceptEvidenceOnlyDelta, acceptRetestDelta, acceptSpecLaneWording } from "./test/specLaneWording";
 import { acceptReviewerToolDelta } from "./test/reviewerToolDelta";
 import { acceptStackedBranchDelta } from "./test/stackedBranchToolDelta";
+import { acceptResearchToolDelta, chiefResearchEdit } from "./test/researchDelta";
 import { PRELOAD_OLD_TAIL, acceptRosterOthersDelta, chiefPreloadTail } from "./test/toolConfigFixture";
 import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, elapse, readyAction, rowOf, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -1051,6 +1052,8 @@ describe("Coordinator", () => {
       // Retest debt: chief_review gains the optional retestSkipped field and a description sentence; asserted, then restored to base.
       // Stacked-branch worktrees: optional branch / stackOn and one forge `base` sentence; asserted, then removed (before the plan-flag reversal reads the plan text).
       for (const tool of now.tools) acceptStackedBranchDelta(tool, tool.name);
+      // "Researcher as a normal agent": the new chief_research definition is asserted exactly, then the baseline's own is put back.
+      for (const tool of now.tools) acceptResearchToolDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       for (const tool of now.tools) acceptReviewerToolDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       for (const tool of now.tools) acceptRetestDelta(tool, was.tools.find((entry) => entry.name === tool.name), tool.name);
       // #214: chief_delegate gains the optional evidenceOnly boolean; asserted, then removed.
@@ -1059,11 +1062,13 @@ describe("Coordinator", () => {
       for (const tool of now.tools) acceptRosterOthersDelta(tool, tool.name);
       expect(now.tools).toEqual(was.tools);
       // Instructions: only the claude-code preload line changes: `query "+chief", max_results N` becomes the exact select: list of every returned tool in the host's order; codex is byte-identical.
-      now.instructions = acceptCoreRuleTrim(acceptPlanningLine(now.instructions, was.instructions), was.instructions);
+      // The research line and paragraph are rewritten in the base text, forward; the rest of the base text is untouched.
+      const wasText = chiefResearchEdit(was.instructions);
+      now.instructions = acceptCoreRuleTrim(acceptPlanningLine(now.instructions, wasText), wasText);
       const preload = (config: Config) => config.instructions.split("\n").filter((line) => line.includes("ToolSearch"));
       if (provider === "codex") expect(preload(was)).toEqual([]);
       else expect(preload(was)).toHaveLength(1);
-      expect(now.instructions).toBe(provider === "codex" ? was.instructions : swapPreload(was.instructions, returnedNames));
+      expect(now.instructions).toBe(provider === "codex" ? wasText : swapPreload(wasText, returnedNames));
       expect(now.skills).toEqual(was.skills);
     });
 
@@ -1082,8 +1087,9 @@ describe("Coordinator", () => {
       const lines = child.instructions.split("\n");
       const added = lines.filter((line) => /^Coordinator thr_\w+ supervises you: call chief_escalate before every Need you/.test(line));
       expect(added).toHaveLength(1);
-      const expected = provider === "codex" ? was.instructions : swapPreload(was.instructions, child.tools.map((tool) => tool.name));
-      expect(acceptCoreRuleTrim(acceptPlanningLine(lines.filter((line) => line !== added[0]).join("\n"), was.instructions), was.instructions).split("\n")).toEqual(expected.split("\n"));
+      const wasText = chiefResearchEdit(was.instructions);
+      const expected = provider === "codex" ? wasText : swapPreload(wasText, child.tools.map((tool) => tool.name));
+      expect(acceptCoreRuleTrim(acceptPlanningLine(lines.filter((line) => line !== added[0]).join("\n"), wasText), wasText).split("\n")).toEqual(expected.split("\n"));
     });
   });
 

@@ -134,7 +134,7 @@ flowchart LR
 
 | Tool | Use |
 | --- | --- |
-| `chief_research` | Read-only survey or investigation by a researcher thread. Chief uses it before a plan or to check doubtful evidence. |
+| `chief_research` | Read-only research by a researcher thread that answers alone or with helper threads; reports through chief_report. Chief uses it before a plan or to check doubtful evidence. |
 | `chief_consult` | Read-only advisor. It gives a plan its one review, and Chief must call it after the second `request_changes` in a row. |
 | `chief_roster` | Starts every Chief turn. Its Pending block is the work list. |
 | `chief_escalate` | Posts a **Need you** request on the pull request or issue with an @mention of the owner. Chief also writes it in chat. |
@@ -170,7 +170,7 @@ A plan chain has one branch, one pull request and one implementation worktree. E
 | Reviewer | thread role `reviewer` | Reports a `verdict` of `approve` or `request_changes`. It never edits. | `skipReview` |
 | Planner | thread role `planner` | Read-only. Splits the work into waves. | `unplannedReason` |
 | Advisor | thread role `advisor` | Read-only. Reviews a plan or helps a stuck review. | n/a |
-| Researcher | thread role `researcher` | Read-only. Runs `chief_research` and reports the findings. | Optional |
+| Researcher | thread role `researcher` | Read-only research by a researcher thread that answers alone or with helper threads; reports through chief_report. | Optional |
 
 A fresh worker takes every follow-up through `replaces:`. A worker that already reported is never reused.
 

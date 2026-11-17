@@ -7,8 +7,8 @@
     "scenarios": 10
   },
   "outputs": {
-    "research, behind clone (fast-forward succeeds)": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
-    "research, current clone": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+    "research, behind clone (fast-forward succeeds)": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+    "research, current clone": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
     "chief_plan, shared checkout, behind": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
     "chief_plan, shared checkout, current": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",
     "chief_plan, confirmed separate checkout": "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.",

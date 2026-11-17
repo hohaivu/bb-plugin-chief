@@ -152,52 +152,55 @@ review before delegation (see **Plan review**).
 
 ### Researcher
 
-`chief_research` fans a read-only question out to parallel BB workflow agents. A planner
-waits for the result. Chief does not: its call returns at once with the id of a **researcher** child
-thread, which runs the research and reports through `chief_report`; the report arrives as a lifecycle
-alert, so Chief ends its turn instead of polling. It has two modes:
+`chief_research` is Chief-only. Its call takes `question` (and an optional `branch`) and returns at
+once with the id of a **researcher** thread. The researcher is a normal managed thread: it works
+read-only, decides whether to answer alone or to spawn up to 6 plain helper threads that share its
+checkout, merges their answers, and reports through `chief_report`. The report arrives as a
+lifecycle alert, so Chief ends its turn instead of polling. A report starts with `Helpers: <n>`
+and has `## Confirmed` and `## Unconfirmed` sections; a failed or stopped helper is named, and the
+result is marked partial.
 
-- **survey** answers one question for each of a list of items (files, symbols, topics), one row each
-  with evidence.
-- **investigate** runs one agent per sub-question, then one agent merges the answers into a brief
-  with Confirmed and Unconfirmed sections. In a researcher thread the workflow skips this merge: the
-  researcher merges the answers itself and reports the brief.
-
-A failed scan, verify, or combine no longer loses the run: the result carries what finished, the
-missed items, a count line (`verified`, `dropped`), and the first failed worker's reason. `dropped`
-tells a clean "No confirmed findings" apart from a verify that threw everything away.
-
-Chief, planners and researchers get survey and investigate. Reviewers, workers and advisors never get it; the server refuses a call from any of them. Settings has one **Researcher** switch, on by default;
-while it is off, no role gets the tool or the line about it. Chief is told the tool is optional
-and that it reads no project code itself: `researchChiefInstructions` in src/runtime/host.ts owns when it uses research and what it does after a failed or partial run (it does not rerun).
+Planners do not get `chief_research`; the chief-role-read-only skill tells them how to spawn their
+own read-only helper threads. Reviewers, workers and advisors never get it. The server refuses a
+call from any of them. Settings has one **Researcher** switch, on by default; while it is off,
+Chief gets neither the tool nor the line about it. `researchChiefInstructions` in
+src/runtime/host.ts owns when Chief uses research and what it does after a failed or partial
+report (it does not rerun).
 
 The researcher thread reuses Chief's own environment and permission mode, so it reads Chief's
 checkout. If that checkout cannot be shared, the call fails with a clear error; it never falls back
-to a fresh worktree. The thread runs on the mode's per-machine pick, or on Chief's model when no
-pick is set or the machine can no longer serve it. A researcher that reports ready is absorbed (its
-alert carries the result); one whose run failed, was partial, or timed out says so in its report. The
-mode's timeout bounds the whole run from the thread's start, after which the run is stopped.
+to a fresh worktree. With `branch`, it runs in a fresh worktree on that branch instead. Helpers
+share the researcher's environment. They are read-only only because the prompt tells them to be,
+and the limit of 6 is in the prompt only. There is no run, mode, timeout or call cap: a researcher
+is supervised like every other managed thread, by the stall alert and `chief_stop` /
+`chief_continue`.
+
+The researcher's model is the **Researcher** row in Settings → Chief models by machine, picked like
+the Worker row. A researcher without a pick, or whose pick the machine can no longer serve, runs
+on BB's default model for the project, and so do its helpers. Settings → **Chief researcher** holds
+only the switch.
 
 Before the researcher starts, Chief fast-forwards its checkout to `origin/<default branch>` (`git fetch` + `git merge --ff-only`). It skips this, appending one `Did not fast-forward…` line to the tool result and still starting the researcher, when a researcher or planner of this Chief is running, tracked files have uncommitted changes, the branch has local commits, git or a lookup fails or times out, or the checkout is on another host. Every researcher report alert says `Read at <sha>` (the commit it read) and, when the default branch has moved since, that the answer may be stale.
 
-The agents share the caller's checkout and permissions. They are read-only only because the prompt
-tells them to be. A planner's call, and each call a researcher thread makes while resuming, waits up to its mode's timeout (10 minutes by default), and never more than 2.5 minutes, because some providers end tool calls at
-3 minutes. A researcher run's timeout is a hard stop, kept by the plugin server from the thread's start: the run is stopped even when the researcher thread is not calling, and the next call returns the answers that had finished. If the run is still going, the call returns its runId, and calling again with that runId keeps waiting
-(the run keeps going in between). When a researcher's run has ended and the researcher has not reported within 3 minutes, the server saves the result as an artifact and alerts Chief. If the plugin server can't start the
-workflow, the tool returns the exact script and args so the agent can start it with
-`bb_workflow_run` and then wait on its runId. One cap on agent calls per run (1–100, default 24)
-applies to every role. A run that would need more is refused before it starts.
+**Upgrade note.** Old researcher briefs tell the researcher to call `chief_research` with a mode
+and runId; after the reload those calls are refused, and old workflow runs are not collected. Before
+you merge and reload, ask Chief to do this once for each project that used research:
 
-Settings → **Chief researcher** holds this one config for Chief and planners: the
-**Researcher** switch and the agent-call cap are shared. Then each mode (survey,
-investigate) has its own section with a timeout (1–60 minutes, default 10) and, per machine, one
-provider + model + reasoning level pick used for every stage (scan, verify, combine) of that mode.
-The timeout only limits how long one call waits, up to the 2.5-minute per-call ceiling: the run keeps going, and a timeout longer than 2.5 minutes means resuming by runId, not one longer call. The
-picker offers only models the machine's live catalog serves. A mode without a pick on a machine
-shows **Inherit caller** and runs on the calling thread's model; the **Inherit caller** button
-clears a pick back to that default. An earlier single per-machine pick was copied to every mode; a per-machine Review pick from an older version is ignored.
-Timeouts can also be set with `bb plugin config chief set researchSurveyTimeoutMinutes 5` (and
-`researchInvestigateTimeoutMinutes`).
+1. Find live research runs:
+   `sqlite3 ~/.bb/chief/data.db "SELECT DISTINCT run_id FROM chief_research_calls WHERE run_id IS NOT NULL AND started_at > (strftime('%s','now')-7200)*1000"`.
+   Match them against `bb workflows list --json` in that project. Never touch a run that is not in
+   that list (retro runs are workflows too).
+2. For each match, read `bb workflows status <run-id>`. If it is not terminal, wait for the
+   researcher to report, or run `bb workflows stop <run-id>` and check `status` again. If the status
+   cannot be read or the stop is not confirmed, stop the run from the Workflows view. This does not
+   block the merge.
+3. For each non-terminal researcher row in `chief_roster`: let it report, or `chief_stop` it. Never
+   `chief_continue` an old researcher after the reload; ask again with a fresh `chief_research` call.
+4. Planners mid-flight need nothing: their `chief_research` call is refused with a message that
+   points at helper threads.
+
+Your existing Investigate model pick is copied once to the Researcher row. A later clear of that row
+is not copied again.
 
 ### Work list
 

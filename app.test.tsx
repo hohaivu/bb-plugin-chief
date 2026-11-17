@@ -294,6 +294,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
         worker: null,
         reviewer: null,
         advisor: null,
+        researcher: null,
       },
       unusable: [],
     }],
@@ -314,7 +315,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
   unmounts.push(() => rendered.lifecycle.unmount());
 
   await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(4);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
 
   fireEvent.click(rendered.getByRole("button", { name: "Use BB default" }));
 
@@ -324,7 +325,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
       input: { hostId: "host_1", role: "chief", selection: null },
     }),
   );
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(6);
 });
 
 // Contract (Settings > Models, Spec Writer row): the row sits after Tester, an unset Spec Writer is described as using the
@@ -338,7 +339,7 @@ test("the Spec Writer row follows Tester, inherits the Worker model, and clears 
     hosts: [{
       hostId: "host_1", hostName: "Local", connected: true, error: null,
       fallback: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, designer: null, tester: null, "spec-writer": pick, reviewer: null, advisor: null },
+      selections: { chief: null, planner: null, worker: null, designer: null, tester: null, "spec-writer": pick, reviewer: null, advisor: null, researcher: null },
       unusable: [],
     }],
   };
@@ -376,7 +377,7 @@ test("a picker re-reporting a service tier saves no role model", async () => {
     hosts: [{
       hostId: "host_1", hostName: "Local", connected: true, error: null,
       fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, reviewer: null, advisor: null },
+      selections: { chief: null, planner: null, worker: null, designer: null, tester: null, "spec-writer": null, reviewer: null, advisor: null, researcher: null },
       unusable: [],
     }],
   };
@@ -387,7 +388,43 @@ test("a picker re-reporting a service tier saves no role model", async () => {
   await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
   await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
   expect(rendered.rpcCalls.filter((call) => call.method === "setRoleModel")).toHaveLength(0);
-  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(5);
+  expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(6);
+});
+
+// Contract (Settings > Models, Researcher row): Chief models by machine has a Researcher row after Advisor that behaves like
+// the Worker row: an unset pick says BB picks the model, a stored pick offers "Use BB default", and clearing saves role
+// "researcher" with a null selection. Regression: a wrong role string clears another role's pick; inheriting the Worker model
+// shows the wrong text and button.
+test("the Researcher row follows Advisor, uses the BB default, and clears its own pick", async () => {
+  const section = app.settingsSections.find((candidate) => candidate.id === "models")!;
+  const pick = { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" as const };
+  const configuration = {
+    hosts: [{
+      hostId: "host_1", hostName: "Local", connected: true, error: null,
+      fallback: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" as const },
+      selections: { chief: null, planner: null, worker: null, designer: null, tester: null, "spec-writer": null, reviewer: null, advisor: null, researcher: pick },
+      unusable: [],
+    }],
+  };
+  const rendered = renderSlot<Record<string, never>, typeof rpcContract>(section, {}, {
+    rpc: { modelConfiguration: () => configuration, setRoleModel: () => ({ ok: true as const }) } as never,
+  });
+  unmounts.push(() => rendered.lifecycle.unmount());
+  await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
+
+  const advisor = rendered.getByText("Advisor", { selector: "div" }).closest("div.mt-3") as HTMLElement;
+  const row = rendered.getByText("Researcher", { selector: "div" }).closest("div.mt-3") as HTMLElement;
+  expect(advisor.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const researcher = within(row);
+  expect(researcher.queryByText(/^Not set/)).toBeNull();
+  expect(researcher.queryByRole("button", { name: "Use Worker model" })).toBeNull();
+
+  fireEvent.click(researcher.getByRole("button", { name: "Use BB default" }));
+  await vi.waitFor(() =>
+    expect(rendered.rpcCalls).toContainEqual({ method: "setRoleModel", input: { hostId: "host_1", role: "researcher", selection: null } }),
+  );
+  expect(rendered.rpcCalls.filter((call) => call.method === "setRoleModel")).toHaveLength(1);
+  await vi.waitFor(() => expect(researcher.getByText("Not set · BB picks the model")).toBeTruthy());
 });
 
 test("registers no thread panel action: the Chief to-do panel is removed", () => {
@@ -399,34 +436,19 @@ test("registers the Chief researcher settings section after the models section",
   expect(app.settingsSections.map((section) => section.id)).toEqual(["models", "research"]);
 });
 
+// Contract (Settings > Chief researcher): one Researcher switch (on by default) saves only `enabled`; the section has no cap,
+// timeout, per-mode model or Inherit-caller control, because the model is the Researcher row in Chief models.
 describe("Chief researcher settings", () => {
-  const triple = { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" as const };
   const fake = () => {
-    const settings = { enabled: true, maxAgentCalls: 24, timeoutMinutes: { survey: 10, investigate: 10 } };
-    const store = { selections: { survey: null, investigate: null } as Record<"survey" | "investigate", typeof triple | null> };
+    const settings = { enabled: true };
     const rpc = {
-      researchConfiguration: () => ({
-        settings: structuredClone(settings),
-        hosts: [{
-          hostId: "host_1", hostName: "Local", connected: true, error: null,
-          fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
-          selections: structuredClone(store.selections), unusable: [],
-        }],
-      }),
-      // The harness does not validate input, so the fake applies the real contract schema.
-      setResearchModel: (input: unknown) => {
-        const parsed = rpcContract.setResearchModel.input.safeParse(input);
-        if (!parsed.success) throw new Error("Invalid model selection");
-        store.selections[parsed.data.mode] = parsed.data.selection as typeof triple | null;
-        return { ok: true as const };
-      },
-      setResearchSettings: ({ timeoutMinutes, ...patch }: { enabled?: boolean; maxAgentCalls?: number; timeoutMinutes?: object }) => {
+      researchConfiguration: () => ({ settings: structuredClone(settings) }),
+      setResearchSettings: (patch: { enabled?: boolean }) => {
         Object.assign(settings, patch);
-        Object.assign(settings.timeoutMinutes, timeoutMinutes);
         return structuredClone(settings);
       },
     };
-    return { rpc, store };
+    return { rpc, settings };
   };
   const render = (rpc: ReturnType<typeof fake>["rpc"]) => {
     const section = app.settingsSections.find((candidate) => candidate.id === "research")!;
@@ -434,106 +456,40 @@ describe("Chief researcher settings", () => {
     unmounts.push(() => rendered.lifecycle.unmount());
     return rendered;
   };
-  const picker = (rendered: ReturnType<typeof render>) => within(rendered.getAllByTestId("bb-provider-model-picker")[0]!);
-  const inheriting = "Inherit caller · uses the calling thread's model";
 
-  test("a picker re-reporting a service tier saves nothing and the screen settles", async () => {
-    hostPicker.normalizes = true;
-    const { rpc, store } = fake();
-    const rendered = render(rpc);
-    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
-    await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
-    expect(rendered.rpcCalls.filter((call) => call.method === "setResearchModel")).toHaveLength(0);
-    expect(store.selections).toEqual({ survey: null, investigate: null });
-    expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(1);
-  });
-
-  test("the Researcher switch is on by default", async () => {
+  test("the Researcher switch is on by default and shows no other control", async () => {
     const rendered = render(fake().rpc);
-    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
+    await vi.waitFor(() => expect(rendered.getByRole("checkbox", { name: "Researcher" })).toBeTruthy());
     expect((rendered.getByRole("checkbox", { name: "Researcher" }) as HTMLInputElement).checked).toBe(true);
+    expect(rendered.queryByLabelText(/Agent calls|timeout/i)).toBeNull();
+    expect(rendered.queryByTestId("bb-provider-model-picker")).toBeNull();
+    expect(rendered.queryByRole("button", { name: "Inherit caller" })).toBeNull();
+    expect(rendered.queryByRole("spinbutton")).toBeNull();
+    expect(rendered.rpcCalls.filter((call) => call.method === "setResearchSettings")).toHaveLength(0);
   });
 
-  test("saves a full triple and shows it after a reload", async () => {
-    const { rpc } = fake();
+  test("the switch saves enabled only and survives a reload", async () => {
+    const { rpc, settings } = fake();
     const first = render(rpc);
-    await vi.waitFor(() => expect(first.getAllByText("Local")[0]).toBeTruthy());
-    expect(first.getAllByText(inheriting)).toHaveLength(2);
-    const cell = picker(first);
-    fireEvent.change(cell.getByLabelText("Provider ID"), { target: { value: triple.providerId } });
-    fireEvent.change(cell.getByLabelText("Model"), { target: { value: triple.model } });
-    fireEvent.change(cell.getByLabelText("Reasoning level"), { target: { value: triple.reasoningLevel } });
-    fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
+    await vi.waitFor(() => expect(first.getByRole("checkbox", { name: "Researcher" })).toBeTruthy());
+    fireEvent.click(first.getByRole("checkbox", { name: "Researcher" }));
     await vi.waitFor(() =>
-      expect(first.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", mode: "survey", selection: triple } }),
+      expect(first.rpcCalls.filter((call) => call.method === "setResearchSettings").map((call) => call.input)).toEqual([{ enabled: false }]),
     );
+    expect(settings.enabled).toBe(false);
     first.lifecycle.unmount();
 
     const second = render(rpc);
-    await vi.waitFor(() => expect(second.getAllByText("Local")[0]).toBeTruthy());
-    expect((picker(second).getByLabelText("Model") as HTMLInputElement).value).toBe(triple.model);
-    expect(second.getAllByRole("button", { name: "Inherit caller" })).toHaveLength(1);
-    expect(second.getAllByText(inheriting)).toHaveLength(1);
+    await vi.waitFor(() => expect((second.getByRole("checkbox", { name: "Researcher" }) as HTMLInputElement).checked).toBe(false));
   });
 
-  test("rejects a partial triple, stores nothing, and shows the error after reload", async () => {
-    const { rpc, store } = fake();
-    const rendered = render(rpc);
-    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
-    const cell = picker(rendered);
-    fireEvent.change(cell.getByLabelText("Model"), { target: { value: "" } });
-    fireEvent.click(cell.getByRole("button", { name: "Apply execution selection" }));
-    await vi.waitFor(() => expect(rendered.getByRole("alert").textContent).toContain("Invalid model selection"));
-    expect(store.selections.survey).toBeNull();
-    await vi.waitFor(() =>
-      expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(2),
-    );
-    expect(rendered.getAllByText(inheriting)).toHaveLength(2);
-  });
-
-  test("the switch and the cap save valid values only", async () => {
+  test("a failed save keeps the error visible after the reload", async () => {
     const { rpc } = fake();
+    rpc.setResearchSettings = () => { throw new Error("Could not save"); };
     const rendered = render(rpc);
-    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
-    const sent = () => rendered.rpcCalls.filter((call) => call.method === "setResearchSettings").map((call) => call.input);
-
+    await vi.waitFor(() => expect(rendered.getByRole("checkbox", { name: "Researcher" })).toBeTruthy());
     fireEvent.click(rendered.getByRole("checkbox", { name: "Researcher" }));
-    await vi.waitFor(() => expect(sent()).toEqual([{ enabled: false }]));
-
-    const cap = rendered.getByLabelText("Agent calls per run");
-    fireEvent.change(cap, { target: { value: "0" } });
-    expect(cap.getAttribute("aria-invalid")).toBe("true");
-    expect(sent()).toHaveLength(1);
-    fireEvent.change(cap, { target: { value: "30" } });
-    await vi.waitFor(() => expect(sent()).toEqual([{ enabled: false }, { maxAgentCalls: 30 }]));
-    expect(cap.getAttribute("aria-invalid")).toBe("false");
-  });
-
-  test("Inherit caller clears the machine's pick", async () => {
-    const { rpc, store } = fake();
-    store.selections.survey = triple;
-    const rendered = render(rpc);
-    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
-    fireEvent.click(rendered.getByRole("button", { name: "Inherit caller" }));
-    await vi.waitFor(() =>
-      expect(rendered.rpcCalls).toContainEqual({ method: "setResearchModel", input: { hostId: "host_1", mode: "survey", selection: null } }),
-    );
-    expect(rendered.getAllByText(inheriting)).toHaveLength(2);
-    expect(store.selections.survey).toBeNull();
-  });
-
-  test("a mode's timeout saves valid values only", async () => {
-    const rendered = render(fake().rpc);
-    await vi.waitFor(() => expect(rendered.getAllByText("Local")[0]).toBeTruthy());
-    const sent = () => rendered.rpcCalls.filter((call) => call.method === "setResearchSettings").map((call) => call.input);
-    const timeout = rendered.getByLabelText("Investigate timeout (minutes)");
-    for (const value of ["0", "61"]) {
-      fireEvent.change(timeout, { target: { value } });
-      expect(timeout.getAttribute("aria-invalid")).toBe("true");
-    }
-    expect(sent()).toHaveLength(0);
-    fireEvent.change(timeout, { target: { value: "5" } });
-    await vi.waitFor(() => expect(sent()).toEqual([{ timeoutMinutes: { investigate: 5 } }]));
-    expect(timeout.getAttribute("aria-invalid")).toBe("false");
+    await vi.waitFor(() => expect(rendered.getByRole("alert").textContent).toContain("Could not save"));
+    expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(2);
   });
 });

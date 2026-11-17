@@ -30,11 +30,8 @@ interface Prepared {
 }
 
 export interface ManagedSpawn<Input extends InsertBase> {
-  /** Steps 1-3. `pick` is a role to resolve through spawnExecution, or an execution the caller already resolved (research). */
-  prepare(
-    projectId: string,
-    pick: { role: ModelRole; hostId: string | null } | { execution: Execution },
-  ): Promise<Prepared>;
+  /** Steps 1-3: the role's model pick (cooldown-checked), the Chief section, the rules warm-up. */
+  prepare(projectId: string, pick: { role: ModelRole; hostId: string | null }): Promise<Prepared>;
   /**
    * Steps 5-7. Chief owns every managed thread, so the row's chiefThreadId is also the spawn's parent and lifecycle
    * owner, and `role` and a designer's `kind` go into the plugin metadata. `inTransaction` runs in the insert's transaction.
@@ -65,8 +62,8 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
 }): ManagedSpawn<Input> {
   const { bb, db, spawnExecution, ensureSection, readRules, lifecycleOwner, insertThread, persistBrief } = deps;
 
-  async function prepare(projectId: string, pick: { role: ModelRole; hostId: string | null } | { execution: Execution }) {
-    const execution = "execution" in pick ? pick.execution : await spawnExecution(pick.role, pick.hostId, projectId);
+  async function prepare(projectId: string, pick: { role: ModelRole; hostId: string | null }) {
+    const execution = await spawnExecution(pick.role, pick.hostId, projectId);
     const sectionId = await ensureSection();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every managed turn, so the spawn prompt does not repeat them.

@@ -71,6 +71,34 @@ describe("Chief backend", () => {
     expect(() => insert.run("host_1", "junior", "codex", "gpt-6-mini", "low", 101)).toThrow();
   });
 
+  // Contract (plan-1 migration): the Researcher pick is seeded ONCE from each host's investigate pick (survey and review picks are
+  // not imported), every other model row is untouched, a host with no investigate pick gets no row, and the role CHECK accepts "researcher".
+  // Regression: seeding from survey, dropping a row in the table rebuild, or a CHECK without "researcher".
+  test("chief_models_v9 migration seeds the researcher pick from investigate, keeps every row, and accepts a researcher pick", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-researcher" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    bb.storage.migrate(db, MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("chief_models_v9"))));
+    const insert = db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    expect(() => insert.run("host_1", "researcher", "codex", "gpt-6-mini", "low", 0)).toThrow();
+    const roles = ["chief", "planner", "worker", "reviewer", "advisor", "designer", "tester", "spec-writer"];
+    roles.forEach((role, i) => insert.run("host_1", role, "codex", `model-${role}`, "high", i + 1));
+    insert.run("host_2", "worker", "claude-code", "claude-opus-5", "medium", 99);
+    const pick = db.prepare(`INSERT INTO research_mode_models (host_id, mode, provider_id, model, reasoning_level, updated_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    pick.run("host_1", "investigate", "claude-code", "claude-opus-5", "high", 50);
+    pick.run("host_1", "survey", "codex", "survey-model", "low", 51);
+    pick.run("host_2", "survey", "codex", "survey-only", "low", 52);
+    const before = db.prepare(`SELECT * FROM chief_models ORDER BY host_id, role`).all();
+
+    bb.storage.migrate(db, MIGRATIONS);
+
+    expect(db.prepare(`SELECT * FROM chief_models WHERE role != 'researcher' ORDER BY host_id, role`).all()).toEqual(before);
+    expect(db.prepare(`SELECT host_id, provider_id, model, reasoning_level FROM chief_models WHERE role = 'researcher'`).all())
+      .toEqual([{ host_id: "host_1", provider_id: "claude-code", model: "claude-opus-5", reasoning_level: "high" }]);
+    expect(() => insert.run("host_2", "researcher", "codex", "gpt-6-mini", "low", 100)).not.toThrow();
+    expect(() => insert.run("host_2", "junior", "codex", "gpt-6-mini", "low", 101)).toThrow();
+  });
+
   test("explains a machine with no signed-in provider instead of offering a model", async () => {
     const state = await setup({ providerAvailable: false });
     const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);

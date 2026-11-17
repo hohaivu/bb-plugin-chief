@@ -306,11 +306,10 @@ export function createRoster(ctx: Ctx) {
     const categoryCount = (category: string) => perTask.filter((task) => task.category === category).length;
     const researchBy = new Map<string, { role: string; mode: string | null; calls: number; succeeded: number }>();
     for (const call of db.prepare(`SELECT caller_thread_id, role, mode, outcome FROM chief_research_calls ORDER BY id`).all() as { caller_thread_id: string; role: string; mode: string | null; outcome: string }[]) {
-      // Chief's spawned call only started a researcher; that thread's own calls carry the real outcomes.
-      if (!ids.has(call.caller_thread_id) || call.outcome === "spawned") continue;
+      if (!ids.has(call.caller_thread_id)) continue;
       const entry = researchBy.get(`${call.role}\u0000${call.mode}`) ?? { role: call.role, mode: call.mode, calls: 0, succeeded: 0 };
       entry.calls += 1;
-      if (call.outcome === "succeeded" || call.outcome === "partial") entry.succeeded += 1;
+      if (call.outcome === "succeeded" || call.outcome === "partial" || call.outcome === "spawned") entry.succeeded += 1;
       researchBy.set(`${call.role}\u0000${call.mode}`, entry);
     }
     return {
@@ -359,7 +358,7 @@ export function createRoster(ctx: Ctx) {
       `Tasks: ${tasks.total} — ${tasks.completed} completed, ${tasks.open} open, ${tasks.dropped} dropped · todos: ${todos.open} open, ${todos.done} done, ${todos.dropped} dropped`,
       `Task kinds: ${tasks.planned} planned, ${tasks.unplanned_planner_on} unplanned (planner on), ${tasks.unplanned_planner_off} unplanned (planner off), ${tasks.simple} simple, ${tasks.unknown} unknown`,
       `Reviews: ${verdicts.approve} approve, ${verdicts.request_changes} request_changes`,
-      `Research: ${research.length ? research.map((entry) => `${entry.role} ${entry.mode ?? "resume"} ${entry.succeeded}/${entry.calls} succeeded`).join(", ") : "no calls"}`,
+      `Research: ${research.length ? research.map((entry) => `${entry.role} ${entry.mode ?? "calls"} ${entry.succeeded}/${entry.calls} succeeded`).join(", ") : "no calls"}`,
       `Repairs: ${plural(repairs.replacements, "replacement round")}, ${repairs.requestChanges} request_changes (${plural(repairs.regressions, "regression")}), ${plural(repairs.consults, "consult")}`,
       `Failures: provider ${failures.usageLimit + failures.connection} (usage limit ${failures.usageLimit}, connection ${failures.connection}) · timing ${failures.busyRejections + failures.stalls + failures.hardStalls} (busy rejections ${failures.busyRejections}, stalls ${failures.stalls}, hard stalls ${failures.hardStalls}) · rejected reviews ${failures.rejectedReviews} · thread errors ${failures.threadErrors}`,
       `Wall time (${wallTimeMs.completed} completed): median ${duration(wallTimeMs.median)}, total ${duration(wallTimeMs.total)}`,

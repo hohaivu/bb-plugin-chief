@@ -491,7 +491,7 @@ export function createRetro(ctx: Ctx) {
     try {
       const live = await bb.sdk.threads.get({ threadId: chiefId });
       const hostId = live.environmentId ? await ctx.environmentHostId(live.environmentId) : null;
-      const stored = hostId ? ctx.readResearchModel(hostId, "investigate") : null;
+      const stored = hostId ? ctx.readRoleModel(hostId, "researcher") : null;
       const usable = stored && hostId ? await ctx.usableSelection(hostId, stored, ctx.catalogReader(hostId)) : null;
       return usable ? { provider: usable.providerId, model: usable.model, reasoningLevel: usable.reasoningLevel } : {};
     } catch {

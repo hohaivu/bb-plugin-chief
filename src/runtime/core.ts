@@ -1,7 +1,6 @@
 import { createPlanLifecycle } from "../plan/planLifecycle";
 import { createPlanProgress } from "../plan/planProgress";
 import { PR_AGENT_DIR } from "../review/prAgent";
-import { agentCapSchema, RESEARCH_DEFAULT_TIMEOUT_MINUTES, timeoutSchema } from "../research/research";
 import { createReviewLedger } from "../review/reviewLedger";
 import { MIGRATIONS } from "../db/migrations";
 import { type ManagedRow, terminal } from "../types";
@@ -41,12 +40,9 @@ export function createCore(ctx: Ctx) {
     researchEnabled: {
       type: "boolean",
       label: "Researcher",
-      description: "Lets Chief and planners run read-only chief_research surveys and investigations as BB workflows. They share one config.",
+      description: "Lets Chief start read-only researcher threads (chief_research). A researcher may spawn read-only helper threads. Its model is the Researcher row in Chief models by machine.",
       default: true,
     },
-    researchMaxAgentCalls: { type: "number", label: "Researcher: agent calls per run (1–100)", default: 24, experimental_schema: agentCapSchema },
-    researchSurveyTimeoutMinutes: { type: "number", label: "Researcher: survey timeout (minutes, 1–60)", default: RESEARCH_DEFAULT_TIMEOUT_MINUTES, experimental_schema: timeoutSchema },
-    researchInvestigateTimeoutMinutes: { type: "number", label: "Researcher: investigate timeout (minutes, 1–60)", default: RESEARCH_DEFAULT_TIMEOUT_MINUTES, experimental_schema: timeoutSchema },
     autoSpawn: {
       type: "boolean",
       label: "Auto-spawn Chief",
@@ -153,9 +149,6 @@ export function createCore(ctx: Ctx) {
   const roleModelRow = db.prepare<[string, string]>(
     `SELECT provider_id, model, reasoning_level FROM chief_models WHERE host_id=? AND role=?`,
   );
-  const researchModelRow = db.prepare<[string, string]>(
-    `SELECT provider_id, model, reasoning_level FROM research_mode_models WHERE host_id=? AND mode=?`,
-  );
   // chief_todos.chief_thread_id is the owning Chief (NULL = legacy, from before ownership).
   const todosForProject = db.prepare<[string]>(
     `SELECT * FROM chief_todos WHERE project_id=? AND state='open' ORDER BY id ASC`,
@@ -196,6 +189,6 @@ export function createCore(ctx: Ctx) {
   const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
   const { onSpecChain } = progress;
   const plans = createPlanLifecycle<ManagedRow>(store, schedule, ledger, (planner: ManagedRow): string | null => ctx.planReviewRefusal(planner));
-  return { activeChiefForProject, anyCooldown, chainOwner, chainStarted, planBase, planBaseOf, chiefCountForProject, closedTodosForProject, coexists, cooldownFor, db, insertTodo, isDesignWave, isTestWave, latestChiefForProject, latestSideWriter, latestWorker, ledger, onSpecChain, pendingAlerts, planWavesFor, plans, progress, researchModelRow, reviewTargetsFor, reviewerFails, roleModelRow, schedule, settings, sideLane, specWave, specWriters, store, taskWriters, todoById, todosForProject, updateTodo, upsertCooldown, writerPending };
+  return { activeChiefForProject, anyCooldown, chainOwner, chainStarted, planBase, planBaseOf, chiefCountForProject, closedTodosForProject, coexists, cooldownFor, db, insertTodo, isDesignWave, isTestWave, latestChiefForProject, latestSideWriter, latestWorker, ledger, onSpecChain, pendingAlerts, planWavesFor, plans, progress, reviewTargetsFor, reviewerFails, roleModelRow, schedule, settings, sideLane, specWave, specWriters, store, taskWriters, todoById, todosForProject, updateTodo, upsertCooldown, writerPending };
 }
 

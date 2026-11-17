@@ -354,7 +354,7 @@ describe("tracker integration", () => {
   // Regression: an unconditional recovery insert at any one of them, which upserts the keys to null so the thread drops out of its unit.
   describe.each<[string, "worker" | "chief", string, object, string | undefined]>([
     ["chief_report (reportIntake)", "worker", "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, undefined],
-    ["chief_research (managedRow)", "worker", "chief_research", { mode: "survey", question: "Who calls this?", items: ["a.ts"] }, "not available to a managed worker"],
+    ["chief_research (managedRow)", "worker", "chief_research", { question: "Who calls this?" }, "available only to an active Chief"],
     ["chief_inspect (resolveTarget)", "chief", "chief_inspect", {}, undefined],
   ])("stale spawn recovery through %s", (_name, caller, tool, params, rejection) => {
     test.each([true, false])("launch row landed during the lookup: %s", async (launched) => {

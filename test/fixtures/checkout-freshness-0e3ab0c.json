@@ -8,7 +8,7 @@
   },
   "outputs": {
     "research, behind (fast-forward)": {
-      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+      "replies": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
       "head": "origin tip",
       "threads": {
         "researcher": 1,
@@ -73,7 +73,7 @@
       ]
     },
     "research, current": {
-      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+      "replies": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
       "head": "origin tip",
       "threads": {
         "researcher": 1,
@@ -127,7 +127,7 @@
       ]
     },
     "research, dirty": {
-      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: it has uncommitted changes. The researcher reads it as it is.",
+      "replies": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: it has uncommitted changes. The researcher reads it as it is.",
       "head": "c0",
       "threads": {
         "researcher": 1,
@@ -146,7 +146,7 @@
       ]
     },
     "research, own commit": {
-      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: its branch has 1 commit(s) not on origin/main. The researcher reads it as it is.",
+      "replies": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: its branch has 1 commit(s) not on origin/main. The researcher reads it as it is.",
       "head": "local commit",
       "threads": {
         "researcher": 1,
@@ -200,7 +200,7 @@
       ]
     },
     "research, fetch fails": {
-      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: git fetch failed: Command failed: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main fatal: '<root>/gone.git' does not appear to be. The researcher reads it as it is.",
+      "replies": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: git fetch failed: Command failed: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main fatal: '<root>/gone.git' does not appear to be. The researcher reads it as it is.",
       "head": "c0",
       "threads": {
         "researcher": 1,
@@ -239,7 +239,7 @@
       ]
     },
     "research, remote host": {
-      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: the checkout is on a remote host, not the plugin server. The researcher reads it as it is.",
+      "replies": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: the checkout is on a remote host, not the plugin server. The researcher reads it as it is.",
       "head": "c0",
       "threads": {
         "researcher": 1,
@@ -248,7 +248,7 @@
       "gitCalls": []
     },
     "research, no default branch": {
-      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: default branch unknown. The researcher reads it as it is.",
+      "replies": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: default branch unknown. The researcher reads it as it is.",
       "head": "c0",
       "threads": {
         "researcher": 1,
@@ -257,7 +257,7 @@
       "gitCalls": []
     },
     "research, environment lookup throws": {
-      "replies": "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: env lookup failed. The researcher reads it as it is.",
+      "replies": "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/the default branch: env lookup failed. The researcher reads it as it is.",
       "head": "c0",
       "threads": {
         "researcher": 1,
@@ -267,8 +267,8 @@
     },
     "research, running researcher": {
       "replies": [
-        "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
-        "Started researcher thread thr_3 (Research · survey · Question 2). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: researcher thr_2 is still running in it. The researcher reads it as it is."
+        "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+        "Started researcher thread thr_3 (Research · Question 2). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: researcher thr_2 is still running in it. The researcher reads it as it is."
       ],
       "head": "origin tip",
       "threads": {
@@ -336,7 +336,7 @@
     "research, running planner of unknown sharing": {
       "replies": [
         "Started planner “Plan · Plan 1” in thread thr_2. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/the default branch: could not tell whether the planner shares it (project checkout path unknown). The planner reads it as it is.",
-        "Started researcher thread thr_3 (Research · survey · Question 2). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: planner thr_2 is still running in it. The researcher reads it as it is."
+        "Started researcher thread thr_3 (Research · Question 2). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.\nDid not fast-forward your checkout to origin/main: planner thr_2 is still running in it. The researcher reads it as it is."
       ],
       "head": "c0",
       "threads": {
@@ -655,7 +655,7 @@
     },
     "chief_plan, shared, running researcher": {
       "replies": [
-        "Started researcher thread thr_2 (Research · survey · Question 1). It runs the survey in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
+        "Started researcher thread thr_2 (Research · Question 1). It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert. Do not poll: end your turn.",
         "Started planner “Plan · Plan 2” in thread thr_3. Its ready alert lists the wave schedule and the exact next call.\nDid not fast-forward your checkout to origin/main: researcher thr_2 is still running in it. The planner reads it as it is."
       ],
       "head": "origin tip",

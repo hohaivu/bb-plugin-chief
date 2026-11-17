@@ -321,7 +321,7 @@ export function createNextAction(ctx: Ctx) {
     let live = await bb.sdk.threads.get({ threadId: worker.thread_id });
     // ponytail: polls; defer the alert to thread.idle if a minute is not enough.
     for (const deadline = Date.now() + REVIEW_IDLE_WAIT_MS; worker.state === "ready" && BUSY_STATUSES.has(live.status) && Date.now() < deadline;) {
-      await ctx.researchSleep(REVIEW_IDLE_POLL_MS);
+      await new Promise((resolve) => setTimeout(resolve, REVIEW_IDLE_POLL_MS));
       live = await bb.sdk.threads.get({ threadId: worker.thread_id });
     }
     return live;

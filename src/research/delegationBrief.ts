@@ -333,7 +333,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
 const branchLine = (branch: string) => `Your worktree is based on branch ${branch} (an open branch, not the project default). Read and plan against it.`;
 
 export type PlannerBriefInput = {
-  title: string; chiefThreadId: string; mission: string; context?: string; research: boolean;
+  title: string; chiefThreadId: string; mission: string; context?: string;
   /** An open branch the planner's worktree is based on; chain heads of its plan stack on it. */
   branch?: string;
   /** Set for chief_plan revises: the plan its one advisor review sent back, and that advice. */

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** `researcher` is a support role like the advisor: the child a Chief's chief_research runs in. */
+/** `researcher` is a support role like the advisor: the thread a Chief's chief_research starts. */
 export const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "researcher"]);
 export type Role = z.infer<typeof roleSchema>;
 
@@ -9,14 +9,10 @@ export type Role = z.infer<typeof roleSchema>;
 export const workerKindSchema = z.enum(["worker", "designer", "tester", "spec-writer"]);
 export type WorkerKind = z.infer<typeof workerKindSchema>;
 
-/** The role key chief_models stores a per-machine model pick under: the lifecycle roles plus
- * `designer` (a worker kind, not a thread role). Explicit, not derived from roleSchema: the researcher's
- * model is the mode's research pick, and chief_models' CHECK would refuse it. */
-export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "tester", "spec-writer"]);
+/** The role key chief_models stores a per-machine model pick under: the thread roles plus the worker kinds
+ * `designer`, `tester` and `spec-writer`. Explicit, not derived from roleSchema: a worker kind is not a thread role. */
+export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "tester", "spec-writer", "researcher"]);
 export type ModelRole = z.infer<typeof modelRoleSchema>;
-
-export const researchRoleSchema = z.enum(["chief", "planner", "researcher"]);
-export type ResearchRole = z.infer<typeof researchRoleSchema>;
 
 /** A model role with no pick of its own reads another role's pick: no Designer, Tester or Spec Writer row inherits the Worker pick. */
 export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker", tester: "worker", "spec-writer": "worker" };
@@ -57,4 +53,4 @@ export const CONTINUE_REMINDERS: Partial<Record<Role, string>> = {
 // A new role needs a NEW appended migration (never an edit to an existing one) that rebuilds both tables whose
 // role list is a CHECK constraint in MIGRATIONS (server.ts):
 //   - managed_threads: the latest rebuild is managed_threads_v4 (role IN chief, planner, worker, reviewer, advisor, researcher).
-//   - chief_models: the latest rebuild is chief_models_v8 (role IN chief, planner, worker, reviewer, advisor, designer, tester, spec-writer).
+//   - chief_models: the latest rebuild is chief_models_v9 (role IN chief, planner, worker, reviewer, advisor, designer, tester, spec-writer, researcher).
