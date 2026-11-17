@@ -50,7 +50,7 @@ The first failing check decides the refusal.
 | Active registered Chief, research on | Allowed. |
 | Finished Chief (state `complete`, `archived` or `deleted`) | Refused: `chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads (chief-role-read-only skill).` |
 | Planner, researcher, worker, reviewer, advisor or unmanaged thread | Refused: `chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads (chief-role-read-only skill).` |
-| Research switched off | Refused: `chief_research is off in Chief settings → Chief researcher.` |
+| Research switched off (`researchEnabled` is off) | Refused: the research switch is off. |
 
 ### Researcher model
 
@@ -135,7 +135,6 @@ The researcher never polls with sleep loops.
 ### Settings
 
 - The research settings hold one field, `enabled`. A patch with `maxAgentCalls` or `timeoutMinutes` is refused by the strict schema. Reason: the cap and timeouts belonged to the workflow path.
-- `researchConfiguration` returns only `{ settings }`. Reason: model picks live in `modelConfiguration`.
 - The RPC contract has no `setResearchModel`. Reason: the researcher pick uses `setRoleModel`.
 - Old stored settings keys and the `research_mode_models` table stay in place and are not read. Reason: the migration drops no data.
 

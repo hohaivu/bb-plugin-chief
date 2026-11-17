@@ -9,7 +9,6 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { PluginAppSlots } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import type { ResearchConfiguration } from "./src/research/research";
 import type { rpcContract } from "./src/rpcContract";
 import type { ModelConfiguration, ModelSelection } from "./src/types";
 
@@ -278,79 +277,6 @@ function HostModelPicker({ hostId, value, disabled, onPick }: {
   );
 }
 
-function ResearchSettings() {
-  const rpc = useRpc<typeof rpcContract>();
-  const [configuration, setConfiguration] = useState<ResearchConfiguration | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-
-  const load = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      setConfiguration(await rpc.call("researchConfiguration", null));
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setIsLoading(false);
-    }
-  }, [rpc]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  // Reload first: load() clears the error, and the failure must stay visible.
-  const fail = useCallback(async (cause: unknown) => {
-    await load();
-    setError(errorMessage(cause));
-  }, [load]);
-
-  const saveSettings = useCallback(
-    (patch: { enabled?: boolean }) => {
-      setError(null);
-      void rpc.call("setResearchSettings", patch).then(
-        (settings) => setConfiguration((current) => current && { ...current, settings }),
-        fail,
-      );
-    },
-    [fail, rpc],
-  );
-
-  if (!configuration && isLoading) {
-    return <p className="text-sm text-muted-foreground">Scanning machines for providers and models…</p>;
-  }
-
-  const settings = configuration?.settings;
-  return (
-    <div className="space-y-4">
-      {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      <div className="flex items-center justify-between gap-3">
-        <label className="flex items-center gap-2 text-sm text-foreground">
-          <input
-            type="checkbox"
-            checked={settings?.enabled ?? true}
-            disabled={!settings}
-            onChange={(event) => saveSettings({ enabled: event.target.checked })}
-          />
-          Researcher
-        </label>
-        <button
-          type="button"
-          disabled={isLoading}
-          onClick={() => void load()}
-          className="h-7 shrink-0 cursor-pointer rounded-md border border-input px-3 text-xs font-medium disabled:opacity-50"
-        >
-          {isLoading ? "Refreshing…" : "Refresh"}
-        </button>
-      </div>
-      <p className="text-sm text-muted-foreground">
-        The researcher&apos;s model is the Researcher row in Chief models by machine.
-      </p>
-    </div>
-  );
-}
-
 function ChiefHeaderBadge({
   threadId,
   isCompactViewport,
@@ -449,12 +375,6 @@ export default definePluginApp((app) => {
     title: "Chief models by machine",
     description: "Live provider and model choices scanned from each enrolled machine.",
     component: ChiefModelSettings,
-  });
-  app.slots.settingsSection({
-    id: "research",
-    title: "Chief researcher",
-    description: "Lets Chief start read-only researcher threads that may split work across helper threads.",
-    component: ResearchSettings,
   });
   // The SDK retired this slot from its typings but the host still runs it. experimental_threadAction(placement "header") only draws labelled buttons, so it cannot render the role badge.
   const slots = app.slots as PluginAppSlots & { experimental_threadHeaderAction(registration: { id: string; title: string; component: typeof ChiefHeaderBadge }): void };

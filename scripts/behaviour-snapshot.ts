@@ -532,7 +532,6 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       return `${method}\n in ${schema(spec.input)}\n out ${schema(spec.output)}`;
     }).join("\n"));
     await step("rpc modelConfiguration", () => rpc("modelConfiguration", null));
-    await step("rpc researchConfiguration", () => rpc("researchConfiguration", null));
 
     // b. per Chief reads
     begin("b-chief-reads");
@@ -974,7 +973,7 @@ async function capture(distPath: string, dbPath: string, outPath: string) {
       await step("rpc setRoleModel researcher cleared", () => rpc("setRoleModel", { hostId: HOST, role: "researcher", selection: null }));
       // 4. Research off, then on again with the original settings: no research line or tool while it is off.
       let original: any;
-      await step("rpc researchConfiguration settings", async () => (original = ((await rpc("researchConfiguration", null)) as any).settings));
+      await step("rpc setResearchSettings read", async () => (original = await rpc("setResearchSettings", {})));
       const researchConfigured = async (id: string | undefined, project: string | undefined) => {
         if (!id || !project) return "no such thread";
         const resolved = await configure(id, project);

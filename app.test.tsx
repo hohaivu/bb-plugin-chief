@@ -432,64 +432,8 @@ test("registers no thread panel action: the Chief to-do panel is removed", () =>
   expect(app.threadPanelActions.map((action) => action.id)).not.toContain("pending");
 });
 
-test("registers the Chief researcher settings section after the models section", () => {
-  expect(app.settingsSections.map((section) => section.id)).toEqual(["models", "research"]);
-});
-
-// Contract (Settings > Chief researcher): one Researcher switch (on by default) saves only `enabled`; the section has no cap,
-// timeout, per-mode model or Inherit-caller control, because the model is the Researcher row in Chief models.
-describe("Chief researcher settings", () => {
-  const fake = () => {
-    const settings = { enabled: true };
-    const rpc = {
-      researchConfiguration: () => ({ settings: structuredClone(settings) }),
-      setResearchSettings: (patch: { enabled?: boolean }) => {
-        Object.assign(settings, patch);
-        return structuredClone(settings);
-      },
-    };
-    return { rpc, settings };
-  };
-  const render = (rpc: ReturnType<typeof fake>["rpc"]) => {
-    const section = app.settingsSections.find((candidate) => candidate.id === "research")!;
-    const rendered = renderSlot<Record<string, never>, typeof rpcContract>(section, {}, { rpc: rpc as never });
-    unmounts.push(() => rendered.lifecycle.unmount());
-    return rendered;
-  };
-
-  test("the Researcher switch is on by default and shows no other control", async () => {
-    const rendered = render(fake().rpc);
-    await vi.waitFor(() => expect(rendered.getByRole("checkbox", { name: "Researcher" })).toBeTruthy());
-    expect((rendered.getByRole("checkbox", { name: "Researcher" }) as HTMLInputElement).checked).toBe(true);
-    expect(rendered.queryByLabelText(/Agent calls|timeout/i)).toBeNull();
-    expect(rendered.queryByTestId("bb-provider-model-picker")).toBeNull();
-    expect(rendered.queryByRole("button", { name: "Inherit caller" })).toBeNull();
-    expect(rendered.queryByRole("spinbutton")).toBeNull();
-    expect(rendered.rpcCalls.filter((call) => call.method === "setResearchSettings")).toHaveLength(0);
-  });
-
-  test("the switch saves enabled only and survives a reload", async () => {
-    const { rpc, settings } = fake();
-    const first = render(rpc);
-    await vi.waitFor(() => expect(first.getByRole("checkbox", { name: "Researcher" })).toBeTruthy());
-    fireEvent.click(first.getByRole("checkbox", { name: "Researcher" }));
-    await vi.waitFor(() =>
-      expect(first.rpcCalls.filter((call) => call.method === "setResearchSettings").map((call) => call.input)).toEqual([{ enabled: false }]),
-    );
-    expect(settings.enabled).toBe(false);
-    first.lifecycle.unmount();
-
-    const second = render(rpc);
-    await vi.waitFor(() => expect((second.getByRole("checkbox", { name: "Researcher" }) as HTMLInputElement).checked).toBe(false));
-  });
-
-  test("a failed save keeps the error visible after the reload", async () => {
-    const { rpc } = fake();
-    rpc.setResearchSettings = () => { throw new Error("Could not save"); };
-    const rendered = render(rpc);
-    await vi.waitFor(() => expect(rendered.getByRole("checkbox", { name: "Researcher" })).toBeTruthy());
-    fireEvent.click(rendered.getByRole("checkbox", { name: "Researcher" }));
-    await vi.waitFor(() => expect(rendered.getByRole("alert").textContent).toContain("Could not save"));
-    expect(rendered.rpcCalls.filter((call) => call.method === "researchConfiguration")).toHaveLength(2);
-  });
+// Contract (Settings): the Researcher on/off switch is a plugin setting beside the other Chief switches; the app registers
+// only the Chief models section (no "Chief researcher" section, no Refresh button).
+test("registers only the Chief models settings section", () => {
+  expect(app.settingsSections.map((section) => section.id)).toEqual(["models"]);
 });

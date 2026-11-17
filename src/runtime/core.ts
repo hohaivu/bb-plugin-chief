@@ -40,7 +40,7 @@ export function createCore(ctx: Ctx) {
     researchEnabled: {
       type: "boolean",
       label: "Researcher",
-      description: "Lets Chief start read-only researcher threads (chief_research). A researcher may spawn read-only helper threads. Its model is the Researcher row in Chief models by machine.",
+      description: "Lets Chief start read-only researcher threads (chief_research). A researcher may spawn read-only helper threads.",
       default: true,
     },
     autoSpawn: {

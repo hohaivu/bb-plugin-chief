@@ -48,7 +48,6 @@ import type { FailEntry, ManagedRow, ManagedThread, ModelConfiguration, ModelSel
 
 export { MIGRATIONS } from "./src/db/migrations";
 export { rpcContract } from "./src/rpcContract";
-export type { ResearchConfiguration } from "./src/research/research";
 export type { ManagedRow, ManagedThread, FailEntry, ReportFinding, ReportParams, ModelConfiguration, ModelSelection };
 
 export default async function plugin(bb: BbPluginApi) {

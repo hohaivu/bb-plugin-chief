@@ -12,9 +12,6 @@ export const RESEARCH_MAX_HELPERS = 6;
 
 export const researchSettingsSchema = z.object({ enabled: z.boolean() });
 export type ResearchSettings = z.infer<typeof researchSettingsSchema>;
-/** Model picks live in modelConfiguration, under the researcher role. */
-export const researchConfigurationSchema = z.object({ settings: researchSettingsSchema });
-export type ResearchConfiguration = z.infer<typeof researchConfigurationSchema>;
 export const researchSettingsPatchSchema = z.object({ enabled: z.boolean().optional() }).strict();
 /** One flat object: tool parameters must publish as a JSON Schema of type object. */
 export const researchParams = z.object({
@@ -103,7 +100,7 @@ export function createResearch(deps: ResearchDeps) {
     }
     if (!isActiveChief(row)) throw new Error("chief_research requires an active registered Chief thread.");
     if (!(await researchSettings()).enabled) {
-      throw new Error("chief_research is off in Chief settings → Chief researcher.");
+      throw new Error("chief_research is off: turn on the Researcher switch in Chief's plugin settings.");
     }
     return row;
   }

@@ -228,25 +228,23 @@ describe("chief_research", () => {
   });
 
   describe("switch and settings", () => {
-    test("the switch gates a Chief live, through settings and setResearchSettings, and round-trips only { enabled }", async () => {
+    test("the switch gates a Chief live, through settings and setResearchSettings, and answers only { enabled }", async () => {
       const state = await setup();
       const chief = await roleThread(state, "chief");
-      const off = "chief_research is off in Chief settings → Chief researcher.";
+      const off = "chief_research is off: turn on the Researcher switch in Chief's plugin settings.";
       await state.harness.behavior.setSettings({ plannerEnabled: true, researchEnabled: false });
       await expect(call(state, chief, ask())).rejects.toThrow(off);
       await state.harness.behavior.setSettings({ plannerEnabled: true, researchEnabled: true });
       await expect(call(state, chief, ask())).resolves.toContain("Started researcher thread");
       expect(await state.harness.behavior.callRpc("setResearchSettings", { enabled: false })).toEqual({ enabled: false });
-      expect(await state.harness.behavior.callRpc("researchConfiguration", null)).toEqual({ settings: { enabled: false } });
       await expect(call(state, chief, ask())).rejects.toThrow(off);
       expect(await state.harness.behavior.callRpc("setResearchSettings", { enabled: true })).toEqual({ enabled: true });
-      expect(await state.harness.behavior.callRpc("researchConfiguration", null)).toEqual({ settings: { enabled: true } });
       expect(callRows(state).map((row) => row.outcome)).toEqual(["error", "spawned", "error"]);
     });
 
     test("is on by default with no stored values, and the retired cap and timeout patches are rejected", async () => {
       const state = await setup();
-      expect(await state.harness.behavior.callRpc("researchConfiguration", null)).toEqual({ settings: { enabled: true } });
+      expect(await state.harness.behavior.callRpc("setResearchSettings", {})).toEqual({ enabled: true });
       await expect(state.harness.behavior.callRpc("setResearchSettings", { maxAgentCalls: 100 } as never)).rejects.toThrow();
       await expect(state.harness.behavior.callRpc("setResearchSettings", { timeoutMinutes: { survey: 5 } } as never)).rejects.toThrow();
       await expect(state.harness.behavior.callRpc("setResearchSettings", { planner: { enabled: false } } as never)).rejects.toThrow();
