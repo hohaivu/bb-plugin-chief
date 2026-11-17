@@ -100,7 +100,7 @@ export function createResearch(deps: ResearchDeps) {
     }
     if (!isActiveChief(row)) throw new Error("chief_research requires an active registered Chief thread.");
     if (!(await researchSettings()).enabled) {
-      throw new Error("chief_research is off in Chief settings → Chief researcher.");
+      throw new Error("chief_research is off: turn on the Researcher switch in Chief's plugin settings.");
     }
     return row;
   }
