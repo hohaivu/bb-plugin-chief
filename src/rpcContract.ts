@@ -1,7 +1,7 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { researchConfigurationSchema, researchModeSchema, researchSettingsPatchSchema, researchSettingsSchema } from "./research/research";
-import { modelRoleSchema, roleSchema } from "./core/roles";
+import { modelRoleSchema, roleSchema, workerKindSchema } from "./core/roles";
 import { managedThreadSchema, modelConfigurationSchema, modelSelectionSchema } from "./types";
 
 export const rpcContract = defineRpcContract({
@@ -47,6 +47,6 @@ export const rpcContract = defineRpcContract({
   },
   role: {
     input: z.object({ threadId: z.string() }).strict(),
-    output: z.object({ role: roleSchema.nullable() }).strict(),
+    output: z.object({ role: z.union([roleSchema, workerKindSchema]).nullable() }).strict(),
   },
 });
