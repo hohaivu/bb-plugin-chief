@@ -265,6 +265,7 @@ The review gate is the one review of a plan. It gives one verdict and one test r
 
 - `chief_review (workerThreadId: W)` opens the gate, or joins it. A call with both sides live names them and starts nothing. Reason: a retry must not start a second reviewer or tester.
 - The call refuses while the readiness rules of the plan refuse the wave. Those rules cover design waves, pending Spec Writers and restacks.
+- For unplanned work, the call refuses while the worker, or the task's newest Spec Writer, is not settled. Settled means ready, idle after a ready report, or complete, as in Pending writer in [plan-chains.md](plan-chains.md). Reason: not stated in the code.
 - The call refuses when the builder tree is dirty. It also refuses when the pinned commit does not contain the builder HEAD. Reason: the review must see the code that the builder has, and the Spec Writer fold may be ahead of it.
 - A refusal names the target and the recovery. The recovery is `chief_continue` of the worker to commit and push, or `chief_forge_init`. Reason: a refusal must say what Chief does next.
 
@@ -308,8 +309,9 @@ Rules:
 
 - A target whose current report number differs from its pinned number gives `escalate`. The text names the target and says that it changed after the gate pinned it. Reason: the verdict no longer covers the target.
 - A docs finding routes only to a Spec Writer repair or to escalation. Reason: only a Spec Writer changes docs.
+- A gate with two or more Spec Writers escalates a docs finding when no repair exists after the verdict. The text names each writer and the call `chief_delegate (replaces: <that writer>, kind: spec-writer)`. Reason: a finding names no owner, so the plugin picks no writer.
 - A `docsRepair` is refused while the fix run or the corrector is busy. Reason: one writable owner holds the gate at a time.
-- A `pass` needs `testsPassed` true on the tester, or on the fix run when one exists, and every docs finding settled. An approve, or a `request_changes` whose only blocking findings are docs, can pass when those docs are settled. Reason: the decision reads the test result and the docs state together.
+- A `pass` needs `testsPassed` true on the tester, or on the fix run when one exists, and docs settled. Docs are settled when no docs finding exists, or when a repair was created after the verdict and every current repair is settled. A current repair is one that no later repair replaces. An approve, or a `request_changes` whose only blocking findings are docs, can pass when those docs are settled. Reason: the decision reads the test result and the docs state together.
 - A ready fix run with `testsPassed` true settles the tester result and the code findings of the gate. Reason: the fix run ran the tests on the fixed code, so the old findings no longer decide.
 - A fix run that fails gives `chief_continue` of that run, or `escalate`. Reason: a failed run keeps its evidence, and a fresh row would lose it.
 
@@ -324,6 +326,7 @@ A `fix` decision admits one fix run. A blocked fix run with wrong-test evidence 
 - The fix run never writes, edits, skips or deletes a test, fixture or test config. It never changes `docs/`. Reason: only the tester writes tests, and only a Spec Writer changes docs.
 - The fix run reports ready only with `testsPassed` true. Reason: the decision reads this value, and a missing value must not count as a pass.
 - The fix run reports blocked only with wrong-test evidence: the test file and line, the plan or docs text that it contradicts, and the command output. Reason: product code is fixed in the run, and only a wrong test leaves the run.
+- The blocker must name the test file and line as a path, then `:` and a line number. The path ends in `.test.` or `.spec.` plus a JavaScript or TypeScript extension, for example `src/x.test.ts:12`. Without that text, the gate escalates and admits no corrector. The plugin checks only this text. Reason: the named line tells the corrector which test to edit.
 - A blocked fix run admits one corrector: `chief_delegate (replaces: <fix run>, kind: tester)`. The corrector runs when the fix run is blocked on a wrong test and no corrector exists. It fixes only the named tests, then reruns the gate's failing commands. It reports `testsPassed`.
 - The corrector's `testsPassed` true gives `pass`. A red or blocked corrector gives `escalate`. A second fix worker is never admitted. Reason: the goal allows one fix run and at most one corrector.
 
