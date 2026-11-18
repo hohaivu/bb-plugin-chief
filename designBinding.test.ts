@@ -243,9 +243,16 @@ describe("approved design binding", () => {
   });
 
   describe("chief_forge_init", () => {
+    async function approvePlan(state: State, chief: string, planner: string) {
+      await tool(state, "chief_consult", { planThreadId: planner, title: "Plan", mission: "Review this plan" }, chief);
+      const advisor = (await status(state)).threads.filter((row) => row.role === "advisor").at(-1)!;
+      await report(state, advisor.threadId, { state: "ready", result: "Plan approved.", verdict: "approve" });
+    }
+
     /** The plan's one chain head: forge_init on wave 1 returns the script text (no project path), whose BODY holds the pull request body. */
     async function forgeBody(ctx: Awaited<ReturnType<typeof approved>>, planner: string) {
       await report(ctx.state, planner, { state: "ready", result: "Waves written.", plan: [planWave(1), planWave(2)] });
+      await approvePlan(ctx.state, ctx.chief, planner);
       return tool(ctx.state, "chief_forge_init", { title: "Wave 1 work", planThreadId: planner, wave: 1 }, ctx.chief) as Promise<string>;
     }
 
@@ -269,7 +276,7 @@ describe("approved design binding", () => {
     });
 
     // Contract (plan-chains.md Pull request body: "A plan without a design keeps the pull request body it had before this change"): the BODY and ISSUE_BODY of an undesigned plan's wave 1 are the bytes 16bbc52 produced
-    // (the literal below was captured from 16bbc52 with this same plan). Regression: a design block, marker or blank line leaking into a design-less body.
+    // (the literal below was captured from 16bbc52 with the same wave headings and contracts). Regression: a design block, marker or blank line leaking into a design-less body.
     test("an undesigned plan's forge body is byte-identical to the body 16bbc52 produced", async () => {
       const state = await setup({ heavyFiles: true });
       await state.harness.behavior.setSettings({ plannerEnabled: true });
@@ -277,6 +284,7 @@ describe("approved design binding", () => {
       await state.harness.behavior.callAgentTool("chief_plan", { title: "Sessions", mission: "Plan it", undesignedReason: "small fix" }, { threadId: chief.threadId, projectId: "proj_1" });
       const planner = plannerRows(state).at(-1)!.thread_id;
       await report(state, planner, { state: "ready", result: "Waves written.", plan: [{ body: PLAN_FIXTURE }, { body: "# Wave 2\n\n## Contracts to verify\n- Wave 2 keeps its invariant" }] });
+      await approvePlan(state, chief.threadId, planner);
       const script = await tool(state, "chief_forge_init", { title: "Wave 1 work", planThreadId: planner, wave: 1 }, chief.threadId) as string;
       const body = `Tracking work for Wave 1 work.\n\n<details><summary>Plan — chain of waves 1, 2 of 2 (planner ${planner})</summary>\n\nWaves written.\n</details>\n\n<details><summary>Wave 1 of 2 — Plan</summary>\n\n### Contracts to verify\n- Totals stay non-negative\n</details>\n\n<details><summary>Wave 2 of 2 — Wave 2</summary>\n\n### Contracts to verify\n- Wave 2 keeps its invariant\n</details>`;
       expect(script).toContain(`\nBODY='${body}'\n`);
