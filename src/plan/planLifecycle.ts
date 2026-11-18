@@ -239,9 +239,10 @@ export function createPlanLifecycle<Row extends PlanRow>(
    * "already-waived" means a previous call did. Refused once the plan's Spec Writer was delegated. */
   function waiveSpecs(planThreadId: string): { outcome: SpecWaiver; waves: number[] } {
     const waves = planWavesFor(planThreadId);
+    // A plan-level bypass already ran: a retained legacy writer may now be the computed anchor, so check this first.
+    if (waves.some((wave) => wave.specsSkipped)) return { outcome: "already-waived", waves: [] };
     const anchor = planWriterWave(waves);
     if (anchor === null) {
-      if (waves.some((wave) => wave.specsSkipped)) return { outcome: "already-waived", waves: [] };
       throw new Error(`Planner ${planThreadId} has no spec: true implementation wave.`);
     }
     const writer = writersAt(planThreadId, anchor)[0];
