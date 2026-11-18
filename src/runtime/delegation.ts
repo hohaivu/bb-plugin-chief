@@ -38,7 +38,8 @@ export function createDelegation(ctx: Ctx) {
     const { chief, projectId } = await ctx.owningChief(callerThreadId);
     const revision = params.revises ? revisionInput(params.revises, chief.thread_id) : undefined;
     // A revision keeps the design its original planner was bound to; every refusal below runs before any freshen or spawn.
-    const researchThreadId = params.researchThreadId ?? (params.revises ? store.get(params.revises)?.research_thread_id ?? undefined : undefined);
+    const revised = params.revises ? store.get(params.revises) : undefined;
+    const researchThreadId = params.researchThreadId ?? revised?.research_thread_id ?? undefined;
     if (!researchThreadId && !params.revises && !params.undesignedReason && (await ctx.researchSettings()).enabled) {
       throw new Error("chief_plan needs researchThreadId (an approved chief_research design: true) or undesignedReason.");
     }
@@ -54,7 +55,7 @@ export function createDelegation(ctx: Ctx) {
       design = { researcherThreadId: researchThreadId, designPath: bound.designPath, factsPath: bound.factsPath };
     }
     // A revision stays on the branch its original planner read.
-    const branch = params.branch ?? (params.revises ? store.get(params.revises)?.branch ?? undefined : undefined);
+    const branch = params.branch ?? revised?.branch ?? undefined;
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: "planner", hostId: await ctx.projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = plannerBrief({
