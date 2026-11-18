@@ -432,11 +432,20 @@ export async function legacyWave(state: Awaited<ReturnType<typeof setup>>, chief
   return { threadId };
 }
 
-// chief_review answers `Started|Using existing “<title>” in thread <id>.`: the retired `bb chief review` CLI answered JSON with these fields.
+// chief_review answers `Started|Using existing “<title>” in thread <id>.` for a branch review; the retired `bb chief review` CLI answered JSON with these fields.
 export async function chiefReview(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, params: { workerThreadId?: string; branch?: string; pullRequest?: string }) {
   const text = await state.harness.behavior.callAgentTool("chief_review", params, { threadId: chiefThreadId, projectId: "proj_1" }) as string;
+  // A worker's gate answers `Review gate <key> pinned ... Started reviewer <id> and tester <id>.` or `The review gate <key> already runs reviewer <id> and tester <id>; nothing started.`
+  // threadId is the gate's reviewer, testerThreadId its tester (null for a branch review); created is true when a reviewer was started.
+  const gate = /(?:Started reviewer (\S+?)(?: and tester (\S+?))?\.|already runs reviewer (\S+) and tester (\S+?);|Started tester (\S+?)\.)/.exec(text);
+  if (gate) {
+    const reviewer = gate[1] ?? gate[3];
+    const threadId = reviewer ?? (state.db.prepare("SELECT reviewer_thread_id FROM review_gates WHERE chief_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(chiefThreadId) as { reviewer_thread_id: string }).reviewer_thread_id;
+    const title = (state.db.prepare("SELECT title FROM managed_threads WHERE thread_id=?").get(threadId) as { title: string }).title;
+    return { text, title, threadId, testerThreadId: gate[2] ?? gate[4] ?? gate[5] ?? null, created: gate[1] != null };
+  }
   const [, title, threadId] = /^(?:Started|Using existing) “(.*)” in thread (\S+?)\./.exec(text)!;
-  return { text, title: title!, threadId: threadId!, created: text.startsWith("Started") };
+  return { text, title: title!, threadId: threadId!, testerThreadId: null as string | null, created: text.startsWith("Started") };
 }
 
 // A reviewer's ready report must carry findings: [] for an approve and a blocking entry for request_changes.
