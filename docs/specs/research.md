@@ -209,11 +209,11 @@ After the user approves a design, `chief_plan` binds that design to the planner.
 
 ### Inputs
 
-- `researchThreadId` names the design researcher. Chief passes it with a one-line mission. Reason: the design comes from that researcher's thread.
-- `undesignedReason` (1 to 300 characters) names why the work needs no design. Reason: a small fix may skip the design, and the skip stays on record.
-- Neither input may appear with the other, and neither may appear with `revises`. Reason: one plan has one design source, and a revision inherits it.
+- `researchThreadId` (CLI `--research-thread thr_id`) names the design researcher. Chief passes it with a one-line mission. Reason: the design comes from that researcher's thread.
+- `undesignedReason` (CLI `--undesigned-reason "…"`) names why the work needs no design, in 1 to 300 characters. Reason: a small fix may skip the design, and the skip stays on record.
+- Neither input may appear with the other, and neither may appear with `revises`. The CLI flags follow the same rule. Reason: one plan has one design source, and a revision inherits it.
 - With research on, a plan with no `researchThreadId` and no `revises` needs `undesignedReason`. Reason: each plan records its design or its skip.
-- With research off, neither input is required. Reason: the design flow is off.
+- With research off, neither input is required. When `undesignedReason` is given, the server accepts it and renders it in the brief. Reason: the design flow is off, but the skip still stays on record.
 
 ### Refusals
 
