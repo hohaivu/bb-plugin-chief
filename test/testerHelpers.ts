@@ -94,6 +94,8 @@ export async function openGate(state: State, chiefThreadId: string, targetId: st
   await tool(state, "chief_review", { workerThreadId: targetId }, chiefThreadId);
   return gateOf(state, targetId)!;
 }
+/** The spawn record (prompt, environment) of thread `threadId`: thr_<n> is the n-th spawn. */
+export const spawnOf = (state: State, threadId: string) => state.spawned[Number(threadId.slice("thr_".length)) - 1];
 /** The gate tester reports ready (idle) with its test result. */
 export async function testerReady(state: State, gate: Gate, passed: boolean, result = passed ? "Every test passes." : "Tests fail.\n\n## Failing tests\n- totals.test.ts:3 — `npx vitest run totals.test.ts`, exit 1: totals go negative (totals.ts:4)") {
   await report(state, gate.tester_thread_id, { state: "ready", result, testsPassed: passed });
