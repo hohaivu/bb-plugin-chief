@@ -36,6 +36,8 @@ export interface ReportIntakeAdapters {
   /** Hands the files an accepted report wrote to the tracker sync. Called after the commit and before the alert; never awaited, never throws. */
   trackFiles(row: ManagedRow, files: { name: string; content: string }[]): void;
   warn(message: string): void;
+  /** nextAction.ts planAdvisors: the plan's in-flight advisor, if any. */
+  planAdvisors(plannerId: string): { inFlight?: ManagedRow };
   /** One chief_events row, in the caller's transaction (observe.event); unset, nothing is ledgered. */
   event?(kind: string, row: Partial<ManagedRow>, detail?: string | null): void;
 }
@@ -477,6 +479,12 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
     const verdict = params.state === "ready" ? params.verdict ?? null : null;
     const plannerReady = row.role === "planner" && params.state === "ready";
+    // A replacement plan would drop the live advisor's gate: refuse it before the plan files or the state change.
+    const advisorBusy = () => {
+      const reviewing = plannerReady && planInput ? adapters.planAdvisors(threadId).inFlight : undefined;
+      if (reviewing) throw new Error(`chief_report was not saved: plan ${threadId} is in its one advisor review (${reviewing.thread_id}); wait for its report before submitting a new plan.`);
+    };
+    advisorBusy();
     const planWaves = plannerReady && planInput ? await writePlan(threadId, row.project_id, planInput) : null;
     const scheduledWaves = planWaves && planInput
       ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof planInput === "string" ? planInput : planInput[index]!.body)!,
@@ -519,6 +527,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     // report_seq is reserved here, so the per-report file names below never collide.
     let lessonId: number | null = null;
     const { report_seq: seq, result_rev: resultRev } = store.batch(() => {
+      advisorBusy(); // again at the state write: an advisor may have launched while the plan files were written
       const reserved = store.reserveReport({
         threadId, state: params.state, result: params.result ?? null, summary: params.summary ?? null,
         blocker: params.state === "blocked" ? params.blocker ?? null : null,
@@ -535,7 +544,8 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         if (params.state === "ready" && verdict === "request_changes") event?.("plan_review_changes", row);
       }
       if (plannerReady && scheduledWaves) {
-        store.setPlanReview(threadId, null);
+        // Keep a decided review (approved/changes); reset only an unset or stale required one.
+        if (row.plan_review == null || row.plan_review === "required") store.setPlanReview(threadId, null);
         const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }

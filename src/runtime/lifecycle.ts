@@ -59,6 +59,7 @@ export function createLifecycle(ctx: Ctx) {
       ?? (current.role === "researcher" ? "Research is advisory: use its findings, check anything doubtful against the code, and note any failures or partial answers it reports. Nothing to review or complete." : null)
       ?? "Inspect live evidence with chief_inspect and choose: continue, review, complete, or escalate to the user.",
     warn: (message) => bb.log.warn(message),
+    planAdvisors: (plannerId) => ctx.planAdvisors(plannerId),
     event: ctx.observe.event,
   });
 
