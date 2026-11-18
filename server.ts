@@ -35,7 +35,6 @@ import { registerStopTool } from "./src/tools/stop";
 import { registerReviewTool } from "./src/tools/review";
 import { registerCompleteTool } from "./src/tools/complete";
 import { registerOwnerApprovalTool } from "./src/tools/ownerApproval";
-import { registerSkipTestsTool } from "./src/tools/skipTests";
 import { registerSkipSpecsTool } from "./src/tools/skipSpecs";
 import { registerEscalateTool } from "./src/tools/escalate";
 import { registerSyncTool } from "./src/tools/sync";
@@ -87,7 +86,6 @@ export default async function plugin(bb: BbPluginApi) {
   registerReviewTool(ctx);
   registerCompleteTool(ctx);
   registerOwnerApprovalTool(ctx);
-  registerSkipTestsTool(ctx);
   registerSkipSpecsTool(ctx);
   registerEscalateTool(ctx);
   registerSyncTool(ctx);

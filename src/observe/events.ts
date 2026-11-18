@@ -15,7 +15,7 @@ export interface EventRow {
 
 /** Ledgered here and never sent to Sentry. */
 const LOCAL_ONLY = new Set(["nudge"]);
-const WARNING = new Set(["request_changes", "plan_review_changes", "review_skipped", "tests_skipped", "specs_skipped", "override", "stopped"]);
+const WARNING = new Set(["request_changes", "plan_review_changes", "review_skipped", "specs_skipped", "override", "stopped"]);
 const newEventId = () => randomBytes(16).toString("hex");
 
 /** One local ledger of failures, review outcomes and nudges (chief_events), mirrored to Sentry when a DSN is set.

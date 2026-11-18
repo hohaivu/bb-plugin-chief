@@ -244,18 +244,12 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     },
 
     /** chief_complete. A replaced result drops the summary and report file that described the old one. cleanupApprovedAt is written in the same UPDATE, so completion and cleanup eligibility never split. */
-    markComplete(args: { status: string; result: string | null; note: string | null; now: number; threadId: string; cleanupApprovedAt: number | null; reviewSkipped: string | null; testsSkipped: string | null }) {
+    markComplete(args: { status: string; result: string | null; note: string | null; now: number; threadId: string; cleanupApprovedAt: number | null; reviewSkipped: string | null }) {
       db.prepare(`UPDATE managed_threads SET state='complete', status=@status,
       result=CASE WHEN @note IS NULL THEN COALESCE(@result, result) ELSE COALESCE(@result, result, '') || @note END,
       summary=CASE WHEN @result IS NULL THEN summary END, report_path=CASE WHEN @result IS NULL THEN report_path END,
       result_rev=result_rev + (@result IS NOT NULL),
-      blocker=NULL, recommendation=NULL, active_since=NULL, cleanup_approved_at=@cleanupApprovedAt, review_skipped=@reviewSkipped, tests_skipped=@testsSkipped, updated_at=@now WHERE thread_id=@threadId`).run(args);
-      wrote();
-    },
-
-    /** chief_review retestSkipped: Chief's reason for reviewing this fix without the tester rerun it owed. */
-    setRetestSkipped(threadId: string, reason: string, now: number) {
-      db.prepare(`UPDATE managed_threads SET retest_skipped=?, updated_at=? WHERE thread_id=?`).run(reason, now, threadId);
+      blocker=NULL, recommendation=NULL, active_since=NULL, cleanup_approved_at=@cleanupApprovedAt, review_skipped=@reviewSkipped, updated_at=@now WHERE thread_id=@threadId`).run(args);
       wrote();
     },
 
@@ -297,9 +291,9 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       db.prepare(`UPDATE managed_threads SET plan_review=? WHERE thread_id=? AND (plan_review IS NULL OR plan_review='required')`).run(value, threadId);
       wrote();
     },
-    /** chief_skip_tests and chief_skip_specs: sets the given waiver reasons on one wave in plan_waves, in one write,
+    /** chief_skip_specs: sets the given waiver reason on one wave in plan_waves, in one write,
      * and touches no other field. */
-    skipWave(plannerThreadId: string, wave: number, fields: { testsSkipped?: string; specsSkipped?: string }) {
+    skipWave(plannerThreadId: string, wave: number, fields: { specsSkipped: string }) {
       db.transaction(() => {
         const row = db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(plannerThreadId) as { plan_waves: string | null } | undefined;
         const waves = JSON.parse(row?.plan_waves ?? "[]") as Record<string, unknown>[];

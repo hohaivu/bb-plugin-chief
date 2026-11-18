@@ -11,7 +11,7 @@ export const BUILT_IN_RULES = `# Chief operating rules
 /** The Chief tools and their CLI twins (`chief_<command>`) that refuse a Coordinator at execution time. */
 export const COORDINATOR_REFUSED = new Set([
   "chief_plan", "chief_consult", "chief_delegate", "chief_forge_init", "chief_review", "chief_inspect", "chief_continue", "chief_stop",
-  "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research",
+  "chief_complete", "chief_owner_approval", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research",
 ]);
 
 export const coordinatorRefusal = (what: string) => `${what} is not available to a Coordinator: it runs no planner, worker, reviewer, tester, advisor or researcher. Ask the child Chief that owns the work.`;

@@ -42,7 +42,7 @@ export interface ReportIntakeAdapters {
 
 export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 
-type WaveInput = { body: string; dependsOn?: number[]; stackOn?: number; design?: boolean; test?: boolean; spec?: boolean; feature?: boolean; reshape?: boolean };
+type WaveInput = { body: string; dependsOn?: number[]; stackOn?: number; design?: boolean; spec?: boolean; feature?: boolean; reshape?: boolean };
 
 /** One Markdown bullet per finding of the given severity, never clipped. */
 export function findingLines(list: ReportFinding[], severity: ReportFinding["severity"]) {
@@ -231,7 +231,7 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, pa
     if (row.role !== "planner") errors.push(`plan is only for a planner's ready report (role is ${row.role}); remove it.`);
     errors.push(...checkPlan(plan));
   } else if (row.role === "planner" && ready) {
-    errors.push("plan is missing; a planner's ready report requires the full plan body, as an array of {body, dependsOn?, design?, test?}.");
+    errors.push("plan is missing; a planner's ready report requires the full plan body, as a string or an array of {body, dependsOn?, design?}.");
   }
   return errors;
 }
@@ -242,9 +242,8 @@ export function checkPlan(plan: string | unknown[]): string[] {
   const errors: string[] = [];
   const num = (n: number) => n.toLocaleString("en-US");
   const kind = (value: unknown) => value === null ? "null" : Array.isArray(value) ? "an array" : typeof value === "object" ? "an object" : `a ${typeof value}`;
-  if (Array.isArray(plan) && !plan.length) return [`plan is an empty array; pass an array of {body, dependsOn?, design?, test?} with 2 to ${MAX_WAVES} waves.`];
+  if (Array.isArray(plan) && !plan.length) return [`plan is an empty array; pass a string or an array of {body, dependsOn?, design?} with 1 to ${MAX_WAVES} waves.`];
   const multi = typeof plan !== "string";
-  if (!multi) errors.push(`plan needs at least two waves: implementation wave(s), then a test wave (test: true) ending each chain; pass an array of {body, dependsOn?, design?, test?}.`);
   const items: unknown[] = multi ? plan : [{ body: plan }];
   if (items.length > MAX_WAVES) errors.push(`plan has ${items.length} waves; max ${MAX_WAVES}. Merge waves.`);
   // Per wave: its trimmed body (undefined when missing or not a string), the legal earlier waves it may build on
@@ -253,15 +252,14 @@ export function checkPlan(plan: string | unknown[]): string[] {
   const maybeParents: (number[] | "any")[] = [];
   const parents: (number | null | undefined)[] = [];
   const designs: boolean[] = [];
-  const tests: boolean[] = [];
   items.forEach((item, index) => {
     const n = index + 1;
     if (typeof item !== "object" || item === null || Array.isArray(item)) {
-      errors.push(`plan wave ${n} is ${kind(item)}, not an object; use {body, dependsOn?, design?, test?}.`);
-      bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false); tests.push(false);
+      errors.push(`plan wave ${n} is ${kind(item)}, not an object; use {body, dependsOn?, design?}.`);
+      bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false);
       return;
     }
-    const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown; test?: unknown; spec?: unknown; feature?: unknown; reshape?: unknown };
+    const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown; spec?: unknown; feature?: unknown; reshape?: unknown };
     const name = multi ? `plan wave ${n} body` : "plan";
     const body = typeof wave.body === "string" ? wave.body.trim() : undefined;
     bodies.push(body);
@@ -272,23 +270,19 @@ export function checkPlan(plan: string | unknown[]): string[] {
       errors.push(`plan wave ${n} design is ${JSON.stringify(wave.design)} (${typeof wave.design}); allowed true or false. Send a boolean, or drop design.`);
     }
     designs.push(wave.design === true);
-    if (wave.test !== undefined && typeof wave.test !== "boolean") {
-      errors.push(`plan wave ${n} test is ${JSON.stringify(wave.test)} (${typeof wave.test}); allowed true or false. Send a boolean, or drop test.`);
-    }
-    tests.push(wave.test === true);
-    if (wave.design === true && wave.test === true) errors.push(`plan wave ${n} is both design: true and test: true; a wave is one or the other.`);
+    if ("test" in wave) errors.push(`plan wave ${n}: test waves are gone; the tester runs once in the review gate after every wave. Drop test.`);
     if (wave.spec !== undefined && typeof wave.spec !== "boolean") {
       errors.push(`plan wave ${n} spec is ${JSON.stringify(wave.spec)} (${typeof wave.spec}); allowed true or false. Send a boolean, or drop spec.`);
-    } else if (wave.spec === true && (wave.test === true || wave.design === true)) {
-      errors.push(`plan wave ${n} is spec: true and ${wave.test === true ? "test" : "design"}: true; spec marks an implementation wave only.`);
+    } else if (wave.spec === true && wave.design === true) {
+      errors.push(`plan wave ${n} is spec: true and design: true; spec marks an implementation wave only.`);
     } else if (wave.spec === true && body && !/^[ \t]*#{1,6}[ \t]+spec delta/im.test(body)) {
       errors.push(`plan wave ${n} is spec: true but lacks a "## Spec delta" Markdown heading naming the docs the Spec Writer changes; add one, or drop spec.`);
     }
     for (const flag of ["feature", "reshape"] as const) {
       if (wave[flag] !== undefined && typeof wave[flag] !== "boolean") {
         errors.push(`plan wave ${n} ${flag} is ${JSON.stringify(wave[flag])} (${typeof wave[flag]}); allowed true or false. Send a boolean, or drop ${flag}.`);
-      } else if (wave[flag] === true && (wave.test === true || wave.design === true)) {
-        errors.push(`plan wave ${n} is ${flag}: true and ${wave.test === true ? "test" : "design"}: true; feature and reshape mark an implementation wave only.`);
+      } else if (wave[flag] === true && wave.design === true) {
+        errors.push(`plan wave ${n} is ${flag}: true and design: true; feature and reshape mark an implementation wave only.`);
       }
     }
     if (body && hasSpecBaseline(body) && wave.spec !== true) {
@@ -328,18 +322,6 @@ export function checkPlan(plan: string | unknown[]): string[] {
       errors.push(`plan wave ${n} is design: true but no wave builds on it; follow it with the wave that implements it (dependsOn [${n}] or the next wave), or drop design.`);
     }
   });
-  // Every chain ends with a test wave: a tip no later wave could build on must be test: true. A test wave is a tip
-  // with a parent that is an implementation wave (neither design nor test). Skipped where dependsOn is invalid.
-  if (multi) items.forEach((_, index) => {
-    const n = index + 1;
-    const tip = maybeParents.every((candidates, other) => other <= index || (candidates !== "any" && !candidates.includes(n)));
-    if (tip && !tests[index] && !designs[index]) errors.push(`plan wave ${n} ends a chain but is not test: true; follow it with a test wave (test: true, dependsOn [${n}]) that tests it.`);
-    if (!tests[index]) return;
-    if (parents.some((parent, other) => other > index && parent === n)) errors.push(`plan wave ${n} is test: true but a later wave builds on it; a test wave ends its chain.`);
-    const parent = parents[index];
-    if (parent === null) errors.push(`plan wave ${n} is test: true but starts a chain; set dependsOn [k] with k the chain's last implementation wave.`);
-    else if (parent !== undefined && (designs[parent - 1] || tests[parent - 1])) errors.push(`plan wave ${n} is test: true but builds on ${designs[parent - 1] ? "design" : "test"} wave ${parent}; build it on the chain's last implementation wave.`);
-  });
   // stackOn: an earlier implementation wave, on another chain, that a chain head builds on. Skipped on a wave whose dependsOn is invalid.
   items.forEach((item, index) => {
     const stackOn = typeof item === "object" && item !== null ? (item as { stackOn?: unknown }).stackOn : undefined;
@@ -350,7 +332,7 @@ export function checkPlan(plan: string | unknown[]): string[] {
     else if (stackOn < 1 || stackOn >= n) bad("not an earlier wave", n === 1 ? "wave 1 stacks on nothing; drop stackOn." : `use one wave from 1 to ${n - 1}.`);
     else {
       if (parents[index] !== undefined && parents[index] !== null) bad("but wave " + n + " is not a chain head", "stackOn goes on a wave with dependsOn [].");
-      if (tests[stackOn - 1] || designs[stackOn - 1]) bad(`${tests[stackOn - 1] ? "test" : "design"} wave ${stackOn}`, "stack on an implementation wave.");
+      if (designs[stackOn - 1]) bad(`design wave ${stackOn}`, "stack on an implementation wave.");
     }
   });
   const taken = new Set<number>();
@@ -560,7 +542,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     // The launch row may have landed while the lookup awaited; keep it, as a recovery candidate has no PR or branch.
     if (found.pending && !store.get(threadId)) store.insert(found.pending);
     const row = store.get(threadId)!;
-    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, test?, spec?, feature?, reshape?}[], with bodies not yet trimmed if JSON-decoded.
+    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, spec?, feature?, reshape?}[], with bodies not yet trimmed if JSON-decoded.
     const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
     const verdict = params.state === "ready" ? params.verdict ?? null : null;
@@ -572,7 +554,6 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         ...(typeof planInput !== "string" && planInput[index]!.dependsOn ? { dependsOn: planInput[index]!.dependsOn } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.stackOn !== undefined ? { stackOn: planInput[index]!.stackOn } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}),
-        ...(typeof planInput !== "string" && planInput[index]!.test ? { test: true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.spec ? { spec: true } : {}),
         ...(typeof planInput !== "string" ? { feature: planInput[index]!.feature === true, reshape: planInput[index]!.reshape === true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.spec && hasSpecBaseline(planInput[index]!.body) ? { baseline: true } : {}) }))
@@ -624,7 +605,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         if (params.state === "ready" && verdict === "request_changes") event?.("plan_review_changes", row);
       }
       if (plannerReady && scheduledWaves) {
-        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.test && !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
+        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
         const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }

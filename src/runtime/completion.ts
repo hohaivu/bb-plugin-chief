@@ -8,7 +8,7 @@ import type { Ctx } from "./context";
 import { isWriter } from "../plan/waveSchedule";
 
 export function createCompletion(ctx: Ctx) {
-  const { bb, chainOwner, isDesignWave, isTestWave, latestWorker, ledger, planBaseOf, planWavesFor, progress, sideLane, store, taskWriters } = ctx;
+  const { bb, chainOwner, isDesignWave, ledger, planBaseOf, planWavesFor, progress, sideLane, store, taskWriters } = ctx;
   /** Why a worker may not complete yet, or null when its newest review covers what it would ship.
    * With a pull request the verdict must be an approve given for the PR head the forge reports now;
    * without one it must be an approve for the worker's current report. A design-wave worker needs the owner's recorded approval instead.
@@ -61,7 +61,7 @@ export function createCompletion(ctx: Ctx) {
 
   /** override is the one bypass of a worker's review requirement; its reason is recorded in the stored result.
    * skipReview completes a worker without a review by Chief's judgment: refused only for invalid state, never cleaned up. */
-  async function markComplete(threadId: string, result?: string, override?: string, skipReview?: string, testsSkipped?: string) {
+  async function markComplete(threadId: string, result?: string, override?: string, skipReview?: string) {
     const row = store.get(threadId);
     if (!row || row.role === "chief") throw new Error(`No managed worker or reviewer ${threadId}.`);
     const live = await bb.sdk.threads.get({ threadId });
@@ -71,28 +71,10 @@ export function createCompletion(ctx: Ctx) {
     let overrideReason: string | null = null;
     let approved = false;
     let reviewSkipped: string | null = null;
-    let testsSkippedReason: string | null = null;
     let docsNote: string | null = null;
-    // An implementation-lane Spec Writer never counts as done work: its worker (or, on a test wave, the rerun tester) follows. Only a waived test wave ends on one. A side-lane writer completes like a worker.
+    // An implementation-lane Spec Writer never counts as done work: its worker follows. A side-lane writer completes like a worker.
     if (row.role === "worker" && isWriter(row.kind) && !sideLane(row)) {
-      const waves = planWavesFor(row.plan_thread_id);
-      const testWave = row.plan_wave != null ? waves[row.plan_wave - 1] : undefined;
-      if (!(testWave?.test && testWave.testsSkipped)) {
-        throw new Error(`Refusing to complete ${threadId}: a Spec Writer's docs need ${testWave?.test
-          ? `a test rerun — chief_delegate (replaces: ${threadId}, kind: tester)`
-          : `their worker — chief_delegate (${row.plan_thread_id ? `planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, ` : ""}replaces: ${threadId}, kind: worker)`}.`);
-      }
-    }
-    if (testsSkipped !== undefined) {
-      const reason = overrideSchema.safeParse(testsSkipped);
-      if (!reason.success || !reason.data) throw new Error(`Refusing to complete ${threadId}: testsSkipped needs a non-empty reason of at most the allowed length.`);
-      if (row.role !== "worker") throw new Error(`Refusing to complete ${threadId}: testsSkipped is only for a worker.`);
-      if (planWavesFor(row.plan_thread_id).some((wave) => wave.test)) {
-        throw new Error(`Refusing to complete ${threadId}: its plan has a test wave; go without it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave, reason), not testsSkipped.`);
-      }
-      testsSkippedReason = reason.data;
-    } else if (row.role === "worker" && !row.plan_thread_id && !ledger.taskChain(threadId).some((id) => store.get(id)?.kind === "tester")) {
-      throw new Error(`No tester ran on this work: delegate one first — chief_delegate (replaces: ${threadId}, kind: tester) — or pass testsSkipped: your reason.`);
+      throw new Error(`Refusing to complete ${threadId}: a Spec Writer's docs need their worker — chief_delegate (${row.plan_thread_id ? `planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, ` : ""}replaces: ${threadId}, kind: worker).`);
     }
     if (skipReview !== undefined) {
       const refuse = (why: string): never => { throw new Error(`Refusing to skip the review of ${threadId}: ${why}`); };
@@ -101,10 +83,7 @@ export function createCompletion(ctx: Ctx) {
       if (row.role !== "worker") refuse("only a worker's review can be skipped.");
       if (override !== undefined) refuse("pass skipReview or override, not both.");
       if (isDesignWave(row)) refuse("design-only work is approved by the owner only: record it with chief_owner_approval, or pass override.");
-      // A waived test wave is Chief's recorded decision to accept that branch, so its blocked report also counts.
-      const waived = row.last_report_state === "blocked" && isTestWave(row) && !!planWavesFor(row.plan_thread_id)[row.plan_wave! - 1]!.testsSkipped
-        && latestWorker(row.plan_thread_id!, row.plan_wave!)?.thread_id === row.thread_id;
-      if (row.last_report_state !== "ready" && !waived) refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
+      if (row.last_report_state !== "ready") refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
       const busy = ledger.busyReview(threadId);
       if (busy) refuse(`review ${busy.thread_id} is still running; wait for its verdict.`);
       docsNote = await docsGate(row, refuse);
@@ -125,10 +104,9 @@ export function createCompletion(ctx: Ctx) {
     // Before the write that queues cleanup, so cleanup cannot run ahead of the evidence. Never throws, never refuses completion.
     if (row.role === "worker") await ctx.snapshotCompletion(row);
     const now = Date.now();
-    store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && ctx.state.cleanupActive ? now : null, reviewSkipped, testsSkipped: testsSkippedReason });
+    store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && ctx.state.cleanupActive ? now : null, reviewSkipped });
     const completed = store.get(threadId)!;
     if (reviewSkipped) ctx.observe.event("review_skipped", completed, reviewSkipped);
-    if (testsSkippedReason) ctx.observe.event("tests_skipped", completed, testsSkippedReason);
     if (overrideReason) ctx.observe.event("override", completed, overrideReason);
     ctx.enqueueCompletionComment(completed, overrideReason);
     const cleanup: "queued" | "override" | "unapproved" | "off" | null = row.role !== "worker" ? null

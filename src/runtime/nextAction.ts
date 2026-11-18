@@ -1,4 +1,4 @@
-import { type RepairTarget, type RetestDebt } from "../plan/planProgress";
+import { type RepairTarget } from "../plan/planProgress";
 import { reviewEngine } from "../review/prAgent";
 import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
 import { createReviewStart } from "../review/reviewStart";
@@ -18,12 +18,7 @@ const REVIEW_IDLE_POLL_MS = 2_000;
 const DESIGN_REVIEW_REFUSAL = "Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.";
 
 export function createNextAction(ctx: Ctx) {
-  const { bb, db, isTestWave, ledger, onSpecChain, planWavesFor, progress, reviewTargetsFor, schedule, latestSideWriter, settings, specWave, specWriters, store } = ctx;
-  /** The next call once a delegated test wave is waived: its latest worker still owns the branch. */
-  function waivedLine(owner: ManagedRow): string {
-    return `Tests on wave ${owner.plan_wave} waived. ${owner.thread_id} still owns the branch: review it — chief_review (workerThreadId: ${owner.thread_id}) — or complete it without one — chief_complete (threadId: ${owner.thread_id}, skipReview: your reason).`;
-  }
-
+  const { bb, db, ledger, onSpecChain, planWavesFor, progress, reviewTargetsFor, schedule, latestSideWriter, settings, specWave, specWriters, store } = ctx;
   /** Wave n of a plan is a spec wave: the sentence saying its default call spawns its Spec Writer, else "". */
   function specFirstLine(planThreadId: string | null, waves: PlanWave[], n: number): string {
     return planThreadId && specWave(waves, n)
@@ -40,57 +35,26 @@ export function createNextAction(ctx: Ctx) {
   /** A blocked worker's in-place route: an environment or permission blocker is answered with the allowed step, not a fresh worker. */
   const inPlaceLine = (row: ManagedRow) => `If the blocker is an environment or permission problem (a blocked command, a dirty build-cache file, a needed permission), not a code, test or spec defect: answer it in place with chief_continue (threadId: ${row.thread_id}, instruction: the allowed step, at most ${MAX_NUDGE_LENGTH} characters); it keeps its worktree.`;
 
-  /** The evidence-only rerun option after a tester call: offered only when the chain's newest ready tester has a complete receipt. */
-  function evidenceOption(threadId: string, args: string): string {
-    const prior = progress.priorReceipt(threadId);
-    return prior?.receipt
-      ? ` Its prior tester ${prior.tester.thread_id} has a complete receipt (Tested commit ${prior.receipt.testedCommit}): if no test needs to change, rerun evidence-only instead — chief_delegate (${args}, kind: tester, evidenceOnly: true) with \`Expected head: <branch tip after the fix and any intended fold>\` in the mission.`
-      : " No complete tester receipt on this chain: rerun in normal Tester mode (no evidenceOnly).";
-  }
-
-  /** One sentence per owed tester rerun, then the waiver. The one renderer of retest debt: the review refusal and the ready alert read it. */
-  function retestLines(row: ManagedRow, debts: RetestDebt<ManagedRow>[]): string {
-    const lines = debts.map(({ fix, tester, route }) => {
-      switch (route.kind) {
-        case "tester": {
-          const args = `${route.wave === undefined ? "" : `planThreadId: ${fix.plan_thread_id}, wave: ${route.wave}, `}replaces: ${route.replaces.thread_id}`;
-          const call = `chief_delegate (${args}, kind: tester)`;
-          const productFirst = tester && tester.thread_id === route.replaces.thread_id && ["blocked", "failed"].includes(tester.state)
-            ? ` Or, if ${tester.thread_id}'s blocked report shows a product bug, fix it first — chief_delegate (replaces: ${tester.thread_id}, kind: worker).` : "";
-          return `${fix.thread_id} changed code after the review's rejection and no tester started after it has reported ready: rerun the tests — ${call}.${productFirst}${evidenceOption(route.replaces.thread_id, args)}`;
-        }
-        case "wait": return `Tester ${route.tester.thread_id} (${route.tester.state}) is rerunning the tests after ${fix.thread_id}: wait for its ready report.`;
-        case "workerFirst": return `Spec Writer ${route.replaces.thread_id} owns the branch: hand off to a worker first — chief_delegate (replaces: ${route.replaces.thread_id}, kind: worker) — then rerun the tests with kind: tester.`;
-        case "none": return "Restack the chain first; its restacked tester reruns the tests.";
-      }
-    });
-    return `${lines.join(" ")} To review without the rerun, record why: chief_review (workerThreadId: ${row.thread_id}, retestSkipped: "<reason>") — it waives every rerun listed here.`;
-  }
-
-  /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready.
-   * retestWaived: Chief recorded why it reviews without the owed tester reruns. */
-  function reviewRefusal(worker: ManagedRow, retestWaived = false): string | null {
-    const block = progress.reviewBlock(worker, retestWaived);
+  /** Why a worker may not start a review now, or null. The review of a plan runs once, after every wave is ready. */
+  function reviewRefusal(worker: ManagedRow): string | null {
+    const block = progress.reviewBlock(worker);
     if (!block) return null;
     switch (block.kind) {
       case "design": return DESIGN_REVIEW_REFUSAL;
       case "superseded":
         return `${worker.thread_id} is superseded by ${block.latest.thread_id}. The plan's one review starts from the latest workers: chief_review (workerThreadId: ${block.latest.thread_id}) once every wave is ready.`;
       case "restack":
-        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} is stacked on it and still builds on the old head: restack it first — chief_delegate (replaces: ${block.successor.thread_id}${block.waves[block.next - 1]!.test ? ", kind: tester" : ""}).`;
+        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} is stacked on it and still builds on the old head: restack it first — chief_delegate (replaces: ${block.successor.thread_id}).`;
       case "restacked":
         return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} was already restacked as ${block.successor.thread_id}; start the plan's one review from the latest chain-tip worker once every wave is ready.`;
       case "betweenWaves":
-        return block.waves[block.next - 1]!.test
-          ? `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate test wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, reason).`
-          : `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}).${specFirstLine(worker.plan_thread_id, block.waves, block.next)}`;
+        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}).${specFirstLine(worker.plan_thread_id, block.waves, block.next)}`;
       case "sideWriter":
         return `${worker.thread_id} is a Spec Writer: it never starts a review. The plan's one review starts from an implementation chain tip (chief_review) once every wave and every Spec Writer is ready.`;
       case "writers":
         return `One review covers the whole plan once every Spec Writer is ready; ${block.writers.map(({ wave, writer }) => writer ? `wave ${wave}'s ${writer.thread_id} (${writer.state})` : `wave ${wave}'s Spec Writer is not delegated yet — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${wave}, kind: spec-writer), or record why not with chief_skip_specs`).join(", ")} ${block.writers.length > 1 ? "are" : "is"} not ready. Wait for their ready reports, then start the review.`;
       case "pending":
         return `One review covers the whole plan once every wave is ready; wave(s) ${block.pending.join(", ")} of ${block.waves.length} are not ready yet. Wait for their ready reports (delegate any wave not delegated yet), then start the review.`;
-      case "retest": return `Review refused: ${retestLines(worker, block.debts)}`;
     }
   }
 
@@ -125,26 +89,15 @@ export function createNextAction(ctx: Ctx) {
       case "designDone":
         return `Design wave ${row.plan_wave} of ${step.waves.length} is ready and nothing builds on it: its artboards need the owner's approval. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words), then chief_complete (threadId: ${row.thread_id}). Never chief_review it.`;
       case "restack":
-        return `Wave ${row.plan_wave} of ${step.waves.length} is ready after its fix. Wave ${step.next} is stacked on it and still builds on the old head: once this worker is idle, restack it — chief_delegate (replaces: ${step.successor.thread_id}${step.waves[step.next - 1]!.test ? ", kind: tester" : ""}), with a mission to rebase ${step.successor.branch ?? `wave ${step.next}'s branch`} onto ${row.branch ?? "this branch"} and fix what the rebase breaks; the review's findings are attached automatically. Do not review between waves.`;
+        return `Wave ${row.plan_wave} of ${step.waves.length} is ready after its fix. Wave ${step.next} is stacked on it and still builds on the old head: once this worker is idle, restack it — chief_delegate (replaces: ${step.successor.thread_id}), with a mission to rebase ${step.successor.branch ?? `wave ${step.next}'s branch`} onto ${row.branch ?? "this branch"} and fix what the rebase breaks; the review's findings are attached automatically. Do not review between waves.`;
       case "nextWave":
-        if (step.waves[step.next - 1]!.test) {
-          return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate test wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, reason). Do not review between waves.`;
-        }
         return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}).${specFirstLine(row.plan_thread_id, step.waves, step.next)} Do not review between waves.`;
       case "unplannedWriter":
         return `Spec Writer ${row.thread_id} committed the docs. Once it is idle, delegate the worker to implement against them: chief_delegate (replaces: ${row.thread_id}, kind: worker${row.unplanned_reason ? `, unplannedReason: ${row.unplanned_reason}` : ""}). Do not review yet.`;
       case "waitWriters":
         return `Wave ${row.plan_wave} of ${step.waves.length} is ready; the Spec Writer of ${step.pending.map(({ wave, writer }) => writer ? `wave ${wave} (${writer.thread_id}, ${writer.state})` : `wave ${wave} (not delegated)`).join(", ")} is not ready yet. Wait for its ready report: the Tester derives its tests from the committed docs, and the one review waits too. Do not delegate the next wave or review yet.`;
-      case "tester": {
-        const wave = step.waves[step.test - 1]!;
-        return `Spec Writer ${row.thread_id} committed wave ${row.plan_wave}'s docs and no writer of its chain is pending. Delegate test wave ${step.test}: ${wave.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.test}, replaces: ${step.replaces.thread_id}, kind: tester). To go without tests, record why: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${step.test}, reason). Do not review between waves.`;
-      }
-      case "retest":
-        if (isWriter(row.kind)) return `A Spec Writer changed docs on test wave ${row.plan_wave}: rerun the tests against them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review. If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
-        return `A worker changed code on test wave ${row.plan_wave} after the tests ran: rerun them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review.${evidenceOption(row.thread_id, `replaces: ${row.thread_id}`)} If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
-      case "retestOwed": return `A code fix after the review's rejection owes a tester rerun before the next review. ${retestLines(row, step.debts)}`;
       case "unplanned":
-        return `${row.kind === "tester" ? "" : `Workers never test: delegate a tester on this branch first — chief_delegate (replaces: ${row.thread_id}, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. `}Start its review now: chief_review (workerThreadId: ${row.thread_id}), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: ${row.thread_id}, skipReview: your reason).`;
+        return `${row.kind === "tester" ? "" : `Workers never test: delegate a tester on this branch first — chief_delegate (replaces: ${row.thread_id}, kind: tester). `}Start its review now: chief_review (workerThreadId: ${row.thread_id}), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: ${row.thread_id}, skipReview: your reason).`;
       case "review": {
         const branches = step.targets.map((target) => `${target.thread_id}${target.branch ? ` (${target.branch})` : ""}`).join(", ");
         return `${step.waves.length === 1 ? "The plan's only wave is" : `All ${step.waves.length} waves are`} ready. Start the one review of the whole plan now: chief_review (workerThreadId: ${step.namer.thread_id}). It covers every branch (${branches}). Complete each worker on that reviewer's approve — or, if you judge a review unnecessary, complete each of them without one: chief_complete (threadId: <each>, skipReview: your reason).`;
@@ -179,7 +132,7 @@ export function createNextAction(ctx: Ctx) {
     if (planner.plan_review === "required") {
       const { inFlight, abandoned } = planAdvisors(P);
       if (inFlight) return `Plan ${P} is in its one advisor review (${inFlight.thread_id}): wait for ${inFlight.thread_id}'s report before chief_forge_init or chief_delegate.`;
-      const waves = planWavesFor(P).filter((wave) => !wave.test && !wave.design).length;
+      const waves = planWavesFor(P).filter((wave) => !wave.absent && !wave.design).length;
       const why = waves > 1 ? `Plan ${P} has ${waves} implementation waves` : `Plan ${P} is marked complex`;
       const ended = abandoned ? `Advisor ${abandoned.thread_id} ended without advice (state ${abandoned.state}). ` : "";
       return `${ended}${why}: get its one advisor review first — chief_consult (planThreadId: ${P}, title, mission: review this plan before delegation). Do not chief_forge_init or chief_delegate it yet.`;
@@ -216,21 +169,15 @@ export function createNextAction(ctx: Ctx) {
       return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user, then chief_plan (revises: ${row.replaces_thread_id}) with the decision in context; it gets no review.`;
     }
     if (row.state === "blocked" && row.role === "worker") {
-      const testWave = isTestWave(row) ? planWavesFor(row.plan_thread_id)[row.plan_wave! - 1]! : undefined;
-      if (testWave?.testsSkipped) return waivedLine(row);
       if (row.kind === "tester" && onSpecChain(row)) {
-        return `Tester blocked: ${clip(row.blocker ?? "", 200)}. Tester's recommendation: ${clip(row.recommendation ?? "none", 300)}. Route by cause. ${inPlaceLine(row)} If tests fail on product code: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${specRoutes(row)} ${testWave
-          ? `If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason).`
-          : "If you judge the failures acceptable, complete it with testsSkipped (your reason)."}`;
+        return `Tester blocked: ${clip(row.blocker ?? "", 200)}. Tester's recommendation: ${clip(row.recommendation ?? "none", 300)}. Route by cause. ${inPlaceLine(row)} If tests fail on product code: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${specRoutes(row)}`;
       }
       if (isWriter(row.kind)) {
         return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route${schedule.sideLane(row) ? ` (the retry gets a fresh worktree from ${row.branch})` : ""}. ${row.plan_thread_id && schedule.sideLane(row) ? "The retry gets this wave's `## Docs needed` items with the blocker; one repair per wave, not separate fix and fold writers. " : ""}If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}, kind: spec-writer.`;
       }
       if (row.kind !== "tester" && onSpecChain(row)) return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user. ${inPlaceLine(row)} ${specRoutes(row)}`;
       if (row.kind === "tester") {
-        return `Tester blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${testWave
-          ? `If you judge the failures acceptable, waive them: chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason).`
-          : "If you judge the failures acceptable, complete it with testsSkipped (your reason)."}`;
+        return `Tester blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester.`;
       }
     }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
@@ -284,7 +231,7 @@ export function createNextAction(ctx: Ctx) {
       return `The reviewer approves. ${complete}. Nits listed with an approve are optional: start no worker round for them alone.`;
     }
     // A tester's branch: a product fix goes to a worker, a test fix to a tester; replacing it needs the kind.
-    // Docs findings go to the side-lane Spec Writers of the target's whole chain (a test wave has none of its own); a side-lane target is only ever fixed by one. A chain without a live one (legacy, whose completed head writer handed its checkout on; unplanned) falls back to the target itself.
+    // Docs findings go to the side-lane Spec Writers of the target's whole chain; a side-lane target is only ever fixed by one. A chain without a live one (legacy, whose completed head writer handed its checkout on; unplanned) falls back to the target itself.
     const docsRoute = "In each Spec Writer's mission, list the docs findings that wave owns (verdict file item or file:line); a finding on a docs path several waves share goes to the wave whose Spec delta names it. The plugin attaches that wave's `## Docs needed` items.";
     /** The docs routing sentence, once, when a handoff the alert renders emitted a Spec Writer route. */
     const docsNote = (routes: { writerRoute: boolean }[]) => routes.some((route) => route.writerRoute) ? ` ${docsRoute}` : "";
@@ -368,7 +315,7 @@ export function createNextAction(ctx: Ctx) {
 
   const { startReview, startBranchReview } = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn: ctx.managedSpawn, controlsThread: (...a) => ctx.controlsThread(...a),
-    plan: { reviewRefusal, retestDebts: progress.retestDebts, reviewTargetsFor, planWavesFor, specWriters, taskWriters: ctx.taskWriters, planBaseOf: ctx.planBaseOf },
+    plan: { reviewRefusal, reviewTargetsFor, planWavesFor, specWriters, taskWriters: ctx.taskWriters, planBaseOf: ctx.planBaseOf },
     host: {
       settledLive: async (worker) => {
         const live = await waitIdleAfterReport(worker);
@@ -401,6 +348,6 @@ export function createNextAction(ctx: Ctx) {
     git: { env: forgeEnv },
     engine: async () => reviewEngine(await settings.get()),
   });
-  return { busyRejection, nextAction, planAdvisors, planReviewRefusal, revisionsOf, specFirstLine, startBranchReview, startReview, waitIdleAfterReport, waivedLine, waveWaitLine, workerReadyNextStep };
+  return { busyRejection, nextAction, planAdvisors, planReviewRefusal, revisionsOf, specFirstLine, startBranchReview, startReview, waitIdleAfterReport, waveWaitLine, workerReadyNextStep };
 }
 

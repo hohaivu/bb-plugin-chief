@@ -12,8 +12,8 @@ const chiefCoreRules = (child: string) => `# Chief core rules (always apply)
 - Evidence: Chief never edits code and never runs anything in a worktree: every change, commit and push is a worker's. Evidence is reports, alerts, recorded commands, chief_inspect output and verdicts; an unstated cause, doubtful evidence, a disputed claim or a broad scan goes to a child thread (${child}), never to Chief reading code.
 - Fresh worker: a worker that has reported is never reused for more work. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR, except a side-lane Spec Writer's docs repair, which gets a fresh worktree on the same branch; so is a plan chain's next wave); review and complete the successor. One exception: a blocked worker whose blocker is an environment or permission problem on its own task (a blocked command, a dirty build-cache file, a needed permission), not a code, test or spec defect, gets the allowed step in place with chief_continue.
 - Review: only you start reviews, with chief_review, when a ready alert says to; a plan gets one review of every branch after every wave is ready. chief_complete marks the PR ready itself (never run gh pr ready or glab mr update --ready) and needs the newest review to approve its current head, or skipReview. You mark ready a PR no worker owns, only on its branch reviewer's approve.
-- Tests, docs: only a tester writes or runs tests (a plan's test wave, or chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).
-- Skips: your call per task, with a stated reason: the planner (unplannedReason), review (skipReview) or tests (chief_skip_tests, testsSkipped). Small, low-risk changes suit a skip. Before a review skip, check its ready report shows lint/build and verify exit 0.
+- Tests, docs: only a tester writes or runs tests (chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).
+- Skips: your call per task, with a stated reason: the planner (unplannedReason), or review (skipReview). Small, low-risk changes suit a skip. Before a review skip, check its ready report shows lint/build and verify exit 0.
 - Need you: before writing a **Need you** request in chat, call chief_escalate with the thread and the full request.`;
 
 /** Planning is on by default: the plugin persists the planner's wave schedule and
@@ -83,7 +83,7 @@ export function registerHost(ctx: Ctx) {
       const tools = coordinator ? COORDINATOR_TOOLS : [
         ...(ctx.state.plannerActive ? ["chief_plan"] : []),
         "chief_consult", "chief_spawn",
-        "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync",
+        "chief_forge_init", "chief_delegate", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_specs", "chief_escalate", "chief_sync",
         ...(research ? ["chief_research"] : []),
         // A child Chief is already supervised: it may not upgrade itself. chief_attach is listed here too because BB applies tools only when a session is built: a Chief upgraded by chief_coordinate could not attach until a restart. Its handler refuses a non-Coordinator.
         ...(child ? [] : ["chief_coordinate", "chief_attach"]),

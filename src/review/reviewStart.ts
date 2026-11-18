@@ -113,10 +113,6 @@ export interface ReviewBriefInput {
   chain: number[];
   /** The waves' contract text, already cut to fit. */
   contractLines: string[];
-  /** Chief's waived test waves this review covers, one line each with the reason, already cut to fit. Optional: older callers omit it. */
-  waiverLines?: string[];
-  /** The fixes whose tester rerun Chief waived (chief_review retestSkipped), one line each with the reason, already cut to fit. Optional: older callers omit it. */
-  retestWaiverLines?: string[];
   /** Chief's bypassed Spec Writer steps (chief_skip_specs), one line each with the reason, already cut to fit. Optional: older callers omit it. */
   specWaiverLines?: string[];
   /** The chain's spec: true implementation waves Chief did not bypass: a Spec Writer committed docs/ from each one's Spec delta in parallel with its worker. Optional: older callers omit it. */
@@ -150,7 +146,7 @@ export interface ReviewBriefInput {
 
 /** The sections review-context.md holds, with the parts of them the prompt refers to. Pure. */
 function contextSections(input: ReviewBriefInput) {
-  const { worker, targets, wavePaths, chain, previous, waiverLines = [], retestWaiverLines = [], specWaiverLines = [], sideWriters = [] } = input;
+  const { worker, targets, wavePaths, chain, previous, specWaiverLines = [], sideWriters = [] } = input;
   const head = worker.head;
   const many = targets.length > 1;
   const briefSection = worker.brief && !head && !many ? ["## The brief this work was given", worker.brief] : [];
@@ -205,13 +201,12 @@ function contextSections(input: ReviewBriefInput) {
       ]),
     ]),
   ] : [];
-  const waiverSection = waiverLines.length || retestWaiverLines.length ? ["## Waived test waves", ...waiverLines, ...retestWaiverLines] : [];
   const specWaiverSection = specWaiverLines.length ? ["## Bypassed Spec Writer steps", ...specWaiverLines] : [];
   const sideWriterSection = sideWriters.length ? [
     "## Side-lane Spec Writers",
     ...sideWriters.map((writer) => `- wave ${writer.wave} Spec Writer ${writer.threadId}: ${writer.reportPath ? `Full report: ${writer.reportPath}; ` : ""}bb chief inspect ${writer.threadId}`),
   ] : [];
-  const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, sideWriterSection, waiverSection, specWaiverSection, sliceSection, guidelineSection].filter((lines) => lines.length);
+  const sections = [briefSection, recordedSection, reportSection, earlierSection, previousSection, planSection, sideWriterSection, specWaiverSection, sliceSection, guidelineSection].filter((lines) => lines.length);
   return { briefSection, recordedSection, reportSection, earlierSection, withEarlier, context: sections.map((lines) => lines.join("\n")).join("\n\n") };
 }
 
@@ -222,7 +217,7 @@ export function reviewContext(input: ReviewBriefInput): string {
 
 /** The prompt a worker's reviewer starts from, plus the context it names (review-context.md, written before the launch). Pure. */
 export function reviewBrief(input: ReviewBriefInput): { prompt: string; context: string } {
-  const { worker, targets, wavePaths, chain, contractLines, previous, waiverLines = [], retestWaiverLines = [], specWaiverLines = [], specWaves = [], sideWriters = [], writers = [], specUnplanned = false, specBaseline = false, contextPath = null, docs = true } = input;
+  const { worker, targets, wavePaths, chain, contractLines, previous, specWaiverLines = [], specWaves = [], sideWriters = [], writers = [], specUnplanned = false, specBaseline = false, contextPath = null, docs = true } = input;
   const specGate = specWaves.length > 0 || specUnplanned;
   const head = worker.head;
   const many = targets.length > 1;
@@ -345,12 +340,6 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
           ...(wavePaths.length ? ["A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding."] : []),
         ].join(" "),
       ] : []),
-      ...(waiverLines.length ? [
-        "Chief waived the test waves listed under `## Waived test waves` in review-context.md (chief_skip_tests), each with its reason. Their planned test work, test runs and contracts are authorized omissions: their absence is not scope drift, a skipped planned step or missing verification evidence. Every commit on the branch (including any a waived tester already pushed) and every unwaived wave's contracts stay fully under review. Their wave files stay listed in the plan section; still read them.",
-      ] : []),
-      ...(retestWaiverLines.length ? [
-        "Chief waived the tester rerun after the fixes listed under `## Waived test waves` in review-context.md (chief_review retestSkipped), each with its reason. Judge those fixes without a rerun and say so in your report.",
-      ] : []),
       ...(specWaiverLines.length ? [
         "Chief bypassed the Spec Writer on the waves listed under `## Bypassed Spec Writer steps` in review-context.md (chief_skip_specs), each with its reason. Review those waves against their plan: missing docs/ for them is not a finding, and they get no spec gate. The bypass never covers tests, and it never excuses landed docs/ that contradict the code.",
       ] : []),
@@ -451,9 +440,7 @@ export interface ReviewStartDeps<Row extends ReviewRow> {
   ledger: ReturnType<typeof createReviewLedger<Row>>;
   managedSpawn: ManagedSpawn<ReviewInsert>;
   plan: {
-    reviewRefusal: (worker: Row, retestWaived?: boolean) => string | null;
-    /** The tester reruns this review still owes after a rejection, and the fixes whose rerun Chief waived. */
-    retestDebts: (worker: Row) => { owed: { fix: Row }[]; waived: { fix: Row; reason: string }[] };
+    reviewRefusal: (worker: Row) => string | null;
     reviewTargetsFor: (worker: Row) => Row[];
     planWavesFor: (planThreadId: string | null) => PlanWave[];
     /** A planner's side-lane Spec Writer rows (optionally one wave), oldest first. Optional: older callers omit it, and no writer is side-lane. */
@@ -605,18 +592,11 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
    * by a fresh one rather than resumed; its reject_streak carries over onto the new
    * row, so deadlock detection still sees consecutive rejections across the fresh
    * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
-  async function startReview(caller: Row, workerThreadId: string, focus?: string, retestSkipped?: string, acceptedGaps?: string): Promise<ReviewStarted> {
+  async function startReview(caller: Row, workerThreadId: string, focus?: string, acceptedGaps?: string): Promise<ReviewStarted> {
     const worker = store.get(workerThreadId);
     if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
-    const refusal = plan.reviewRefusal(worker, !!retestSkipped);
+    const refusal = plan.reviewRefusal(worker);
     if (refusal) throw new Error(refusal);
-    if (retestSkipped) {
-      // The waiver covers every rerun the refusal would have listed; it is stored before the review launches.
-      const { owed } = plan.retestDebts(worker);
-      if (!owed.length) throw new Error("No tester rerun is owed on this review; drop retestSkipped.");
-      const now = Date.now();
-      store.batch(() => { for (const debt of owed) store.setRetestSkipped(debt.fix.thread_id, retestSkipped, now); });
-    }
     // One review of a plan covers the latest worker of every branch; any other worker covers itself.
     const targets = plan.reviewTargetsFor(worker);
     for (const target of targets) {
@@ -719,9 +699,9 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const chain = worker.plan_wave != null && waves.length && !planReview ? chainOf(waves, worker.plan_wave) : waves.map((_, index) => index + 1);
       const contractLines = waves.length === 1
         ? waves[0]!.contracts ? [clip(waves[0]!.contracts, 3_000)] : []
-        : chain.filter((n) => !waves[n - 1]!.testsSkipped).flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
+        : chain.filter((n) => !waves[n - 1]!.absent).flatMap((n) => waves[n - 1]!.contracts ? [`Wave ${n} of ${waves.length}:`, clip(waves[n - 1]!.contracts!, 3_000)] : []);
       const recorded = targets.length > 1 ? null : await host.recordedCommands(workerThreadId);
-      const specWaves = chain.filter((n) => !!waves[n - 1]!.spec && !waves[n - 1]!.test && !waves[n - 1]!.design && !waves[n - 1]!.specsSkipped);
+      const specWaves = chain.filter((n) => !!waves[n - 1]!.spec && !waves[n - 1]!.design && !waves[n - 1]!.specsSkipped);
       const specBaseline = specWaves.some((n) => !!waves[n - 1]!.baseline);
       const specUnplanned = !waves.length && ledger.taskChain(worker.thread_id).some((id) => isWriter(store.get(id)?.kind));
       const specChain = specWaves.length > 0 || specUnplanned;
@@ -756,8 +736,8 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         ...(since ? { since } : {}),
         kind: row.kind, lane: laneOf(row), earlier: earlier.get(row.thread_id) ?? [],
       });
-      // Rule blocks. An implementation wave is neither test nor design; a legacy wave has no `feature` key and keeps the native-design and reshape rules.
-      const implementation = chain.filter((n) => !waves[n - 1]!.test && !waves[n - 1]!.design);
+      // Rule blocks. An implementation wave is neither design nor absent (a legacy test wave); a legacy wave has no `feature` key and keeps the native-design and reshape rules.
+      const implementation = chain.filter((n) => !waves[n - 1]!.absent && !waves[n - 1]!.design);
       const feature = !waves.length || implementation.some((n) => waves[n - 1]!.feature !== false);
       const reshape = waves.length > 0 && (chain.some((n) => waves[n - 1]!.reshape === true) || implementation.some((n) => waves[n - 1]!.feature === undefined));
       // Git listings of each covered target's slice; a skipped or missing slice, or a failed lookup, is unknown and keeps the rule.
@@ -779,9 +759,6 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         wavePaths: waves.map((wave) => wave.path),
         chain,
         contractLines,
-        waiverLines: chain.filter((n) => waves[n - 1]!.testsSkipped)
-          .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: tests skipped by Chief: ${clip(waves[n - 1]!.testsSkipped!, 500)}`),
-        retestWaiverLines: plan.retestDebts(worker).waived.map(({ fix, reason }) => `Retest after fix ${fix.thread_id} waived by Chief: ${clip(reason, 500)}`),
         specWaiverLines: chain.filter((n) => waves[n - 1]!.specsSkipped)
           .map((n) => `Wave ${n} of ${waves.length}: ${waves[n - 1]!.path}: specs skipped by Chief: ${clip(waves[n - 1]!.specsSkipped!, 500)}`),
         specWaves,

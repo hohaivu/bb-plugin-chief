@@ -117,7 +117,7 @@ export function createDelegation(ctx: Ctx) {
       throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
     }
     if (planner.plan_review !== "required") {
-      if (!planner.plan_review) throw new Error(`Only a plan with more than one implementation wave (design and test waves do not count), or a complex plan, gets an advisor review; ${plannerId} does not (a revision never does): delegate it.`);
+      if (!planner.plan_review) throw new Error(`Only a plan with more than one implementation wave (design waves do not count), or a complex plan, gets an advisor review; ${plannerId} does not (a revision never does): delegate it.`);
       const { decider } = ctx.planAdvisors(plannerId);
       throw new Error(`Plan ${plannerId} already had its one review (${decider?.thread_id ?? "?"}): ${ctx.planReviewRefusal(planner) ?? ctx.nextAction(planner) ?? "delegate its waves."}`);
     }
@@ -180,9 +180,7 @@ export function createDelegation(ctx: Ctx) {
       // The escalation ladder: round 2 needs a consult that gave its advice on this task, round 3 needs the user.
       // Read from the task's verdict history, not the open reviewer: a fresh or completed reviewer,
       // a re-pointed snapshot, or a second replaces: before the next review must not reset it.
-      // Only the exact retest tester hand-off the review refusal renders skips the consult and user rungs.
-      const retestHandoff = params.kind === "tester" && progress.retestDebts(prior).owed.some((debt) => debt.route.kind === "tester" && debt.route.replaces.thread_id === prior.thread_id);
-      const needs = retestHandoff ? null : ledger.replacement(prior, !!params.userApprovedRound);
+      const needs = ledger.replacement(prior, !!params.userApprovedRound);
       if (needs?.needs === "user") {
         throw new Error(`The reviewer has requested changes ${needs.streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
       }
