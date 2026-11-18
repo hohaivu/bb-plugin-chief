@@ -693,3 +693,28 @@ describe("admitDelegation: a fresh head on a plan base", () => {
     expect(chain.admit({ ...planned, wave: 4, prior: "w3", kind: "worker", resolvedKind: "worker" })).toMatchObject({ stackBase: undefined });
   });
 });
+
+// Contract (plan-1 cutover): a plan persisted as [build, {test: true}] before the review gate keeps both waves in its raw JSON. With no row on
+// wave 2 it is `absent`: still counted, never pending, never delegable. With a tester row on it, it is an ordinary wave owned by its latest row.
+// Regression: the absent wave stays pending (the plan never finishes, chief_review waits on betweenWaves) or a started legacy chain loses its owner.
+describe("legacy test wave cutover", () => {
+  const legacy: PlanWave[] = [{ path: "w1" }, { path: "w2", test: true }];
+
+  test("with no row on wave 2, the wave is kept and absent, and nothing pends once wave 1 is delegated and ready", () => {
+    const { rows } = world({ [P]: legacy }, [{ id: "w", plan: P, wave: 1 }]);
+    const schedule = createWaveSchedule(() => rows);
+    const waves = schedule.planWavesFor(P);
+    expect(waves).toHaveLength(2);
+    expect(waves.map((entry) => !!entry.absent)).toEqual([false, true]);
+    expect(schedule.pendingWaves(P, waves)).toEqual([]);
+  });
+
+  test("with a tester row on wave 2, it is an ordinary wave whose latest row is its owner", () => {
+    const { rows, admit } = world({ [P]: legacy }, [{ id: "w", plan: P, wave: 1 }, { id: "t", plan: P, wave: 2, kind: "tester", replaces: "w" }]);
+    const schedule = createWaveSchedule(() => rows);
+    const waves = schedule.planWavesFor(P);
+    expect(waves.map((entry) => !!entry.absent)).toEqual([false, false]);
+    expect(schedule.chainOwner(P, waves, 2)?.thread_id).toBe("t");
+    expect(admit({ ...planned, wave: 2, prior: "t", kind: "worker", resolvedKind: "worker" })).toMatchObject({ kind: "worker", lane: "implementation" });
+  });
+});
