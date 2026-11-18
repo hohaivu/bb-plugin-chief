@@ -1327,6 +1327,61 @@ describe("docs work list", () => {
     for (const out of ["W2NOTE", "W3NOTE", "T4NOTE", "S1NOTE", ctx.w1, ctx.w2, ctx.w3, ctx.t4, ctx.s1, ctx.s3]) expect(file).not.toContain(out);
   });
 
+  // Retest of #242 finding 1 (verdict thr_8ikzcixq2m): the file is the only place the omitted items live, so a rejected write (not a 409:
+  // ENOSPC, a refused host) must not leave a repair running without it. The new thread is stopped and retired, the prior writer stays the
+  // active one and unchanged, and the chief_delegate call fails with a message Chief can act on; repeating the call once storage works succeeds.
+  // Regression: the write failure is only logged, the repair runs on without the file, and the prior writer is completed and repointed.
+  test("a rejected docs-work file write stops and retires the new repair, keeps the prior writer, and the repeated call succeeds", async () => {
+    const state = await setup();
+    const blocker = `Delta names no domain. ${"why ".repeat(200)}END-BLOCKER`;
+    const ctx = await docsChains(state, OWN, blocker);
+    await cloneRows(state, ctx, 400, (n) => `- CLONE-${n}-END`);
+    expect(rowOf(state, ctx.s5)).toMatchObject({ state: "blocked", last_report_state: "blocked" });
+
+    state.failWritesMatching(/docs-work\.md/);
+    const message = await refusal(delegateWave(state, ctx.chief.threadId, ctx.P, 5, { replaces: ctx.s5, kind: "spec-writer" }));
+    const failed = writerOn(state, ctx.P, 5).thread_id as string;
+    expect(failed).not.toBe(ctx.s5);
+    expect(message).toContain(failed);
+    expect(message).toContain("write refused");
+    expect(message).toContain(`${ctx.s5} stays the active writer`);
+    expect(message).toContain("Repeat this chief_delegate call");
+    // The new thread was spawned with the pointer in its prompt, then stopped and retired; no file exists for it.
+    expect(lastPrompt(state)).toContain("$BB_THREAD_STORAGE/docs-work.md");
+    expect(state.stopped).toContain(failed);
+    expect(rowOf(state, failed)).toMatchObject({ replaces_thread_id: ctx.s5, state: "complete" });
+    expect(existsSync(docsFile(state, failed))).toBe(false);
+    // The prior writer is neither completed nor stopped.
+    expect(rowOf(state, ctx.s5)).toMatchObject({ state: "blocked", last_report_state: "blocked" });
+    expect(state.stopped).not.toContain(ctx.s5);
+
+    // Storage recovers: the same call is admitted (the retired row no longer holds the branch), retires the prior writer and writes the file.
+    state.failWritesMatching(null);
+    await delegateWave(state, ctx.chief.threadId, ctx.P, 5, { replaces: ctx.s5, kind: "spec-writer" });
+    const retry = writerOn(state, ctx.P, 5).thread_id as string;
+    expect(retry).not.toBe(failed);
+    expect(rowOf(state, ctx.s5).state).toBe("complete");
+    expect(rowOf(state, retry)).toMatchObject({ replaces_thread_id: ctx.s5 });
+    expect(rowOf(state, retry).state).not.toBe("complete");
+    const file = readFileSync(docsFile(state, retry), "utf8");
+    expect(file).toContain("all 403 items");
+    expect(file).toContain("END-BLOCKER");
+  });
+
+  // The write is a prerequisite only when the file is the recovery path: a list that fits inline never touches thread storage, so a refused write
+  // there changes nothing. Regression: the failure path fires for every repair, or the inline repair starts writing the file.
+  test("a repair whose list fits inline never writes the file, so a refused write changes nothing", async () => {
+    const state = await setup();
+    const ctx = await docsChains(state, OWN, true);
+    state.failWritesMatching(/docs-work\.md/);
+    const list = docsWorkList(await repair(state, ctx, 5, ctx.s5));
+    expect(list).toContain(`${ctx.w5} (wave 5): - W5NOTE`);
+    expect(rowOf(state, ctx.s5).state).toBe("complete");
+    expect(rowOf(state, writerOn(state, ctx.P, 5).thread_id).state).not.toBe("complete");
+    expect(state.stopped).toEqual([]);
+    noFile(state, ctx, 5);
+  });
+
   // Contract 5 (no section elsewhere): a first writer, an implementation-lane repair, an unplanned repair, a writer adopted by a new plan, and
   // non-writer kinds get no work list even when rows hold Docs needed. Regression: the gate loses the same-plan side-lane test.
   test("no docs work list for a first writer, an implementation-lane repair, an unplanned repair, an adopted writer or a non-writer kind", async () => {
@@ -1416,6 +1471,7 @@ describe("docs work list", () => {
     // Ahead of the variable route text and the escalate tail.
     expect(action.indexOf(SENTENCE)).toBeLessThan(action.indexOf("chief_delegate"));
     expect(action).toContain("Escalate if the disagreement");
+    expect(action).not.toContain("omitted here");
     expect(action).toBe(await adviceOf(state, chain.chief.threadId));
   });
 
@@ -1441,22 +1497,67 @@ describe("docs work list", () => {
     expect((await adviceOf(state, chief.threadId)).split(SENTENCE)).toHaveLength(2);
   });
 
-  test("a long shared handoff keeps the docs routing sentence whole inside the cap, ahead of the route list the cap clips", async () => {
+  // Retest of #242 finding 2 (verdict thr_8ikzcixq2m): the delivered action must hold only whole routes within the cap, and when routes are
+  // omitted say where the complete handoff is. `list` reads the " / "-joined route list between two fixed phrases of an action.
+  const listOf = (action: string, from: string, to: string) => action.slice(action.indexOf(from) + from.length, action.indexOf(to)).split(" / ");
+  /** What the delivered alert's action keeps of the roster's complete handoff: whole routes in order, a pointer for the rest, nothing cut. */
+  const keptWhole = async (state: State, chiefThreadId: string, from: string, to: string) => {
+    const action = delivered(state);
+    const advice = await adviceOf(state, chiefThreadId);
+    // The fixture is long: the complete handoff exceeds the cap, so the delivered action had to drop routes.
+    expect(advice.length).toBeGreaterThan(ACTION_CAP);
+    expect(action.indexOf(SENTENCE)).toBeLessThan(action.indexOf("chief_delegate"));
+    expect(action.endsWith("…")).toBe(false);
+    expect(action.endsWith("Escalate if the disagreement is a genuine decision.")).toBe(true);
+    const complete = listOf(advice, from, to);
+    const delivered_ = listOf(action, from, to);
+    const pointer = delivered_.pop()!;
+    // Whole commands: every kept route is exactly the roster's route, in order, and at least one is dropped for the pointer to be needed.
+    expect(delivered_.length).toBeGreaterThan(0);
+    expect(delivered_.length).toBeLessThan(complete.length);
+    expect(delivered_).toEqual(complete.slice(0, delivered_.length));
+    // The pointer counts the omitted routes exactly and names the tool that prints them.
+    expect(pointer).toContain(`${complete.length - delivered_.length} more`);
+    expect(pointer).toContain("chief_roster");
+    return { advice, action };
+  };
+
+  test("a long shared handoff delivers whole routes inside the cap, the docs sentence once, and a chief_roster pointer for the rest", async () => {
     const state = await setup();
     const ctx = await docsChains(state, OWN);
     await reviewed(state, ctx.chief.threadId, ctx.t4, "request_changes");
-    const action = delivered(state);
-    const advice = await adviceOf(state, ctx.chief.threadId);
-    // The fixture is long: the unclipped handoff exceeds the cap, and a note placed after the routes (where it used to sit) would end past it.
-    expect(advice.length).toBeGreaterThan(ACTION_CAP);
-    expect(advice.indexOf("their findings are attached automatically.") + SENTENCE.length).toBeGreaterThan(ACTION_CAP);
-    expect(action.endsWith("…")).toBe(true);
-    expect(action.indexOf(SENTENCE) + SENTENCE.length).toBeLessThanOrEqual(ACTION_CAP);
-    expect(action.indexOf(SENTENCE)).toBeLessThan(action.indexOf("Hand the fixes to fresh workers"));
+    const { advice } = await keptWhole(state, ctx.chief.threadId, "one per branch the findings name: ", "; their findings are attached automatically");
     expect(advice.split(SENTENCE)).toHaveLength(2);
-    // The writer routes the cap leaves room for are delivered whole; the roster has all of them.
-    expect(action).toContain(`replaces: ${ctx.s1}, kind: spec-writer) for wave 1 docs findings`);
+    // The omitted routes are all in the roster, which is not clipped: every chain's writers are named there.
     for (const writer of [ctx.s1, ctx.s3, ctx.s5]) expect(advice).toContain(`replaces: ${writer}, kind: spec-writer`);
+  });
+
+  test("a long handoff beside a legacy stack delivers the stack text whole, whole loose routes and a chief_roster pointer", async () => {
+    const state = await setup();
+    const { chief, planner } = await specPlan(state, [specImpl(1), planWave(2), TEST_WAVE(3), specImpl(4, { dependsOn: [] }), TEST_WAVE(5), specImpl(6, { dependsOn: [] }), TEST_WAVE(7)]);
+    const P = planner.threadId;
+    await delegateWave(state, chief.threadId, P, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+    const w1 = ownerOn(state, P, 1).thread_id as string;
+    const side = await delegateWriter(state, chief, P, 1);
+    await readyIdle(state, w1);
+    await readyIdle(state, side);
+    const w2 = (await legacyWave(state, chief.threadId, P, 2, "feature/b")).threadId;
+    await readyIdle(state, w2);
+    const writers: string[] = [];
+    for (const [n, branch, prUrl] of [[4, "feature/c", "https://github.com/o/r/pull/8"], [6, "feature/d", "https://github.com/o/r/pull/9"]] as const) {
+      await delegateWave(state, chief.threadId, P, n, { branch, prUrl });
+      const worker = ownerOn(state, P, n).thread_id as string;
+      writers.push(await delegateWriter(state, chief, P, n, { branch, prUrl }));
+      await readyIdle(state, worker);
+      await readyIdle(state, writers.at(-1)!);
+    }
+    for (const n of [3, 5, 7]) await tool(state, "chief_skip_tests", { planThreadId: P, wave: n, reason: "docs only" }, chief.threadId);
+    await reviewed(state, chief.threadId, w2, "request_changes");
+    const { action, advice } = await keptWhole(state, chief.threadId, "to fresh workers in this turn: ", ". Their findings are attached automatically");
+    // The one dispatch result for the stack survives whole, ahead of the loose routes.
+    for (const part of ["Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel.", `wave 1: ${w1}, wave 2: ${w2}`, "even one the findings do not name."]) expect(action).toContain(part);
+    expect(action.indexOf("are stacked")).toBeLessThan(action.indexOf("to fresh workers in this turn"));
+    for (const writer of writers) expect(advice).toContain(`replaces: ${writer}, kind: spec-writer`);
   });
 
   test("a plan with no Spec Writer never gets the docs routing sentence in its alert", async () => {
