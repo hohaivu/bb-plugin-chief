@@ -1327,45 +1327,99 @@ describe("docs work list", () => {
     for (const out of ["W2NOTE", "W3NOTE", "T4NOTE", "S1NOTE", ctx.w1, ctx.w2, ctx.w3, ctx.t4, ctx.s1, ctx.s3]) expect(file).not.toContain(out);
   });
 
-  // Retest of #242 finding 1 (verdict thr_8ikzcixq2m): the file is the only place the omitted items live, so a rejected write (not a 409:
-  // ENOSPC, a refused host) must not leave a repair running without it. The new thread is stopped and retired, the prior writer stays the
-  // active one and unchanged, and the chief_delegate call fails with a message Chief can act on; repeating the call once storage works succeeds.
-  // Regression: the write failure is only logged, the repair runs on without the file, and the prior writer is completed and repointed.
-  test("a rejected docs-work file write stops and retires the new repair, keeps the prior writer, and the repeated call succeeds", async () => {
-    const state = await setup();
+  // Retest of #242 finding 1 (verdicts thr_8ikzcixq2m, thr_6q3b5ttyi8): the file is the only place the omitted items live, so a rejected write
+  // (not a 409: ENOSPC, a refused host) rolls the launch back. The new thread is stopped and unlinked from the plan, so the blocked prior writer
+  // stays the owner everywhere the plan decides (its writer is still owed, a chain-tip review is still refused naming it), and the chief_delegate
+  // call fails with a message Chief can act on; repeating the call once storage works succeeds and transfers ownership.
+  // Regression: the failed row is marked complete in the plan, so the scheduler sees the newest writer as settled and drops the blocked owner.
+  const rollbackFixture = async (state: State) => {
     const blocker = `Delta names no domain. ${"why ".repeat(200)}END-BLOCKER`;
     const ctx = await docsChains(state, OWN, blocker);
     await cloneRows(state, ctx, 400, (n) => `- CLONE-${n}-END`);
     expect(rowOf(state, ctx.s5)).toMatchObject({ state: "blocked", last_report_state: "blocked" });
+    // The gate before the failure: chain B's tip cannot be reviewed while its writer is owed.
+    const tip = ownerOn(state, ctx.P, 6).thread_id as string;
+    const gate = () => expect(tool(state, "chief_review", { workerThreadId: tip }, ctx.chief.threadId)).rejects.toThrow(new RegExp(`wave 5's ${ctx.s5} \\(`));
+    await gate();
+    return { ctx, gate, blocker };
+  };
+  const failedOf = (state: State, prior: string) => state.db.prepare(`SELECT * FROM managed_threads WHERE replaces_thread_id=?`).get(prior) as any;
+
+  test("a rejected docs-work file write rolls the launch back: the prior writer stays the owner, the review gate stays closed, and the repeated call succeeds", async () => {
+    const state = await setup();
+    const { ctx, gate, blocker } = await rollbackFixture(state);
 
     state.failWritesMatching(/docs-work\.md/);
     const message = await refusal(delegateWave(state, ctx.chief.threadId, ctx.P, 5, { replaces: ctx.s5, kind: "spec-writer" }));
-    const failed = writerOn(state, ctx.P, 5).thread_id as string;
+    const failed = failedOf(state, ctx.s5).thread_id as string;
     expect(failed).not.toBe(ctx.s5);
     expect(message).toContain(failed);
     expect(message).toContain("write refused");
-    expect(message).toContain(`${ctx.s5} stays the active writer`);
+    expect(message).toContain(`${ctx.s5} stays the owner of the docs work`);
     expect(message).toContain("Repeat this chief_delegate call");
-    // The new thread was spawned with the pointer in its prompt, then stopped and retired; no file exists for it.
+    expect(message).not.toContain("FAILED");
+    // The new thread was spawned with the pointer in its prompt, then stopped; no file exists for it.
     expect(lastPrompt(state)).toContain("$BB_THREAD_STORAGE/docs-work.md");
     expect(state.stopped).toContain(failed);
-    expect(rowOf(state, failed)).toMatchObject({ replaces_thread_id: ctx.s5, state: "complete" });
     expect(existsSync(docsFile(state, failed))).toBe(false);
-    // The prior writer is neither completed nor stopped.
-    expect(rowOf(state, ctx.s5)).toMatchObject({ state: "blocked", last_report_state: "blocked" });
+    // The failed attempt leaves the plan (it stays a row for diagnostics): the plan's newest wave 5 writer is still the blocked prior, which is still owed.
+    expect(rowOf(state, failed)).toMatchObject({ replaces_thread_id: ctx.s5, plan_thread_id: null, plan_wave: null, state: "complete" });
+    expect(writerOn(state, ctx.P, 5).thread_id).toBe(ctx.s5);
+    expect(rowOf(state, ctx.s5)).toMatchObject({ state: "blocked", last_report_state: "blocked", plan_thread_id: ctx.P, plan_wave: 5 });
     expect(state.stopped).not.toContain(ctx.s5);
+    await gate();
+    // A reload of the row cache (what the next write does) changes none of it.
+    await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, ctx.chief.threadId);
+    await gate();
 
-    // Storage recovers: the same call is admitted (the retired row no longer holds the branch), retires the prior writer and writes the file.
+    // Storage recovers: the same call is admitted (the stopped row no longer holds the branch), retires the prior writer and writes the full list.
     state.failWritesMatching(null);
     await delegateWave(state, ctx.chief.threadId, ctx.P, 5, { replaces: ctx.s5, kind: "spec-writer" });
     const retry = writerOn(state, ctx.P, 5).thread_id as string;
     expect(retry).not.toBe(failed);
+    expect(retry).not.toBe(ctx.s5);
     expect(rowOf(state, ctx.s5).state).toBe("complete");
-    expect(rowOf(state, retry)).toMatchObject({ replaces_thread_id: ctx.s5 });
+    expect(rowOf(state, retry)).toMatchObject({ replaces_thread_id: ctx.s5, plan_thread_id: ctx.P, plan_wave: 5 });
     expect(rowOf(state, retry).state).not.toBe("complete");
     const file = readFileSync(docsFile(state, retry), "utf8");
     expect(file).toContain("all 403 items");
-    expect(file).toContain("END-BLOCKER");
+    expect(file).toContain(blocker.slice(-20));
+  });
+
+  // The stop itself can fail (a host that refused both calls). The error says so instead of claiming a stop, the unconfirmed thread is not marked
+  // complete (it may still run and holds the branch, so a retry cannot start a second actionable writer) and the prior writer is still the owner.
+  test("when the stop also fails the error says so, the thread stays live and holds the branch, the owner and gate are unchanged, and a retry waits for the stop", async () => {
+    const state = await setup();
+    const { ctx, gate } = await rollbackFixture(state);
+
+    state.failWritesMatching(/docs-work\.md/);
+    state.failNextStops(1);
+    const message = await refusal(delegateWave(state, ctx.chief.threadId, ctx.P, 5, { replaces: ctx.s5, kind: "spec-writer" }));
+    const failed = failedOf(state, ctx.s5).thread_id as string;
+    expect(message).toContain("Stopping that thread FAILED");
+    expect(message).toContain("stop refused");
+    expect(message).not.toContain("was stopped");
+    expect(message).toContain(`${ctx.s5} stays the owner of the docs work`);
+    expect(state.stopped).not.toContain(failed);
+    expect(rowOf(state, failed)).toMatchObject({ plan_thread_id: null, plan_wave: null });
+    expect(rowOf(state, failed).state).not.toBe("complete");
+    expect(writerOn(state, ctx.P, 5).thread_id).toBe(ctx.s5);
+    expect(rowOf(state, ctx.s5)).toMatchObject({ state: "blocked" });
+    await gate();
+
+    // Storage recovered, but the unconfirmed thread still holds the branch: no second actionable writer starts.
+    state.failWritesMatching(null);
+    const spawns = state.spawned.length;
+    expect(await refusal(delegateWave(state, ctx.chief.threadId, ctx.P, 5, { replaces: ctx.s5, kind: "spec-writer" }))).toContain(`Branch ${CHAIN_B} already carries the active worker`);
+    expect(state.spawned).toHaveLength(spawns);
+    await gate();
+
+    // Once that thread is gone the retry succeeds and takes the ownership.
+    state.db.prepare(`UPDATE managed_threads SET state='complete' WHERE thread_id=?`).run(failed);
+    await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, ctx.chief.threadId);
+    await delegateWave(state, ctx.chief.threadId, ctx.P, 5, { replaces: ctx.s5, kind: "spec-writer" });
+    expect(writerOn(state, ctx.P, 5).thread_id).not.toBe(ctx.s5);
+    expect(rowOf(state, ctx.s5).state).toBe("complete");
   });
 
   // The write is a prerequisite only when the file is the recovery path: a list that fits inline never touches thread storage, so a refused write
@@ -1558,6 +1612,62 @@ describe("docs work list", () => {
     for (const part of ["Waves 1 → 2 are stacked, each on the one before: fix them in wave order, never in parallel.", `wave 1: ${w1}, wave 2: ${w2}`, "even one the findings do not name."]) expect(action).toContain(part);
     expect(action.indexOf("are stacked")).toBeLessThan(action.indexOf("to fresh workers in this turn"));
     for (const writer of writers) expect(advice).toContain(`replaces: ${writer}, kind: spec-writer`);
+  });
+
+  // Retest of #242 finding 2 (verdict thr_6q3b5ttyi8), the zero-kept-route boundary: in a supported legacy shared review with open stacks 1→2→3 and
+  // 5→6, waived tips at 4 and 7, a loose side writer on wave 1, request_changes with regression:true and real 14-character ids, the stack text alone
+  // is over the cap, so no loose route fits. The delivered alert must still name chief_roster inside the cap and keep every route it shows whole;
+  // the stack order and each stack's ids stay; the complete handoff, with the writer's route, is at the named destination.
+  // Regression: the alert is clipped at the cap with the roster pointer and the only loose route past the cut.
+  test("a legacy stacked review whose fixed text alone is over the cap still delivers a chief_roster pointer inside the cap and only whole routes", async () => {
+    const state = await setup({ realWidthIds: true });
+    const { chief, planner } = await specPlan(state, [specImpl(1), planWave(2), planWave(3), TEST_WAVE(4), planWave(5, { dependsOn: [] }), planWave(6), TEST_WAVE(7)]);
+    const P = planner.threadId;
+    await delegateWave(state, chief.threadId, P, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+    const w1 = ownerOn(state, P, 1).thread_id as string;
+    const side = await delegateWriter(state, chief, P, 1);
+    await readyIdle(state, w1);
+    await readyIdle(state, side);
+    const w2 = (await legacyWave(state, chief.threadId, P, 2, "feature/b")).threadId;
+    const w3 = (await legacyWave(state, chief.threadId, P, 3, "feature/c")).threadId;
+    await delegateWave(state, chief.threadId, P, 5, { branch: "feature/d", prUrl: "https://github.com/o/r/pull/8" });
+    const w5 = ownerOn(state, P, 5).thread_id as string;
+    const w6 = (await legacyWave(state, chief.threadId, P, 6, "feature/e")).threadId;
+    for (const id of [w2, w3, w5, w6]) await readyIdle(state, id);
+    for (const n of [4, 7]) await tool(state, "chief_skip_tests", { planThreadId: P, wave: n, reason: "docs only" }, chief.threadId);
+    for (const id of [w1, side, w2, w3, w5, w6]) expect(id).toHaveLength(14);
+
+    await tool(state, "chief_review", { workerThreadId: w3 }, chief.threadId);
+    const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer" && row.state !== "complete").at(-1)!.threadId;
+    await report(state, reviewer, { state: "ready", result: "The discount is still applied twice", verdict: "request_changes", regression: true,
+      findings: [{ file: "totals.ts", line: 3, severity: "blocking", message: "The discount is applied twice", fix: "Apply it once" }] });
+
+    const alert = lastAlert(state);
+    // The whole action line as delivered: a leading pointer comes before the words actionOf starts at.
+    const action = alert.split("\n").find((line) => line.includes("The reviewer requires changes"))!;
+    const advice = await adviceOf(state, chief.threadId);
+    // The complete handoff is the roster's: it holds the writer's route and is over the cap; the stack text alone already is the reviewer's fixture.
+    expect(advice.length).toBeGreaterThan(ACTION_CAP);
+    expect(advice).toContain(`chief_delegate (replaces: ${side}, kind: spec-writer)`);
+    expect(advice).toContain("are stacked");
+    // Inside the cap, not cut, the roster named before the cap, and the pointer is not the last thing a clip could remove.
+    expect(action.length).toBeLessThanOrEqual(ACTION_CAP);
+    expect(action.endsWith("…")).toBe(false);
+    expect(action.indexOf("chief_roster")).toBeGreaterThanOrEqual(0);
+    expect(action.indexOf("chief_roster") + "chief_roster".length).toBeLessThanOrEqual(ACTION_CAP);
+    // Every command the action shows is whole, and is one the complete handoff gives.
+    const commands = action.match(/chief_delegate \(/g) ?? [];
+    const whole = [...action.matchAll(/chief_delegate \([^)]*\)/g)].map((match) => match[0]);
+    expect(whole).toHaveLength(commands.length);
+    for (const command of whole) expect(advice).toContain(command);
+    // The stack sequencing and each stack's ids, in wave order, survive.
+    expect(action).toContain("never in parallel");
+    const at = (id: string) => action.indexOf(id);
+    for (const [first, second] of [[w1, w2], [w2, w3], [w5, w6]] as const) {
+      expect(at(first)).toBeGreaterThanOrEqual(0);
+      expect(at(first)).toBeLessThan(at(second));
+    }
+    expect(await roster(state, chief.threadId)).toContain(`replaces: ${side}, kind: spec-writer`);
   });
 
   test("a plan with no Spec Writer never gets the docs routing sentence in its alert", async () => {

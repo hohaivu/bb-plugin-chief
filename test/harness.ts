@@ -107,7 +107,9 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   /** Runs in every threads.getPluginMetadata before it answers: a hook may hold the spawn-recovery lookup open while a launch lands. */
   onPluginMetadata?: (threadId: string) => Promise<void> | void,
   /** Runs in every threads.storageLocation before it answers: a hook may throw `HTTP 409: ...` as bb does while a new environment provisions. */
-  onStorageLocation?: (threadId: string) => Promise<void> | void } = {}) {
+  onStorageLocation?: (threadId: string) => Promise<void> | void,
+  /** Spawned thread ids are `thr_` plus ten zero-padded digits (14 characters, as real ids), not `thr_<n>`: length-bounded outputs depend on it. */
+  realWidthIds?: boolean } = {}) {
   const storageRoot = await mkdtemp(join(tmpdir(), "chief-plan-"));
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
@@ -131,6 +133,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   const tabsStore = new Map<string, { revision: number; tabs: any[] }>();
   let tabsUpdateFailures = options.failTabsUpdates ?? 0;
   let failedWrites: RegExp | null = null;
+  let failedStops = 0;
   let tabsGets = 0;
   const tabsUpdates: Array<{ threadId: string; expectedRevision: number; tabs: any[] }> = [];
   const archivedEnvs: string[] = [];
@@ -223,7 +226,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
         spawn: async (args: any) => {
           spawned.push(args);
           spawnIndex += 1;
-          const id = `thr_${spawnIndex}`;
+          const id = options.realWidthIds ? `thr_${String(spawnIndex).padStart(10, "0")}` : `thr_${spawnIndex}`;
           const thread = sdk.makeThreadResponse({
             id,
             projectId: args.projectId,
@@ -305,6 +308,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
           list: async ({ threadId }: { threadId: string }) => queuedMessagesStore.get(threadId) ?? [],
         },
         stop: async ({ threadId }: { threadId: string }) => {
+          if (failedStops > 0) { failedStops -= 1; throw new Error(`stop refused for ${threadId}`); }
           stopped.push(threadId);
           live.set(threadId, { ...live.get(threadId)!, status: "idle" });
           return { ok: true as const };
@@ -356,6 +360,8 @@ export async function setup(options: { /** projects.get rejects these ids, as th
     failTabsUpdates(count: number) { tabsUpdateFailures = count; },
     /** Every file write to a path matching `pattern` fails until it is set to null. */
     failWritesMatching(pattern: RegExp | null) { failedWrites = pattern; },
+    /** The next `count` threads.stop calls reject. */
+    failNextStops(count = 1) { failedStops = count; },
     setPatch(next: string) { patch = next; },
     seedQueuedMessage(threadId: string, text: string) {
       const existing = queuedMessagesStore.get(threadId) ?? [];
