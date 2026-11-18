@@ -1,4 +1,4 @@
-import { gateDecision, type GateDecision } from "../plan/planProgress";
+import { gateDecision, neverReported, type GateDecision } from "../plan/planProgress";
 import type { ReviewGate } from "../db/threadStore";
 import { reviewEngine } from "../review/prAgent";
 import { createReviewStart } from "../review/reviewStart";
@@ -116,8 +116,9 @@ export function createNextAction(ctx: Ctx) {
     const chainIds = new Set(ids.flatMap((id) => ledger.taskChain(id)));
     const writers = store.all().filter((other) => isWriter(other.kind) && other.role === "worker"
       && (gate.plan_thread_id ? other.plan_thread_id === gate.plan_thread_id : chainIds.has(other.thread_id) || chainIds.has(other.replaces_thread_id ?? "")));
+    const settledReviewer = ledger.newestVerdictReviewer(ids);
     const decision = gateDecision<ManagedRow>({
-      gate, row: store.get, startRefusal: null, verdictAt: ledger.newestVerdictAt(ids)?.at ?? null, writers, terminal,
+      gate, row: store.get, startRefusal: null, verdictAt: ledger.newestVerdictAt(ids)?.at ?? null, settledReviewer: settledReviewer ? store.get(settledReviewer) : undefined, writers, terminal,
     });
     return { gate, decision };
   }
@@ -139,15 +140,20 @@ export function createNextAction(ctx: Ctx) {
       }
       case "wait": return `The review gate is waiting on ${decision.who.map((side) => `${side.role === "reviewer" ? "reviewer" : side.kind ?? "worker"} ${side.thread_id} (${side.state})`).join(", ")}. Wait for their reports.`;
       case "fix": {
-        const fixRun = gate.tester_thread_id ? `chief_delegate (replaces: ${gate.tester_thread_id}, kind: worker)` : "chief_delegate (replaces: <the gate tester>, kind: worker)";
-        return `The review gate needs a fix: ${[decision.redTests ? `${testerReport} has failing tests` : "", decision.codeFindings ? `${verdictRef} has ${decision.codeFindings} blocking code finding${decision.codeFindings > 1 ? "s" : ""}` : ""].filter(Boolean).join("; ")}. Delegate the gate's one fix run: ${fixRun}; its brief carries the verdict, the findings and the failing tests. There is no re-review: its green run passes the gate.`;
+        // A fix decision with a fix run set means that run never reported: it is replaced, not the tester.
+        const replaced = gate.fixer_thread_id ?? gate.tester_thread_id;
+        const fixRun = replaced ? `chief_delegate (replaces: ${replaced}, kind: worker)` : "chief_delegate (replaces: <the gate tester>, kind: worker)";
+        return `The review gate needs a fix: ${[decision.redTests ? `${testerReport} has failing tests` : "", decision.codeFindings ? `${verdictRef} has ${decision.codeFindings} blocking code finding${decision.codeFindings > 1 ? "s" : ""}` : ""].filter(Boolean).join("; ")}. Delegate the gate's one fix run: ${fixRun}; its brief carries the verdict, the findings and the failing tests. Its green run passes the gate; after it, one advisory re-review may run with chief_review (workerThreadId: ${first}).`;
       }
       case "docsRepair":
         return `The review gate's code passed, but ${verdictRef} has docs findings: chief_delegate (replaces: ${decision.writer.thread_id}, kind: spec-writer) with them as its mission, then wait for its ready report.`;
-      case "wrongTest":
+      case "wrongTest": {
+        const corrector = gate.corrector_thread_id ? store.get(gate.corrector_thread_id) : undefined;
+        if (corrector && neverReported(corrector)) return `Corrector ${corrector.thread_id} stopped before it reported: delegate the gate's corrector again: chief_delegate (replaces: ${corrector.thread_id}, kind: tester).`;
         return gate.corrector_thread_id
           ? `Fix run ${decision.fixer.thread_id} reports a wrong test: ${clip(decision.fixer.blocker ?? "", 200)}. The gate already had its corrector: escalate to the user.`
           : `Fix run ${decision.fixer.thread_id} reports a wrong test: ${clip(decision.fixer.blocker ?? "", 200)}. Read its evidence (bb chief inspect ${decision.fixer.thread_id}). If it holds, delegate the gate's one corrector: chief_delegate (replaces: ${decision.fixer.thread_id}, kind: tester); otherwise escalate to the user.`;
+      }
       case "escalate": return `The review gate cannot pass on its own: ${decision.why}. Escalate to the user.`;
       case "pass": return `The review gate passed. Complete ${ids.length > 1 ? "each target" : "it"}: ${ids.filter((id) => store.get(id)?.state !== "complete").map((id) => `chief_complete (threadId: ${id})`).join("; ")}; each marks its pull request ready.`;
     }

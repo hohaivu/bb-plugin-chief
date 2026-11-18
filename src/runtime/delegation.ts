@@ -1,7 +1,7 @@
 import { DOCS_WORK_FILE, advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
 import { MAX_CARRIED_FAILS, sectionOf } from "../report/reportIntake";
 import { isWriter } from "../plan/waveSchedule";
-import { wrongTestEvidence } from "../plan/planProgress";
+import { wrongTestEvidence, neverReported } from "../plan/planProgress";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
 import { isReady } from "../plan/waveSchedule";
@@ -231,7 +231,15 @@ export function createDelegation(ctx: Ctx) {
     if (gate && gate.tester_thread_id === prior.thread_id) {
       if (kind === undefined) throw new Error("Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.");
       if (kind !== "worker") throw new Error(`${prior.thread_id} is review gate ${gate.gate_key}'s tester: only the gate's one fix run replaces it — chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
+      const fixer = gate.fixer_thread_id ? store.get(gate.fixer_thread_id) : undefined;
+      if (fixer && neverReported(fixer)) throw new Error(`Fix run ${fixer.thread_id} stopped before it reported and its environment holds its partial work: chief_delegate (replaces: ${fixer.thread_id}, kind: worker).`);
       if (gate.fixer_thread_id) throw new Error(escalate(gate.fixer_thread_id));
+      const decision = ctx.gateOf(prior)!.decision;
+      if (decision.kind !== "fix") throw new Error(`Review gate ${gate.gate_key} needs no fix run. ${ctx.gateLine(gate, decision)}`);
+      return { run: "gate", gate };
+    }
+    if (gate && gate.fixer_thread_id === prior.thread_id && !gate.corrector_thread_id && neverReported(prior)) {
+      if (kind !== "worker") throw new Error(`Fix run ${prior.thread_id} stopped before it reported, so the gate's fix-run slot is free (a corrector replaces only a fix run that reported blocked with wrong-test evidence): chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
       const decision = ctx.gateOf(prior)!.decision;
       if (decision.kind !== "fix") throw new Error(`Review gate ${gate.gate_key} needs no fix run. ${ctx.gateLine(gate, decision)}`);
       return { run: "gate", gate };
@@ -243,6 +251,10 @@ export function createDelegation(ctx: Ctx) {
       return { run: "corrector", gate };
     }
     if (gate && gate.fixer_thread_id === prior.thread_id && gate.corrector_thread_id && kind === "tester") throw new Error(`Review gate ${gate.gate_key} already had its corrector (${gate.corrector_thread_id}): escalate to the user.`);
+    if (gate && gate.corrector_thread_id === prior.thread_id && neverReported(prior)) {
+      if (kind !== "tester") throw new Error(`Corrector ${prior.thread_id} stopped before it reported: delegate the gate's corrector again — chief_delegate (replaces: ${prior.thread_id}, kind: tester).`);
+      return { run: "corrector", gate };
+    }
     if (gate && prior.state !== "complete" && gate.corrector_thread_id === prior.thread_id) throw new Error(`${prior.thread_id} is review gate ${gate.gate_key}'s corrector: there is no second fix. Escalate to the user.`);
     if (prior.state === "complete" && (prior.fix_run || gate?.targets.some((target) => target.threadId === prior.thread_id))) {
       if (kind !== "worker") throw new Error(`A change after completion is a fix run: chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
@@ -258,9 +270,11 @@ export function createDelegation(ctx: Ctx) {
     const tester = fix.gate.tester_thread_id ? store.get(fix.gate.tester_thread_id) : undefined;
     let findings: ReportFinding[] = [];
     try { findings = reviewer?.findings ? JSON.parse(reviewer.findings) as ReportFinding[] : []; } catch { findings = []; }
+    // The corrector's evidence is the gate's fix run, also when it replaces a corrector that never reported.
+    const fixer = fix.run === "corrector" && fix.gate.fixer_thread_id ? store.get(fix.gate.fixer_thread_id) : undefined;
     return {
-      run: fix.run, fixerThreadId: fix.run === "corrector" ? prior.thread_id : null,
-      fixerReport: fix.run === "corrector" ? prior.report_path ?? prior.blocker : null,
+      run: fix.run, fixerThreadId: fixer?.thread_id ?? null,
+      fixerReport: fixer ? fixer.report_path ?? fixer.blocker : null,
       targets: fix.gate.targets,
       reviewer: reviewer ? { threadId: reviewer.thread_id, verdict: reviewer.verdict, verdictPath: reviewer.verdict_path, findings } : null,
       tester: tester ? { threadId: tester.thread_id, reportPath: tester.report_path, failingTests: failingTests(tester.result) } : null,

@@ -169,8 +169,8 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
 - `admitDelegation` names `replaces: <chain owner>` when it rejects a non-head wave without a replacement target. Reason: callers must know the latest implementation thread to continue the chain.
 - `admitDelegation` rejects an implementation delegation without `replaces:` when any wave in the chain already has an implementation-lane row. Reason: started chains must not allocate duplicate workers or environments.
-- `admitDelegation` refuses `kind: tester` while a review gate is open, unless `evidenceOnly` is true or the call is the corrector of the gate's fix run. Reason: the gate starts its own tester.
-- While a review gate is open, `admitDelegation` admits only the gate's fix run (`kind: worker`, replacing the gate tester). Reason: one writable owner holds the gate at a time. See [review-engine.md](review-engine.md) under Fix Run and Corrector.
+- `admitDelegation` refuses `kind: tester` while a review gate is open, unless `evidenceOnly` is true, the call is the corrector of the gate's fix run, or it replaces a corrector that never reported. Reason: the gate starts its own tester.
+- While a review gate is open, `admitDelegation` admits only the gate's fix run (`kind: worker`, replacing the gate tester). It also admits a fix run that replaces a fix run that never reported. Reason: one writable owner holds the gate at a time. See [review-engine.md](review-engine.md) under Fix Run and Corrector.
 - A later implementation wave is admitted while a Spec Writer is pending. Reason: Spec Writers never gate implementation waves.
 - `admitDelegation` rejects a replacement target from another chain of the same plan. Reason: independent chains must not inherit foreign branches or environments.
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
