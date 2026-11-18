@@ -181,7 +181,7 @@ describe("admitDelegation: spec flow", () => {
     expect(() => workerFirst.admit({ ...planned, wave: 1 })).toThrow(/already has worker w on wave 1/);
   });
 
-  test("a first side writer is refused with a live side writer on the wave, behind an unsettled parent, or on a wave that takes none", () => {
+  test("the plan's Spec Writer is refused with a live side writer on the wave, while a wave is not ready, or on a wave that takes none", () => {
     const live = world({ [P]: [{ path: "w1", spec: true }] }, [{ id: "w", plan: P, wave: 1 }, { id: "sw", plan: P, wave: 1, kind: "spec-writer", state: "active", last: null }]);
     expect(() => live.admit({ ...writer, wave: 1 })).toThrow("is still live");
     // The writer waits on its own wave's worker too: wave 2 not ready refuses it, a ready, idle or complete one admits it.
