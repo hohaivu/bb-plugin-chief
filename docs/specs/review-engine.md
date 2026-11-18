@@ -302,10 +302,11 @@ The review gate is the one review of a plan. It gives one verdict and one test r
 | 2 | The reviewer or tester is missing, failed or blocked. | `restart` | `chief_review (workerThreadId: W)` again starts only that side. A blocked tester names its environment blocker. |
 | 3 | The reviewer, tester, fix run or corrector is busy. | `wait` | Names the busy side. |
 | 4 | No fix run exists, both sides reported, and the tester has `testsPassed` false, or a code finding exists. | `fix` | `chief_delegate (replaces: <gate tester>, kind: worker)`, once. |
-| 5 | Docs findings exist, and no Spec Writer repair was created after the verdict and is ready. | `docsRepair` | `chief_delegate (replaces: <that branch's latest side-lane Spec Writer>, kind: spec-writer)`. When no such writer exists, `escalate`. |
-| 6 | A fix run is blocked on a wrong test, and no corrector exists. | `wrongTest` | `chief_delegate (replaces: <fix run>, kind: tester)`, once. |
-| 7 | The corrector is red or blocked, or the fix run is blocked on a wrong test after a corrector exists. | `escalate` | Names the test and the owner. |
-| 8 | Otherwise. | `pass` | Completion is allowed. |
+| 5 | Docs findings exist, and the gate has two or more Spec Writers. | `escalate` | Names each writer and `chief_delegate (replaces: <that writer>, kind: spec-writer)`. Chief checks every repair, then completes with `override`. |
+| 6 | Docs findings exist, and no Spec Writer repair was created after the verdict and is ready. | `docsRepair` | `chief_delegate (replaces: <that branch's latest side-lane Spec Writer>, kind: spec-writer)`. When no such writer exists, `escalate`. |
+| 7 | A fix run is blocked on a wrong test, and no corrector exists. | `wrongTest` | `chief_delegate (replaces: <fix run>, kind: tester)`, once. |
+| 8 | The corrector is red or blocked, or the fix run is blocked on a wrong test after a corrector exists. | `escalate` | Names the test and the owner. |
+| 9 | Otherwise. | `pass` | Completion is allowed. |
 
 Rules:
 
