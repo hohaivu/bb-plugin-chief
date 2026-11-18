@@ -235,8 +235,8 @@ An evidence-only tester runs the commands that the mission names, or the command
   - For each command, its cwd, exact command and required exit status: from the mission, else from the complete prior receipt. Mission values win.
   - A missing input makes the tester report blocked. The report recommends `chief_delegate (replaces: <your thread id>, kind: tester)` without `evidenceOnly`.
 - Pin. After the sync, HEAD must equal Expected head. Otherwise the report is blocked and names both commits. The check never compares with the predecessor's Head commit. Reason: neither the predecessor's commit nor a synced HEAD pins the rerun.
-- Escalation. A finding that asks for a new or changed test, a receipt whose Coverage lacks the fixed behaviour, or a test that asserts the old behaviour makes the tester report blocked with the same normal-mode recommendation. Reason: an evidence tester writes no test.
-- Receipt. A ready result ends with `## Receipt` in the `chief-role-tester` skill format. Coverage and Gaps carry over from the prior receipt, Tested commit equals Expected head, and commands and results are updated. Reason: the next retest starts from this receipt.
+- Escalation. A finding that asks for a new or changed test makes the tester report blocked. So does a receipt whose Coverage lacks the fixed behaviour, or a test that asserts the old behaviour. The report recommends the same normal-mode call. Reason: an evidence tester writes no test.
+- Receipt. A ready result ends with `## Receipt` in the `chief-role-tester` skill format. Coverage and Gaps carry over from the prior receipt. Tested commit equals Expected head. Commands and results are updated. Reason: the next retest starts from this receipt.
 
 ### Spec Writer Side Lane
 
@@ -347,7 +347,13 @@ A tester brief has these rules:
 - The tester rules come from the `chief-role-tester` skill. The working contract keeps the test-files-only boundary: the tester never changes product code or `docs/`. It omits the user-journey wording, the `## Docs needed` route, and the re-plan line. Reason: those lines belong to workers.
 - No brief renders the refactor oracle rule. The `chief-role-tester` skill holds it. Reason: the rule applies to the tester role, so the skill owns it once.
 - A tester delegated with `replaces:` gets `## Prior receipt (<id>)` after `## Predecessor's last report`. The evidence-only brief keeps it too. `<id>` is the prior tester: the newest row of its task chain with kind `tester` and a ready last report, in any row state. `priorReceipt` in `src/plan/planProgress.ts` finds it. Reason: the next tester starts from the last complete receipt.
-- A receipt is the `## Receipt` section at the end of a tester's ready result. It is complete when it has a `Tested commit: <7-40 hex>` line, at least one command line, `Coverage:` and `Gaps:` lines, a last non-blank line that reads `Receipt end.`, and at most 3,000 characters. Reason: the end line proves the stored text was not cut.
+- A receipt is the `## Receipt` section at the end of a tester's ready result. It is complete when it has these parts:
+  - a `Tested commit: <7-40 hex>` line,
+  - at least one command line,
+  - `Coverage:` and `Gaps:` lines,
+  - a last non-blank line that reads `Receipt end.`,
+  - at most 3,000 characters.
+  Reason: the end line proves the stored text was not cut.
 - A complete receipt renders in full. Normal mode adds: "Reuse it: rerun the commands the change affects; do not rediscover commands or coverage it already names." Evidence mode adds: "Its commands are your commands and its Tested commit is Last tested, unless your mission names others."
 - A prior tester without a complete receipt renders a pointer line: "<id>'s report has no complete receipt: <report path, else `bb chief inspect <id>`>. Do not run partial commands from it." An older receipt never stands in for the newest tester's, and no receipt is clipped. Reason: an older receipt may name stale coverage.
 - A tester with no prior tester gets no section. An absent or incomplete receipt never refuses a delegation. Workers, designers and Spec Writers never get the section. Reason: only a tester reuses a receipt.
