@@ -29,7 +29,7 @@ describe.skipIf(!existsSync("/usr/bin/lockf"))("heavy wrapper with real /usr/bin
   });
 
   /** A temp folder with the wrapper, a `slots` file and a payload that logs, signals entry and optionally holds until `release.<name>` exists. */
-  function world(slots: string | null = "1", limits = { waitSeconds: 3, beatSeconds: 1, pollSeconds: 1 }) {
+  function world(slots: string | null = "1", limits = { waitSeconds: 10, beatSeconds: 1, pollSeconds: 1 }) { // a wait limit well above the test steps; the limit tests pass their own
     const dir = mkdtempSync(join(tmpdir(), "chief-heavy-test-"));
     dirs.push(dir);
     const tmp = join(dir, "tmp");
