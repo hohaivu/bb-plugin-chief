@@ -206,6 +206,13 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       wrote();
     },
 
+    /** A replacement whose launch was rolled back: unlinked from its plan so no schedule, review or ownership decision sees it (the row stays for diagnostics),
+     * and complete only once the thread is confirmed stopped; a thread that may still run stays live, so it keeps holding its branch. */
+    rollBackLaunch(threadId: string, now: number, stopped: boolean) {
+      db.prepare(`UPDATE managed_threads SET plan_thread_id=NULL, plan_wave=NULL, updated_at=? ${stopped ? ", state='complete', active_since=NULL" : ""} WHERE thread_id=?`).run(now, threadId);
+      wrote();
+    },
+
     /** chief_continue: re-arms the stall clock unless the nudge cap is reached. Returns whether it was capped.
      * Decides from the stored counter inside one synchronous transaction, not a pre-send snapshot. */
     markContinued(threadId: string, now: number, maxStallResets: number) {

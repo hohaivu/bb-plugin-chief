@@ -306,11 +306,15 @@ export function createNextAction(ctx: Ctx) {
       ? { text: `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings or chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings`, writerRoute: false }
       : { text: `chief_delegate (replaces: ${target.threadId})`, writerRoute: false };
     // The alert's action is clipped at ACTION_ROOM: keep whole routes only and point at chief_roster, which prints the full text, for the rest.
-    const fitRoutes = (routes: { text: string }[], build: (list: string) => string) => {
+    // When even the fixed text alone is over, `short` replaces it: the pointer leads (a clip never reaches it) and the ids, order and wave rule stay inline.
+    const fitRoutes = (routes: { text: string; writerRoute: boolean }[], build: (list: string) => string, short: string) => {
       const list = (n: number) => `${routes.slice(0, n).map((route) => route.text).join(" / ")}${n < routes.length ? `${n ? " / " : ""}and ${routes.length - n} more branch(es) omitted here: read the complete handoff in chief_roster before delegating` : ""}`;
       let n = routes.length;
       while (forAlert && n > 0 && build(list(n)).length > ACTION_ROOM) n--;
-      return build(list(n));
+      const action = build(list(n));
+      return forAlert && action.length > ACTION_ROOM
+        ? `Shortened: read the complete handoff in chief_roster (Pending) before delegating. ${short}${routes.some((route) => route.writerRoute) ? " A docs finding goes to the Spec Writer of the wave whose Spec delta names its path." : ""}`
+        : action;
     };
     // A stacked chain's waves each build on the one before, so they are fixed one at a time, never in parallel.
     if (work.layout === "plan") {
@@ -327,10 +331,12 @@ export function createNextAction(ctx: Ctx) {
       }
       if (stacks.length) {
         const routes = loose.map(handoff);
-        return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} ${stacks.map((stack) => `Waves ${stack.map((target) => target.wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${target.wave}: ${target.threadId}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${routes.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${list}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`);
+        return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} ${stacks.map((stack) => `Waves ${stack.map((target) => target.wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${target.wave}: ${target.threadId}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${routes.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${list}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`,
+          `The reviewer requires changes.${flagged} Stacked waves are fixed in wave order, never in parallel: ${stacks.map((stack) => `waves ${stack.map((target) => `${target.wave}: ${target.threadId}`).join(", ")}`).join("; ")}. Delegate the earliest the findings name now with chief_delegate (replaces: its worker), then restack each later wave on it as each ready report directs, even one the findings do not name.${loose.length ? ` Other branches the findings name: each to a fresh worker in this turn (kind per the roster handoff): ${loose.map((target) => `chief_delegate (replaces: ${target.threadId}${target.lane === "side" ? ", kind: spec-writer" : ""})`).join(", ")}.` : ""} The next review covers every branch again once every wave is ready.`);
       }
       const routes = open.map(handoff);
-      return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${list}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`);
+      return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${list}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`,
+        `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map((target) => target.threadId).join(", ")}. Delegate all of them before any reports: the next review covers every branch again.`);
     }
     const single = work.layout === "single" ? handoff(work.target) : undefined;
     if (advice.kind === "consult") {
