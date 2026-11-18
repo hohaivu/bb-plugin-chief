@@ -1,7 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { vi } from "vitest";
-import { CLOSE_OUT, delegate, execFileMock, start, type setup } from "./harness";
+import { CLOSE_OUT, PLAN_FIXTURE, delegate, execFileMock, start, type setup } from "./harness";
 import { plan, report, setLive } from "./testerHelpers";
 
 type State = Awaited<ReturnType<typeof setup>>;
@@ -26,7 +26,7 @@ export async function completedPlan(state: State, options: { mission?: string; /
   state.harness.sdk.stub("files.read", async ({ path }: { path: string }) => ({ content: await readFile(path, "utf8") }));
   await state.harness.behavior.setSettings({ retroJudge: true });
   const chief = (await start(state)).threadId;
-  const planner = (await plan(state, chief)).threadId;
+  const planner = (await plan(state, chief, [{ body: PLAN_FIXTURE }])).threadId;
   const spawned = await state.harness.behavior.runCli(["delegate", "--title", "Fix totals", "--mission", options.mission ?? "Correct and verify totals", "--criteria", "Regression passes", "--unplanned-reason", "Bounded test fixture", ...(options.branch ? ["--branch", options.branch] : []), "--json"], { threadId: chief, projectId: "proj_1" });
   const worker = (JSON.parse(spawned.stdout!) as { threadId: string }).threadId;
   setLive(state, worker, "idle");
