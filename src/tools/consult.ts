@@ -6,19 +6,16 @@ export function registerConsultTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_consult",
     presentation: { label: { pending: "Starting advisor…", completed: "Started advisor" } },
-    description: "Start a read-only advisor on a hard problem or a change that keeps failing review. It may read code and run commands to reproduce it, never edits, and reports its advice back to you. With planThreadId, it gives a multi-wave or complex plan its one review before delegation; refused for any other plan.",
+    description: "Plans only: start a read-only advisor that gives a multi-wave or complex plan (planThreadId) its one review before delegation; refused for any other plan. It may read code and run commands, never edits, and reports its advice back to you.",
     parameters: consultParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!ctx.isActiveChief(caller)) {
         throw new Error("chief_consult requires an active registered Chief thread.");
       }
-      if (params.workerThreadId) {
-        await ctx.controlledTarget(params.workerThreadId, caller);
-      }
       ctx.touchCallerChief(caller);
       const result = await ctx.startConsult(params, context.threadId);
-      return `Started advisor “${result.title}” in thread ${result.threadId}. Wait for its advice before starting another worker round.`;
+      return `Started advisor “${result.title}” in thread ${result.threadId}. Wait for its advice before delegating the plan.`;
     },
   });}
 

@@ -589,9 +589,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
   }
 
   /** A reviewer that already finished (idle, ready, blocked, or failed) is superseded
-   * by a fresh one rather than resumed; its reject_streak carries over onto the new
-   * row, so deadlock detection still sees consecutive rejections across the fresh
-   * reviewers. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
+   * by a fresh one rather than resumed. The verdict history lives in reviewer_verdicts, not on the row. Only a reviewer still busy (BUSY_STATUSES) is returned as-is. */
   async function startReview(caller: Row, workerThreadId: string, focus?: string, acceptedGaps?: string): Promise<ReviewStarted> {
     const worker = store.get(workerThreadId);
     if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
@@ -825,12 +823,9 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       (threadId) => ledger.addTargets(threadId, covered.map((target) => ({
         threadId: target.row.thread_id, reportSeq: target.row.report_seq, headSha: target.head?.sha ?? null, prUrl: target.row.pr_url, branch: target.row.branch,
       }))));
-      // Seed from the task's history, not just the open reviewer: a completed one must not reset the count.
-      const streak = ledger.carriedStreak(targets.map((target) => target.thread_id));
-      if (openReviews.length || streak) {
+      if (openReviews.length) {
         const now = Date.now();
         store.batch(() => {
-          ledger.seedStreak(thread.id, streak, previous, now);
           for (const old of openReviews) store.completeSuperseded(old.thread_id, now);
         });
       }

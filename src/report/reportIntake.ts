@@ -16,7 +16,7 @@ export interface ReportIntakeAdapters {
   /** chief_lessons is written only by the intake; the thread store keeps only managed_threads (threadStore.ts:66-67). */
   db: Database;
   store: ThreadStore<ManagedRow>;
-  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets" | "ladder">;
+  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets">;
   lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInsert<ManagedRow["role"], ManagedRow["state"]> }>;
   writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string): Promise<{ path: string }[]>;
   writeArtifact(threadId: string, projectId: string, name: string, content: string): Promise<string>;
@@ -586,8 +586,6 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, not rejection rounds — a
     // reviewer resumed for an unrelated reason must not read as a deadlock.
-    // reject_streak counts only consecutive request_changes verdicts, and
-    // resets the moment either side breaks the streak with an approve.
     // report_seq is reserved here, so the per-report file names below never collide.
     let lessonId: number | null = null;
     const { report_seq: seq, result_rev: resultRev } = store.batch(() => {
@@ -616,10 +614,10 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
       if (params.state === "blocked") event?.("blocked", row, clip(params.blocker?.split("\n")[0] ?? "", 160));
       if (event && row.role === "reviewer" && params.state === "ready" && verdict === "request_changes") {
-        // One row per covered worker, with the streak that worker's task is on now that this verdict is recorded.
+        // One row per covered worker.
         const covered = ledger.targets(threadId).map((target) => target.worker_thread_id);
         for (const workerId of covered.length ? covered : row.worker_thread_id ? [row.worker_thread_id] : []) {
-          event("request_changes", store.get(workerId) ?? { thread_id: workerId, project_id: row.project_id }, `round=${ledger.ladder(workerId).streak}`);
+          event("request_changes", store.get(workerId) ?? { thread_id: workerId, project_id: row.project_id });
         }
       }
       if (row.role === "reviewer" && params.state === "ready" && verdict) {

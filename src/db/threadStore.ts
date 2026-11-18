@@ -381,17 +381,6 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       inBatch();
       db.prepare(`UPDATE managed_threads SET worker_thread_id=?, reviewed_report_seq=NULL, updated_at=? WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(successorThreadId, now, priorThreadId);
     },
-    /** A new reviewer starts from the task's carried reject streak. Batch only; no reload. */
-    setRejectStreak(reviewerThreadId: string, streak: number, now: number) {
-      inBatch();
-      db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(streak, now, reviewerThreadId);
-    },
-    /** A report's verdict: a request_changes adds one to reject_streak, an approve resets it. Batch only; no reload. */
-    bumpRejectStreak(threadId: string, verdict: string | null) {
-      inBatch();
-      db.prepare(`UPDATE managed_threads SET reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END WHERE thread_id=?`)
-        .run(verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0, threadId);
-    },
 
     /** A Chief that failed a turn is active again once it calls a tool. */
     reactivate(threadId: string) {

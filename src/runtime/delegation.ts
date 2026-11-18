@@ -76,42 +76,13 @@ export function createDelegation(ctx: Ctx) {
     };
   }
 
-  /** A consult is read-only, like a review: with a worker it reuses that
-   * worker's worktree so the advisor can reproduce the failing change; without
-   * one it runs in the project's own checkout, like a plan. */
   async function startConsult(params: z.infer<typeof consultParams>, callerThreadId?: string | null) {
     const { chief, projectId } = await ctx.owningChief(callerThreadId);
-    if (params.planThreadId) return startPlanConsult(params, params.planThreadId, chief.thread_id, projectId);
-    if (params.workerThreadId && params.branch) throw new Error(`The advisor reuses worker ${params.workerThreadId}'s worktree and branch; omit branch.`);
-    const worker = params.workerThreadId ? store.get(params.workerThreadId) : undefined;
-    if (params.workerThreadId && (!worker || worker.role !== "worker" || !ctx.controlsThread(worker, chief.thread_id))) {
-      throw new Error(`No managed worker ${params.workerThreadId} for this Chief.`);
-    }
-    let workerLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
-    if (worker) {
-      workerLive = await bb.sdk.threads.get({ threadId: worker.thread_id });
-      if (BUSY_STATUSES.has(workerLive.status)) ctx.busyRejection(worker, workerLive.status, "starting a consult");
-      if (workerLive.deletedAt !== null || workerLive.archivedAt !== null) throw new Error(`Worker ${worker.thread_id} is not consultable.`);
-      if (!workerLive.environmentId) throw new Error(`Worker ${worker.thread_id} has no reusable environment.`);
-    }
-    const hostId = worker ? await ctx.environmentHostId(workerLive!.environmentId!) : await ctx.projectHostId(projectId);
-    const prepared = await ctx.managedSpawn.prepare(projectId, { role: "advisor", hostId });
-    const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
-    const reviews = worker ? ctx.taskReviews(worker) : [];
-    const prompt = advisorBrief({ title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context, worker, reviews, branch: params.branch });
-    const thread = await ctx.managedSpawn.launch(prepared, {
-      projectId,
-      environment: worker
-        ? { type: "reuse", environmentId: workerLive!.environmentId! }
-        : await readerEnvironment(projectId, params.branch),
-      title, prompt,
-    }, { role: "advisor", chiefThreadId: chief.thread_id, workerThreadId: worker?.thread_id ?? null, ...(params.branch ? { branch: params.branch } : {}) });
-    return { threadId: thread.id, title, projectId };
+    return startPlanConsult(params, params.planThreadId, chief.thread_id, projectId);
   }
 
   /** chief_consult planThreadId: the plan's one read-only advisor review, in the project's own checkout. */
   async function startPlanConsult(params: z.infer<typeof consultParams>, plannerId: string, chiefThreadId: string, projectId: string) {
-    if (params.workerThreadId) throw new Error("Use one of workerThreadId or planThreadId.");
     const planner = store.get(plannerId);
     if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId) || !planner.plan_waves || planner.state === "complete") {
       throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
@@ -175,18 +146,6 @@ export function createDelegation(ctx: Ctx) {
     const prior = params.replaces ? store.get(params.replaces) : undefined;
     if (params.replaces && (!prior || prior.role !== "worker" || !ctx.controlsThread(prior, chief.thread_id) || prior.project_id !== projectId)) {
       throw new Error(`No managed worker ${params.replaces} for this Chief.`);
-    }
-    if (prior) {
-      // The escalation ladder: round 2 needs a consult that gave its advice on this task, round 3 needs the user.
-      // Read from the task's verdict history, not the open reviewer: a fresh or completed reviewer,
-      // a re-pointed snapshot, or a second replaces: before the next review must not reset it.
-      const needs = ledger.replacement(prior, !!params.userApprovedRound);
-      if (needs?.needs === "user") {
-        throw new Error(`The reviewer has requested changes ${needs.streak} times in a row on ${prior.thread_id}. Do not delegate another round: escalate to the user with both positions, the consult's advice and your recommendation. Only the user can authorize another round; once they do, repeat this call with userApprovedRound: true (CLI: --user-approved-round).`);
-      }
-      if (needs?.needs === "consult") {
-        throw new Error(`The reviewer has requested changes ${needs.streak} times in a row on ${prior.thread_id}. Call chief_consult (workerThreadId: ${prior.thread_id}) and wait for it to send its advice (a ready or blocked report; a status-only, stopped or completed-unreported consult does not count) before delegating the one more round.`);
-      }
     }
     let priorLive: Awaited<ReturnType<typeof bb.sdk.threads.get>> | undefined;
     if (prior) {

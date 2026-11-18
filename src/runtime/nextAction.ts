@@ -1,6 +1,5 @@
 import { type RepairTarget } from "../plan/planProgress";
 import { reviewEngine } from "../review/prAgent";
-import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
 import { createReviewStart } from "../review/reviewStart";
 import { terminal, type ManagedRow } from "../types";
 import { clip } from "../core/text";
@@ -208,18 +207,12 @@ export function createNextAction(ctx: Ctx) {
       return workerReadyNextStep(row, forAlert);
     }
     if (row.role === "advisor") {
-      if (row.worker_thread_id && ledger.ladder(row.worker_thread_id).rung === "stop") {
-        return `The advisor changed nothing. The reviewer has now requested changes ${STOP_AFTER_REJECTIONS} times in a row: start no new worker, and escalate to the user with both positions, this advice, and your recommendation.`;
-      }
       const advised = row.worker_thread_id ? store.get(row.worker_thread_id) : undefined;
       return `The advisor changed nothing. Decide the next step yourself: hand its advice to a fresh worker with ${advised ? ctx.replacesCall(advised) : row.worker_thread_id ? `chief_delegate (replaces: ${row.worker_thread_id})` : "chief_delegate (through chief_plan first when planning is on)"} with the advice in its context, or escalate to the user if it names a genuine decision.`;
     }
     const advice = progress.reviewAdvice(row);
     if (!advice) return null;
     const flagged = advice.kind !== "approve" && advice.regression ? " The reviewer reports this change introduced a new problem; make the fix's brief name it." : "";
-    if (advice.kind === "stop") {
-      return `The reviewer still requires changes after ${advice.streak} consecutive rounds, and the advisor's advice did not settle it. Stop: start no new worker. Escalate to the user with both positions (the reviewer's findings and the worker's), the consult's advice, and your recommendation; only the user can authorize another round.${flagged}`;
-    }
     const { work } = advice;
     if (advice.kind === "approve") {
       if (work.layout === "plan") {
@@ -271,11 +264,6 @@ export function createNextAction(ctx: Ctx) {
       const mixed = testerIds.length
         ? ` On ${testerIds.join(", ")} name the kind: kind: worker for product-code findings, kind: tester for test-only findings. Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests.`
         : "";
-      if (advice.kind === "consult") {
-        return `The reviewer still requires changes after ${advice.streak} consecutive rounds. Call chief_consult (workerThreadId: ${open[0]!.threadId}) now, before any further delegation, with every branch of the review (${workers}) in its context — one consult unlocks the fix for each. Then hand its advice to ${stacks.length
-          ? `fresh workers with chief_delegate (replaces: …): on the stacked waves ${stacks.map((stack) => stack.map((target) => target.wave).join(" → ")).join("; ")} one at a time in wave order, the earliest wave the findings name first, then each later wave restacked on it as its ready report directs; any other branch the findings name in this turn. Run exactly one more review once every wave is ready.`
-          : "one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review."}${mixed} If that review still requires changes, stop and escalate to the user.${flagged}`;
-      }
       if (stacks.length) {
         const routes = loose.map(handoff);
         return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} ${stacks.map((stack) => `Waves ${stack.map((target) => target.wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${target.wave}: ${target.threadId}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${routes.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${list}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`,
@@ -286,9 +274,6 @@ export function createNextAction(ctx: Ctx) {
         `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map((target) => target.threadId).join(", ")}. Delegate all of them before any reports: the next review covers every branch again.`);
     }
     const single = work.layout === "single" ? handoff(work.target) : undefined;
-    if (advice.kind === "consult") {
-      return `The reviewer still requires changes after ${advice.streak} consecutive rounds. Call chief_consult${work.layout === "single" ? ` (workerThreadId: ${work.target.threadId})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix.${single ? docsNote([single]) : ""} Then hand its advice to one fresh worker with ${single ? single.text : `chief_delegate (branch: ${row.branch})`} and run exactly one more review.${work.layout === "single" && work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} If that review still requires changes, stop and escalate to the user.${flagged}`;
-    }
     return single && work.layout === "single"
       ? `The reviewer requires changes.${flagged}${docsNote([single])} Hand the fix to a fresh worker with ${single.text}; its findings are attached automatically.${work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} Escalate if the disagreement is a genuine decision.`
       : `The reviewer requires changes, and no managed worker owns branch ${row.branch}.${flagged} Hand the fix to a fresh worker with chief_delegate (branch: ${row.branch}${row.pr_url ? `, prUrl: ${row.pr_url}` : ""}; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.`;

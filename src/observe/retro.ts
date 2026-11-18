@@ -373,7 +373,7 @@ export function createRetro(ctx: Ctx) {
     const all = [...members.values()].sort((a, b) => a.created_at - b.created_at);
     const ids = all.map((row) => row.thread_id);
     const flagged = new Set((db.prepare(`SELECT DISTINCT thread_id FROM chief_events WHERE thread_id IN (${ids.map(() => "?").join(",")})`).all(...ids) as { thread_id: string }[]).map((row) => row.thread_id));
-    const picked: ManagedRow[] = all.filter((row) => flagged.has(row.thread_id) || row.state === "blocked" || row.reject_streak > 0);
+    const picked: ManagedRow[] = all.filter((row) => flagged.has(row.thread_id) || row.state === "blocked");
     for (const row of all) if (!picked.some((other) => other.role === row.role && (other.kind ?? null) === (row.kind ?? null))) picked.push(row);
     for (const row of all) if (!picked.includes(row)) picked.push(row);
     const chosen = picked.slice(0, MAX_THREADS);
@@ -406,7 +406,7 @@ export function createRetro(ctx: Ctx) {
       const applicable = applicableRubrics(row.role === "worker" ? row.kind : null);
       const text = [
         `# Thread ${row.thread_id}: ${row.role}${row.kind ? `/${row.kind}` : ""} “${scrubbed(row.title)}”`,
-        `state ${row.state}; created ${new Date(row.created_at).toISOString()}; updated ${new Date(row.updated_at).toISOString()}; reject_streak ${row.reject_streak}`,
+        `state ${row.state}; created ${new Date(row.created_at).toISOString()}; updated ${new Date(row.updated_at).toISOString()}`,
         `Applicable rubrics: ${applicable.join(", ")}`,
         await providerSummary(row),
         "", "## Brief (artifact brief.md)", brief ? scrubbed(clip(brief, 12_000)) : "[brief artifact missing]",

@@ -18,7 +18,6 @@ export interface ProgressRow {
   branch: string | null;
   verdict: string | null;
   worker_thread_id: string | null;
-  reject_streak: number;
   regression: number | null;
 }
 
@@ -33,8 +32,7 @@ export type RepairWork =
   | { layout: "branch" };
 export type ReviewAdvice =
   | { kind: "approve"; work: RepairWork }
-  | { kind: "fix" | "consult"; work: RepairWork; streak: number; regression: boolean }
-  | { kind: "stop"; streak: number; regression: boolean };
+  | { kind: "fix"; work: RepairWork; regression: boolean };
 
 /** The two row-state tests the server owns: a terminal row, and a live thread status that is busy. */
 export interface ProgressStates {
@@ -194,8 +192,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     return ledger.taskChain(row.thread_id).some((id) => isWriter(rows().get(id)?.kind));
   }
 
-  /** The repair decision after a reviewer verdict, or null (no verdict, or nothing left to repair). Advice, not permission:
-   * the rung comes from the reviewer's carried streak, and chief_delegate's ledger.replacement still decides each replaces:. */
+  /** The repair decision after a reviewer verdict, or null (no verdict, or nothing left to repair). */
   function reviewAdvice(reviewer: Row): ReviewAdvice | null {
     if (reviewer.role !== "reviewer" || !reviewer.verdict) return null;
     const round = fixRound(reviewer);
@@ -209,9 +206,7 @@ export function createPlanProgress<Row extends ProgressRow>(
       ? { layout: "plan", open: round.open.map(ofTarget), stacks: round.stacks.map((stack) => stack.map(ofTarget)), loose: round.loose.map(ofTarget) }
       : reviewer.worker_thread_id ? { layout: "single", target: target(reviewer.worker_thread_id) } : { layout: "branch" };
     if (reviewer.verdict === "approve") return { kind: "approve", work };
-    const rung = ledger.rung(reviewer.reject_streak);
-    const regression = !!reviewer.regression;
-    return rung === "stop" ? { kind: "stop", streak: reviewer.reject_streak, regression } : { kind: rung, work, streak: reviewer.reject_streak, regression };
+    return { kind: "fix", work, regression: !!reviewer.regression };
   }
 
   /** A planner's progress: one segment per chain, and how many of all its waves are done. An absent legacy test wave
