@@ -84,7 +84,10 @@ export function createDelegation(ctx: Ctx) {
     const designName = `design-approved-r${researcher.report_seq}.md`;
     const factsName = `facts-approved-r${researcher.report_seq}.md`;
     const snapshot = async (name: string, source: () => Promise<string>) => {
-      const existing = await ctx.readArtifact(id, projectId, name);
+      // A failed read must not look like "absent": the snapshot is write-once.
+      const existing = await ctx.readArtifactIfPresent(id, projectId, name).catch((error) => {
+        throw new Error(`Could not read ${name} for researcher ${id} (${String((error as Error)?.message ?? error).slice(0, 200)}); nothing was started. Retry chief_plan.`);
+      });
       if (existing) return existing;
       const text = await source();
       return { path: await ctx.writeArtifact(id, projectId, name, text), text };
