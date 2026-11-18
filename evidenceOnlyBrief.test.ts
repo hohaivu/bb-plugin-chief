@@ -190,12 +190,28 @@ describe("evidence-only tester brief", () => {
     // nothing masked), and the full base text of the 8 Spec Writer cells with findings=false prior=false verify=npm test specDocs=1.
     // Only the Spec Writer Inputs sentence changes, by the one named edit below applied to the BASE text.
     // The 32 tester cells with a verify command hold the hash of the BASE text plus one swap (tester Verify baseline sentence, 96 characters longer, plan-chains.md line 301); every other cell hash is the base's.
+    // One Spec Writer per plan (plan-chains.md "Spec Writer Side Lane") adds named edits: the stored hashes of the 32 spec-wave worker and designer cells are the
+    // BASE text plus SPEC_WAVE_EDIT, and every tester cell adds TESTER_READY_EDIT (#253); each was checked offline as render(7687ebfd) + exactly these swaps == render(HEAD).
+    // The Spec Writer cells take WRITER_EDITS (both lanes) and SIDE_EDITS (side lane only) on the stored BASE text.
     // Regression: any byte changed in a non-writer brief; an Inputs line that keeps the old allowance or is missing in either lane; a changed Baseline line.
     describe("equal to base 7687ebfd", () => {
       const base = readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "briefs-matrix-7687ebf.json"), "utf8").then((text) => JSON.parse(text) as { hashes: Record<string, string>; writers: Record<string, string> });
       const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
       const OLD_INPUTS = "You may read the code entry points and guideline files those domains need, read-only.";
       const NEW_INPUTS = "Read code only to check a name or path the delta states; a gap goes under `## Open questions`.";
+      const WRITER_EDITS: [string, string][] = [
+        [OLD_INPUTS, NEW_INPUTS],
+        ["- Planned: the wave's `## Spec delta` is your work list.", "- Planned: the `## Spec delta` of each spec: true wave is your work list."],
+        ["- Baseline: this wave's plan has a `## Spec baseline` heading.", "- Baseline: a spec wave's plan file has a `## Spec baseline` heading."],
+      ];
+      const SIDE_EDITS: [string, string][] = [
+        ["Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below are your wave's; they belong to the worker and the tester:", "Read each plan file in full; the `## Spec delta` of each spec: true wave is your work list. Each plan file's `## Contracts to verify` belongs to the worker and the tester:"],
+        ["you run in parallel with its worker, in your own worktree on a side branch cut from feature/x. Your work is only its `## Spec delta` and the docs rules", "you are the plan's one Spec Writer. You run after every wave of the plan is ready, in your own worktree on a side branch cut from feature/x. Your work is the `## Spec delta` of every spec: true wave in the plan files below, the docs work list when present, and the docs rules"],
+      ];
+      const edit = (kind: string, text: string) => [...WRITER_EDITS, ...(kind === "spec-writer side" ? SIDE_EDITS : [])].reduce((out, [from, to]) => {
+        expect(out.split(from).length, from).toBeLessThanOrEqual(2); // a cell without that line (unplanned, baseline=false) takes no edit
+        return out.replace(from, to);
+      }, text);
 
       test.each(["worker", "designer", "tester"])("%s: every cell renders the base's complete bytes", async (kind) => {
         const { hashes } = await base;
@@ -234,7 +250,7 @@ describe("evidence-only tester brief", () => {
         for (const [label, text] of stored) {
           const input = own.find(([name]) => name === label)![1];
           expect(text.split(OLD_INPUTS), label).toHaveLength(2);
-          expect(workerBrief(input).prompt, label).toBe(text.replace(OLD_INPUTS, NEW_INPUTS));
+          expect(workerBrief(input).prompt, label).toBe(edit(kind, text));
         }
       });
 
@@ -246,7 +262,7 @@ describe("evidence-only tester brief", () => {
         const stored = Object.entries(writers).filter(([label]) => label.startsWith(`${kind} planned`) && label.endsWith("baseline=true"));
         expect(stored).toHaveLength(2);
         for (const [label, text] of stored) {
-          const line = baselineLine(text);
+          const line = baselineLine(edit(kind, text));
           expect(line, label).toHaveLength(1);
           for (const [name, input] of own) if (input.baseline) expect(baselineLine(workerBrief(input).prompt), name).toEqual(line);
         }
