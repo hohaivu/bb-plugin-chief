@@ -238,7 +238,8 @@ export function createDelegation(ctx: Ctx) {
       if (decision.kind !== "fix") throw new Error(`Review gate ${gate.gate_key} needs no fix run. ${ctx.gateLine(gate, decision)}`);
       return { run: "gate", gate };
     }
-    if (gate && gate.fixer_thread_id === prior.thread_id && !gate.corrector_thread_id && neverReported(prior) && kind === "worker") {
+    if (gate && gate.fixer_thread_id === prior.thread_id && !gate.corrector_thread_id && neverReported(prior)) {
+      if (kind !== "worker") throw new Error(`Fix run ${prior.thread_id} stopped before it reported, so the gate's fix-run slot is free (a corrector replaces only a fix run that reported blocked with wrong-test evidence): chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
       const decision = ctx.gateOf(prior)!.decision;
       if (decision.kind !== "fix") throw new Error(`Review gate ${gate.gate_key} needs no fix run. ${ctx.gateLine(gate, decision)}`);
       return { run: "gate", gate };

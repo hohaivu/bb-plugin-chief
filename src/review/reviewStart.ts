@@ -555,12 +555,19 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const down = (id: string | null) => { const actor = id ? store.get(id) : undefined; return !actor || ["failed", "blocked", "archived", "deleted"].includes(actor.state); };
       let gate = store.gate(gateKey);
       const existing = !!gate;
-      // One advisory re-review: the review asked for changes, the gate's last fix row is green, and only that one reviewer has a verdict since the gate opened.
-      const oldReviewer = gate?.reviewer_thread_id ? store.get(gate.reviewer_thread_id) : undefined;
+      // After the fix run, the reviewer side is advisory: one re-review when the review asked for changes, the gate's last fix row is green
+      // and only one reviewer has a verdict since the gate opened. A failed no-verdict advisory attempt uses no budget and is retried with the prior verdict.
+      const ids = gate ? gate.targets.map((target) => target.threadId) : [];
+      const settled = gate ? store.get(ledger.newestVerdictAt(ids)?.reviewer_thread_id ?? "") : undefined;
       const lastFix = gate ? store.get(gate.corrector_thread_id ?? gate.fixer_thread_id ?? "") : undefined;
-      const rereview = !!gate && oldReviewer?.verdict === "request_changes" && !!lastFix && (isReady(lastFix) || lastFix.state === "complete") && lastFix.tests_passed === 1
-        && ledger.reviewersWithVerdict(gate.targets.map((target) => target.threadId), gate.created_at) === 1;
-      if (gate && !down(gate.reviewer_thread_id) && !down(gate.tester_thread_id) && !rereview) {
+      const afterFix = !!gate?.fixer_thread_id;
+      const advisoryRunning = afterFix && !down(gate!.reviewer_thread_id) && gate!.reviewer_thread_id !== settled?.thread_id;
+      const rereview = afterFix && !advisoryRunning && (gate!.reviewer_thread_id === settled?.thread_id || down(gate!.reviewer_thread_id))
+        && settled?.verdict === "request_changes" && !!lastFix && (isReady(lastFix) || lastFix.state === "complete") && lastFix.tests_passed === 1
+        && ledger.reviewersWithVerdict(ids, gate!.created_at) === 1;
+      const startReviewer = !gate || (afterFix ? rereview : down(gate.reviewer_thread_id));
+      const startTester = !gate || (!advisoryRunning && down(gate.tester_thread_id));
+      if (gate && !startReviewer && !startTester) {
         return {
           threadId: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)!.title, created: false,
           reply: `The review gate ${gateKey} already runs reviewer ${gate.reviewer_thread_id} and tester ${gate.tester_thread_id}; nothing started.`,
@@ -590,12 +597,12 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         store.batch(() => store.repinGate(gateKey, repinned));
         gate = store.gate(gateKey)!;
       }
-      const previous = rereview && oldReviewer ? { threadId: oldReviewer.thread_id, preview: verdictPreview(oldReviewer), recommendation: oldReviewer.recommendation } : null;
+      const previous = rereview && settled ? { threadId: settled.thread_id, preview: verdictPreview(settled), recommendation: settled.recommendation } : null;
       // Each missing side starts independently and persists on success, so a retry starts only the side that failed.
       const open = gate;
       const [reviewerRun, testerRun] = await Promise.allSettled([
-        down(open.reviewer_thread_id) || rereview ? launchReviewer(open, worker, focus, acceptedGaps, projectDir, previous) : Promise.resolve(null),
-        down(open.tester_thread_id) ? launchTester(open, worker) : Promise.resolve(null),
+        startReviewer ? launchReviewer(open, worker, focus, acceptedGaps, projectDir, previous) : Promise.resolve(null),
+        startTester ? launchTester(open, worker) : Promise.resolve(null),
       ]);
       const reviewer = reviewerRun.status === "fulfilled" ? reviewerRun.value : null;
       const started: string[] = [];

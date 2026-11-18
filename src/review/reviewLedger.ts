@@ -101,9 +101,9 @@ export function createReviewLedger<Row extends LedgerRow>(
   }
 
   /** The newest reviewer_verdicts row over these worker ids and the time it was recorded; null when none. */
-  function newestVerdictAt(threadIds: string[]): { verdict: string; at: number } | null {
+  function newestVerdictAt(threadIds: string[]): { verdict: string; at: number; reviewer_thread_id: string } | null {
     if (!threadIds.length) return null;
-    return (db.prepare(`SELECT verdict, at FROM reviewer_verdicts WHERE worker_thread_id IN (${threadIds.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`).get(...threadIds) as { verdict: string; at: number } | undefined) ?? null;
+    return (db.prepare(`SELECT verdict, at, reviewer_thread_id FROM reviewer_verdicts WHERE worker_thread_id IN (${threadIds.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`).get(...threadIds) as { verdict: string; at: number; reviewer_thread_id: string } | undefined) ?? null;
   }
 
   /** The newest verdict on the worker's task chain, with the report it covered; undefined when none was recorded. */

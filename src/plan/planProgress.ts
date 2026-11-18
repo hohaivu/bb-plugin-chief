@@ -51,6 +51,8 @@ export function gateDecision<Row extends ProgressRow>(input: {
   row: (threadId: string) => Row | undefined;
   startRefusal: string | null;
   verdictAt: number | null;
+  /** The reviewer of the newest recorded verdict on the gate's targets. */
+  settledReviewer?: Row;
   writers: Row[];
   terminal: (state: string) => boolean;
 }): GateDecision<Row> {
@@ -59,7 +61,10 @@ export function gateDecision<Row extends ProgressRow>(input: {
   const moved = gate.targets.find((target) => row(target.threadId)?.report_seq !== target.reportSeq);
   if (moved) return { kind: "escalate", why: `${moved.threadId} changed after the gate pinned it (report ${moved.reportSeq})` };
   const actor = (id: string | null) => (id ? row(id) : undefined);
-  const reviewer = actor(gate.reviewer_thread_id);
+  // After the fix run, a pending or failed advisory re-review never holds the gate: the last settled verdict stands.
+  const named = actor(gate.reviewer_thread_id);
+  const advisoryOpen = !!gate.fixer_thread_id && !!input.settledReviewer && named?.thread_id !== input.settledReviewer.thread_id;
+  const reviewer = advisoryOpen ? input.settledReviewer : named;
   const tester = actor(gate.tester_thread_id);
   const down = (side: Row | undefined) => !side || ["failed", "blocked", "archived", "deleted"].includes(side.state);
   const sides = ([["reviewer", reviewer], ["tester", tester]] as const).filter(([, side]) => down(side));
