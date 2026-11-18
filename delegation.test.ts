@@ -1051,7 +1051,7 @@ describe("heavy-command slots in delegation", () => {
     const chief = await start(state);
     await delegate(state, chief.threadId);
     await delegate(state, chief.threadId, "Draw the checkout screen", { kind: "designer" });
-    const paths = state.spawned.slice(1).map((spawn) => (spawn.prompt as string).match(/## Heavy commands\nSlot wrapper: `bash "([^"]+)"/)?.[1]);
+    const paths = state.spawned.slice(1).map((spawn) => (spawn.prompt as string).match(/## Heavy commands\nSlot wrapper: `+ bash '([^']+)'/)?.[1]);
     expect(paths[0]).toMatch(new RegExp(`^${heavyDir(state).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/chief-heavy-[0-9a-f]{12}\\.sh$`));
     expect(paths[1]).toBe(paths[0]);
     expect(existsSync(paths[0]!)).toBe(true);
