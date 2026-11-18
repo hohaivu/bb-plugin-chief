@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { PLAN_LINE_NEW, PLAN_LINE_OLD } from "./test/reviewWave1";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { NO_DEVIATIONS, PLAN_FIXTURE, REQUEST_CHANGES, TEST_WAVE, approvePlan, completeWorker, delegate, disposeAll, legacyWave, planFile, planTwoWaves, setup, start, status, waiveTests, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
+import plugin from "./server";
 import { provideSdk } from "./test/sdk";
 import { expectLoadLine } from "./test/loadLine";
-import { ctxOf, rowOf, tool, report } from "./test/testerHelpers";
+import { ctxOf, readyIdle, rowOf, tool, report } from "./test/testerHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -1033,5 +1036,72 @@ describe("Chief backend", () => {
       expect(usage).toMatch(/bb chief plan [^\n]*\[--branch feature\/…\]/);
       expect(usage).toMatch(/bb chief consult [^\n]*\[--branch feature\/…\]/);
     });
+  });
+});
+
+// Contracts (docs/specs/plan-chains.md "Heavy Command Slots"): startWorker publishes the wrapper before it launches a worker, designer or
+// tester and the brief names it; no Spec Writer gets one; a failure of the preparation (publish or settings read) logs a warning and never fails the delegation.
+describe("heavy-command slots in delegation", () => {
+  const HEAVY_SECTION = "## Heavy commands";
+  const heavyDir = (state: { storageRoot: string }) => join(state.storageRoot, "chief", "heavy");
+  const warned = (state: Awaited<ReturnType<typeof setup>>) => state.harness.logEntries.some((entry: { level: string; message: string }) => entry.level === "warn" && entry.message.includes("Heavy-command slots are unavailable"));
+
+  test("a worker and a designer are told one published wrapper under <data dir>/chief/heavy, and the capacity file holds the default 2", async () => {
+    const state = await setup({ heavyFiles: true });
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    await delegate(state, chief.threadId, "Draw the checkout screen", { kind: "designer" });
+    const paths = state.spawned.slice(1).map((spawn) => (spawn.prompt as string).match(/## Heavy commands\nSlot wrapper: `bash "([^"]+)"/)?.[1]);
+    expect(paths[0]).toMatch(new RegExp(`^${heavyDir(state).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/chief-heavy-[0-9a-f]{12}\\.sh$`));
+    expect(paths[1]).toBe(paths[0]);
+    expect(existsSync(paths[0]!)).toBe(true);
+    expect(await readFile(join(heavyDir(state), "slots"), "utf8")).toBe("2\n");
+    expect(warned(state)).toBe(false);
+  });
+
+  test("a Spec Writer delegation publishes nothing and its brief has no heavy section", async () => {
+    const state = await setup({ heavyFiles: true });
+    state.failWritesMatching(/\/chief\/heavy\//); // the first worker publishes nothing, so any folder later is the Spec Writer's
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await readyIdle(state, worker.threadId);
+    state.failWritesMatching(null);
+    await delegate(state, chief.threadId, "Record the docs", { kind: "spec-writer", replaces: worker.threadId });
+    expect(state.spawned).toHaveLength(3);
+    expect(state.spawned[2].prompt).not.toContain(HEAVY_SECTION);
+    expect(existsSync(heavyDir(state))).toBe(false);
+  });
+
+  test("a failed publish still delegates: the worker is launched with no heavy section and a warning is logged", async () => {
+    const state = await setup({ heavyFiles: true });
+    state.failWritesMatching(/\/chief\/heavy\//);
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    expect(worker.threadId).toBeTruthy();
+    expect(state.spawned).toHaveLength(2);
+    expect(state.spawned[1].prompt).not.toContain(HEAVY_SECTION);
+    expect(state.spawned[1].prompt).not.toContain("<pool>");
+    expect(warned(state)).toBe(true);
+  });
+
+  test("a settings read that rejects still delegates, with no heavy section, no publish and a warning", async () => {
+    let rejecting = false;
+    // Chief's own settings object, with get() rejecting for the call startWorker itself makes while the test has it on; every other reader passes through.
+    const module = ((bb: any) => plugin(new Proxy(bb, {
+      get: (target, key) => key !== "settings" ? target[key] : {
+        define: (descriptors: any) => {
+          const settings = target.settings.define(descriptors);
+          return { ...settings, get: () => (rejecting && new Error().stack?.split("\n")[2]?.includes("startWorker") ? Promise.reject(new Error("settings unavailable")) : settings.get()) };
+        },
+      },
+    }))) as typeof plugin;
+    const state = await setup({ heavyFiles: true, module });
+    const chief = await start(state);
+    rejecting = true;
+    const worker = await delegate(state, chief.threadId);
+    expect(worker.threadId).toBeTruthy();
+    expect(state.spawned[1].prompt).not.toContain(HEAVY_SECTION);
+    expect(existsSync(heavyDir(state))).toBe(false);
+    expect(warned(state)).toBe(true);
   });
 });
