@@ -11,7 +11,7 @@ export const BUILDER_PATH = "/repo/gate-world-builder";
 export type GateWorld = Awaited<ReturnType<typeof gateWorld>>;
 export type Verdict = "approve" | "request_changes";
 
-export async function gateWorld(options: { /** cleanupApproved: completions stamp cleanup_approved_at. */ cleanup?: boolean; /** Runs before Chief starts (role models, settings). */ before?: (state: Awaited<ReturnType<typeof setup>>) => Promise<void> } = {}) {
+export async function gateWorld(options: { /** cleanupApproved setting: true stamps cleanup_approved_at on completion, false turns cleanup off (default: the harness's). */ cleanup?: boolean; /** Runs before Chief starts (role models, settings). */ before?: (state: Awaited<ReturnType<typeof setup>>) => Promise<void> } = {}) {
   const git = {
     /** Pushed branch tips, by branch; a branch missing here is not on origin. */
     remote: new Map<string, string>(),
@@ -54,7 +54,7 @@ export async function gateWorld(options: { /** cleanupApproved: completions stam
   state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
     id: environmentId, hostId: "host_1", path: BUILDER_PATH, workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
   }));
-  if (options.cleanup) await state.harness.behavior.setSettings({ cleanupApproved: true });
+  if (options.cleanup !== undefined) await state.harness.behavior.setSettings({ cleanupApproved: options.cleanup });
   await options.before?.(state);
   const chief = (await start(state)).threadId;
   const chiefCtx = { threadId: chief, projectId: "proj_1" };
@@ -94,9 +94,18 @@ export async function gateWorld(options: { /** cleanupApproved: completions stam
       state: "ready", result: testsPassed ? "The tests pass." : "The totals test fails.", testsPassed, ...extra,
     }, asThread(threadId)),
     /** A blocked report. */
-    block: (threadId: string, result = "The test setup is wrong.") => call("chief_report", { state: "blocked", result }, asThread(threadId)),
+    block: (threadId: string, result = "The test setup is wrong.") => call("chief_report", { state: "blocked", result, blocker: result, recommendation: "Reroute it." }, asThread(threadId)),
     complete: (threadId: string, extra: object = {}) => call("chief_complete", { threadId, ...extra }),
-    delegateTo: (params: object) => call("chief_delegate", { title: "Repair", mission: "Repair it.", ...params }),
+    /** PRODUCT DEFECT workaround (see gateRepair.test.ts "the gate's fix run is admitted while its target is still active"): chief_delegate refuses a gate's
+     * fix run because the still-active target holds the branch. Nulling the target's branch lets the fix-run tests reach their own contract.
+     * It is a direct row write: the row cache reloads on the next write, so call it before the next report. */
+    unholdBranch: (workerThreadId: string) => { state.db.prepare("UPDATE managed_threads SET branch=NULL WHERE thread_id=?").run(workerThreadId); },
+    /** chief_delegate of a repair (a fix run, corrector, chat fix, docs repair); threadId is the row it created. */
+    async delegateTo(params: object) {
+      const text = await call("chief_delegate", { title: "Repair", mission: "Repair it.", ...params }) as string;
+      const created = state.db.prepare("SELECT thread_id FROM managed_threads ORDER BY rowid DESC LIMIT 1").get() as { thread_id: string };
+      return { text, threadId: created.thread_id };
+    },
     /** A worker whose gate is open: ready, gate started, reviewer and tester ids. */
     async gated(title?: string, forge?: { branch?: string; prUrl?: string }) {
       const worker = await world.worker(title, forge);
