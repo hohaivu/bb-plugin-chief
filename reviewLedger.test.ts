@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import { createReviewLedger } from "./src/review/reviewLedger";
 
-// Contract: reviewLedger answers three questions as data (the 2/3 ladder and what a replaces: needs, which open reviews
-// exist and which is in flight, whether the newest verdict approves what the worker would ship). The caller oracle
-// (server.test.ts "review decisions oracle") owns sentences and bytes; this file owns each rule once.
+// Contract: reviewLedger answers its questions as data (which open reviews exist and which is in flight, what each reviewer
+// verdict recorded, how many events a reviewer gave). It counts no rejections (plan-2). The caller oracle owns sentences
+// and bytes; this file owns each rule once.
 // Real SQLite with the plugin's real migrations; rows are seeded with minimal SQL. Nothing of the ledger is mocked.
 
 const disposals: Array<() => Promise<void>> = [];
@@ -22,9 +22,7 @@ function world(busy: (status: string) => boolean = (status) => status === "worki
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
   const getRow = (id: string) => db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(id) as Row | undefined;
-  // The write side belongs to the thread store; no function under test here writes.
-  const writes = { repointReviewer() {}, setRejectStreak() {}, bumpRejectStreak() {} };
-  const ledger = createReviewLedger<Row>(db, getRow, writes, { busy });
+  const ledger = createReviewLedger<Row>(db, getRow, { busy });
 
   let clock = 0;
   const insert = (id: string, role: string, over: Record<string, unknown> = {}) => {
@@ -42,7 +40,6 @@ function world(busy: (status: string) => boolean = (status) => status === "worki
     for (const w of covers) db.prepare(`INSERT INTO review_targets (reviewer_thread_id, worker_thread_id) VALUES (?, ?)`).run(id, w);
     return id;
   };
-  const advisor = (id: string, forWorker: string, over: { created_at: number; advised_at: number | null }) => insert(id, "advisor", { worker_thread_id: forWorker, ...over });
   /** A verdict for each covered worker, in insertion order (the newest has the highest id). */
   const verdict = (reviewerId: string, workers: string[], verdictName: string, at: number, over: { head_sha?: string; worker_report_seq?: number; report_seq?: number } = {}) => {
     for (const w of workers) {
@@ -50,149 +47,8 @@ function world(busy: (status: string) => boolean = (status) => status === "worki
         .run(reviewerId, w, verdictName, over.report_seq ?? 1, at, over.head_sha ?? null, over.worker_report_seq ?? null);
     }
   };
-  const rejections = (reviewerId: string, workerId: string, count: number) => {
-    for (let n = 0; n < count; n++) verdict(reviewerId, [workerId], "request_changes", 100 + n);
-  };
-  return { ledger, db, worker, reviewer, advisor, verdict, rejections };
+  return { ledger, db, worker, reviewer, verdict, insert };
 }
-
-describe("ladder: the task's streak and rung", () => {
-  test.each([
-    [0, "fix"],
-    [1, "fix"],
-    [2, "consult"],
-    [3, "stop"],
-  ] as const)("%i consecutive request_changes is the %s rung", (count, rung) => {
-    const { ledger, worker, reviewer, rejections } = world();
-    worker("w1");
-    reviewer("r1", ["w1"]);
-    rejections("r1", "w1", count);
-    expect(ledger.ladder("w1")).toEqual({ streak: count, rung });
-  });
-
-  test("an approve ends the streak: only the request_changes after it count", () => {
-    const { ledger, worker, reviewer, verdict } = world();
-    worker("w1");
-    reviewer("r1", ["w1"]);
-    verdict("r1", ["w1"], "request_changes", 1);
-    verdict("r1", ["w1"], "request_changes", 2);
-    verdict("r1", ["w1"], "approve", 3);
-    verdict("r1", ["w1"], "request_changes", 4);
-    expect(ledger.ladder("w1")).toEqual({ streak: 1, rung: "fix" });
-    verdict("r1", ["w1"], "request_changes", 5);
-    expect(ledger.ladder("w1")).toEqual({ streak: 2, rung: "consult" });
-    verdict("r1", ["w1"], "approve", 6);
-    expect(ledger.ladder("w1")).toEqual({ streak: 0, rung: "fix" });
-  });
-
-  test("the streak is counted across a replaces: chain and every reviewer of it", () => {
-    const { ledger, worker, reviewer, verdict } = world();
-    worker("w1");
-    worker("w2", { replaces: "w1" });
-    reviewer("r1", ["w1"], { state: "complete" });
-    reviewer("r2", ["w2"]);
-    verdict("r1", ["w1"], "request_changes", 1);
-    verdict("r1", ["w1"], "request_changes", 2);
-    verdict("r2", ["w2"], "request_changes", 3);
-    expect(ledger.ladder("w2")).toEqual({ streak: 3, rung: "stop" });
-    // The replaced worker's own history stops at its own chain: w1 has no successor in its chain.
-    expect(ledger.ladder("w1")).toEqual({ streak: 2, rung: "consult" });
-  });
-
-  test("rows with no verdict history fall back to the newest reviewer's carried reject_streak", () => {
-    const { ledger, worker, reviewer } = world();
-    worker("w1");
-    reviewer("r1", ["w1"], { reject_streak: 2 });
-    expect(ledger.ladder("w1")).toEqual({ streak: 2, rung: "consult" });
-  });
-
-  test("a carried reject_streak above the recorded verdicts wins", () => {
-    const { ledger, worker, reviewer, rejections } = world();
-    worker("w1");
-    reviewer("r1", ["w1"], { reject_streak: 3 });
-    rejections("r1", "w1", 1);
-    expect(ledger.ladder("w1")).toEqual({ streak: 3, rung: "stop" });
-  });
-});
-
-describe("replacement: what a replaces: of the prior worker still needs", () => {
-  /** A prior worker (created at 10) with `count` request_changes, the last recorded at 100 + count - 1. */
-  function rejected(count: number, busy?: (status: string) => boolean) {
-    const w = world(busy);
-    w.worker("prior", { created_at: 10 });
-    w.reviewer("r1", ["prior"], { created_at: 20 });
-    w.rejections("r1", "prior", count);
-    const prior = { thread_id: "prior", created_at: 10 };
-    return { ...w, prior };
-  }
-
-  test.each([0, 1])("%i rejections need nothing, with or without a user-approved round", (count) => {
-    const { ledger, prior } = rejected(count);
-    expect(ledger.replacement(prior, false)).toBeNull();
-    expect(ledger.replacement(prior, true)).toBeNull();
-  });
-
-  test("two rejections with no advisor need a consult", () => {
-    const { ledger, prior } = rejected(2);
-    expect(ledger.replacement(prior, false)).toEqual({ needs: "consult", streak: 2 });
-  });
-
-  test("a user-approved round does not waive the consult at two rejections", () => {
-    const { ledger, prior } = rejected(2);
-    expect(ledger.replacement(prior, true)).toEqual({ needs: "consult", streak: 2 });
-  });
-
-  test("an advisor that advised after the latest rejection and after the prior worker satisfies the consult", () => {
-    const { ledger, prior, advisor } = rejected(2);
-    advisor("a1", "prior", { created_at: 150, advised_at: 160 });
-    expect(ledger.replacement(prior, false)).toBeNull();
-  });
-
-  test.each([
-    ["has not advised (advised_at null)", { created_at: 150, advised_at: null }],
-    ["was created before the latest rejection", { created_at: 50, advised_at: 60 }],
-  ])("an advisor that %s does not count", (_name, over) => {
-    const { ledger, prior, advisor } = rejected(2);
-    advisor("a1", "prior", over);
-    expect(ledger.replacement(prior, false)).toEqual({ needs: "consult", streak: 2 });
-  });
-
-  test("an advisor created after the latest rejection but before the prior worker does not count", () => {
-    const w = world();
-    w.worker("prior", { created_at: 120 });
-    w.reviewer("r1", ["prior"], { created_at: 20 });
-    w.rejections("r1", "prior", 2); // the latest rejection is at 101
-    w.advisor("a1", "prior", { created_at: 110, advised_at: 115 });
-    expect(w.ledger.replacement({ thread_id: "prior", created_at: 120 }, false)).toEqual({ needs: "consult", streak: 2 });
-  });
-
-  test("a consult on another branch of the same plan review counts", () => {
-    const w = world();
-    w.worker("prior", { created_at: 10 });
-    w.worker("sibling", { created_at: 11 });
-    w.worker("unrelated", { created_at: 12 });
-    // One plan review covers both branches and wrote the newest verdicts for each.
-    w.reviewer("plan-review", ["prior", "sibling"], { created_at: 20 });
-    w.verdict("plan-review", ["prior", "sibling"], "request_changes", 100);
-    w.verdict("plan-review", ["prior", "sibling"], "request_changes", 101);
-    w.advisor("a-other", "unrelated", { created_at: 150, advised_at: 160 });
-    expect(w.ledger.replacement({ thread_id: "prior", created_at: 10 }, false)).toEqual({ needs: "consult", streak: 2 });
-    w.advisor("a-sibling", "sibling", { created_at: 150, advised_at: 160 });
-    expect(w.ledger.replacement({ thread_id: "prior", created_at: 10 }, false)).toBeNull();
-  });
-
-  test("three rejections need the user, even with a consult", () => {
-    const { ledger, prior, advisor } = rejected(3);
-    expect(ledger.replacement(prior, false)).toEqual({ needs: "user", streak: 3 });
-    advisor("a1", "prior", { created_at: 150, advised_at: 160 });
-    expect(ledger.replacement(prior, false)).toEqual({ needs: "user", streak: 3 });
-  });
-
-  test("three rejections with a user-approved round pass with no consult", () => {
-    const { ledger, prior } = rejected(3);
-    expect(ledger.replacement(prior, true)).toBeNull();
-  });
-});
 
 describe("openReviews: the open reviews of workers' task chains", () => {
   test("one review covering several workers of a chain is listed once", () => {
@@ -300,171 +156,6 @@ describe("busyReview: the busy open review chief_complete names when it refuses 
   });
 });
 
-describe("headApproval: is the newest verdict an approve for what the worker would ship", () => {
-  const HEAD = "a".repeat(40);
-  const OTHER = "b".repeat(40);
-  const head = (sha: string | null) => vi.fn(async () => (sha ? { sha } : null));
-
-  test("no verdict on the chain", async () => {
-    const { ledger, worker } = world();
-    worker("w1", { pr_url: "https://forge/pr/1" });
-    const currentHead = head(HEAD);
-    expect(await ledger.headApproval({ thread_id: "w1", report_seq: 1, pr_url: "https://forge/pr/1" }, currentHead)).toEqual({ approved: false, reason: "no-verdict" });
-    expect(currentHead).not.toHaveBeenCalled();
-  });
-
-  test("a newest request_changes is not an approve, and the head is not read", async () => {
-    const { ledger, worker, reviewer, verdict } = world();
-    worker("w1");
-    reviewer("r1", ["w1"]);
-    verdict("r1", ["w1"], "approve", 1, { head_sha: HEAD });
-    verdict("r1", ["w1"], "request_changes", 2, { head_sha: HEAD });
-    const currentHead = head(HEAD);
-    expect(await ledger.headApproval({ thread_id: "w1", report_seq: 1, pr_url: "https://forge/pr/1" }, currentHead)).toEqual({ approved: false, reason: "not-approve", verdict: "request_changes" });
-    expect(currentHead).not.toHaveBeenCalled();
-  });
-
-  describe("with a pull request", () => {
-    const pr = "https://forge/pr/1";
-    const seeded = (recorded: string | null) => {
-      const w = world();
-      w.worker("w1", { pr_url: pr });
-      w.reviewer("r1", ["w1"]);
-      w.verdict("r1", ["w1"], "approve", 1, { head_sha: recorded ?? undefined });
-      return w;
-    };
-
-    test("the approved head still is the pull request's head: approved, and it is read exactly once", async () => {
-      const { ledger } = seeded(HEAD);
-      const currentHead = head(HEAD);
-      expect(await ledger.headApproval({ thread_id: "w1", report_seq: 1, pr_url: pr }, currentHead)).toEqual({ approved: true });
-      expect(currentHead).toHaveBeenCalledTimes(1);
-    });
-
-    test("an uppercase recorded head_sha that matches is approved", async () => {
-      const { ledger } = seeded(HEAD.toUpperCase());
-      expect(await ledger.headApproval({ thread_id: "w1", report_seq: 1, pr_url: pr }, head(HEAD))).toEqual({ approved: true });
-    });
-
-    test("a head that cannot be read is head-unreadable, after one read", async () => {
-      const { ledger } = seeded(HEAD);
-      const currentHead = head(null);
-      expect(await ledger.headApproval({ thread_id: "w1", report_seq: 1, pr_url: pr }, currentHead)).toEqual({ approved: false, reason: "head-unreadable" });
-      expect(currentHead).toHaveBeenCalledTimes(1);
-    });
-
-    test("a moved head names both commits", async () => {
-      const { ledger } = seeded(HEAD);
-      expect(await ledger.headApproval({ thread_id: "w1", report_seq: 1, pr_url: pr }, head(OTHER))).toEqual({ approved: false, reason: "head-moved", approvedSha: HEAD, headSha: OTHER });
-    });
-
-    test("an approve that recorded no head is head-moved with a null approvedSha", async () => {
-      const { ledger } = seeded(null);
-      expect(await ledger.headApproval({ thread_id: "w1", report_seq: 1, pr_url: pr }, head(HEAD))).toEqual({ approved: false, reason: "head-moved", approvedSha: null, headSha: HEAD });
-    });
-
-    test("the report is not compared when there is a pull request", async () => {
-      const { ledger } = seeded(HEAD);
-      expect(await ledger.headApproval({ thread_id: "w1", report_seq: 9, pr_url: pr }, head(HEAD))).toEqual({ approved: true });
-    });
-  });
-
-  describe("without a pull request", () => {
-    const seeded = (over: { on?: string; seq?: number } = {}) => {
-      const w = world();
-      w.worker("w1");
-      w.worker("w2", { replaces: "w1" });
-      w.reviewer("r1", ["w1", "w2"]);
-      w.verdict("r1", [over.on ?? "w2"], "approve", 1, { worker_report_seq: over.seq ?? 3 });
-      return w;
-    };
-
-    test("the approve covers the worker's current report: approved, and no head is read", async () => {
-      const { ledger } = seeded();
-      const currentHead = head(HEAD);
-      expect(await ledger.headApproval({ thread_id: "w2", report_seq: 3, pr_url: null }, currentHead)).toEqual({ approved: true });
-      expect(currentHead).not.toHaveBeenCalled();
-    });
-
-    test("the worker reported again after the approve: report-moved", async () => {
-      const { ledger } = seeded();
-      const currentHead = head(HEAD);
-      expect(await ledger.headApproval({ thread_id: "w2", report_seq: 4, pr_url: null }, currentHead)).toEqual({ approved: false, reason: "report-moved" });
-      expect(currentHead).not.toHaveBeenCalled();
-    });
-
-    test("the newest approve was recorded on an older chain member: report-moved", async () => {
-      const { ledger } = seeded({ on: "w1", seq: 3 });
-      expect(await ledger.headApproval({ thread_id: "w2", report_seq: 3, pr_url: null }, head(HEAD))).toEqual({ approved: false, reason: "report-moved" });
-    });
-  });
-});
-
-// Contract (docs/specs/plan-chains.md "Review Worktree"): the reviewer a later pinned review may reuse is the newest reviewer of any
-// state that was pinned to a head and covers a worker of the task's chain; an unpinned reviewer ran in a worker's own environment.
-describe("lastPinnedReviewer: the earlier reviewer whose worktree a pinned review may reuse", () => {
-  const SHA = "a".repeat(40);
-
-  test("none when nothing reviewed the task", () => {
-    const { ledger, worker } = world();
-    worker("w1");
-    expect(ledger.lastPinnedReviewer(["w1"])).toBeNull();
-  });
-
-  test("the newest pinned reviewer wins over an older pinned one, whatever its state", () => {
-    const { ledger, worker, reviewer } = world();
-    worker("w1");
-    reviewer("r1", ["w1"], { reviewed_head_sha: SHA, state: "ready" });
-    reviewer("r2", ["w1"], { reviewed_head_sha: SHA, state: "complete" });
-    expect(ledger.lastPinnedReviewer(["w1"])).toBe("r2");
-  });
-
-  test("an unpinned reviewer is skipped even when newer: the answer is the newest pinned one", () => {
-    const { ledger, worker, reviewer } = world();
-    worker("w1");
-    reviewer("r1", ["w1"], { reviewed_head_sha: SHA });
-    reviewer("r2", ["w1"]);
-    expect(ledger.lastPinnedReviewer(["w1"])).toBe("r1");
-    const only = world();
-    only.worker("w1");
-    only.reviewer("r1", ["w1"]);
-    expect(only.ledger.lastPinnedReviewer(["w1"])).toBeNull();
-  });
-
-  test("a reviewer of an earlier worker in the replaces: chain counts: the task, not the row, is the unit", () => {
-    const { ledger, worker, reviewer } = world();
-    worker("w1");
-    worker("w2", { replaces: "w1" });
-    reviewer("r1", ["w1"], { reviewed_head_sha: SHA });
-    expect(ledger.lastPinnedReviewer(["w2"])).toBe("r1");
-  });
-
-  test("a reviewer of an unrelated task is never returned", () => {
-    const { ledger, worker, reviewer } = world();
-    worker("w1");
-    worker("other");
-    reviewer("r1", ["other"], { reviewed_head_sha: SHA });
-    expect(ledger.lastPinnedReviewer(["w1"])).toBeNull();
-  });
-
-  test("a plan review covering several workers is found from any of them, and the lists are merged", () => {
-    const { ledger, worker, reviewer } = world();
-    worker("w1");
-    worker("w2");
-    reviewer("r1", ["w1", "w2"], { reviewed_head_sha: SHA });
-    expect(ledger.lastPinnedReviewer(["w2"])).toBe("r1");
-    expect(ledger.lastPinnedReviewer(["w1", "w2"])).toBe("r1");
-  });
-
-  test("the same creation time is broken by insertion order: the later row wins", () => {
-    const { ledger, worker, reviewer } = world();
-    worker("w1");
-    reviewer("r1", ["w1"], { reviewed_head_sha: SHA, created_at: 500 });
-    reviewer("r2", ["w1"], { reviewed_head_sha: SHA, created_at: 500 });
-    expect(ledger.lastPinnedReviewer(["w1"])).toBe("r2");
-  });
-});
-
 // Contract (PR #187): eventCounts is the one owner of "how many approve / request_changes events did each reviewer give".
 // One event is one report (reviewer_thread_id, report_seq), however many target rows the report wrote; history wins over the
 // current verdict; the carried reject_streak is never an event count. chiefStats' caller test lives in server.test.ts.
@@ -492,7 +183,7 @@ describe("eventCounts: review events per reviewer", () => {
     expect(counts.get("r2")).toEqual({ approve: 0, request_changes: 1 });
   });
 
-  test("reject, approve, reject is two request_changes events, while the consecutive streak is one", () => {
+  test("reject, approve, reject is two request_changes events", () => {
     const { ledger, worker, reviewer, verdict } = world();
     worker("w1");
     reviewer("r1", ["w1"]);
@@ -500,7 +191,6 @@ describe("eventCounts: review events per reviewer", () => {
     verdict("r1", ["w1"], "approve", 2, { report_seq: 2 });
     verdict("r1", ["w1"], "request_changes", 3, { report_seq: 3 });
     expect(ledger.eventCounts([{ thread_id: "r1", verdict: "request_changes" }]).get("r1")).toEqual({ approve: 1, request_changes: 2 });
-    expect(ledger.ladder("w1").streak).toBe(1);
   });
 
   test("history survives a cleared current verdict and a completed reviewer", () => {
@@ -529,7 +219,6 @@ describe("eventCounts: review events per reviewer", () => {
     worker("w1");
     reviewer("r1", ["w1"], { verdict: "request_changes", reject_streak: 3 });
     expect(ledger.eventCounts([{ thread_id: "r1", verdict: "request_changes" }]).get("r1")).toEqual({ approve: 0, request_changes: 1 });
-    expect(ledger.ladder("w1").streak).toBe(3);
   });
 
   test("no history and a null current verdict count nothing", () => {
@@ -555,10 +244,9 @@ describe("eventCounts: review events per reviewer", () => {
   });
 });
 
-// Contract (retest debt, wave 1): newestVerdictAt is the one owner of "what was the newest verdict over these rows and when": by recording order
-// (insertion id), not by the `at` time, over only the ids given; empty input and no verdict give null. The debt rule reads it as the rejection
-// a later fix is measured against. Regression: the newest is chosen by `at` (a clock step back makes an old rejection newest), or it reads
-// another chain's verdicts, so a fix is measured against a rejection that is not its chain's.
+// Contract: newestVerdictAt is the one owner of "what was the newest verdict over these rows and when": by recording order
+// (insertion id), not by the `at` time, over only the ids given; empty input and no verdict give null. Regression: the newest is
+// chosen by `at` (a clock step back makes an old rejection newest), or it reads another chain's verdicts.
 describe("newestVerdictAt: the newest verdict over some rows", () => {
   test("the latest recorded verdict wins whatever its time, other rows are ignored, no input or no verdict is null", () => {
     const { ledger, worker, reviewer, verdict } = world();
@@ -574,5 +262,34 @@ describe("newestVerdictAt: the newest verdict over some rows", () => {
     expect(ledger.newestVerdictAt(["other", "w2"])).toEqual({ verdict: "request_changes", at: 900 });
     expect(ledger.newestVerdictAt([])).toBeNull();
     expect(ledger.newestVerdictAt(["unknown"])).toBeNull();
+  });
+});
+
+// Contract (plan-2 step 1): recordVerdict inserts exactly one reviewer_verdicts row per covered target per verdict, bound to the
+// target's head_sha and report_seq, and never touches reject_streak (no code counts rejections any more).
+// Regression: it bumps or seeds reject_streak, writes one row per verdict instead of per target, or drops the head/report binding.
+describe("recordVerdict: one row per covered target per verdict", () => {
+  test("two request_changes verdicts over two targets write four bound rows and leave every reject_streak alone", () => {
+    const { ledger, db, worker, insert } = world();
+    worker("w1");
+    worker("w2");
+    insert("r1", "reviewer", { reject_streak: 2 });
+    db.prepare(`UPDATE managed_threads SET reject_streak=5 WHERE thread_id='w1'`).run();
+    ledger.addTargets("r1", [
+      { threadId: "w1", reportSeq: 3, headSha: "a".repeat(40), prUrl: null, branch: "b1" },
+      { threadId: "w2", reportSeq: 7, headSha: "b".repeat(40), prUrl: null, branch: "b2" },
+    ]);
+    const reviewerRow = { thread_id: "r1", role: "reviewer" };
+    ledger.recordVerdict(reviewerRow, "request_changes", 1, 1000);
+    ledger.recordVerdict(reviewerRow, "request_changes", 2, 2000);
+    const rows = db.prepare(`SELECT worker_thread_id, verdict, report_seq, head_sha, worker_report_seq FROM reviewer_verdicts WHERE reviewer_thread_id='r1' ORDER BY id`).all();
+    expect(rows).toEqual([
+      { worker_thread_id: "w1", verdict: "request_changes", report_seq: 1, head_sha: "a".repeat(40), worker_report_seq: 3 },
+      { worker_thread_id: "w2", verdict: "request_changes", report_seq: 1, head_sha: "b".repeat(40), worker_report_seq: 7 },
+      { worker_thread_id: "w1", verdict: "request_changes", report_seq: 2, head_sha: "a".repeat(40), worker_report_seq: 3 },
+      { worker_thread_id: "w2", verdict: "request_changes", report_seq: 2, head_sha: "b".repeat(40), worker_report_seq: 7 },
+    ]);
+    expect(db.prepare(`SELECT thread_id, reject_streak FROM managed_threads ORDER BY thread_id`).all())
+      .toEqual([{ thread_id: "r1", reject_streak: 2 }, { thread_id: "w1", reject_streak: 5 }, { thread_id: "w2", reject_streak: 0 }]);
   });
 });
