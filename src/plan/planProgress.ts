@@ -29,6 +29,9 @@ export interface ProgressRow {
 /** A blocked fix run's wrong-test evidence: its blocker names a test file and line (review-engine.md: file and line, contradicted text, command output). */
 export const wrongTestEvidence = (blocker: string | null | undefined) => /\S+\.(test|spec)\.[cm]?[jt]sx?:\d+/.test(blocker ?? "");
 
+/** A fix run or corrector that stopped before its first report: it no longer holds its gate slot. Never a live (starting/active/stopping) row. */
+export const neverReported = (row: Pick<ProgressRow, "last_report_state" | "state">) => row.last_report_state === null && ["idle", "blocked", "failed"].includes(row.state);
+
 /** What the review gate asks for next. First match wins (gateDecision). */
 export type GateDecision<Row> =
   | { kind: "start" }
@@ -79,6 +82,7 @@ export function gateDecision<Row extends ProgressRow>(input: {
   const docsWait = !!docsFindings.length && !!repair && !isSettled(repair) && !input.terminal(repair.state);
   const done = (fixRow: Row) => isReady(fixRow) || fixRow.state === "complete";
   const corrector = actor(gate.corrector_thread_id);
+  if (corrector && neverReported(corrector)) return { kind: "wrongTest", fixer: actor(gate.fixer_thread_id)! };
   if (corrector) {
     if (!done(corrector) && !["failed", "blocked"].includes(corrector.state)) return { kind: "wait", who: [corrector] };
     if (done(corrector) && corrector.tests_passed === 1 && docsSettled) return { kind: "pass" };
@@ -86,7 +90,8 @@ export function gateDecision<Row extends ProgressRow>(input: {
     if (multiDocs && done(corrector) && corrector.tests_passed === 1) return multiEscalate;
     return { kind: "escalate", why: `corrector ${corrector.thread_id} ended ${corrector.state}${corrector.tests_passed === 0 ? " with failing tests" : ""}` };
   }
-  const fixer = actor(gate.fixer_thread_id);
+  // A fix run that stopped before it reported is absent: the gate asks for its fix run again.
+  const fixer = [actor(gate.fixer_thread_id)].find((row) => row && !neverReported(row));
   if (fixer) {
     if (fixer.state === "blocked") return wrongTestEvidence(fixer.blocker)
       ? { kind: "wrongTest", fixer }

@@ -94,6 +94,12 @@ export function createReviewLedger<Row extends LedgerRow>(
     }
   }
 
+  /** How many distinct reviewers recorded a verdict on these worker ids since a time (the gate's re-review bound). */
+  function reviewersWithVerdict(threadIds: string[], since: number): number {
+    if (!threadIds.length) return 0;
+    return (db.prepare(`SELECT COUNT(DISTINCT reviewer_thread_id) AS n FROM reviewer_verdicts WHERE worker_thread_id IN (${threadIds.map(() => "?").join(",")}) AND at >= ?`).get(...threadIds, since) as { n: number }).n;
+  }
+
   /** The newest reviewer_verdicts row over these worker ids and the time it was recorded; null when none. */
   function newestVerdictAt(threadIds: string[]): { verdict: string; at: number } | null {
     if (!threadIds.length) return null;
@@ -130,5 +136,5 @@ export function createReviewLedger<Row extends LedgerRow>(
     return counts;
   }
 
-  return { targets, openReview, openReviews, busyReview, covering, isCurrent, taskChain, addTargets, recordVerdict, newestVerdict, newestVerdictAt, eventCounts };
+  return { targets, openReview, openReviews, busyReview, covering, isCurrent, taskChain, addTargets, recordVerdict, newestVerdict, newestVerdictAt, reviewersWithVerdict, eventCounts };
 }

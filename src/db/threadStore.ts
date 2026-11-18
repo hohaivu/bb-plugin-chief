@@ -178,6 +178,11 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       db.prepare(`INSERT INTO review_gates (gate_key, project_id, chief_thread_id, plan_thread_id, targets, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
         .run(gate.gateKey, gate.projectId, gate.chiefThreadId, gate.planThreadId, JSON.stringify(gate.targets), gate.now);
     },
+    /** Re-pins a gate's targets to their current heads before a side launches. Batch only. */
+    repinGate(gateKey: string, targets: GateTarget[]) {
+      inBatch();
+      db.prepare(`UPDATE review_gates SET targets=? WHERE gate_key=?`).run(JSON.stringify(targets), gateKey);
+    },
     /** Names a gate's actor. Batch only. */
     setGateActor(gateKey: string, column: GateActor, threadId: string) {
       inBatch();
