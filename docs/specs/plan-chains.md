@@ -46,7 +46,7 @@ Seven modules own the plan chains domain:
 
 1. `src/plan/waveSchedule.ts` owns graph traversal, wave relationships, wave absence, the lane predicate `sideLane`, `writerPending`, and the plan base of a chain head (`planBase`).
 2. `src/plan/planLifecycle.ts` owns delegation admission, role progression, and waivers.
-3. `src/runtime/delegation.ts` owns `startWorker`, which launches workers and Spec Writers, and `approvedDesign`, which binds a plan's approved design. `src/tools/forgeInit.ts` owns forge initialization. `src/runtime/cleanup.ts` owns cleanup steps and the merge cache. `src/forge/cleanup.ts` owns `taskPullRequests`.
+3. `src/runtime/delegation.ts` owns `startWorker`, which launches workers and Spec Writers. It also owns `bindDesign` for initial binding and `approvedDesign` for read-only lookup by researcher ID and report sequence. `src/tools/forgeInit.ts` owns forge initialization. `src/runtime/cleanup.ts` owns cleanup steps and the merge cache. `src/forge/cleanup.ts` owns `taskPullRequests`.
 4. `src/plan/planProgress.ts` owns progress checks, review readiness, legacy restack rules, and `gateDecision`.
 5. `src/runtime/nextAction.ts` and `src/runtime/completion.ts` own the text of the next call and the completion rules. `src/runtime/host.ts` (`chiefCoreRules`) owns the core rule that sends follow-up work to a fresh worker, with its one in-place exception.
 6. `src/research/delegationBrief.ts` owns the worker brief. `src/review/reviewStart.ts` owns review launch preparation and brief generation.
@@ -68,8 +68,9 @@ Callers interact with these entry points:
 - `specWriters(planThreadId, wave?)`: returns the side-lane Spec Writers, oldest first. `waveWorkers` returns the implementation-lane rows only.
 - `writerPending(planThreadId, waves, n)`: returns true when wave `n` is a spec wave with a pending writer.
 - `chief_forge_init(params)`: initializes the forge repository branch, pull request, and issue.
-- `chief_plan(params)`: starts a planner. With `researchThreadId`, it binds the approved design. Without a design, it needs `undesignedReason` when research is on.
-- `approvedDesign(researcher, projectId)`: writes or reuses the write-once design and fact snapshots. It returns their paths and the design text.
+- `chief_plan(params)`: starts a planner. With `researchThreadId`, it binds the approved design. See [Approved Design Binding](#approved-design-binding) for the design inputs and revision rules.
+- `bindDesign(researcher, projectId)`: creates missing design and fact snapshots for the researcher's ready report and reuses existing snapshots. It returns both paths and the design text.
+- `approvedDesign(researcherId, seq, projectId)`: reads the design and fact snapshots for the plan's stored researcher ID and ready-report sequence. It returns both paths and the design text. It never creates snapshots or reads live `design.md`.
 - `startWorker(params)`: prepares and launches a worker thread in an environment.
 - `restackOf(worker, waves)`: determines whether a legacy wave requires a restack.
 - `newestVerdictAt(threadIds)`: returns the newest reviewer verdict and its time for a set of worker threads.
@@ -451,23 +452,23 @@ Known limits:
 
 ### Approved Design Binding
 
-- `chief_plan` with `researchThreadId` refuses before any spawn, checkout freshen or row insert. It refuses when the researcher is unknown, not a researcher, light, owned by another Chief, or not ready, or when its design.md is missing, empty or over 40,000 characters. Reason: a plan must not start on an unapproved or unreadable design.
-- The binding writes `design-approved-r<seq>.md` and `facts-approved-r<seq>.md` in the researcher's artifact directory. `<seq>` is the sequence number of the ready report. Reason: the names bind one ready report.
-- A snapshot is write-once. A later bind from the same researcher returns the same paths and leaves the snapshots unchanged. Reason: a design edited after approval must not change a plan.
+- `chief_plan` with `researchThreadId` refuses an unknown thread, a non-researcher, a light researcher, a researcher owned by another Chief, or a researcher without a ready approval. These checks occur before checkout freshen, planner spawn or planner row insertion.
+- `bindDesign` uses `design-approved-r<seq>.md` and `facts-approved-r<seq>.md` in the researcher's artifact directory. `<seq>` is the ready report's sequence. When the design snapshot is absent, the helper reads `design.md` and refuses a missing, blank or over-40,000-character source before checkout freshen or planner spawn.
+- A later initial bind to the same researcher and ready-report sequence reuses the existing snapshots. An unreadable snapshot causes refusal, not replacement.
 - The facts snapshot holds the full ready result of the researcher row. Reason: the planner must read the fact report in full.
-- `chief_plan` with `undesignedReason` requires research on, and no `researchThreadId` and no `revises`. Reason: each plan records its design or its skip.
+- With research on, `chief_plan` requires `undesignedReason` when neither `researchThreadId` nor `revises` is supplied. Reason: a new plan records its approved design or its reason for skipping the discussion.
 - With research off, `undesignedReason` is optional. When given, the server accepts it and the brief gets `Design discussion skipped: <reason>`. Reason: a skip stays on record even when the design flow is off.
 - The CLI takes the two inputs as `--research-thread thr_id` (`researchThreadId`) and `--undesigned-reason "…"` (`undesignedReason`). `bb chief plan` calls the same `startPlan`, so the CLI accepts and refuses the same inputs as the tool. Reason: one validation path keeps both entry points in agreement.
 - `researchThreadId` and `undesignedReason` are refused together, and neither is accepted with `revises`. This applies to the CLI flags too. Reason: one plan has one design source.
-- A `revises` planner copies `research_thread_id` and gets the same snapshot paths. Reason: a revision builds on the same design.
+- A new design-bound planner stores the researcher ID in `research_thread_id` and the ready-report sequence in `research_report_seq`. A `revises` planner inherits both values. Revision and `chief_forge_init` use `approvedDesign` to read that exact pair, even after a later ready report. If the sequence is missing or either snapshot is missing or unreadable, they refuse before planner freshen or spawn, or before the forge script runs, respectively. Neither recreates a snapshot or reads live `design.md`.
 - The planner brief holds `## Approved design` before `## Problem`, with both paths and no inline design text. Reason: the planner reads the design from its file.
-- `chief_forge_init` adds the design text, read from the snapshot, after the plan block of the pull request body, with a marker. Reason: reviewers read the approved design with the code.
+- `chief_forge_init` adds the bound design text and fact snapshot path after the plan block of the pull request body. The marker uses the stored researcher ID and ready-report sequence. Reason: reviewers read the design that the planner used.
 - A reused pull request without the marker gets its body rewritten. A body that still lacks the marker refuses the call. Reason: the design block must exist before review.
 - With research off, `chief_plan` accepts a plan with neither input, as before. Reason: the design flow is off.
 
 ## Invariants
 
-- An approved design snapshot never changes after its first write. Reason: a planner, a revision and a pull request must read one design.
+- Revision and forge use the design and fact snapshots identified by the planner's stored researcher ID and ready-report sequence. Neither replaces a snapshot or selects a later approval.
 - A task branch hosts at most one active implementation-lane thread, plus at most one side-lane Spec Writer for each spec wave of the same plan. Reason: only one thread checks out the task branch. Each writer uses its own side branch, and its fold is a fast-forward push.
 - Every implementation-lane row in a plan chain shares the identical environment identifier, branch name, and pull request URL. Every side-lane Spec Writer shares the branch name and pull request URL, and has its own environment. Reason: chain identity must remain uniform across all wave transitions.
 - A replacement worker marks its superseded worker as complete. Reason: superseded workers must release active claims on resources.

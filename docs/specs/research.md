@@ -35,7 +35,8 @@ The research domain lets Chief start a read-only researcher thread for one ticke
 | `researchChiefInstructions`, `bb.agents.configure` | `src/runtime/host.ts` | Give Chief the research tool and its instruction. |
 | `chief_models_v9` | `src/db/migrations.ts` | Stores the researcher pick and seeds it once. |
 | `judgeModel` | `src/observe/retro.ts` | Reads the researcher pick for the retro judge. |
-| `approvedDesign` | `src/runtime/delegation.ts` | Writes or reuses the design and fact snapshots that `chief_plan` and `chief_forge_init` read. |
+| `bindDesign` | `src/runtime/delegation.ts` | Creates missing snapshots or reuses existing ones for a new `chief_plan` binding. |
+| `approvedDesign` | `src/runtime/delegation.ts` | Reads the exact bound snapshot pair for revision and `chief_forge_init`. It never creates snapshots or reads live `design.md`. |
 
 ## Flows and States
 
@@ -155,7 +156,7 @@ AskUserQuestion comes from Claude Code natively. Elsewhere, bb's builtin ask-use
 
 - `research_design` is 1 for a design launch and 0 for a light launch. A row with no value reads as light. Reason: the stall loop and `nextAction` pick the design lines from this flag.
 - An upsert without `researchDesign` keeps the stored value. Reason: a recovery row seeded before the launch insert keeps the launch's value.
-- `research_thread_id` on a planner row names the design researcher whose approved design the planner uses. A `revises` planner copies it. Reason: a revision builds on the same design. See Design hand-off.
+- A design-bound planner row stores the researcher ID in `research_thread_id` and the ready-report sequence in `research_report_seq`. A `revises` planner copies both. See Design hand-off.
 - `waiting_on_user` is 1 only after a design researcher reports `waitingOnUser`. Every later report stores 0, and a `failed` live state stores 0. Reason: a rejection restart returns to stall supervision because its report has no flag.
 - `waitingOnUser` is refused for other roles, for light researchers and for states other than `active` and `blocked`. Reason: the marker only describes a design discussion.
 - A design researcher reports ready only after the user approves the design. Reason: the approved design gates planning and delegation.
@@ -224,14 +225,15 @@ After the user approves a design, `chief_plan` binds that design to the planner.
 - the researcher is a light researcher,
 - another Chief owns the researcher,
 - its last report is not ready,
-- its design.md is missing, empty or over 40,000 characters.
+- an existing snapshot cannot be read, or
+- the design snapshot is absent and `design.md` is missing, blank or over 40,000 characters.
 
 Reason: a plan must not start on an unapproved or unreadable design.
 
 ### Snapshots
 
-- The binding writes `design-approved-r<seq>.md` (the text of design.md) and `facts-approved-r<seq>.md` (the full result of the ready report). Both go in the researcher's artifact directory. `<seq>` is the sequence number of that ready report.
-- A snapshot never changes after its first write. A later bind from the same researcher returns the same paths and leaves the snapshots as they are. Reason: a design edited after approval must not change a plan that already exists.
+- On a new binding, `bindDesign(researcher, projectId)` creates missing snapshots in the researcher's artifact directory. `design-approved-r<seq>.md` holds the text of `design.md`. `facts-approved-r<seq>.md` holds the full ready result. A later initial bind to the same researcher and ready-report sequence reuses existing snapshots.
+- Revision and forge call `approvedDesign(researcherId, seq, projectId)` with the pair stored on the planner row. A later ready report does not change the pair. If the sequence is missing or either snapshot is missing or unreadable, revision refuses before checkout freshen or spawn, and forge refuses before its script runs. The lookup never recreates a file or reads live `design.md`.
 - The planner brief names both paths and never holds their text. Reason: a clipped copy loses content.
 
 ### Planner brief
