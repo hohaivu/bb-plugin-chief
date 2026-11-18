@@ -249,6 +249,13 @@ export async function markPrReady(pullRequest: string, cwd: string | null): Prom
   return { ready: false, error };
 }
 
+/** Best-effort: flips the draft pull request of a branch to ready. A branch name a forge CLI would read as a pull request
+ * reference (a bare number, #number, owner/repo#number or a URL) is refused rather than risk flipping another pull request. */
+export async function markBranchReady(branch: string, cwd: string): Promise<{ ready: boolean; error?: string }> {
+  if (/^\d+$/.test(branch) || parsePullRequestRef(branch).target !== branch) return { ready: false, error: `branch ${branch} reads as a pull request reference; record the pull request URL to flip it` };
+  return markPrReady(branch, cwd);
+}
+
 /** Whether a pull request is merged and its head commit (null when the forge gave no valid sha), with whichever forge CLI hosts it. Null when no forge CLI could say. */
 export async function prMerged(pullRequest: string, cwd: string | null): Promise<{ merged: boolean; open: boolean; head: string | null } | null> {
   try {
