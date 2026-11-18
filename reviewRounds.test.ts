@@ -127,7 +127,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;

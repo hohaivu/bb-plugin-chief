@@ -139,7 +139,7 @@ run_bounded() {
   rm -f "$TMP/timeout"
   "$@" &
   CUR_PID=$!
-  ( sleep "$rb_limit"; : > "$TMP/timeout"; kill -TERM -- "-$CUR_PID" 2>/dev/null; sleep 5; kill -KILL -- "-$CUR_PID" 2>/dev/null ) >/dev/null 2>&1 &
+  ( trap "exit 0" TERM; sleep "$rb_limit"; : > "$TMP/timeout"; kill -TERM -- "-$CUR_PID" 2>/dev/null; sleep 5; kill -KILL -- "-$CUR_PID" 2>/dev/null ) >/dev/null 2>&1 &
   WATCH_PID=$!
   wait "$CUR_PID" 2>/dev/null
   RB_STATUS=$?

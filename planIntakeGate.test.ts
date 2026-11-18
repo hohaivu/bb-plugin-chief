@@ -18,7 +18,7 @@ const CTX = (threadId: string) => ({ threadId, projectId: "proj_1" });
 
 async function newPlanner(state: State, chiefId: string, extra: string[] = []) {
   const before = new Set((await status(state)).threads.map((row) => row.threadId));
-  const result = await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", ...extra, "--json"], CTX(chiefId));
+  const result = await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "Checkout totals fix needs no design discussion", ...extra, "--json"], CTX(chiefId));
   expect(result.exitCode, result.stderr).toBe(0);
   return (await status(state)).threads.find((row) => row.role === "planner" && !before.has(row.threadId))!;
 }

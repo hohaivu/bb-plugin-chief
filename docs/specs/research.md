@@ -232,8 +232,8 @@ Reason: a plan must not start on an unapproved or unreadable design.
 
 ### Snapshots
 
-- On a new binding, `bindDesign(researcher, projectId)` creates missing snapshots in the researcher's artifact directory. `design-approved-r<seq>.md` holds the text of `design.md`. `facts-approved-r<seq>.md` holds the full ready result. A later initial bind to the same researcher and ready-report sequence reuses existing snapshots.
-- Revision and forge call `approvedDesign(researcherId, seq, projectId)` with the pair stored on the planner row. A later ready report does not change the pair. If the sequence is missing or either snapshot is missing or unreadable, revision refuses before checkout freshen or spawn, and forge refuses before its script runs. The lookup never recreates a file or reads live `design.md`.
+- On a new binding, `bindDesign(researcher, projectId)` creates missing snapshots in the researcher's artifact directory. `design-approved-r<seq>.md` holds the text of `design.md`. `facts-approved-r<seq>.md` holds the full ready result. A later initial bind to the same researcher and ready-report sequence reuses existing snapshots. Reason: reusing the exact approved design and fact report keeps the planner's inputs stable after edits or later approvals.
+- Revision and forge call `approvedDesign(researcherId, seq, projectId)` with the pair stored on the planner row. A later ready report does not change the pair. If the sequence is missing or either snapshot is missing or unreadable, revision refuses before checkout freshen or spawn, and forge refuses before its script runs. The lookup never recreates a file or reads live `design.md`. Reason: a missing or unreadable snapshot causes refusal, not a silent swap.
 - The planner brief names both paths and never holds their text. Reason: a clipped copy loses content.
 
 ### Planner brief

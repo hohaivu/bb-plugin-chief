@@ -208,7 +208,7 @@ describe("Coordinator", () => {
   describe("purity (COORD-2)", () => {
     // The refused list is COORD-2's own list.
     const REFUSED: Array<[string, object]> = [
-      ["chief_plan", { title: "T", mission: "M" }],
+      ["chief_plan", { undesignedReason: "small fix", title: "T", mission: "M" }],
       ["chief_consult", { title: "T", mission: "M", planThreadId: "thr_x" }],
       ["chief_delegate", { title: "T", mission: "M", unplannedReason: "r" }],
       ["chief_forge_init", { title: "T" }],
@@ -221,7 +221,7 @@ describe("Coordinator", () => {
       ["chief_skip_specs", { planThreadId: "thr_x", wave: 1, reason: "r" }],
       ["chief_escalate", { request: "help" }],
       ["chief_sync", {}],
-      ["chief_research", { mode: "survey", question: "q", items: ["a"] }],
+      ["chief_research", { question: "q", design: false }],
     ];
 
     test("a Coordinator is configured with exactly chief_roster, chief_spawn and chief_attach, and no skills", async () => {
@@ -253,7 +253,7 @@ describe("Coordinator", () => {
     });
 
     test.each([
-      [["plan", "--title", "T", "--mission", "M"]],
+      [["plan", "--title", "T", "--mission", "M", "--undesigned-reason", "small fix"]],
       [["consult", "--title", "T", "--mission", "M"]],
       [["delegate", "--title", "T", "--mission", "M", "--unplanned-reason", "r", "--json"]],
       [["stop", "thr_x"]],
@@ -549,7 +549,7 @@ describe("Coordinator", () => {
       const state = await setup();
       await state.harness.behavior.setSettings({ plannerEnabled: true });
       const { coord, child } = await linked(state);
-      const planned = await cli(state, ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], child);
+      const planned = await cli(state, ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"], child);
       expect(planned.exitCode, planned.stderr).toBe(0);
       const planner = (await state.harness.behavior.callRpc("status", null) as any).threads.find((thread: any) => thread.role === "planner" && thread.chiefThreadId === child).threadId as string;
       const chatOnly = "No pull request or issue to post on; write the request in chat only.";
@@ -925,9 +925,11 @@ describe("Coordinator", () => {
     };
     const MARKER = "# Project rules marker";
     // Chief's own budget for the core rules (keeps the rules small), not the SDK cut. The exact select: preload line (about 600 characters for a plain Chief) moved it from 4096/4000.
+    // CRISPY stages 1-3 add 364 characters to the research paragraph and the planner order line of a planning-and-research Chief; the budget grew by the same rounded amount (5,300 to 5,700).
     // The hook-safe fold wave's Fresh worker rule (plan wave 1 step 1, verbatim) is 363 characters longer than the rule this budget was set with; the budget grew by the same rounded amount.
     // The one-gate review rules (W1-W5) added about 200 more characters; the budget grew by the same rounded amount.
-    const CHIEF_BUDGET = 5_600;
+    // CRISPY research rules added about 400 more characters on top of the one-gate growth; the budget grew by the same rounded amount.
+    const CHIEF_BUDGET = 6_000;
     const GREETING = "You are the registered Coordinator for Asha: you supervise child Chiefs in any project, not managed threads.";
 
     test.each([["short chief.md", `${MARKER}\n- Keep rules small.`, false], ["32,000-char chief.md", `${MARKER}\n${"- Project rule text.\n".repeat(1_600)}`.slice(0, 32_000), true]])(
