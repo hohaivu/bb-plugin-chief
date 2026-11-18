@@ -81,7 +81,8 @@ The transaction runs these steps in order:
 
 1. `reserveReport` stores the report columns, adds 1 to `report_seq`, and clears `report_path`.
 2. An advisor ready or blocked report marks the row advised. When the advisor has a plan thread, the first advice resolves the plan review. `approved` means a ready report with verdict `approve`. Any other advice means `changes`.
-3. A planner ready report with a plan sets the plan review. The review is `required` when the row has no `replaces_thread_id`, and either the plan has more than one implementation wave or `complex` is true. Otherwise the review is null. A design wave never counts, because it is a fixed companion wave (a Designer's artboards) and not extra implementation scope. When the planner replaces a planner with review `changes`, the replaced planner completes.
+3. A planner ready report with a plan sets the plan review to null only when the review is unset or `required`. A `required` review is stale when no advisor runs for the plan. A decided review (`approved` or `changes`) is kept. Reason: owner decision. The advisor is an opt-in consult that Chief starts, not a gate, so the plugin never requires a review. When the planner replaces a planner with review `changes`, the replaced planner completes.
+   - The intake refuses a planner ready report while an advisor for that plan is running. It checks before the plan files are written and again before `reserveReport`. The advisor is running when its row has no advised report and its state is busy. The refusal says to wait for the advisor's report. Reason: a replacement plan must not drop the review gate of a running advisor. The intake checks again at the state write, because an advisor can launch while the plan files are written.
 4. An advisor or reviewer ready report with a `lesson` inserts one `chief_lessons` row. The row holds the project, the text, the reporting thread, the reviewed worker, the time, and the role. The row has the status `proposed`, so no prompt contains it until Chief accepts it. `observability.md` describes the lesson lifecycle.
 5. `ledger.recordVerdict` no longer changes `reject_streak`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head. A ready report of a gate tester, fix run, or corrector stores its `testsPassed` in `tests_passed`.
 6. A reviewer ready report with a verdict enqueues forge comments (one for each covered pull request). A worker blocked report enqueues one blocked comment. `forge-comments.md` describes them.
@@ -179,7 +180,6 @@ Each contract carries its reason.
 - A missing verdict file never erases the stored verdict. Reason: the verdict rows commit first.
 - Review ledger writes run only inside the `store.batch` of the intake. Reason: the ledger refuses a write outside a batch.
 - The intake is the only writer of `chief_lessons` in a report. Reason: the thread store keeps only `managed_threads`.
-- The count in the `has N implementation waves` text of `planReviewRefusal` uses the same predicate as the plan review trigger. Reason: a required review never shows a count of 1.
 - A failed optional step changes only the alert text and the attached paths. It never removes a committed row. Reason: the required rows are already committed before optional work begins, so an optional failure cannot roll them back.
 
 ### Trade-offs

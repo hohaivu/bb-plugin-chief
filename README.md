@@ -108,13 +108,13 @@ named. Nothing is implemented until it delegates.
 
 A planner shares Chief's checkout only when the project default is the project checkout (Chief's environment path equals the project source path). Then Chief fast-forwards it first, like a researcher's. A planner in its own worktree is left alone, and when that cannot be told (a lookup failed) Chief starts it with a `could not tell whether the planner shares it` warning. Every planner report alert carries the `Read at <sha>` line.
 
-**Plan review.** A plan with more than one implementation wave (design waves do not count), or one the planner marked `complex` on its ready
-report, gets exactly one read-only advisor review before delegation. Its ready alert asks for
-`chief_consult (planThreadId: …)`, and `chief_forge_init` and `chief_delegate` refuse the plan until
-that review resolves. On `approve`, Chief delegates the plan as it is. On `request_changes` or a
-blocked advisor, Chief runs `chief_plan (revises: …)`: a fresh planner revises the plan with the
-advice attached, and the revision is delegated with no second review. A stopped or failed attempt
-leaves the review open for a fresh one. There is no skip. A single-wave plan delegates at once.
+**Plan review.** A plan delegates at once; the plugin never requires a review. When Chief chooses,
+`chief_consult (planThreadId: …)` starts one read-only advisor review of the plan, and
+`chief_forge_init` and `chief_delegate` refuse the plan only while that advisor runs. On `approve`,
+Chief delegates the plan as it is. On `request_changes` or a blocked advisor, Chief runs
+`chief_plan (revises: …)`: a fresh planner revises the plan with the advice attached, and the
+revision is delegated with no second review. A stopped or failed advisor does not block: Chief may
+start a fresh one or delegate the plan.
 
 **Feature reshape.** For a big feature (new behaviour touching 3+ modules or 10+ files, never a bug fix or refactor) the planner adds a reshape wave after the chain's last feature wave. A fresh worker on the same branch applies the make-native skill: it reads the feature diff, redesigns it as if planned from day one, `git grep`s removed symbols, runs lint and build, and commits the reshape separately. It never touches tests; the gate's tester writes them against the reshaped design. Every review of feature work also checks the diff for make-native's smells (re-derived aliases, scattered `if (newKind)` branches, mirror components, duplicate flags, validation or download paths or systems, "nothing else changed" tests) and reports each as a finding: a nit, or an unmet contract when a reshape wave's contracts rule it out.
 
@@ -147,8 +147,8 @@ It is pull-only: it never alerts Chief or changes any thread's state, and no wor
 
 ### Advisor
 
-`chief_consult (planThreadId: …)` (`--plan-thread`) starts a read-only advisor for a plan's one
-review before delegation (see **Plan review**). It reads code and runs the read-only commands its brief
+`chief_consult (planThreadId: …)` (`--plan-thread`) starts an optional read-only advisor for one
+review of a plan before delegation, when Chief chooses (see **Plan review**). It reads code and runs the read-only commands its brief
 allows, but never changes a tracked file, commits, or pushes. Its advice goes back to Chief.
 
 ### Researcher

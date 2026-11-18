@@ -38,7 +38,7 @@ sequenceDiagram
   Chief->>Planner: chief_plan with researchThreadId or undesignedReason
   Planner-->>Chief: report with plan, alert lists waves and next call
 
-  opt more than one implementation wave (design waves do not count), or planner marked complex
+  opt Chief chooses to consult (optional)
     Chief->>Advisor: chief_consult planThreadId
     Advisor-->>Chief: report (advice, one review only)
     opt request_changes
@@ -135,7 +135,7 @@ flowchart LR
 | Tool | Use |
 | --- | --- |
 | `chief_research` | Read-only research by a researcher thread: ticket-blind facts from helper threads. With `design: true`, it also runs a design discussion with the user in its own thread and reports an approved design.md. Chief uses `design: true` for features and multi-file work, and `design: false` to check doubtful evidence. |
-| `chief_consult` | Read-only advisor. It gives a plan its one review. |
+| `chief_consult` | Optional read-only advisor: one review of a plan, when Chief asks. |
 | `chief_roster` | Starts every Chief turn. Its Pending block is the work list. |
 | `chief_escalate` | Posts a **Need you** request on the pull request or issue with an @mention of the owner. Chief also writes it in chat. |
 | `chief_stop` | Interrupts a stuck thread. It keeps the worktree, branch and history. |
@@ -151,7 +151,7 @@ flowchart LR
 | Step | Rule |
 | --- | --- |
 | Plan | With planning on, `chief_delegate` refuses a call without `planThreadId` and `wave`, unless it carries `unplannedReason`. A plan has 1 to 8 implementation waves. A `test` key is refused. |
-| Plan review | `chief_forge_init` and `chief_delegate` refuse a qualifying plan until its one advisor review resolves. There is no skip. |
+| Plan review | No required review. When Chief starts a plan advisor (`chief_consult planThreadId`), the plan review becomes `required` after the launch, and `chief_forge_init`/`chief_delegate` refuse the plan only while that advisor runs. A stopped advisor no longer blocks. Approve → delegate. `request_changes` or blocked → `chief_plan revises`, no second review. |
 | Forge | Chief owns the forge. `chief_forge_init` runs on a chain head with no worker yet. A worker never touches the pull request. |
 | Review | `chief_review` opens the one gate of the plan. The plan's readiness rules refuse it, for example for a design wave or a pending Spec Writer. Later steps follow `gateDecision`, and no re-review runs. `skipReview` on `chief_complete` needs a reason. |
 | Complete | `chief_complete` on a gate target needs `gateDecision` to return `pass` for the PR's current head. `skipReview` or `override` with a reason bypass it. A design wave needs the owner's approval. A Spec Writer completes like a worker, on a covering approve, `skipReview` or `override`. |

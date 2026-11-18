@@ -54,3 +54,6 @@ export const CONTINUE_REMINDERS: Partial<Record<Role, string>> = {
 // role list is a CHECK constraint in MIGRATIONS (server.ts):
 //   - managed_threads: the latest rebuild is managed_threads_v4 (role IN chief, planner, worker, reviewer, advisor, researcher).
 //   - chief_models: the latest rebuild is chief_models_v9 (role IN chief, planner, worker, reviewer, advisor, designer, tester, spec-writer, researcher).
+
+/** Planners whose plan is being published or whose consult is being admitted: each refuses the other before anything changes. */
+export const planAdmissions = new Set<string>();

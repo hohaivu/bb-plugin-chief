@@ -8,8 +8,8 @@ vi.mock("node:child_process", async () => (await import("./test/execMock")).chil
 afterEach(disposeAll);
 
 // Contract (plan-1 "plan intake"; docs/specs/report-intake.md, docs/specs/plan-chains.md): a plan is implementation waves only. 1 to 8 waves
-// are accepted as a string or an array; the `test` wave flag is refused through the real chief_report tool; plan_review is `required` exactly
-// when the plan has more than one non-design wave or is `complex`, and never on a revision. A persisted legacy test wave (raw `test: true`,
+// are accepted as a string or an array; the `test` wave flag is refused through the real chief_report tool; the plugin never requires a plan review
+// (plan_review stays null whatever the wave count; a `complex` key is stripped, not refused). A persisted legacy test wave (raw `test: true`,
 // written before the review gate) is absent, not delegable and not a pending wave; with a tester row on it it is an ordinary wave.
 // Everything here runs the real tools; only the forge answer and the legacy plan JSON (written by direct SQL) are seeded.
 
@@ -58,20 +58,47 @@ describe("plan intake: wave count and the test flag", () => {
 
 describe("plan intake: plan_review", () => {
   test.each([
-    ["one wave", waves(1), undefined, null],
-    ["two implementation waves", waves(2), undefined, "required"],
-    ["one implementation wave and one design wave", waves(2, (n) => (n === 1 ? { design: true } : {})), undefined, null],
-    ["two implementation waves and a design wave", waves(3, (n) => (n === 1 ? { design: true } : {})), undefined, "required"],
-    ["one wave, complex", waves(1), true, "required"],
-  ] as [string, object[], boolean | undefined, string | null][])("%s: plan_review is %s", async (_name, plan, complex, expected) => {
+    ["one wave", waves(1)],
+    ["two implementation waves", waves(2)],
+    ["one implementation wave and one design wave", waves(2, (n) => (n === 1 ? { design: true } : {}))],
+    ["two implementation waves and a design wave", waves(3, (n) => (n === 1 ? { design: true } : {}))],
+    ["eight implementation waves", waves(8)],
+  ] as [string, object[]][])("%s: plan_review stays null", async (_name, plan) => {
     const state = await setup();
     const chief = await start(state);
     const planner = await newPlanner(state, chief.threadId);
-    await report(state, planner.threadId, { state: "ready", result: "Planned.", plan, ...(complex ? { complex } : {}) });
-    expect(rowOf(state, planner.threadId).plan_review).toBe(expected);
+    await report(state, planner.threadId, { state: "ready", result: "Planned.", plan });
+    expect(rowOf(state, planner.threadId).plan_review).toBeNull();
   });
 
-  test("a revision of a reviewed plan is never `required`, even with two waves and complex", async () => {
+  test("a `complex` key on a planner's ready report is neither refused nor stored", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await newPlanner(state, chief.threadId);
+    await report(state, planner.threadId, { state: "ready", result: "Planned.", plan: waves(2), complex: true });
+    expect(rowOf(state, planner.threadId).plan_review).toBeNull();
+    expect(JSON.parse(rowOf(state, planner.threadId).plan_waves)).toHaveLength(2);
+  });
+
+  test("a `complex` key on a non-planner report is not refused either", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await report(state, worker.threadId, { state: "active", result: "Working.", complex: true });
+    expect(rowOf(state, worker.threadId).state).toBe("active");
+  });
+
+  test("a planner ready report resets a stale `required` to null", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await newPlanner(state, chief.threadId);
+    await report(state, planner.threadId, { state: "ready", result: "Planned.", plan: waves(2) });
+    state.db.prepare("UPDATE managed_threads SET plan_review='required' WHERE thread_id=?").run(planner.threadId);
+    await report(state, planner.threadId, { state: "ready", result: "Planned again.", plan: waves(2) });
+    expect(rowOf(state, planner.threadId).plan_review).toBeNull();
+  });
+
+  test("a revision of a reviewed plan stays null", async () => {
     const state = await setup();
     const chief = await start(state);
     const planner = await newPlanner(state, chief.threadId);
@@ -83,7 +110,7 @@ describe("plan intake: plan_review", () => {
     await state.harness.behavior.callAgentTool("chief_plan", { title: "Rework checkout", mission: "Revise it", revises: planner.threadId }, CTX(chief.threadId));
     const revision = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!;
     expect(revision.threadId).not.toBe(planner.threadId);
-    await report(state, revision.threadId, { state: "ready", result: "Revised.", plan: waves(2), complex: true });
+    await report(state, revision.threadId, { state: "ready", result: "Revised.", plan: waves(2) });
     expect(rowOf(state, revision.threadId).plan_review).toBeNull();
   });
 });

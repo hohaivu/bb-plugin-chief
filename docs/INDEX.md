@@ -32,6 +32,7 @@
 - [Researcher is a normal agent with a role model](decisions/2026-11-17-researcher-normal-agent.md)
 - [Heavy commands run through a host slot wrapper](decisions/2026-11-18-heavy-slots-host-capacity.md)
 - [Design discussion runs in the researcher thread](decisions/2026-11-18-crispy-design-discussion.md)
+- [Advisor review is opt-in at Chief's discretion](decisions/2026-11-18-advisor-review-opt-in.md)
 
 ## Superseded decisions
 

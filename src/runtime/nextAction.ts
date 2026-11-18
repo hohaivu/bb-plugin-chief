@@ -178,12 +178,9 @@ export function createNextAction(ctx: Ctx) {
   function planReviewRefusal(planner: ManagedRow): string | null {
     const P = planner.thread_id;
     if (planner.plan_review === "required") {
-      const { inFlight, abandoned } = planAdvisors(P);
+      const { inFlight } = planAdvisors(P);
       if (inFlight) return `Plan ${P} is in its one advisor review (${inFlight.thread_id}): wait for ${inFlight.thread_id}'s report before chief_forge_init or chief_delegate.`;
-      const waves = planWavesFor(P).filter((wave) => !wave.absent && !wave.design).length;
-      const why = waves > 1 ? `Plan ${P} has ${waves} implementation waves` : `Plan ${P} is marked complex`;
-      const ended = abandoned ? `Advisor ${abandoned.thread_id} ended without advice (state ${abandoned.state}). ` : "";
-      return `${ended}${why}: get its one advisor review first — chief_consult (planThreadId: ${P}, title, mission: review this plan before delegation). Do not chief_forge_init or chief_delegate it yet.`;
+      return null;
     }
     if (planner.plan_review !== "changes") return null;
     const revisions = revisionsOf(P);

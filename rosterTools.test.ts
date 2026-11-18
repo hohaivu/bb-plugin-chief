@@ -344,12 +344,9 @@ describe("Chief backend", () => {
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const { planner } = await planTwoWaves(state, chief.threadId);
 
-    // A two-wave plan waits for its one advisor review before Pending tells Chief to delegate wave 1.
+    // A two-wave plan needs no review: Pending tells Chief to delegate wave 1 at once.
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Plan ${planner.threadId} has 2 implementation waves: get its one advisor review first`);
-    expect(roster).not.toContain("Delegate wave 1 now");
-    await approvePlan(state, chief.threadId, planner.threadId);
-    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).not.toContain("chief_consult");
     expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Delegate wave 1 now: run chief_forge_init (planThreadId: ${planner.threadId}, wave: 1), then chief_delegate (planThreadId: ${planner.threadId}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`);
 
     await state.harness.behavior.runCli([

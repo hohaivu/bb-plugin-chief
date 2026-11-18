@@ -35,7 +35,7 @@ export function createRoster(ctx: Ctx) {
     }
     if (row.role === "planner" && row.replaces_thread_id) return `Once it is idle, start a fresh chief_plan (revises: ${row.replaces_thread_id}) with a narrower brief; the review round is already used.`;
     if (row.role === "planner") return "Once it is idle, start a fresh chief_plan with a narrower brief.";
-    if (row.role === "advisor" && row.plan_thread_id) return `Once it is idle, start a fresh chief_consult (planThreadId: ${row.plan_thread_id}); the plan still needs its one review.`;
+    if (row.role === "advisor" && row.plan_thread_id) return `Once it is idle, start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or delegate the plan without it.`;
     if (row.role === "researcher") return "Once it is idle, decide without it or start a fresh chief_research with a narrower question.";
     return "Once it is idle, decide without it or start a fresh chief_consult with a narrower question.";
   }
@@ -183,7 +183,7 @@ export function createRoster(ctx: Ctx) {
     const { inFlight, decider } = ctx.planAdvisors(row.thread_id);
     const revised = ctx.revisionsOf(row.thread_id).ready;
     const status = row.plan_review === "required"
-      ? inFlight ? `in review (${inFlight.thread_id})` : "required"
+      ? inFlight ? `in review (${inFlight.thread_id})` : "consulted, no advice"
       : row.plan_review === "approved" ? `approved (${decider?.thread_id ?? "?"})`
       : row.state === "complete" && revised ? `revised by ${revised.thread_id}` : `changes requested (${decider?.thread_id ?? "?"})`;
     return [...lines, `plan review: ${status}`];

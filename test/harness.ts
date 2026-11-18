@@ -114,6 +114,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   let section: { id: string; name: string; createdAt: number; updatedAt: number } | null = null;
   let spawnIndex = 0;
   let sendFailures = 0;
+  let spawnFailures = 0;
   let callerPermissionMode = "auto";
   let threadExecution: { model?: string } | null | undefined = null;
   let executionLookupFails = false;
@@ -226,6 +227,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
         events: { list: async ({ threadId }: { threadId: string }) => eventsStore.get(threadId) ?? [] },
         defaultExecutionOptions: async () => executionLookupFails ? Promise.reject(new Error("execution options unavailable")) : threadExecution === undefined ? null : ({ permissionMode: callerPermissionMode, ...(threadExecution ?? {}) }),
         spawn: async (args: any) => {
+          if (spawnFailures > 0) { spawnFailures -= 1; throw new Error("spawn refused"); }
           spawned.push(args);
           spawnIndex += 1;
           const id = options.realWidthIds ? `thr_${String(spawnIndex).padStart(10, "0")}` : `thr_${spawnIndex}`;
@@ -347,6 +349,8 @@ export async function setup(options: { /** projects.get rejects these ids, as th
     failNextGet(threadId: string) { getFailures.set(threadId, (getFailures.get(threadId) ?? 0) + 1); },
     failNextUpdate(threadId: string) { updateFailures.set(threadId, (updateFailures.get(threadId) ?? 0) + 1); },
     failNextSend() { sendFailures += 1; },
+    /** The next threads.spawn call rejects before it creates a thread. */
+    failNextSpawn() { spawnFailures += 1; },
     setCallerPermissionMode(mode: string) { callerPermissionMode = mode; },
     /** Makes every threads.defaultExecutionOptions lookup reject. */
     failExecutionLookups() { executionLookupFails = true; },
@@ -411,7 +415,7 @@ export async function delegate(
   return JSON.parse(result.stdout!) as { threadId: string; projectId: string };
 }
 
-// A plan of more than one implementation wave needs its one advisor review before any wave is delegated.
+// Opt-in plan review: Chief starts one advisor on a plan and it approves.
 export async function approvePlan(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, planThreadId: string) {
   const chiefCtx = { threadId: chiefThreadId, projectId: "proj_1" };
   await state.harness.behavior.callAgentTool("chief_consult", { planThreadId, title: "Plan", mission: "Review this plan before delegation" }, chiefCtx);

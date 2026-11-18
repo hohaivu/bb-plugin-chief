@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ReviewTarget, createReviewLedger } from "../review/reviewLedger";
-import type { Role } from "../core/roles";
+import { planAdmissions, type Role } from "../core/roles";
 import { ACTION_ROOM, LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../types";
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
 import { ALERT_MARKER_ROOM, COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
 import { waveTitle } from "../plan/waveSchedule";
+import { BUSY_STATUSES } from "../runtime/constants";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 
@@ -115,9 +116,6 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id" | "r
   }
   if (row.role === "advisor" && row.plan_thread_id && ready && !params.verdict) {
     errors.push("verdict is missing; a plan review's ready report requires verdict: approve or request_changes.");
-  }
-  if (params.complex !== undefined && (row.role !== "planner" || !ready)) {
-    errors.push(`complex is only for a planner's ready report (role is ${row.role}, state is "${params.state}"); remove it.`);
   }
   if (row.role === "worker" && row.plan_thread_id && ready
     && !/^[ \t]*#{1,6}[ \t]+deviations from plan/im.test(params.result ?? "")) {
@@ -480,6 +478,18 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
     const verdict = params.state === "ready" ? params.verdict ?? null : null;
     const plannerReady = row.role === "planner" && params.state === "ready";
+    // A replacement plan would drop the live advisor's gate: refuse it before the plan files or the state change.
+    const advisorBusy = () => {
+      // Same in-flight test as nextAction.ts planAdvisors.
+      const reviewing = plannerReady && planInput
+        ? store.all().find((r) => r.role === "advisor" && r.plan_thread_id === threadId && r.advised_at == null && BUSY_STATUSES.has(r.state)) : undefined;
+      if (reviewing) throw new Error(`chief_report was not saved: plan ${threadId} is in its one advisor review (${reviewing.thread_id}); wait for its report before submitting a new plan.`);
+    };
+    advisorBusy();
+    const publishing = plannerReady && !!planInput;
+    if (publishing && planAdmissions.has(threadId)) throw new Error(`chief_report was not saved: an advisor review of plan ${threadId} is starting; wait for its report before submitting a new plan.`);
+    if (publishing) planAdmissions.add(threadId);
+    try {
     const planWaves = plannerReady && planInput ? await writePlan(threadId, row.project_id, planInput) : null;
     const scheduledWaves = planWaves && planInput
       ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof planInput === "string" ? planInput : planInput[index]!.body)!,
@@ -522,6 +532,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     // report_seq is reserved here, so the per-report file names below never collide.
     let lessonId: number | null = null;
     const { report_seq: seq, result_rev: resultRev } = store.batch(() => {
+      advisorBusy(); // again at the state write: an advisor may have launched while the plan files were written
       const reserved = store.reserveReport({
         threadId, state: params.state, result: params.result ?? null, summary: params.summary ?? null,
         blocker: params.state === "blocked" ? params.blocker ?? null : null,
@@ -538,7 +549,8 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         if (params.state === "ready" && verdict === "request_changes") event?.("plan_review_changes", row);
       }
       if (plannerReady && scheduledWaves) {
-        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
+        // Keep a decided review (approved/changes); reset only an unset or stale required one.
+        if (row.plan_review == null || row.plan_review === "required") store.setPlanReview(threadId, null);
         const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }
@@ -636,6 +648,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     if (files.length) trackFiles(current, files);
     const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
     return alertChief(store.get(threadId) ?? current, `report:${current.active_cycle}:${contentKey}`, alert);
+    } finally { if (publishing) planAdmissions.delete(threadId); }
   }
   return { report };
 }
