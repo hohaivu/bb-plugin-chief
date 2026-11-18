@@ -457,4 +457,6 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN research_design INTEGER`,
     `ALTER TABLE managed_threads ADD COLUMN research_thread_id TEXT`,
     `ALTER TABLE managed_threads ADD COLUMN waiting_on_user INTEGER NOT NULL DEFAULT 0`,
+    // Planner row: the researcher ready report (report_seq) whose design snapshots the plan is bound to; revisions inherit it.
+    `ALTER TABLE managed_threads ADD COLUMN research_report_seq INTEGER`,
 ];

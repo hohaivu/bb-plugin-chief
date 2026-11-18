@@ -44,14 +44,21 @@ export function createDelegation(ctx: Ctx) {
       throw new Error("chief_plan needs researchThreadId (an approved chief_research design: true) or undesignedReason.");
     }
     let design: { researcherThreadId: string; designPath: string; factsPath: string } | undefined;
-    if (researchThreadId) {
+    let researchReportSeq: number | null = null;
+    if (revised?.research_thread_id) {
+      // A revision reads only the exact snapshot pair its original plan was bound to.
+      const bound = await approvedDesign(revised.research_thread_id, revised.research_report_seq, projectId);
+      design = { researcherThreadId: revised.research_thread_id, designPath: bound.designPath, factsPath: bound.factsPath };
+      researchReportSeq = revised.research_report_seq;
+    } else if (researchThreadId) {
       const researcher = store.get(researchThreadId);
       if (!researcher || researcher.role !== "researcher" || !ctx.controlsThread(researcher, chief.thread_id)) throw new Error(`No managed researcher ${researchThreadId} for this Chief.`);
       if (researcher.research_design !== 1) throw new Error(`Researcher ${researchThreadId} ran without design: chief_plan researchThreadId needs a chief_research design: true researcher.`);
       if (researcher.last_report_state !== "ready" || (researcher.state !== "ready" && researcher.state !== "complete")) {
         throw new Error(`Researcher ${researchThreadId} has no approved design yet: its last report is ${researcher.last_report_state ?? "missing"}; wait for its ready report.`);
       }
-      const bound = await approvedDesign(researcher, projectId);
+      const bound = await bindDesign(researcher, projectId);
+      researchReportSeq = researcher.report_seq;
       design = { researcherThreadId: researchThreadId, designPath: bound.designPath, factsPath: bound.factsPath };
     }
     // A revision stays on the branch its original planner read.
@@ -65,7 +72,7 @@ export function createDelegation(ctx: Ctx) {
     const warning = branch ? null : await ctx.freshenChiefCheckout(chief, "planner");
     const thread = await ctx.managedSpawn.launch(prepared,
       { projectId, environment: await readerEnvironment(projectId, branch), title, prompt },
-      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null, researchThreadId: researchThreadId ?? null, ...(branch ? { branch } : {}) },
+      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null, researchThreadId: researchThreadId ?? null, researchReportSeq, ...(branch ? { branch } : {}) },
       // Earlier revision attempts that failed or stopped are superseded atomically with the new one.
       params.revises ? (newId) => {
         const now = Date.now();
@@ -79,7 +86,7 @@ export function createDelegation(ctx: Ctx) {
 
   /** The user-approved design bound to a plan: write-once snapshots of design.md and the full ready result, keyed by the researcher's
    * ready report, in its Chief artifact dir. An existing snapshot is reused and never rewritten, so the design cannot change under a plan. */
-  async function approvedDesign(researcher: ManagedRow, projectId: string) {
+  async function bindDesign(researcher: ManagedRow, projectId: string) {
     const id = researcher.thread_id;
     const designName = `design-approved-r${researcher.report_seq}.md`;
     const factsName = `facts-approved-r${researcher.report_seq}.md`;
@@ -102,6 +109,21 @@ export function createDelegation(ctx: Ctx) {
       if (!researcher.result?.trim()) throw new Error(`Researcher ${id}'s ready report has no result (fact report).`);
       return researcher.result;
     });
+    return { designPath: designSnap.path, factsPath: factsSnap.path, designText: designSnap.text };
+  }
+
+  /** A plan's bound design: reads only the exact snapshot pair of ready report `seq`; never design.md, never creates. Missing or unreadable refuses. */
+  async function approvedDesign(researcherId: string, seq: number | null, projectId: string) {
+    if (seq == null) throw new Error(`The plan's design binding to researcher ${researcherId} has no ready report; nothing was started.`);
+    const read = async (name: string) => {
+      const found = await ctx.readArtifactIfPresent(researcherId, projectId, name).catch((error) => {
+        throw new Error(`Could not read ${name} for researcher ${researcherId} (${String((error as Error)?.message ?? error).slice(0, 200)}); nothing was started. Retry.`);
+      });
+      if (!found) throw new Error(`The approved design snapshot ${name} of researcher ${researcherId} is missing; nothing was started.`);
+      return found;
+    };
+    const designSnap = await read(`design-approved-r${seq}.md`);
+    const factsSnap = await read(`facts-approved-r${seq}.md`);
     return { designPath: designSnap.path, factsPath: factsSnap.path, designText: designSnap.text };
   }
 
