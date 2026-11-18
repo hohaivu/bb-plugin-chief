@@ -74,17 +74,26 @@ export function contractsOf(body: string): string | undefined {
   return sectionOf(body, "contracts to verify")?.trim() || undefined;
 }
 
-/** A tester result's `## Receipt` when complete, else null: a `Tested commit: <7-40 hex>` line, a command row (`cwd | command | required exit | actual exit | pass counts`: nonempty cwd and command, exit statuses 0-255), `Coverage:` and `Gaps:` lines,
+/** A tester result's `## Receipt` when complete, else null: a `Tested commit: <7-40 hex>` line, a command row (`cwd | command | required exit | actual exit | pass counts`: nonempty cwd, command and pass counts, exit statuses 0-255; all five fields required), `Coverage:` and `Gaps:` lines,
  * `Receipt end.` as the last line, at most 3,000 characters. The end line proves the stored text was not cut; a receipt is never clipped. */
 export function receiptOf(result: string | null): { text: string; testedCommit: string } | null {
   const text = sectionOf(result ?? "", "receipt")?.trim();
   if (!text || text.length > 3_000 || text.split(/\r?\n/).at(-1)!.trim() !== "Receipt end.") return null;
   const line = (label: string) => new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?${label}`, "im");
   const testedCommit = /^[ \t]*(?:[-*][ \t]+)?Tested commit:[ \t]*`?([0-9a-f]{7,40})`?[ \t]*$/im.exec(text)?.[1];
-  // Label lines never count; the lazy command may itself contain `|`, so the two exit statuses (0-255) anchor the row.
-  const exit = "(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)";
-  const commandRow = new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?[^|\\s][^|]*\\|[ \\t]*\\S.*?\\|[ \\t]*${exit}[ \\t]*\\|[ \\t]*${exit}[ \\t]*(?:\\|.*)?$`);
-  const hasCommand = text.split(/\r?\n/).some((row) => !/^[ \t]*(?:[-*][ \t]+)?(?:Tested commit|Coverage|Gaps):/i.test(row) && commandRow.test(row));
+  // Label lines never count. A row is `cwd | command | required exit | actual exit | counts`: the first pipe ends cwd, the last three split the rest, and the command is the exact middle span (it may hold pipes). No backtracking.
+  const exit = (field: string) => /^\d{1,3}$/.test(field) && Number(field) <= 255;
+  const isCommandRow = (row: string) => {
+    if (/^[ \t]*(?:[-*][ \t]+)?(?:Tested commit|Coverage|Gaps):/i.test(row)) return false;
+    const pipes = [...row.matchAll(/\|/g)].map((m) => m.index!);
+    if (pipes.length < 4) return false;
+    const [first, a, b, c] = [pipes[0]!, ...pipes.slice(-3)] as [number, number, number, number]; // 4+ pipes: first < a
+    const command = row.slice(first + 1, a).trim();
+    return !!row.slice(0, first).replace(/^[ \t]*(?:[-*][ \t]+)?/, "").trim()
+      && !/^\|(?!\|)|^[|\s]*$/.test(command)
+      && exit(row.slice(a + 1, b).trim()) && exit(row.slice(b + 1, c).trim()) && !!row.slice(c + 1).trim();
+  };
+  const hasCommand = text.split(/\r?\n/).some(isCommandRow);
   return testedCommit && hasCommand && line("Coverage:").test(text) && line("Gaps:").test(text) ? { text, testedCommit } : null;
 }
 
