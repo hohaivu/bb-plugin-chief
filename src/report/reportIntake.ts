@@ -50,17 +50,32 @@ export function findingLines(list: ReportFinding[], severity: ReportFinding["sev
     .map((entry) => `- ${entry.file}${entry.line ? `:${entry.line}` : ""} — ${entry.message}${entry.fix ? ` (fix: ${entry.fix})` : ""}`);
 }
 
+/** Per line: whether it is fenced code (opener, interior and closer). A fence closes only on the same marker, at least as long as the opener, with nothing but whitespace after it; an unclosed fence runs to the end. */
+function fencedLines(lines: string[]): boolean[] {
+  let open: { marker: string; length: number } | null = null;
+  return lines.map((line) => {
+    if (!open) {
+      const opener = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
+      if (!opener || (opener[1]![0] === "`" && opener[2]!.includes("`"))) return false;
+      open = { marker: opener[1]![0]!, length: opener[1]!.length };
+      return true;
+    }
+    const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(line);
+    if (closer && closer[1]![0] === open.marker && closer[1]!.length >= open.length) open = null;
+    return true;
+  });
+}
+
 /** The untrimmed text under the first heading named `name` (any level), up to the next heading of the same or higher level. Undefined without the heading. */
 export function sectionOf(body: string, name: string, skipFenced = false): string | undefined {
-  // With skipFenced, headings inside fenced code are blanked for matching only (same length, so indices still fit `body`); contractsOf keeps the plain scan.
-  let fenced = false;
-  const scan = skipFenced
-    ? body.split(/(\r?\n)/).map((line, i) => {
-      if (i % 2) return line;
-      if (/^(```|~~~)/.test(line.trim())) { fenced = !fenced; return " ".repeat(line.length); }
-      return fenced ? " ".repeat(line.length) : line;
-    }).join("")
-    : body;
+  // With skipFenced, fenced lines are blanked for matching only (same length, so indices still fit `body`); contractsOf keeps the plain scan.
+  let scan = body;
+  if (skipFenced) {
+    const parts = body.split(/(\r?\n)/);
+    const text = parts.filter((_, i) => i % 2 === 0);
+    const fenced = fencedLines(text);
+    scan = parts.map((part, i) => (i % 2 || !fenced[i / 2] ? part : " ".repeat(part.length))).join("");
+  }
   const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(scan);
   if (!heading) return undefined;
   const start = heading.index + heading[0].length;
@@ -74,29 +89,38 @@ export function contractsOf(body: string): string | undefined {
   return sectionOf(body, "contracts to verify")?.trim() || undefined;
 }
 
-/** A tester result's `## Receipt` when complete, else null: a `Tested commit: <7-40 hex>` line, a command row (`cwd | command | required exit | actual exit | pass counts`: nonempty cwd and command, exit statuses 0-255), `Coverage:` and `Gaps:` lines,
+/** A tester result's `## Receipt` when complete, else null: a `Tested commit: <7-40 hex>` line, a command row (`cwd | command | required exit | actual exit | pass counts`: nonempty cwd, command and pass counts, exit statuses 0-255; all five fields required), `Coverage:` and `Gaps:` lines,
  * `Receipt end.` as the last line, at most 3,000 characters. The end line proves the stored text was not cut; a receipt is never clipped. */
 export function receiptOf(result: string | null): { text: string; testedCommit: string } | null {
   const text = sectionOf(result ?? "", "receipt")?.trim();
   if (!text || text.length > 3_000 || text.split(/\r?\n/).at(-1)!.trim() !== "Receipt end.") return null;
   const line = (label: string) => new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?${label}`, "im");
   const testedCommit = /^[ \t]*(?:[-*][ \t]+)?Tested commit:[ \t]*`?([0-9a-f]{7,40})`?[ \t]*$/im.exec(text)?.[1];
-  // Label lines never count; the lazy command may itself contain `|`, so the two exit statuses (0-255) anchor the row.
-  const exit = "(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)";
-  const commandRow = new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?[^|\\s][^|]*\\|[ \\t]*\\S.*?\\|[ \\t]*${exit}[ \\t]*\\|[ \\t]*${exit}[ \\t]*(?:\\|.*)?$`);
-  const hasCommand = text.split(/\r?\n/).some((row) => !/^[ \t]*(?:[-*][ \t]+)?(?:Tested commit|Coverage|Gaps):/i.test(row) && commandRow.test(row));
+  // Label lines never count. A row is `cwd | command | required exit | actual exit | counts`: the first pipe ends cwd, the last three split the rest, and the command is the exact middle span (it may hold pipes). No backtracking.
+  const exit = (field: string) => /^\d{1,3}$/.test(field) && Number(field) <= 255;
+  const isCommandRow = (row: string) => {
+    if (/^[ \t]*(?:[-*][ \t]+)?(?:Tested commit|Coverage|Gaps):/i.test(row)) return false;
+    const pipes = [...row.matchAll(/\|/g)].map((m) => m.index!);
+    if (pipes.length < 4) return false;
+    const [first, a, b, c] = [pipes[0]!, ...pipes.slice(-3)] as [number, number, number, number]; // 4+ pipes: first < a
+    const command = row.slice(first + 1, a).trim();
+    return !!row.slice(0, first).replace(/^[ \t]*(?:[-*][ \t]+)?/, "").trim()
+      && !/^\|(?!\|)|^[|\s]*$/.test(command)
+      && exit(row.slice(a + 1, b).trim()) && exit(row.slice(b + 1, c).trim()) && !!row.slice(c + 1).trim();
+  };
+  const hasCommand = text.split(/\r?\n/).some(isCommandRow);
   return testedCommit && hasCommand && line("Coverage:").test(text) && line("Gaps:").test(text) ? { text, testedCommit } : null;
 }
 
 /** Markdown list items at the section's shallowest indentation (tab = 4 spaces); wrapped lines, deeper items and fenced code are not counted. */
 function topLevelItems(section: string): number {
+  const lines = section.split(/\r?\n/);
+  const fenced = fencedLines(lines);
   const indents: number[] = [];
-  let fenced = false;
-  for (const line of section.split(/\r?\n/)) {
-    if (/^(```|~~~)/.test(line.trim())) { fenced = !fenced; continue; }
-    const item = !fenced && /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+\S/.exec(line);
+  lines.forEach((line, i) => {
+    const item = !fenced[i] && /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+\S/.exec(line);
     if (item) indents.push(item[1]!.replace(/\t/g, "    ").length);
-  }
+  });
   const top = Math.min(...indents);
   return indents.filter((indent) => indent === top).length;
 }
@@ -294,7 +318,8 @@ export function checkPlan(plan: string | unknown[]): string[] {
       ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string." : ""}`);
   }
   bodies.forEach((body, index) => {
-    if (body !== undefined && !contractsOf(body)) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
+    // A test wave's heading must exist outside fenced code, the same slice its count reads.
+    if (body !== undefined && !(tests[index] ? sectionOf(body, "contracts to verify", true)?.trim() : contractsOf(body))) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
   });
   // A design wave is a chain tip when no later wave could build on it; a later wave whose dependsOn is not an array might, so it blocks the check.
   designs.forEach((design, index) => {

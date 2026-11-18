@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { READY, type State, ctxOf, delegateWave, followRoute, plan, readyIdle, readyImpl, refusal, report, rerunRoute, review, reviewed, reviewerCount, rowOf, setLive, tick, tool, workerOn } from "./test/testerHelpers";
-import { BLANK_ROW_RESULT, COMPLETE_RESULT, CUT_RESULT, METADATA_ONLY_RESULT, MISSING_FIELDS_RESULT, NORMAL_MODE, PIPES_ONLY_RESULT, TESTED } from "./test/receiptFixtures";
+import { BLANK_COMMAND_RESULT, BLANK_ROW_RESULT, COMPLETE_RESULT, CUT_RESULT, FOUR_FIELD_RESULT, METADATA_ONLY_RESULT, MISSING_FIELDS_RESULT, NORMAL_MODE, PIPED_RESULT, PIPES_ONLY_RESULT, TESTED } from "./test/receiptFixtures";
 import { TEST_WAVE, approvePlan, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -287,6 +287,12 @@ describe("retest receipt option", () => {
     ["a receipt whose command row is pipes only", [PIPES_ONLY_RESULT], null],
     ["a receipt whose command row is blank", [BLANK_ROW_RESULT], null],
     ["a receipt whose command row lacks its exit statuses", [MISSING_FIELDS_RESULT], null],
+    ["a receipt whose command row has four fields and no pass counts", [FOUR_FIELD_RESULT], null],
+    ["a receipt whose command row has no command (`| | 0 | 0 | 0`)", [BLANK_COMMAND_RESULT], null],
+    ["a four-field newest tester over an older complete receipt", [COMPLETE_RESULT, FOUR_FIELD_RESULT], null],
+    ["a blank-command newest tester over an older complete receipt", [COMPLETE_RESULT, BLANK_COMMAND_RESULT], null],
+    ["a valid receipt whose command holds pipes", [PIPED_RESULT], 0],
+    ["a valid piped newest tester over an older complete receipt", [COMPLETE_RESULT, PIPED_RESULT], 1],
     ["a legacy newest tester over an older complete receipt", [COMPLETE_RESULT, READY], null],
     ["a complete newest tester over an older legacy report", [READY, COMPLETE_RESULT], 1],
   ])("retest refusal and ready alert with %s", async (_label, results, owner) => {
