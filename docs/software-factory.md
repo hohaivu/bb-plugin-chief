@@ -92,7 +92,7 @@ sequenceDiagram
     Chief->>SpecWriter: chief_delegate kind spec-writer, replaces the side-lane writer
   end
   Note over Chief,Owner: a second fix run is refused. A red or blocked corrector escalates to the owner
-  Note over Chief,Tester: gateDecision pass needs testsPassed true, and every docs finding settled. No second review starts
+  Note over Chief,Tester: gateDecision pass needs testsPassed true, and every docs finding settled. One advisory re-review may start after a green fix run, and it never blocks pass
 
   opt any other decision only the owner can make
     Chief->>Owner: Need you, also posted with chief_escalate
@@ -151,7 +151,7 @@ flowchart LR
 | Plan | With planning on, `chief_delegate` refuses a call without `planThreadId` and `wave`, unless it carries `unplannedReason`. A plan has 1 to 8 implementation waves. A `test` key is refused. |
 | Plan review | No required review. When Chief starts a plan advisor (`chief_consult planThreadId`), the plan review becomes `required` after the launch, and `chief_forge_init`/`chief_delegate` refuse the plan only while that advisor runs. A stopped advisor no longer blocks. Approve → delegate. `request_changes` or blocked → `chief_plan revises`, no second review. |
 | Forge | Chief owns the forge. `chief_forge_init` runs on a chain head with no worker yet. A worker never touches the pull request. |
-| Review | `chief_review` opens the one gate of the plan. The plan's readiness rules refuse it, for example for a design wave or a pending Spec Writer. Later steps follow `gateDecision`, and no re-review runs. `skipReview` on `chief_complete` needs a reason. |
+| Review | `chief_review` opens the one gate of the plan. The plan's readiness rules refuse it, for example for a design wave or a pending Spec Writer. Later steps follow `gateDecision`. One advisory re-review may run after a green fix run, and it never blocks pass. `skipReview` on `chief_complete` needs a reason. |
 | Complete | `chief_complete` on a gate target needs `gateDecision` to return `pass` for the PR's current head. `skipReview` or `override` with a reason bypass it. A design wave needs the owner's approval. A Spec Writer completes like a worker, on a covering approve, `skipReview` or `override`. |
 | Merge | Only the owner merges. Chief never merges. |
 

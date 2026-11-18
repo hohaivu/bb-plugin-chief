@@ -99,16 +99,20 @@ describe("one gate per plan", () => {
 
   // Contract: the heads are pinned once at open; a retry reviews the pinned heads, whatever the forge says now.
   // Regression: a retry re-reads the forge and reviews a moved head, or re-pins and changes the gate.
-  test("pins are read once: a retry after the forge head moved still reviews the pinned head", async () => {
+  test("live sides keep their pins; a reviewer relaunch refreshes only the target heads", async () => {
     const w = twoChains();
     await w.review.startReview(w.chief, "W1");
-    const asked = w.forge.head.mock.calls.length;
-    w.forge.head.mockImplementation(async () => headOf("feature/one", "c".repeat(40)));
+    const initial = w.store.gate(KEY)!.targets;
+    const fresh = ["c".repeat(40), "d".repeat(40)];
+    w.forge.head.mockImplementation(async (url) => url === pr(1) ? headOf("feature/one", fresh[0]!) : headOf("feature/two", fresh[1]!));
+    await w.review.startReview(w.chief, "W1");
+    expect(w.store.gate(KEY)!.targets).toEqual(initial);
+    expect(w.launches).toHaveLength(2);
+
     w.setState(w.reviewerLaunch()!.id, "failed");
     await w.review.startReview(w.chief, "W1");
-
-    expect(w.forge.head).toHaveBeenCalledTimes(asked);
-    expect(w.targetRows(w.launches[2]!.id).map((target) => target.head_sha)).toEqual([SHA_A, SHA_B]);
+    expect(w.store.gate(KEY)!.targets).toEqual(initial.map((target, i) => ({ ...target, headSha: fresh[i] })));
+    expect(w.targetRows(w.launches[2]!.id).map((target) => target.head_sha)).toEqual(fresh);
   });
 });
 
@@ -159,7 +163,7 @@ describe("retry launches only the side that is missing", () => {
     await w.review.startReview(w.chief, "W1");
     expect(w.launches.map((entry) => entry.row.role === "reviewer" ? "reviewer" : entry.row.kind)).toEqual(["reviewer", "tester"]);
     expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: w.reviewerLaunch()!.id, tester_thread_id: w.testerLaunch()!.id });
-    expect(w.forge.head).toHaveBeenCalledTimes(pinned);
+    expect(w.forge.head).toHaveBeenCalledTimes(pinned + 2);
   });
 
   // Contract: a reviewer launch that throws leaves the gate open and pinned with no actor; the next call starts both sides on the same pins.
@@ -179,7 +183,7 @@ describe("retry launches only the side that is missing", () => {
     await w.review.startReview(w.chief, "W1");
     expect(w.launches).toHaveLength(2);
     expect(gateRows(w)).toHaveLength(1);
-    expect(w.forge.head).toHaveBeenCalledTimes(pinned);
+    expect(w.forge.head).toHaveBeenCalledTimes(pinned + 2);
   });
 });
 

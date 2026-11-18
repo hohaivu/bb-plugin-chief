@@ -10,7 +10,7 @@ import { REVIEW_ONLY } from "../core/roles";
 import { clip, clipMiddle, recordedLines, type RecordedCommand } from "../core/text";
 import { terminal } from "../types";
 import type { GateTarget, ReviewGate, ThreadStore } from "../db/threadStore";
-import { chainOf, isWriter, type PlanWave } from "../plan/waveSchedule";
+import { chainOf, isReady, isWriter, type PlanWave } from "../plan/waveSchedule";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 type LiveThread = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["get"]>>;
@@ -377,6 +377,8 @@ interface ReviewRow {
   reject_streak: number;
   reviewed_head_sha: string | null;
   created_at: number;
+  last_report_state: string | null;
+  tests_passed: number | null;
 }
 
 /** What a chief_review call answers: the reviewer thread and the reply text the handler forwards. */
@@ -552,7 +554,20 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
     return dedupe(gateKey, async () => {
       const down = (id: string | null) => { const actor = id ? store.get(id) : undefined; return !actor || ["failed", "blocked", "archived", "deleted"].includes(actor.state); };
       let gate = store.gate(gateKey);
-      if (gate && !down(gate.reviewer_thread_id) && !down(gate.tester_thread_id)) {
+      const existing = !!gate;
+      // After the fix run, the reviewer side is advisory: one re-review when the review asked for changes, the gate's last fix row is green
+      // and only one reviewer has a verdict since the gate opened. A failed no-verdict advisory attempt uses no budget and is retried with the prior verdict.
+      const ids = gate ? gate.targets.map((target) => target.threadId) : [];
+      const settled = gate ? store.get(ledger.newestVerdictReviewer(ids) ?? "") : undefined;
+      const lastFix = gate ? store.get(gate.corrector_thread_id ?? gate.fixer_thread_id ?? "") : undefined;
+      const afterFix = !!gate?.fixer_thread_id;
+      const advisoryRunning = afterFix && !down(gate!.reviewer_thread_id) && gate!.reviewer_thread_id !== settled?.thread_id;
+      const rereview = afterFix && !advisoryRunning && (gate!.reviewer_thread_id === settled?.thread_id || down(gate!.reviewer_thread_id))
+        && settled?.verdict === "request_changes" && !!lastFix && (isReady(lastFix) || lastFix.state === "complete") && lastFix.tests_passed === 1
+        && ledger.reviewersWithVerdict(ids, gate!.created_at) === 1;
+      const startReviewer = !gate || (afterFix ? rereview : down(gate.reviewer_thread_id));
+      const startTester = !gate || (!advisoryRunning && down(gate.tester_thread_id));
+      if (gate && !startReviewer && !startTester) {
         return {
           threadId: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)!.title, created: false,
           reply: `The review gate ${gateKey} already runs reviewer ${gate.reviewer_thread_id} and tester ${gate.tester_thread_id}; nothing started.`,
@@ -575,11 +590,19 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         store.batch(() => store.openGate({ gateKey, projectId: worker.project_id, chiefThreadId: caller.thread_id, planThreadId: worker.plan_thread_id, targets: pinned, now: Date.now() }));
         gate = store.gate(gateKey)!;
       }
+      if (existing) {
+        // Every side launch on an existing gate works on each target's current head; the report number stays as pinned.
+        const repinned: GateTarget[] = [];
+        for (const target of gate.targets) repinned.push({ ...target, headSha: (await pinHead(store.get(target.threadId)!, projectDir)).sha });
+        store.batch(() => store.repinGate(gateKey, repinned));
+        gate = store.gate(gateKey)!;
+      }
+      const previous = rereview && settled ? { threadId: settled.thread_id, preview: verdictPreview(settled), recommendation: settled.recommendation } : null;
       // Each missing side starts independently and persists on success, so a retry starts only the side that failed.
       const open = gate;
       const [reviewerRun, testerRun] = await Promise.allSettled([
-        down(open.reviewer_thread_id) ? launchReviewer(open, worker, focus, acceptedGaps, projectDir) : Promise.resolve(null),
-        down(open.tester_thread_id) ? launchTester(open, worker) : Promise.resolve(null),
+        startReviewer ? launchReviewer(open, worker, focus, acceptedGaps, projectDir, previous) : Promise.resolve(null),
+        startTester ? launchTester(open, worker) : Promise.resolve(null),
       ]);
       const reviewer = reviewerRun.status === "fulfilled" ? reviewerRun.value : null;
       const started: string[] = [];
@@ -624,7 +647,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
   }
 
   /** Starts the gate's reviewer in a fresh worktree on the first target's branch, over the pinned heads. Returns its id and title. */
-  async function launchReviewer(gate: ReviewGate, worker: Row, focus: string | undefined, acceptedGaps: string | undefined, projectDir: string | null) {
+  async function launchReviewer(gate: ReviewGate, worker: Row, focus: string | undefined, acceptedGaps: string | undefined, projectDir: string | null, previous: ReviewBriefInput["previous"] = null) {
     const targets = gate.targets.map((target) => store.get(target.threadId)!);
     const covered: CoveredTarget<Row>[] = gate.targets.map((target) => ({ row: store.get(target.threadId)!, head: { branch: target.branch, sha: target.headSha, base: target.base } }));
     const mine = covered.find((target) => target.row.thread_id === worker.thread_id) ?? covered[0]!;
@@ -712,7 +735,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         specUnplanned,
         specBaseline,
         recordedLines: recordedLines(recorded),
-        previous: null,
+        previous,
         focus,
         acceptedGaps,
         chiefThreadId: worker.chief_thread_id,

@@ -151,6 +151,8 @@ Shared worktree cleanup coordinates action ownership:
   - A second live side-lane Spec Writer on one wave is rejected, unless it replaces the first.
   - A second live implementation-lane row is rejected.
   - A holder from another plan, or an unplanned holder, is rejected.
+  - A Spec Writer delegation ignores a review gate's fixer, corrector or tester that is not busy. Reason: the owner chose this rule, because a ready fix run blocked every docs repair.
+  - A busy gate fixer, corrector or tester still holds the branch for a Spec Writer. Busy means `starting`, `pending`, `active` or `stopping`. Reason: two writable rows must not share one worktree branch.
   - Reason: a side worktree checks out its own `bb/` side branch, so it never blocks the task branch.
 - `startWorker` rejects a delegation when `params.branch` differs from the branch of the prior worker. Reason: replacement workers must remain on the established chain branch.
 
@@ -174,12 +176,18 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
 - `admitDelegation` names `replaces: <chain owner>` when it rejects a non-head wave without a replacement target. Reason: callers must know the latest implementation thread to continue the chain.
 - `admitDelegation` rejects an implementation delegation without `replaces:` when any wave in the chain already has an implementation-lane row. Reason: started chains must not allocate duplicate workers or environments.
-- `admitDelegation` refuses `kind: tester` while a review gate is open, unless `evidenceOnly` is true or the call is the corrector of the gate's fix run. Reason: the gate starts its own tester.
-- While a review gate is open, `admitDelegation` admits only the gate's fix run (`kind: worker`, replacing the gate tester). Reason: one writable owner holds the gate at a time. See [review-engine.md](review-engine.md) under Fix Run and Corrector.
+- `admitDelegation` refuses `kind: tester` while a review gate is open, unless `evidenceOnly` is true, the call is the corrector of the gate's fix run, or it replaces a corrector that never reported. Reason: the gate starts its own tester.
+- While a review gate is open, `admitDelegation` admits only the gate's fix run (`kind: worker`, replacing the gate tester). It also admits a fix run that replaces a fix run that never reported. Reason: one writable owner holds the gate at a time. See [review-engine.md](review-engine.md) under Fix Run and Corrector.
 - A later implementation wave is admitted while a Spec Writer is pending. Reason: Spec Writers never gate implementation waves.
 - `admitDelegation` rejects a replacement target from another chain of the same plan. Reason: independent chains must not inherit foreign branches or environments.
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
 - `admitDelegation` permits a tester to start fresh on a new branch when the tested worker completed. Reason: post-merge testing verifies code after branch deletion.
+- `admitDelegation` admits `kind: tester` without `replaces:` on unplanned work when `branch` is set. The optional `prUrl` names the pull request of that branch. Reason: test-only work has no worker row to replace.
+- `admitDelegation` refuses `kind: tester` without `replaces:` on unplanned work when `branch` is not set. The text names both routes: `replaces:` and `branch`. Reason: the tester must name the work that it tests.
+- `admitDelegation` refuses `kind: tester` without `replaces:` on a plan wave. Reason: a plan tests the workers of its own chain.
+- An admitted unplanned tester row carries the given `branch` and `prUrl`. It gets a fresh worktree on that branch and supersedes no row. Reason: superseding another row would leave an empty worker row, which must never happen.
+- The review gate of an admitted unplanned tester pins the pull request head of its `branch`. Reason: the gate must review the code that the tester tests.
+- Admission with `replaces:` for `kind: tester` keeps its existing behaviour. Reason: existing tester hand-offs must not change.
 - `admitDelegation` permits a fresh plan wave 1 delegation to replace a blocked row of another plan. The rule applies to each lane. Reason: re-planning allows recovery on the blocked worktree or side worktree.
 - `admitDelegation` refuses a fresh delegation (without `replaces:`) to a chain head with a plan base, while that base waits or is unresolved. Reason: the head must not build before its parent code exists.
 - `admitDelegation` refuses a fresh delegation to such a head without `branch`, and it never falls back to the project default. Reason: forge init cuts the branch from the plan base, so admission, forge and review agree on one value.
@@ -366,6 +374,14 @@ A tester brief has these rules:
 
 - `admitDelegation` rejects a delegation when `params.prUrl` differs from the pull request URL of the prior worker. Reason: replacement workers on a chain must preserve the established pull request.
 - `admitDelegation` accepts `params.prUrl` when the prior worker has no recorded pull request URL. Reason: callers must be able to record a missing pull request URL on replacement.
+
+### Pull Request Ready Flip
+
+- `chief_complete` of a worker marks its pull request ready. The flip uses `pr_url` when it is set. Reason: a pull request that a person opened by hand stayed draft.
+- The branch fallback runs only with a local project checkout. Without one, the flip makes no forge or Git call and returns a non-fatal "still a draft" outcome. Reason: a branch name resolves only in a local checkout of the project.
+- `markBranchReady` in `src/forge/forge.ts` refuses a branch name that a forge CLI reads as a pull request reference. Those forms are a bare number, `#n`, `owner/repo#n`, and a URL. The refusal is non-fatal and asks for the pull request URL. Reason: the forge CLI would flip the pull request that the reference names, not the branch.
+- `readyPullRequest` in `src/runtime/completion.ts` skips a row that is not a worker. It also skips a row with neither `pr_url` nor `branch`, and runs no forge command. Reason: only a worker row names a branch to flip.
+- A forge failure during the flip returns the non-fatal line. It never undoes completion. Reason: the work is done even when the forge call fails.
 
 ### Forge Pre-flight Operations
 

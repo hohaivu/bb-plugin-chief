@@ -184,7 +184,7 @@ function fixRunLines(fix: FixRunInput, heavy: string): string[] {
   }
   return [
     "", "## Fix run",
-    "You are the review gate's one fix run. There is no second fix and no re-review: make the tests pass.",
+    "You are the review gate's one fix run. There is no second fix: make the tests pass. The gate passes on your green run; any re-review is advisory.",
     "### Gate targets", ...targets, ...evidence,
     "- Verify each code finding against the code and the plan; fix every blocking one that holds, and the product code behind each failing test. List a finding that does not hold under `## Disputed findings` with evidence.",
     "- Never write, edit, skip or delete a test, fixture or test config. Never change docs/: list a docs need under `## Docs needed`.",
