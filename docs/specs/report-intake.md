@@ -213,11 +213,12 @@ Each contract carries its reason.
 
 ### Test key refusal
 
-`checkPlan` refuses a plan wave that has a `test` key, whatever its value. The refusal says: `plan wave N: test waves are gone; the tester runs once in the review gate after every wave. Drop test.` Reason: the review gate runs one tester after every wave, so a test wave adds no work.
+`checkPlan` refuses a plan wave whose `test` key is `true` or `false`. The refusal says: `plan wave N: test waves are gone; the tester runs once in the review gate after every wave. Drop test.` Reason: the review gate runs one tester after every wave, so a test wave adds no work.
 
 Invariants:
 
 - The refusal runs only at planner ready-report intake. Admitted plans are never checked again. Reason: plans already admitted stay valid.
+- A `test` value that is not a boolean, such as `null`, fails the report schema first. The schema refuses it before `checkPlan` runs, so this refusal never names it. Reason: the schema accepts only a boolean or no key.
 
 ## Out of Scope
 
