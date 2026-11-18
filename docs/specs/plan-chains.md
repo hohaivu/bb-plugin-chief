@@ -365,7 +365,9 @@ A tester brief has these rules:
 
 ### Pull Request Ready Flip
 
-- `chief_complete` of a worker marks its pull request ready. The flip uses `pr_url` when it is set, and otherwise the row's branch name. Reason: a pull request that a person opened by hand stayed draft.
+- `chief_complete` of a worker marks its pull request ready. The flip uses `pr_url` when it is set. Reason: a pull request that a person opened by hand stayed draft.
+- The branch fallback runs only with a local project checkout. Without one, the flip makes no forge or Git call and returns a non-fatal "still a draft" outcome. Reason: a branch name resolves only in a local checkout of the project.
+- `markBranchReady` in `src/forge/forge.ts` refuses a branch name that a forge CLI reads as a pull request reference. Those forms are a bare number, `#n`, `owner/repo#n`, and a URL. The refusal is non-fatal and asks for the pull request URL. Reason: the forge CLI would flip the pull request that the reference names, not the branch.
 - `readyPullRequest` in `src/runtime/completion.ts` skips a row that is not a worker. It also skips a row with neither `pr_url` nor `branch`, and runs no forge command. Reason: only a worker row names a branch to flip.
 - A forge failure during the flip returns the non-fatal line. It never undoes completion. Reason: the work is done even when the forge call fails.
 
