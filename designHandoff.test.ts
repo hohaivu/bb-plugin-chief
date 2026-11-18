@@ -20,7 +20,8 @@ async function newState() {
   return { state, chief };
 }
 const spawnedPlanners = (state: State) => state.spawned.filter((args) => args.pluginMetadata?.role === "planner");
-const researcherIds = async (state: State) => (await status(state)).threads.filter((row) => row.role === "researcher").map((row) => row.threadId);
+const threadsOf = async (state: State, role: string) => ((await status(state)).threads as { role: string; threadId: string }[]).filter((row) => row.role === role);
+const researcherIds = async (state: State) => (await threadsOf(state, "researcher")).map((row) => row.threadId);
 const alertsTo = (state: State, chief: string) => state.sent.filter((message) => message.threadId === chief).map((message) => message.input[0].text as string);
 
 /** A researcher thread; `design` is its chief_research design flag. */
@@ -103,7 +104,7 @@ describe("waitingOnUser report", () => {
   test("a worker may not send waitingOnUser", async () => {
     const { state, chief } = await newState();
     await tool(state, "chief_delegate", { title: "Fix totals", mission: "Fix", unplannedReason: "tiny" }, chief);
-    const worker = (await status(state)).threads.find((row) => row.role === "worker")!.threadId;
+    const worker = (await threadsOf(state, "worker"))[0].threadId;
     await expect(report(state, worker, { state: "active", result: "x", waitingOnUser: true })).rejects.toThrow(/waitingOnUser is only for a design researcher/);
   });
 
@@ -245,7 +246,7 @@ describe("chief_plan with researchThreadId", () => {
     expect(prompt.indexOf("## Approved design")).toBeLessThan(prompt.indexOf("## Problem"));
     // The design rides by path, never inline.
     expect(prompt).not.toContain("Use the existing mapper.");
-    const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
+    const planner = (await threadsOf(state, "planner"))[0];
     expect(rowOf(state, planner.threadId)).toMatchObject({ research_thread_id: id, research_report_seq: seq });
   });
 
@@ -275,7 +276,7 @@ describe("chief_plan with researchThreadId", () => {
   test("a worker thread id is refused as a design source", async () => {
     const { state, chief } = await newState();
     await tool(state, "chief_delegate", { title: "Fix totals", mission: "Fix", unplannedReason: "tiny" }, chief);
-    const worker = (await status(state)).threads.find((row) => row.role === "worker")!.threadId;
+    const worker = (await threadsOf(state, "worker"))[0].threadId;
     await expect(plan(state, chief, { researchThreadId: worker })).rejects.toThrow(/No managed researcher/);
   });
 });
@@ -284,7 +285,7 @@ describe("a bound plan's pull request body and revision", () => {
   const PLAN_BODY = "# Wave 1\nDo it.\n\n## Contracts to verify\n- Export works\n\n## What we're NOT doing\n- x";
   async function boundPlanner(state: State, chief: string, id: string) {
     await plan(state, chief, { researchThreadId: id });
-    const planner = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!.threadId;
+    const planner = (await threadsOf(state, "planner")).at(-1)!.threadId;
     await report(state, planner, { state: "ready", result: "One wave.", plan: [{ body: PLAN_BODY }] });
     return planner;
   }
@@ -302,7 +303,7 @@ describe("a bound plan's pull request body and revision", () => {
     expect(script).toContain("design=%s");
 
     await plan(state, chief, { undesignedReason: "tiny" });
-    const plain = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!.threadId;
+    const plain = (await threadsOf(state, "planner")).at(-1)!.threadId;
     await report(state, plain, { state: "ready", result: "One wave.", plan: [{ body: PLAN_BODY }] });
     const plainScript = await tool(state, "chief_forge_init", { title: "Tiny fix", planThreadId: plain, wave: 1 }, chief) as string;
     expect(plainScript).toContain("DESIGN_MARKER=''");
@@ -337,10 +338,10 @@ describe("a bound plan's pull request body and revision", () => {
   /** A bound plan whose one advisor review asked for changes. */
   async function reviewedPlanner(state: State, chief: string, id: string) {
     await plan(state, chief, { researchThreadId: id });
-    const planner = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!.threadId;
+    const planner = (await threadsOf(state, "planner")).at(-1)!.threadId;
     await report(state, planner, { state: "ready", result: "One wave.", plan: [{ body: PLAN_BODY }], complex: true });
     await tool(state, "chief_consult", { planThreadId: planner, title: "Plan", mission: "Review this plan" }, chief);
-    const advisor = (await status(state)).threads.filter((row) => row.role === "advisor").at(-1)!.threadId;
+    const advisor = (await threadsOf(state, "advisor")).at(-1)!.threadId;
     await report(state, advisor, { state: "ready", result: "Change it.", verdict: "request_changes" });
     return planner;
   }
@@ -355,7 +356,7 @@ describe("a bound plan's pull request body and revision", () => {
     expect(rowOf(state, id).report_seq).toBeGreaterThan(seq);
 
     await tool(state, "chief_plan", { title: "Add CSV export", mission: "Revise", revises: planner }, chief);
-    const revision = (await status(state)).threads.filter((row) => row.role === "planner").at(-1)!.threadId;
+    const revision = (await threadsOf(state, "planner")).at(-1)!.threadId;
     expect(rowOf(state, revision)).toMatchObject({ research_thread_id: id, research_report_seq: seq });
     const prompt = spawnedPlanners(state).at(-1).prompt as string;
     expect(prompt).toContain(`- Design: ${join(state.storageRoot, "chief", "proj_1", id, `design-approved-r${seq}.md`)}`);
