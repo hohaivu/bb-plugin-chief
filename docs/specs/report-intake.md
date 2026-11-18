@@ -18,6 +18,8 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 - **Report file**: `report-<seq>.md`. It holds the full text of a long or clipped report.
 - **Stamp**: the `Read at <sha>` text of a researcher or planner report. `checkout-freshness.md` defines it.
 - **Implementation wave**: a plan wave that is neither `design: true` nor `test: true`.
+- **Test wave**: a plan wave with `test: true`. Its parent is an implementation wave.
+- **Top-level item**: a Markdown list item at the smallest list indentation of its section. Deeper items are not top-level items.
 
 ## Ownership and Entry Points
 
@@ -25,6 +27,7 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 | --- | --- | --- |
 | `createReportIntake(adapters).report(threadId, params, callerProjectId)` | `src/report/reportIntake.ts` | Owns the order of acceptance and publication. Resolves to whether Chief received the alert now. `false` means the alert waits in the outbox. |
 | `checkReport`, `reportAlert`, `verdictFileBody`, `reportFileBody` | `src/report/reportIntake.ts` | Pure helpers. They validate a report and lay out the alert and the files. |
+| `sectionOf`, `contractsOf`, `checkPlan` | `src/report/reportIntake.ts` | Pure helpers. `sectionOf` reads a named Markdown section. `checkPlan` validates a planner plan, including the test-wave bound. |
 | `chief_report` handler and adapters | `server.ts` | Calls the intake one time. Provides the adapters. |
 
 The adapters are:
@@ -197,6 +200,42 @@ Each contract carries its reason.
 - A planner ready alert lists each plan file one time. Reason: one path for each wave is enough, and the report file keeps both lists.
   - When the mirror to Chief's storage worked, the alert shows the inline-vis lines, wave 1 first, and no `Wave n of N:` line.
   - When the mirror failed, the alert shows the `Wave n of N: <path>` lines.
+
+### Section helper
+
+`sectionOf` reads one Markdown section of a plan body. The plan checks and `contractsOf` both use it.
+
+- `sectionOf` matches the first heading of any level from 1 to 6 whose text starts with the name. It ignores case and leading spaces or tabs. Reason: not stated in the code.
+- `sectionOf` returns the text after the heading line up to the next heading of the same or a higher level, or to the end. Reason: not stated in the code.
+- `sectionOf` does not trim the text. The first content line keeps its indentation. Reason: the top-level item count reads list indentation.
+- `sectionOf` returns undefined when no heading matches. Reason: not stated in the code.
+- `contractsOf(body)` returns the trimmed `sectionOf` text for `Contracts to verify`, or undefined when that text is empty. Its output is unchanged for every body. Reason: existing callers keep their output.
+
+### Plan test-wave bound
+
+`checkPlan` bounds the size of each test wave. It does not bound implementation waves.
+
+- A test wave's `## Contracts to verify` holds 1 to 8 top-level list items. Reason: a small test wave keeps a tester session short, because each call re-reads the growing context.
+- A test wave's `## Test files` holds 1 to 5 top-level list items. Reason: the same as the contract bound.
+- A test wave with contract text and no list item is refused. Reason: the bound counts list items, so plain text has no count.
+- A test wave without a `## Test files` heading is refused. Reason: the file bound counts the items under that heading.
+- A test wave without a Contracts heading gets only the missing-heading error. Reason: not stated in the code.
+- Implementation and design waves have no bound. Reason: the bound limits tester work only.
+
+Counting rules:
+
+- Top level is the smallest indentation among the list items of the section. A tab counts as 4 spaces.
+- Supported markers are `-`, `*`, `+`, `N.` and `N)`. A checkbox (`[ ]` or `[x]`) belongs to its item.
+- Wrapped lines, deeper items and fenced code blocks are not counted. Reason: one top-level item stands for one contract or one test file.
+- A section with no list item counts 0.
+
+Invariants:
+
+- The bound runs only at planner ready-report intake. Admitted plans are never checked again. Reason: plans already admitted stay valid.
+
+Trade-offs:
+
+- A contract list in an unsupported marker style, such as `•`, is refused when no supported item exists. When supported and unsupported items are mixed, the unsupported items are not counted. Reason: not stated in the code.
 
 ## Out of Scope
 
