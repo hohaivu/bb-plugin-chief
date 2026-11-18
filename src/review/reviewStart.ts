@@ -570,7 +570,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           // The builder's own checkout must be committed and pushed: the pin holds its HEAD (a Spec Writer fold may be ahead).
           const builderDir = live.environmentId ? await host.localPath(live.environmentId) : null;
           if (!builderDir) notes.push(`${target.thread_id}: its checkout is not on the plugin server, so its clean tree and push were not checked`);
-          else await builderCheck(target, builderDir, head.sha);
+          else await builderCheck(target, builderDir, head.sha, head.branch);
           pinned.push({ threadId: target.thread_id, reportSeq: target.report_seq, branch: head.branch, prUrl: target.pr_url, headSha: head.sha, base: head.base });
         }
         store.batch(() => store.openGate({ gateKey, projectId: worker.project_id, chiefThreadId: caller.thread_id, planThreadId: worker.plan_thread_id, targets: pinned, now: Date.now() }));
@@ -606,11 +606,14 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
   }
 
   /** Refuses when the builder's checkout has uncommitted changes or a HEAD the pinned commit does not contain. */
-  async function builderCheck(target: Row, dir: string, pinnedSha: string) {
+  async function builderCheck(target: Row, dir: string, pinnedSha: string, branch: string) {
     const git = gitWithin(dir, deps.git.env(), Date.now() + 20_000);
     const recovery = `chief_continue (threadId: ${target.thread_id}) to commit and push its work, or run chief_forge_init`;
     const dirty = await git(["status", "--porcelain"]).catch((error: Error) => `(${error.message})`);
     if (dirty.trim()) throw new Error(`Worker ${target.thread_id} has uncommitted changes in its checkout, so the gate cannot pin it: ${recovery}.`);
+    // A builder behind the pin (a Spec Writer fold reached origin first) may lack the pinned object: fetch it before the ancestry check.
+    const has = () => git(["cat-file", "-e", `${pinnedSha}^{commit}`]).then(() => true, () => false);
+    if (!(await has())) await git(["fetch", "origin", `refs/heads/${branch}`]).catch(() => "");
     const contained = await git(["merge-base", "--is-ancestor", "HEAD", pinnedSha]).then(() => true, () => false);
     if (!contained) throw new Error(`Worker ${target.thread_id}'s HEAD is not in the pinned commit ${pinnedSha.slice(0, 12)} on origin: ${recovery}.`);
   }

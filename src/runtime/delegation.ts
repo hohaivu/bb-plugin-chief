@@ -167,6 +167,7 @@ export function createDelegation(ctx: Ctx) {
       if (prior.last_report_state !== "blocked") throw new Error(`A corrector replaces fix run ${prior.thread_id} only after it reports blocked with wrong-test evidence; it is ${prior.state}.`);
       return { run: "corrector", gate };
     }
+    if (gate && gate.fixer_thread_id === prior.thread_id && gate.corrector_thread_id && kind === "tester") throw new Error(`Review gate ${gate.gate_key} already had its corrector (${gate.corrector_thread_id}): escalate to the user.`);
     if (gate && prior.state !== "complete" && gate.corrector_thread_id === prior.thread_id) throw new Error(`${prior.thread_id} is review gate ${gate.gate_key}'s corrector: there is no second fix. Escalate to the user.`);
     if (prior.state === "complete" && (prior.fix_run || gate?.targets.some((target) => target.threadId === prior.thread_id))) {
       if (kind !== "worker") throw new Error(`A change after completion is a fix run: chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
@@ -253,7 +254,9 @@ export function createDelegation(ctx: Ctx) {
     const holder = branch
       ? store.all().find((row) => row.role === "worker" && !terminal(row.state)
         && row.project_id === projectId && row.branch === branch && row.thread_id !== params.replaces
-        && !(planThreadId !== undefined && coexists(row, planThreadId, wave, lane)))
+        && !(planThreadId !== undefined && coexists(row, planThreadId, wave, lane))
+        // A gate fix run works on the pinned targets' branch: its targets and tester do not hold it.
+        && !(fix?.gate && (fix.gate.tester_thread_id === row.thread_id || fix.gate.targets.some((target) => target.threadId === row.thread_id))))
       : undefined;
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
