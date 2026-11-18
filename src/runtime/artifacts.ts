@@ -128,15 +128,22 @@ export function createArtifacts(ctx: Ctx) {
     return path;
   }
 
+  /** The artifact's path and text, or null only when the file is missing; any other read failure throws. */
+  async function readArtifactIfPresent(threadId: string, projectId: string, name: string) {
+    const { hostId, dir } = await artifactDir(threadId, projectId);
+    const path = join(dir, name);
+    try {
+      return { path, text: await readFile(hostId, path) };
+    } catch (error) {
+      // shortcut: the host's message text is how we detect a missing file (see cleanup.ts MISSING); upgrade when the SDK exposes a status.
+      if (/not found|404|ENOENT|no such file/i.test(String((error as Error)?.message ?? error))) return null;
+      throw error;
+    }
+  }
+
   /** The artifact's path and text, or null when it is missing or unreadable. Never throws. */
   async function readArtifact(threadId: string, projectId: string, name: string) {
-    try {
-      const { hostId, dir } = await artifactDir(threadId, projectId);
-      const path = join(dir, name);
-      return { path, text: await readFile(hostId, path) };
-    } catch {
-      return null;
-    }
+    return readArtifactIfPresent(threadId, projectId, name).catch(() => null);
   }
 
   /** Runs the write, retrying while bb answers HTTP 409 (the thread's environment is still provisioning): 7 tries,
@@ -196,6 +203,6 @@ export function createArtifacts(ctx: Ctx) {
     }
     for (const row of rows) void persistBrief(row.thread_id, row.project_id, row.prompt);
   }
-  return { persistBrief, resumeBriefs, readArtifact, writeArtifact, writePlan, writeStorageFile, readStorageFile, retryWhileProvisioning, publishHeavy };
+  return { persistBrief, resumeBriefs, readArtifact, readArtifactIfPresent, writeArtifact, writePlan, writeStorageFile, readStorageFile, retryWhileProvisioning, publishHeavy };
 }
 
