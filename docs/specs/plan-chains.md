@@ -227,7 +227,7 @@ An evidence-only tester runs the commands that the mission names, or the command
 - The findings section keeps one guidance line instead of four. The line orders the tester to verify each finding first, and to list a finding that does not hold under `## Disputed findings`. Reason: the evidence brief must stay short.
 - The line `Read the verdict file in full.` appears only when the call attaches a verdict file path. An evidence tester without findings gets no findings section and no verdict line. Reason: the line must not point to a file that does not exist.
 - A plan-linked evidence brief keeps the `## Deviations from plan` line. Reason: report intake refuses a plan-linked ready report without that heading.
-- The example brief of 13,996 bytes renders at 6,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. Reason: a clipped obligation can hide a required step. The budget rose from 5,000 because the Evidence work lines of wave 3 need about 700 bytes, and trimming them would cut existing obligations.
+- The example brief of 13,996 bytes renders at 6,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. The budget fits the required evidence instructions without cutting obligations. Reason: a clipped obligation can hide a required step.
 - A ready evidence-only tester discharges retest debt like any ready Tester. Reason: its run repeats the tests.
 - Inputs. An evidence-only tester needs these inputs before any run. Reason: a run without a pin or a command list is not valid evidence.
   - `Expected head: <sha>` in the mission. It is the branch tip after the fix and any intended Spec Writer fold, not the predecessor's commit.
@@ -349,11 +349,11 @@ A tester brief has these rules:
 - A tester delegated with `replaces:` gets `## Prior receipt (<id>)` after `## Predecessor's last report`. The evidence-only brief keeps it too. `<id>` is the prior tester: the newest row of its task chain with kind `tester` and a ready last report, in any row state. `priorReceipt` in `src/plan/planProgress.ts` finds it. Reason: the next tester starts from the last complete receipt.
 - A receipt is the `## Receipt` section at the end of a tester's ready result. It is complete when it has these parts:
   - a `Tested commit: <7-40 hex>` line,
-  - at least one command line,
+  - at least one command row, a separate row per command with a nonempty cwd, the exact command, and a valid exit status,
   - `Coverage:` and `Gaps:` lines,
   - a last non-blank line that reads `Receipt end.`,
   - at most 3,000 characters.
-  Reason: the end line proves the stored text was not cut.
+  Reason: the end line proves the stored text was not cut, and a row without cwd, command or exit status cannot be rerun to prove a retest.
 - A complete receipt renders in full. Normal mode adds: "Reuse it: rerun the commands the change affects; do not rediscover commands or coverage it already names." Evidence mode adds: "Its commands are your commands and its Tested commit is Last tested, unless your mission names others."
 - A prior tester without a complete receipt renders a pointer line: "<id>'s report has no complete receipt: <report path, else `bb chief inspect <id>`>. Do not run partial commands from it." An older receipt never stands in for the newest tester's, and no receipt is clipped. Reason: an older receipt may name stale coverage.
 - A tester with no prior tester gets no section. An absent or incomplete receipt never refuses a delegation. Workers, designers and Spec Writers never get the section. Reason: only a tester reuses a receipt.
