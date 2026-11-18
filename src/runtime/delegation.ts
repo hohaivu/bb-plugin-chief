@@ -6,7 +6,7 @@ import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
 import { isReady } from "../plan/waveSchedule";
 import type { ReviewGate } from "../db/threadStore";
-import { CONTINUE_REMINDERS } from "../core/roles";
+import { CONTINUE_REMINDERS, planAdmissions } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
 import { clip } from "../core/text";
 import { prMerged } from "../forge/forge";
@@ -168,6 +168,9 @@ export function createDelegation(ctx: Ctx) {
     }
     const { inFlight } = ctx.planAdvisors(plannerId);
     if (inFlight) throw new Error(`Plan ${plannerId} is already in review by ${inFlight.thread_id}: wait for ${inFlight.thread_id}, or chief_stop it first.`);
+    if (planAdmissions.has(plannerId)) throw new Error(`Plan ${plannerId} is being submitted or already entering review: retry chief_consult once its ready alert arrives.`);
+    planAdmissions.add(plannerId);
+    try {
     const branch = params.branch ?? planner.branch ?? undefined;
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: "advisor", hostId: await ctx.projectHostId(projectId) });
     const title = `Consult · ${params.title.replace(/^Consult · /, "")}`;
@@ -184,6 +187,7 @@ export function createDelegation(ctx: Ctx) {
     // Set after the launch: a failed launch leaves no gate.
     store.setPlanReview(plannerId, "required");
     return { threadId: thread.id, title, projectId };
+    } finally { planAdmissions.delete(plannerId); }
   }
   function delegate(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
     const run = ctx.state.delegating.then(() => startWorker(params, callerThreadId));
@@ -416,6 +420,10 @@ export function createDelegation(ctx: Ctx) {
     const handoff = `Hand it to a fresh worker instead: ${ctx.replacesCall(row)} ${ctx.sideLane(row) ? "starts a fresh worktree on the same branch and pull request" : "keeps the same worktree, branch, and pull request"}.`;
     if (row.role === "worker" && (row.state === "ready" || row.state === "complete")) {
       throw new Error(`Worker ${threadId} already reported ${row.state}. chief_continue never reuses a finished worker for more work — deferred acceptance criteria, a rebase or restack, or a new task. ${handoff}`);
+    }
+    // An unadvised advisor's gate ends when its plan is replaced or decided: resuming it would run ungated.
+    if (row.role === "advisor" && row.plan_thread_id && row.advised_at == null && store.get(row.plan_thread_id)?.plan_review !== "required") {
+      throw new Error(`Advisor ${threadId} reviewed a plan revision that was since replaced or decided; it cannot be resumed. Start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or delegate the plan without it.`);
     }
     if (row.role !== "worker" && (row.state === "ready" || row.state === "complete")) {
       throw new Error(`${threadId} already reported; chief_continue is only a nudge to a thread still working. ${ctx.rerouteSteps(row)}`);

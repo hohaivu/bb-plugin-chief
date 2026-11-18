@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ReviewTarget, createReviewLedger } from "../review/reviewLedger";
-import type { Role } from "../core/roles";
+import { planAdmissions, type Role } from "../core/roles";
 import { ACTION_ROOM, LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../types";
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
@@ -486,6 +486,10 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       if (reviewing) throw new Error(`chief_report was not saved: plan ${threadId} is in its one advisor review (${reviewing.thread_id}); wait for its report before submitting a new plan.`);
     };
     advisorBusy();
+    const publishing = plannerReady && !!planInput;
+    if (publishing && planAdmissions.has(threadId)) throw new Error(`chief_report was not saved: an advisor review of plan ${threadId} is starting; wait for its report before submitting a new plan.`);
+    if (publishing) planAdmissions.add(threadId);
+    try {
     const planWaves = plannerReady && planInput ? await writePlan(threadId, row.project_id, planInput) : null;
     const scheduledWaves = planWaves && planInput
       ? planWaves.map((wave, index) => ({ ...wave, contracts: contractsOf(typeof planInput === "string" ? planInput : planInput[index]!.body)!,
@@ -644,6 +648,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     if (files.length) trackFiles(current, files);
     const contentKey = createHash("sha1").update(alert).digest("hex").slice(0, 16);
     return alertChief(store.get(threadId) ?? current, `report:${current.active_cycle}:${contentKey}`, alert);
+    } finally { if (publishing) planAdmissions.delete(threadId); }
   }
   return { report };
 }
