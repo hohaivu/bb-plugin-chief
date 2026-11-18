@@ -285,7 +285,8 @@ The review gate is the one review of a plan. It gives one verdict and one test r
 - A re-review is one advisory reviewer run. `chief_review` starts it when all of these hold: the gate reviewer's verdict is `request_changes`; the gate's last fix row (the corrector, else the fix run) is ready or complete with `testsPassed` true; and exactly one distinct reviewer has a verdict on the gate's targets since the gate opened. Reason: a re-review checks a green fix, and the gate allows one.
 - The re-reviewer runs on the targets' fresh pins. Its brief has `## The previous review (<old reviewer>)` and an instruction to check each previous finding. Reason: the fix must be checked against the findings it claims to fix.
 - A re-review verdict never starts a fix run and never blocks `pass` on code findings. A docs finding routes as in the gate decision table. Reason: the green run already settled the tests, so the re-review cannot reopen the gate.
-- While the re-reviewer runs, `chief_review` starts nothing. After it reports any verdict, no further `chief_review` starts a reviewer. A reviewer that ends without a verdict does not count. Reason: one gate gets at most one re-review.
+- A pending or failed re-review never holds a green gate. The gate passes on the green run, and no re-review result blocks `pass`. Reason: the re-review is advisory, so it cannot hold a green gate.
+- While the re-reviewer runs, `chief_review` starts nothing. After it reports any verdict, no further `chief_review` starts a reviewer. A reviewer that ends without a verdict does not count. Reason: one gate gets at most one re-review, and no third reviewer starts.
 
 ### Delegation while the gate is open
 

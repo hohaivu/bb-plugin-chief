@@ -94,7 +94,7 @@ sequenceDiagram
     Chief->>SpecWriter: chief_delegate kind spec-writer, replaces the side-lane writer
   end
   Note over Chief,Owner: a second fix run is refused. A red or blocked corrector escalates to the owner
-  Note over Chief,Tester: gateDecision pass needs testsPassed true, and every docs finding settled. No second review starts
+  Note over Chief,Tester: gateDecision pass needs testsPassed true, and every docs finding settled. One advisory re-review may start after a green fix run, and it never blocks pass
 
   opt any other decision only the owner can make
     Chief->>Owner: Need you, also posted with chief_escalate
