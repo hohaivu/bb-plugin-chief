@@ -116,9 +116,9 @@ export function createNextAction(ctx: Ctx) {
     const chainIds = new Set(ids.flatMap((id) => ledger.taskChain(id)));
     const writers = store.all().filter((other) => isWriter(other.kind) && other.role === "worker"
       && (gate.plan_thread_id ? other.plan_thread_id === gate.plan_thread_id : chainIds.has(other.thread_id) || chainIds.has(other.replaces_thread_id ?? "")));
-    const newest = ledger.newestVerdictAt(ids);
+    const settledReviewer = ledger.newestVerdictReviewer(ids);
     const decision = gateDecision<ManagedRow>({
-      gate, row: store.get, startRefusal: null, verdictAt: newest?.at ?? null, settledReviewer: newest ? store.get(newest.reviewer_thread_id) : undefined, writers, terminal,
+      gate, row: store.get, startRefusal: null, verdictAt: ledger.newestVerdictAt(ids)?.at ?? null, settledReviewer: settledReviewer ? store.get(settledReviewer) : undefined, writers, terminal,
     });
     return { gate, decision };
   }

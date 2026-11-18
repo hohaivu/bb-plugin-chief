@@ -558,7 +558,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       // After the fix run, the reviewer side is advisory: one re-review when the review asked for changes, the gate's last fix row is green
       // and only one reviewer has a verdict since the gate opened. A failed no-verdict advisory attempt uses no budget and is retried with the prior verdict.
       const ids = gate ? gate.targets.map((target) => target.threadId) : [];
-      const settled = gate ? store.get(ledger.newestVerdictAt(ids)?.reviewer_thread_id ?? "") : undefined;
+      const settled = gate ? store.get(ledger.newestVerdictReviewer(ids) ?? "") : undefined;
       const lastFix = gate ? store.get(gate.corrector_thread_id ?? gate.fixer_thread_id ?? "") : undefined;
       const afterFix = !!gate?.fixer_thread_id;
       const advisoryRunning = afterFix && !down(gate!.reviewer_thread_id) && gate!.reviewer_thread_id !== settled?.thread_id;

@@ -101,9 +101,15 @@ export function createReviewLedger<Row extends LedgerRow>(
   }
 
   /** The newest reviewer_verdicts row over these worker ids and the time it was recorded; null when none. */
-  function newestVerdictAt(threadIds: string[]): { verdict: string; at: number; reviewer_thread_id: string } | null {
+  function newestVerdictAt(threadIds: string[]): { verdict: string; at: number } | null {
     if (!threadIds.length) return null;
-    return (db.prepare(`SELECT verdict, at, reviewer_thread_id FROM reviewer_verdicts WHERE worker_thread_id IN (${threadIds.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`).get(...threadIds) as { verdict: string; at: number; reviewer_thread_id: string } | undefined) ?? null;
+    return (db.prepare(`SELECT verdict, at FROM reviewer_verdicts WHERE worker_thread_id IN (${threadIds.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`).get(...threadIds) as { verdict: string; at: number } | undefined) ?? null;
+  }
+
+  /** The reviewer of the newest reviewer_verdicts row over these worker ids (the gate's settled verdict); undefined when none. */
+  function newestVerdictReviewer(threadIds: string[]): string | undefined {
+    if (!threadIds.length) return undefined;
+    return (db.prepare(`SELECT reviewer_thread_id FROM reviewer_verdicts WHERE worker_thread_id IN (${threadIds.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`).get(...threadIds) as { reviewer_thread_id: string } | undefined)?.reviewer_thread_id;
   }
 
   /** The newest verdict on the worker's task chain, with the report it covered; undefined when none was recorded. */
@@ -136,5 +142,5 @@ export function createReviewLedger<Row extends LedgerRow>(
     return counts;
   }
 
-  return { targets, openReview, openReviews, busyReview, covering, isCurrent, taskChain, addTargets, recordVerdict, newestVerdict, newestVerdictAt, reviewersWithVerdict, eventCounts };
+  return { targets, openReview, openReviews, busyReview, covering, isCurrent, taskChain, addTargets, recordVerdict, newestVerdict, newestVerdictAt, newestVerdictReviewer, reviewersWithVerdict, eventCounts };
 }
