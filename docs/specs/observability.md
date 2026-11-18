@@ -85,7 +85,6 @@ Reason for step 5: every tick before the send enters this block again. The prima
 | `plan_review_changes` | An advisor `request_changes` on a plan in `reportIntake.ts` | Yes |
 | `review_skipped`, `override` | `markComplete` in `src/runtime/completion.ts` | Yes |
 | `stopped` | `stopThread` in `completion.ts` | Yes |
-| `tests_skipped` | `markComplete` in `completion.ts`, and `src/tools/skipTests.ts` | Yes |
 | `specs_skipped` | The waive branch of `src/tools/skipSpecs.ts` | Yes |
 | `nudge` | `chief_continue` in `src/runtime/delegation.ts`, after the send succeeds | No: local only |
 
@@ -95,7 +94,7 @@ Reason for step 5: every tick before the send enters this block again. The prima
 
 - `event_id` is a random 32-character hex id. It is unique. It is also the Sentry event id and the receipt.
 - `detail` is the scrubbed text, at most 300 characters.
-- A `request_changes` row has the detail `round=N`. N is the streak of rejections for the worker after this verdict.
+- A `request_changes` row has no detail. The daily report counts these rows for each thread.
 - A `nudge` row has the detail `chars=N`. N is the length of the instruction.
 - Indexes cover `at`, `plan_thread_id`, and (`thread_id`, `kind`).
 
@@ -146,7 +145,7 @@ Secret settings have no default. The code handles an undefined value. The plugin
 - The throttle allows one send for each fingerprint in 10 minutes. The map lives in memory, so a plugin reload resets it.
 - A failed send, a timeout of 10 seconds or a response that is not 2xx never throws. It warns through the original warn at most once in 10 minutes.
   Reason: the original warn does not feed Sentry, so a failed send cannot recurse.
-- The level is `error` for `tool_error`, `stall`, `hard_stall`, `provider_transient` and `thread_failed`. The level is `warning` for `request_changes`, `plan_review_changes`, `review_skipped`, `tests_skipped`, `specs_skipped`, `override` and `stopped`.
+- The level is `error` for `tool_error`, `stall`, `hard_stall`, `provider_transient` and `thread_failed`. The level is `warning` for `request_changes`, `plan_review_changes`, `review_skipped`, `specs_skipped`, `override` and `stopped`.
 - The tags are `kind`, and `role`, `thread_id`, `project_id`, `plan_thread_id` and `plan_wave` when present. A `tool_error` also has the tag `tool`.
 
 ### Scrub
@@ -281,7 +280,7 @@ Each adapter reads one evidence source and returns a section: `{name, status, no
 | --- | --- |
 | Sources | A table of name, status, item count and note for each adapter. |
 | Sentry | New and recurring issues, or the reason that Sentry is not available. |
-| Scorecard | The counts for each ledger kind in the last 24 hours and the 24 hours before. Review rounds are the highest `round=N` of each worker task. |
+| Scorecard | The counts for each ledger kind in the last 24 hours and the 24 hours before. The review count is the number of `request_changes` rows of each thread. |
 | Completion evidence | The completions in the window whose `diff_state` is not `ok`, with their notes. |
 | Recurring patterns | Patterns that occur 2 or more times. The top 15. |
 | Threads with failures | The threads that have the most failure items. |
@@ -296,7 +295,7 @@ The retro adds the sections in "Report sections from the retro".
 - With no active Chief for the setting `chiefProject`, the run logs one info line. It writes no file and no outbox row.
 - Otherwise the run writes `reports/daily-<date>.md` in the storage of that Chief. It then sends one alert with the key `daily:<date>`.
 - A second run on the same date gives the same path and no second outbox row.
-- The alert text has the path, then the counts of new Sentry issues, recurring patterns, blocked workers, stalls and review rounds of 2 or more. It ends with the triage line.
+- The alert text has the path, then the counts of new Sentry issues, recurring patterns, blocked workers, stalls and threads with 2 or more `request_changes` rows. It ends with the triage line.
 - The run never throws. A failure logs a warning, and the next day runs again.
 - `alertSelf` in `src/runtime/alerts.ts` sends the alert. When the source of an alert equals its target, `deliverAlert` sends it without `senderThreadId`. When they differ, the alert still carries `senderThreadId = source_thread_id`.
   Reason: a thread cannot message itself as its own sender.
