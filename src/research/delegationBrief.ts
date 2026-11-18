@@ -124,8 +124,8 @@ export type WorkerBriefInput = {
   specWave?: boolean;
   /** side: a Spec Writer in its own side worktree, folding docs/ onto the chain branch. Absent or implementation: every other row. */
   lane?: "side" | "implementation";
-  /** Same-plan side-lane Spec Writer repair: every known docs item of its owned waves and the prior blocker, with each item's source thread id. Optional: empty or absent renders nothing. */
-  docsWork?: { items: string[]; sources: string[] };
+  /** Same-plan side-lane Spec Writer repair: every known docs item of its owned waves and the prior blocker, each with its source thread id. Optional: empty or absent renders nothing. */
+  docsWork?: { id: string; text: string }[];
   /** The replaced worker's open review covers more than one target, so its findings are not all this thread's. */
   sharedReview?: boolean;
   /** Tester only: a compact no-commit evidence brief. Optional: older callers omit it. */
@@ -144,11 +144,11 @@ const deviationsLine = "- Your ready result must contain a `## Deviations from p
 const DOCS_WORK_MAX = 4_000;
 
 /** The repair's docs work list: whole items while the section stays within DOCS_WORK_MAX, then a pointer to every remaining source. */
-function docsWorkSection(wave: number | undefined, items: string[], sources: string[]): string[] {
+function docsWorkSection(wave: number | undefined, items: { id: string; text: string }[]): string[] {
   const build = (shown: number) => [
     "", `## Docs work list (wave ${wave})`,
-    ...items.slice(0, shown),
-    ...(shown < items.length ? [`${items.length - shown} more items not shown. Read each \`## Docs needed\` in full: ${sources.slice(shown).map((id) => `bb chief inspect ${id}`).join("; ")}.`] : []),
+    ...items.slice(0, shown).map((item) => `${item.id} ${item.text}`),
+    ...(shown < items.length ? [`${items.length - shown} more items not shown. Read each \`## Docs needed\` in full: ${items.slice(shown).map((item) => `bb chief inspect ${item.id}`).join("; ")}.`] : []),
     "Fix every item that still holds, together with the Spec delta and the docs findings your mission assigns, then fold once (section 10). List an item already true in the docs at your HEAD under `## Already done`, and one that does not hold under `## Disputed findings`.",
   ];
   let shown = items.length;
@@ -226,7 +226,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "Read each in full, with the docs they name. Derive every test case from these, never from the implementation.",
       ...specSources,
     ] : []),
-    ...(specWriter && docsWork?.items.length ? docsWorkSection(wave, docsWork.items, docsWork.sources) : []),
+    ...(specWriter && docsWork?.length ? docsWorkSection(wave, docsWork) : []),
     ...((specDocs.length || specWave) && !specWriter && !evidence ? [
       "", "## Spec",
       tester

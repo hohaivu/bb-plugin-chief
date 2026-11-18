@@ -161,6 +161,15 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return laneRows(planThreadId, wave).filter(sideLane);
   }
 
+  /** The non-writer implementation rows a side-lane Spec Writer on wave n owns docs for: wave n and the later waves of its chain before
+   * the next spec wave, oldest first per wave. */
+  function ownedWorkers(planThreadId: string, n: number): Row[] {
+    const waves = planWavesFor(planThreadId);
+    const later = chainOf(waves, n).filter((m) => m > n);
+    const end = later.findIndex((m) => waves[m - 1]?.spec);
+    return [n, ...later.slice(0, end < 0 ? undefined : end)].flatMap((m) => waveWorkers(planThreadId, m)).filter((row) => !isWriter(row.kind));
+  }
+
   /** Wave n's newest implementation-lane row. */
   function latestWorker(planThreadId: string, n: number): Row | undefined {
     return waveWorkers(planThreadId, n).at(-1);
@@ -299,5 +308,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(latestWorker(worker.plan_thread_id!, tip)?.state ?? ""));
   }
 
-  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, planBaseOf, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, ownedWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, planBaseOf, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }
