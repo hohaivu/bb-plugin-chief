@@ -482,7 +482,7 @@ export async function status(state: Awaited<ReturnType<typeof setup>>) {
 // we're NOT doing" section) shared by every delegate()-from-plan test below.
 export async function planTwoWaves(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string) {
   await state.harness.behavior.runCli(
-    ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+    ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
     { threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId },
   );
   const planner = (await status(state)).threads.find((row) => row.role === "planner" && row.chiefThreadId === chiefThreadId)!;

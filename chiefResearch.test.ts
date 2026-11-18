@@ -13,7 +13,7 @@ afterEach(disposeAll);
 describe("chief_research", () => {
   type State = Awaited<ReturnType<typeof setup>>;
   const PICK = { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" };
-  const ask = (extra: Record<string, unknown> = {}) => ({ question: "Who calls this?", ...extra });
+  const ask = (extra: Record<string, unknown> = {}) => ({ question: "Who calls this?", design: false, ...extra });
   const researcherSpawn = (state: State) => state.spawned.findLast((args) => args.pluginMetadata?.role === "researcher");
   const researcherRows = (state: State) => state.db.prepare("SELECT thread_id, chief_thread_id, role, brief, branch FROM managed_threads WHERE role='researcher'").all() as { thread_id: string; chief_thread_id: string; role: string; brief: string; branch: string | null }[];
   const callRows = (state: State) => state.db.prepare("SELECT caller_thread_id, role, mode, run_id, outcome FROM chief_research_calls ORDER BY id").all() as { caller_thread_id: string; role: string | null; mode: string | null; run_id: string | null; outcome: string }[];
@@ -28,7 +28,7 @@ describe("chief_research", () => {
     state.setThreadExecution({ model: "gpt-6-astra" });
     if (role === "chief") return chief.threadId;
     if (role === "worker") return (await delegate(state, chief.threadId)).threadId;
-    if (role === "planner") await state.harness.behavior.runCli(["plan", "--title", "Rework", "--mission", "Propose"], opts);
+    if (role === "planner") await state.harness.behavior.runCli(["plan", "--title", "Rework", "--mission", "Propose", "--undesigned-reason", "small fix"], opts);
     if (role === "reviewer") await state.harness.behavior.callAgentTool("chief_review", { branch: "feature/x" }, opts);
     if (role === "advisor") {
       const planner = await plan(state, chief.threadId, [planWave(1), planWave(2)]);
@@ -51,8 +51,8 @@ describe("chief_research", () => {
     const spawn = researcherSpawn(state);
     expect(spawn.prompt).toBe(row!.brief);
     for (const part of [
-      "## Question\nWho calls this?", RESEARCH_ONLY, "--parent-self", '--lifecycle-owner-thread "$BB_THREAD_ID"', '--environment "$BB_ENVIRONMENT_ID"',
-      "at most 6 helper threads", "bb thread wait", "Helpers:", "chief_report", `Report to that Chief.`, `Chief thread ${chief}`,
+      "## Ticket\nWith no separate ticket, this is the ticket.\nWho calls this?", RESEARCH_ONLY, "--parent-self", '--lifecycle-owner-thread "$BB_THREAD_ID"', '--environment "$BB_ENVIRONMENT_ID"',
+      "at least 1 and at most 6", "bb thread wait", "Helpers:", "chief_report", `Report to that Chief.`, `Chief thread ${chief}`,
     ]) expect(spawn.prompt).toContain(part);
     expect(spawn.environment).toEqual({ type: "reuse", environmentId: state.live.get(chief)!.environmentId });
     expect(callRows(state)).toEqual([{ caller_thread_id: chief, role: "chief", mode: null, run_id: null, outcome: "spawned" }]);

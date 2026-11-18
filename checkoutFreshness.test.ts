@@ -17,7 +17,7 @@ afterEach(disposeAll);
 describe("checkout freshness", () => {
   const PRIMARY = { config: async () => ({ primaryHostId: "host_1" }), usageLimits: async () => ({}) };
   const CTX = { projectId: "proj_1" };
-  const SURVEY = (question: string) => ({ question });
+  const SURVEY = (question: string) => ({ question, design: false });
   const FIRST_LINE = /^Started researcher thread thr_\d+ \(.*\)\. It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert\. Do not poll: end your turn\.$/;
   const WARNING = /^Did not fast-forward your checkout to origin\/(main|the default branch): .+\. The (researcher|planner) reads it as it is\.$/;
 
@@ -96,8 +96,8 @@ describe("checkout freshness", () => {
       r, state, chief, cfg, calls, hold, ctx,
       inflight: () => inflight,
       research: () => tool("chief_research", SURVEY(`Question ${q += 1}`)),
-      plan: () => tool("chief_plan", { title: `Plan ${q += 1}`, mission: "Propose how to fix totals" }),
-      cliPlan: (...extra: string[]) => state.harness.behavior.runCli(["plan", "--title", `Plan ${q += 1}`, "--mission", "Propose how to fix totals", ...extra], ctx),
+      plan: () => tool("chief_plan", { undesignedReason: "small fix", title: `Plan ${q += 1}`, mission: "Propose how to fix totals" }),
+      cliPlan: (...extra: string[]) => state.harness.behavior.runCli(["plan", "--title", `Plan ${q += 1}`, "--mission", "Propose how to fix totals", ...extra, "--undesigned-reason", "small fix"], ctx),
       /** Threads spawned by the call under test, excluding Chief itself. */
       spawnedRole: (role: string) => state.spawned.filter((args: any) => args.pluginMetadata?.role === role),
       rows: (role: string) => (state.db.prepare("SELECT thread_id FROM managed_threads WHERE role=? ORDER BY rowid").all(role) as { thread_id: string }[]).map((row) => row.thread_id),
@@ -669,7 +669,7 @@ describe("checkout freshness", () => {
     const sync = (w: World) => w.state.harness.behavior.callAgentTool("chief_sync", {}, w.ctx) as Promise<string>;
     const starts: [string, (w: World) => Promise<string>, string][] = [
       ["chief_research", (w) => w.state.harness.behavior.callAgentTool("chief_research", { ...SURVEY("Which files?"), branch: BRANCH }, w.ctx) as Promise<string>, "researcher"],
-      ["chief_plan", (w) => w.state.harness.behavior.callAgentTool("chief_plan", { title: "Plan", mission: "Propose how to fix totals", branch: BRANCH }, w.ctx) as Promise<string>, "planner"],
+      ["chief_plan", (w) => w.state.harness.behavior.callAgentTool("chief_plan", { undesignedReason: "small fix", title: "Plan", mission: "Propose how to fix totals", branch: BRANCH }, w.ctx) as Promise<string>, "planner"],
       ["CLI plan", async (w) => (await w.cliPlan("--branch", BRANCH)).stdout!, "planner"],
     ];
 

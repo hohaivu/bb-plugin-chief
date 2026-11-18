@@ -71,7 +71,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], opts,
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"], opts,
     );
     const worker = await delegate(state, chief.threadId);
     const branchReview = await chiefReview(state, chief.threadId, { branch: "feature/legacy-fix" });
@@ -270,7 +270,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -309,7 +309,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -338,7 +338,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -386,7 +386,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -424,7 +424,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -441,7 +441,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -470,7 +470,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -497,7 +497,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -527,7 +527,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.runCli(
-      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"],
+      ["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"],
       { threadId: chief.threadId, projectId: "proj_1" },
     );
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -549,7 +549,7 @@ describe("Chief backend", () => {
   // Catches: storing both flags false for every wave (a reported feature plan then loses its native-design check), swapping the two flags, or storing keys on a string plan.
   const plannerOf = async (state: Awaited<ReturnType<typeof setup>>, chiefId: string) => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
-    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], { threadId: chiefId, projectId: "proj_1" });
+    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"], { threadId: chiefId, projectId: "proj_1" });
     return (await status(state)).threads.find((row) => row.role === "planner")!;
   };
   const persistedWaves = (state: Awaited<ReturnType<typeof setup>>, plannerId: string) =>
@@ -617,7 +617,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
-    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], opts);
+    await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"], opts);
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "One wave", plan: [{ body: PLAN_FIXTURE }],

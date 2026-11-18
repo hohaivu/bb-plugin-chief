@@ -103,7 +103,7 @@ describe("Chief backend", () => {
     const spawnedBefore = state.spawned.length;
     const tools: [string, Record<string, unknown>][] = [
       ["chief_delegate", { title: "Next", mission: "Do it", unplannedReason: "Bounded test fixture" }],
-      ["chief_plan", { title: "Rework", mission: "Propose" }],
+      ["chief_plan", { undesignedReason: "small fix", title: "Rework", mission: "Propose" }],
       ["chief_consult", { title: "Diagnose", mission: "Explore", planThreadId: planner.threadId }],
       ["chief_review", { branch: "feature/x" }],
     ];
@@ -180,7 +180,7 @@ describe("Chief backend", () => {
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     for (const [tool, params] of [
       ["chief_delegate", { title: "Next", mission: "Do it", unplannedReason: "Bounded test fixture" }],
-      ["chief_plan", { title: "Rework", mission: "Propose" }],
+      ["chief_plan", { undesignedReason: "small fix", title: "Rework", mission: "Propose" }],
       ["chief_consult", { title: "Diagnose", mission: "Explore", planThreadId: planner.threadId }],
       ["chief_review", { branch: "feature/x" }],
     ] as const) {
@@ -230,7 +230,7 @@ describe("Chief backend", () => {
       const state = await setup();
       const chief = await start(state);
       const ctx = { threadId: chief.threadId, projectId: "proj_1" };
-      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctx);
+      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"], ctx);
       const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Two waves.",
@@ -257,7 +257,7 @@ describe("Chief backend", () => {
       await state.harness.behavior.setSettings({ plannerEnabled: true });
       const chief = await start(state);
       const ctx = { threadId: chief.threadId, projectId: "proj_1" };
-      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctx);
+      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"], ctx);
       const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Two independent waves.",

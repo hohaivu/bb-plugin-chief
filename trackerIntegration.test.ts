@@ -76,7 +76,7 @@ describe("tracker integration", () => {
   const advance = (ms: number) => vi.setSystemTime(Date.now() + ms);
   const chiefCtx = (chief: string) => ({ threadId: chief, ...P });
   const plan = (state: State, chief: string, args: string[] = []) =>
-    state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", ...args], chiefCtx(chief));
+    state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", ...args, "--undesigned-reason", "small fix"], chiefCtx(chief));
   const planners = async (state: State) => (await status(state)).threads.filter((row) => row.role === "planner").map((row) => row.threadId);
   const WAVES = [{ body: PLAN_FIXTURE }];
   // Only a plan of more than one implementation wave gets its one advisor review.
@@ -355,7 +355,7 @@ describe("tracker integration", () => {
   // Regression: an unconditional recovery insert at any one of them, which upserts the keys to null so the thread drops out of its unit.
   describe.each<[string, "worker" | "chief", string, object, string | undefined]>([
     ["chief_report (reportIntake)", "worker", "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, undefined],
-    ["chief_research (managedRow)", "worker", "chief_research", { question: "Who calls this?" }, "available only to an active Chief"],
+    ["chief_research (managedRow)", "worker", "chief_research", { question: "Who calls this?", design: false }, "available only to an active Chief"],
     ["chief_inspect (resolveTarget)", "chief", "chief_inspect", {}, undefined],
   ])("stale spawn recovery through %s", (_name, caller, tool, params, rejection) => {
     test.each([true, false])("launch row landed during the lookup: %s", async (launched) => {
