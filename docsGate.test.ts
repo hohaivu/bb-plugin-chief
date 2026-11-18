@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { TEST_WAVE, approvePlan, delegate, disposeAll, status, wave } from "./test/harness";
-import { NO_TESTER, PR, type World, git, world } from "./test/docsGateWorld";
+import { approvePlan, delegate, disposeAll, status, wave } from "./test/harness";
+import { PR, type World, git, world } from "./test/docsGateWorld";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { READY, ctxOf, delegateWave, readyIdle, refusal, report, reviewed, tool, workerOn } from "./test/testerHelpers";
+import { READY, delegateWave, passGate, readyIdle, refusal, report, workerOn } from "./test/testerHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -26,7 +26,7 @@ describe("skipReview docs/ ownership gate", () => {
     const w = await world();
     const id = await w.worker("Fix checkout totals");
     const offending = await w.commit("docs/specs/totals.md", "docs: totals by a worker");
-    const message = await refusal(w.call("chief_complete", { threadId: id, skipReview: "small change", ...NO_TESTER }));
+    const message = await refusal(w.call("chief_complete", { threadId: id, skipReview: "small change" }));
     expect(message).toContain(`${offending.slice(0, 9)} docs: totals by a worker (docs/specs/totals.md)`);
     expect(message).toContain("the branch has docs/ commits no Spec Writer of this task is recorded on");
     expect(message).toContain(`chief_review (workerThreadId: ${id})`);
@@ -35,24 +35,24 @@ describe("skipReview docs/ ownership gate", () => {
     expect(w.rowState(id)).not.toBe("complete");
   });
 
-  test("C7: the repair route runs end to end: refused, a writer correction (trailer) still refused, then an approve completes without skipReview", async () => {
+  test("C7: the repair route runs end to end: refused, a writer correction (trailer) still refused, then a passed gate completes without skipReview", async () => {
     const w = await world();
     const first = await w.worker("Fix checkout totals");
     const offending = await w.commit("docs/specs/totals.md", "docs: totals by a worker");
-    expect(await refusal(w.call("chief_complete", { threadId: first, skipReview: "small change", ...NO_TESTER }))).toContain(offending.slice(0, 9));
+    expect(await refusal(w.call("chief_complete", { threadId: first, skipReview: "small change" }))).toContain(offending.slice(0, 9));
     // Chief takes the advertised route: a Spec Writer (replacing the worker), whose correction commit carries its trailer; a worker then follows.
     const writer = await w.worker("Docs for totals", { replaces: first, kind: "spec-writer" });
     const correction = await w.commit("docs/specs/totals.md", "docs: correct the totals spec", writer);
     const fix = await w.worker("Finish totals", { replaces: writer, kind: "worker" });
     // History is append-only: the correction does not cure the offending commit, only the offending commit is named.
-    const again = await refusal(w.call("chief_complete", { threadId: fix, skipReview: "small change", ...NO_TESTER }));
+    const again = await refusal(w.call("chief_complete", { threadId: fix, skipReview: "small change" }));
     expect(again).toContain(offending.slice(0, 9));
     expect(again).not.toContain(correction.slice(0, 9));
     expect(w.rowState(fix)).not.toBe("complete");
-    // The reviewer's approve is the cure: chief_complete without skipReview runs no docs check and completes.
-    await reviewed(w.state, w.chief.threadId, fix, "approve");
+    // A passed review gate is the cure: chief_complete without skipReview runs no docs check and completes.
+    await passGate(w.state, w.chief.threadId, fix);
     w.gitCalls.length = 0;
-    const done = await w.call("chief_complete", { threadId: fix, ...NO_TESTER });
+    const done = await w.call("chief_complete", { threadId: fix });
     expect(done).toContain("complete");
     expect(w.rowState(fix)).toBe("complete");
     expect(w.docsReads()).toEqual([]);
@@ -72,7 +72,7 @@ describe("skipReview docs/ ownership gate", () => {
     const w = await world();
     const { subject, trailer } = await arrange(w);
     const offending = await w.commit("docs/specs/x.md", "docs: tagged by someone else", trailer);
-    expect(await refusal(w.call("chief_complete", { threadId: subject, skipReview: "small change", ...NO_TESTER }))).toContain(offending.slice(0, 9));
+    expect(await refusal(w.call("chief_complete", { threadId: subject, skipReview: "small change" }))).toContain(offending.slice(0, 9));
   });
 
   test("C8: every docs/ commit names a Spec Writer of this task: skipReview succeeds with no note", async () => {
@@ -80,7 +80,7 @@ describe("skipReview docs/ ownership gate", () => {
     const { writer, fix } = await chain(w);
     await w.commit("docs/specs/a.md", "docs: first", writer);
     await w.commit("docs/specs/b.md", "docs: second", writer);
-    const reply = await w.call("chief_complete", { threadId: fix, skipReview: "small change", ...NO_TESTER });
+    const reply = await w.call("chief_complete", { threadId: fix, skipReview: "small change" });
     expect(reply).toContain("without a review (reason recorded)");
     expect(reply).not.toContain("docs/ check skipped");
     expect(w.docsReads()).toHaveLength(1);
@@ -89,7 +89,7 @@ describe("skipReview docs/ ownership gate", () => {
   test("C8: no docs/ commit on the branch: skipReview succeeds with no note", async () => {
     const w = await world();
     const id = await w.worker("Fix checkout totals");
-    const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change", ...NO_TESTER });
+    const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change" });
     expect(reply).toContain("without a review (reason recorded)");
     expect(reply).not.toContain("docs/ check skipped");
     expect(w.docsReads()).toHaveLength(1);
@@ -100,7 +100,7 @@ describe("skipReview docs/ ownership gate", () => {
     test("the project has no checkout path on the plugin server", async () => {
       const w = await world({ path: false });
       const id = await w.worker("Fix checkout totals");
-      const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change", ...NO_TESTER });
+      const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change" });
       expect(reply).toMatch(SKIPPED);
       expect(reply).toContain("docs/ check skipped: no local checkout of the project on the plugin server");
       expect(w.rowState(id)).toBe("complete");
@@ -109,7 +109,7 @@ describe("skipReview docs/ ownership gate", () => {
       const w = await world({ primaryHostId: "host_elsewhere" });
       const id = await w.worker("Fix checkout totals");
       await w.commit("docs/specs/totals.md", "docs: totals by a worker");
-      const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change", ...NO_TESTER });
+      const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change" });
       expect(reply).toContain("docs/ check skipped: the project checkout is on a remote host, not the plugin server");
       expect(w.rowState(id)).toBe("complete");
       expect(w.docsReads()).toEqual([]);
@@ -118,7 +118,7 @@ describe("skipReview docs/ ownership gate", () => {
       const w = await world({ ghHead: () => new Error("gh: HTTP 502") });
       const id = await w.worker("Fix checkout totals", { prUrl: PR });
       await w.commit("docs/specs/totals.md", "docs: totals by a worker");
-      const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change", ...NO_TESTER });
+      const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change" });
       expect(reply).toContain("docs/ check skipped: cannot read the pull request head from the forge");
       expect(w.rowState(id)).toBe("complete");
       expect(w.docsReads()).toEqual([]);
@@ -127,14 +127,14 @@ describe("skipReview docs/ ownership gate", () => {
       const w = await world();
       const row = await delegate(w.state, w.chief.threadId, "No branch");
       await readyIdle(w.state, row.threadId, "Done");
-      const reply = await w.call("chief_complete", { threadId: row.threadId, skipReview: "small change", ...NO_TESTER });
+      const reply = await w.call("chief_complete", { threadId: row.threadId, skipReview: "small change" });
       expect(reply).toContain("docs/ check skipped: no task branch");
     });
     test("the branch cannot be fetched from origin", async () => {
       const w = await world();
       const row = await delegate(w.state, w.chief.threadId, "Unpushed", { branch: "never-pushed" });
       await readyIdle(w.state, row.threadId, "Done");
-      const reply = await w.call("chief_complete", { threadId: row.threadId, skipReview: "small change", ...NO_TESTER });
+      const reply = await w.call("chief_complete", { threadId: row.threadId, skipReview: "small change" });
       expect(reply).toContain("docs/ check skipped: could not fetch origin/never-pushed");
     });
   });
@@ -146,19 +146,19 @@ describe("skipReview docs/ ownership gate", () => {
     // The PR head predates the offending commit that was pushed afterwards.
     head = await w.headSha();
     await w.commit("docs/specs/late.md", "docs: pushed after the PR head");
-    const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change", ...NO_TESTER });
+    const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change" });
     expect(reply).not.toContain("docs/ check skipped");
     expect(w.rowState(id)).toBe("complete");
   });
 
-  describe("C9: approve, override and CLI override run no docs check", () => {
-    test("approve", async () => {
+  describe("C9: a passed gate, override and CLI override run no docs check", () => {
+    test("passed gate", async () => {
       const w = await world();
       const id = await w.worker("Fix checkout totals");
       await w.commit("docs/specs/totals.md", "docs: totals by a worker");
-      await reviewed(w.state, w.chief.threadId, id, "approve");
+      await passGate(w.state, w.chief.threadId, id);
       w.gitCalls.length = 0;
-      await w.call("chief_complete", { threadId: id, ...NO_TESTER });
+      await w.call("chief_complete", { threadId: id });
       expect(w.rowState(id)).toBe("complete");
       expect(w.docsReads()).toEqual([]);
     });
@@ -167,7 +167,7 @@ describe("skipReview docs/ ownership gate", () => {
       const id = await w.worker("Fix checkout totals");
       await w.commit("docs/specs/totals.md", "docs: totals by a worker");
       w.gitCalls.length = 0;
-      const reply = await w.call("chief_complete", { threadId: id, override: "the user accepted it", ...NO_TESTER });
+      const reply = await w.call("chief_complete", { threadId: id, override: "the user accepted it" });
       expect(reply).toContain("without a matching approve");
       expect(reply).not.toContain("docs/ check skipped");
       expect(w.rowState(id)).toBe("complete");
@@ -175,9 +175,7 @@ describe("skipReview docs/ ownership gate", () => {
     });
     test("CLI override", async () => {
       const w = await world();
-      // The CLI has no testsSkipped flag: the unplanned task needs its tester, and the tester is what completes.
-      const worker = await w.worker("Fix checkout totals");
-      const id = await w.worker("Tests for totals", { replaces: worker, kind: "tester" });
+      const id = await w.worker("Fix checkout totals");
       await w.commit("docs/specs/totals.md", "docs: totals by a worker");
       w.gitCalls.length = 0;
       const result = await w.state.harness.behavior.runCli(["complete", id, "--override", "the user accepted it"], { threadId: w.chief.threadId, projectId: "proj_1" });
@@ -191,7 +189,7 @@ describe("skipReview docs/ ownership gate", () => {
   // Stacked-branch worktrees: a stacked or branch-based plan wave is docs-checked against its plan base (origin/<base>), never origin/HEAD. Source: docs/specs/plan-chains.md.
   describe("a stacked or branch-based plan wave is checked against its plan base", () => {
     const contracts = (n: number) => `# Wave ${n}\nDo the work.\n\n## Contracts to verify\n- Wave ${n} keeps its invariant\n\n## What we're NOT doing\n- x`;
-    /** Wave 3 stacks on wave 1 (branch feature-a, one docs/ commit of its own); the pushed `task` branch sits on top of it. The parent's docs/ commit has no trailer. */
+    /** Wave 2 stacks on wave 1 (branch feature-a, one docs/ commit of its own); the pushed `task` branch sits on top of it. The parent's docs/ commit has no trailer. */
     async function stacked(w: World, opts: { plannerBranch?: string; stackOn?: number } = {}) {
       const peer = join(w.workDir, "..", "peer");
       await git(peer, "checkout", "-q", "-B", "feature-a", "main");
@@ -205,10 +203,9 @@ describe("skipReview docs/ ownership gate", () => {
       await git(peer, "push", "-q", "-f", "origin", "HEAD:task");
       await w.call("chief_plan", { title: "Rework checkout", mission: "Propose how to fix totals", ...(opts.plannerBranch ? { branch: opts.plannerBranch } : {}) });
       const planner = (await status(w.state)).threads.filter((row) => row.role === "planner" && row.chiefThreadId === w.chief.threadId).at(-1)!;
-      const waves = [{ body: contracts(1) }, TEST_WAVE(2), { body: wave(3), dependsOn: [], ...(opts.stackOn ? { stackOn: opts.stackOn } : {}) }, TEST_WAVE(4, [3])];
+      const waves = [{ body: contracts(1) }, { body: wave(2), dependsOn: [], ...(opts.stackOn ? { stackOn: opts.stackOn } : {}) }];
       await report(w.state, planner.threadId, { state: "ready", result: "Plan summary.", plan: waves });
       await approvePlan(w.state, w.chief.threadId, planner.threadId);
-      for (const test of [2, 4]) await w.call("chief_skip_tests", { planThreadId: planner.threadId, wave: test, reason: "tests are not under test here" });
       return planner;
     }
     const launch = async (w: World, planThreadId: string, waveNo: number, extra: object) => {
@@ -223,7 +220,7 @@ describe("skipReview docs/ ownership gate", () => {
       const w = await world();
       const planner = await stacked(w, { stackOn: 1 });
       await launch(w, planner.threadId, 1, { branch: "feature-a" });
-      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      const id = await launch(w, planner.threadId, 2, { branch: "task" });
       w.gitCalls.length = 0;
       const own = await w.commit("docs/specs/own.md", "docs: by the wave worker");
       const message = await refusal(complete(w, id));
@@ -237,7 +234,7 @@ describe("skipReview docs/ ownership gate", () => {
       const w = await world();
       const planner = await stacked(w, { stackOn: 1 });
       await launch(w, planner.threadId, 1, { branch: "feature-a" });
-      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      const id = await launch(w, planner.threadId, 2, { branch: "task" });
       w.gitCalls.length = 0;
       const reply = await complete(w, id);
       expect(reply).toContain("without a review (reason recorded)");
@@ -250,7 +247,7 @@ describe("skipReview docs/ ownership gate", () => {
     test("the same wave with no plan base is read against origin/HEAD: the parent's docs/ commit is then refused", async () => {
       const w = await world();
       const planner = await stacked(w);
-      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      const id = await launch(w, planner.threadId, 2, { branch: "task" });
       const message = await refusal(complete(w, id));
       expect(message).toContain("docs: parent wave");
       expect(w.gitCalls).not.toContainEqual(["fetch", "origin", "feature-a"]);
@@ -259,7 +256,7 @@ describe("skipReview docs/ ownership gate", () => {
     test("a plan started on a branch checks its waves against that branch", async () => {
       const w = await world();
       const planner = await stacked(w, { plannerBranch: "feature-a" });
-      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      const id = await launch(w, planner.threadId, 2, { branch: "task" });
       const reply = await complete(w, id);
       expect(reply).not.toContain("docs/ check skipped");
       expect(w.rowState(id)).toBe("complete");
@@ -270,7 +267,7 @@ describe("skipReview docs/ ownership gate", () => {
       const w = await world();
       const planner = await stacked(w, { stackOn: 1 });
       await launch(w, planner.threadId, 1, { branch: "feature-a" });
-      const id = await launch(w, planner.threadId, 3, { branch: "task" });
+      const id = await launch(w, planner.threadId, 2, { branch: "task" });
       w.state.db.prepare("UPDATE managed_threads SET branch=NULL WHERE plan_thread_id=? AND plan_wave=1").run(planner.threadId);
       await readyIdle(w.state, id, READY); // the thread store reloads its row cache on its next write
       w.gitCalls.length = 0;
@@ -285,7 +282,7 @@ describe("skipReview docs/ ownership gate", () => {
       const w = await world({ ghHead: () => JSON.stringify({ headRefName: "task", headRefOid: head, baseRefName: "main" }) });
       const planner = await stacked(w, { stackOn: 1 });
       await launch(w, planner.threadId, 1, { branch: "feature-a" });
-      const id = await launch(w, planner.threadId, 3, { branch: "task", prUrl: PR });
+      const id = await launch(w, planner.threadId, 2, { branch: "task", prUrl: PR });
       head = await w.headSha();
       const message = await refusal(complete(w, id));
       expect(message).toContain("docs: parent wave");

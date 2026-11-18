@@ -1,6 +1,4 @@
-import { test } from "vitest";
-import { checkPlan } from "../src/report/reportIntake";
-import { PLAN_FIXTURE, TEST_FILES, TEST_WAVE, approvePlan, delegate, setup, start, status, wave } from "./harness";
+import { PLAN_FIXTURE, execFileMock, ghHead, setup, start, status, wave } from "./harness";
 
 export type State = Awaited<ReturnType<typeof setup>>;
 export const ctxOf = (state: State, chiefThreadId: string) => ({ threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
@@ -11,8 +9,8 @@ export const report = (state: State, threadId: string, params: object) =>
 export const rowOf = (state: State, threadId: string) => state.db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(threadId) as any;
 export const setLive = (state: State, threadId: string, status: string) => state.live.set(threadId, { ...state.live.get(threadId)!, status } as any);
 
-/** A planner whose ready report carries `waves` (default: one implementation wave, then its test wave). */
-export async function plan(state: State, chiefThreadId: string, waves: object[] = [{ body: PLAN_FIXTURE }, TEST_WAVE(2)]) {
+/** A planner whose ready report carries `waves` (default: one implementation wave). Two implementation waves need an advisor review before delegation: approvePlan. */
+export async function plan(state: State, chiefThreadId: string, waves: object[] = [{ body: PLAN_FIXTURE }]) {
   await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chiefThreadId));
   const planner = (await status(state)).threads.filter((row) => row.role === "planner" && row.chiefThreadId === chiefThreadId).at(-1)!;
   await report(state, planner.threadId, { state: "ready", result: "Waves written.", plan: waves });
@@ -30,11 +28,8 @@ export const workerOn = (state: State, planThreadId: string, waveNo: number) =>
 export const planWaves = (state: State, planThreadId: string) =>
   (state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planThreadId) as { plan_waves: string }).plan_waves;
 
-// Contract: checkPlan accepts a plan iff it is an array, every chain tip is test: true, every test wave is a
-// non-head tip whose parent is neither design nor test, and no wave is both. Regression: dropping any one rule
-// (e.g. the tip check) lets a plan without a test wave through; the table pins each rule's own refusal.
-// Existing checkPlan cases only cover plans without test waves, so none exercises these rules.
-export const planWave = (n: number, extra: object = {}) => ({ body: n === 1 ? PLAN_FIXTURE : wave(n, (extra as { test?: unknown }).test === true ? `Write the tests.\n\n${TEST_FILES}` : undefined), ...extra });
+/** An implementation wave: wave 1 is the plan fixture, every other wave a plain wave body. */
+export const planWave = (n: number, extra: object = {}) => ({ body: n === 1 ? PLAN_FIXTURE : wave(n), ...extra });
 /** Chief reviews `targetId`; its reviewer reports `verdict`. Returns the alert Chief received. */
 export async function reviewed(state: State, chiefThreadId: string, targetId: string, verdict: "approve" | "request_changes", extra: object = {}) {
   await tool(state, "chief_review", { workerThreadId: targetId, ...extra }, chiefThreadId);
@@ -47,7 +42,7 @@ export async function reviewed(state: State, chiefThreadId: string, targetId: st
 }
 export const readyIdle = async (state: State, threadId: string, result = READY) => { await report(state, threadId, { state: "ready", result }); setLive(state, threadId, "idle"); };
 
-/** Two non-test waves make the plan's one advisor review a prerequisite of delegation. */
+/** The plan file path of every wave of a planner. */
 export const wavePaths = (state: State, planThreadId: string) => (JSON.parse(planWaves(state, planThreadId)) as { path: string }[]).map((entry) => entry.path);
 
 
@@ -66,7 +61,7 @@ export async function followRoute(state: State, chiefThreadId: string, text: str
 }
 export const refusal = async (promise: Promise<unknown>) => { try { await promise; } catch (error) { return (error as Error).message; } throw new Error("expected a refusal"); };
 
-/** Chief + a [implementation, test] plan with wave 1 delegated, ready and idle. */
+/** Chief + a one-wave plan with wave 1 delegated, ready and idle. */
 export async function readyImpl(state: State, wave1: object = {}) {
   const chief = await start(state);
   const planner = await plan(state, chief.threadId);
@@ -77,65 +72,41 @@ export async function readyImpl(state: State, wave1: object = {}) {
   return { chief, planner, impl: impl.thread_id as string };
 }
 
-/** The same plan with the tester delegated on wave 2 (still busy: the fake host starts it active). */
-export async function withTester(state: State) {
-  const ctx = await readyImpl(state);
-  await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ctx.impl });
-  return { ...ctx, tester: workerOn(state, ctx.planner.threadId, 2).thread_id as string };
-}
-
-/** Plan [impl, test]; the test wave's tester T0 is rejected by a review and fixed by F, which is ready and idle: F owes a tester rerun. */
-export async function fixedAfterRejection(state: State, wave1: object = {}) {
-  const ctx = await readyImpl(state, wave1);
-  await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ctx.impl });
-  const tester = workerOn(state, ctx.planner.threadId, 2).thread_id as string;
-  await readyIdle(state, tester);
-  await reviewed(state, ctx.chief.threadId, tester, "request_changes");
-  await tick();
-  await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: tester, kind: "worker" });
-  const fix = workerOn(state, ctx.planner.threadId, 2).thread_id as string;
-  await readyIdle(state, fix);
-  await tick();
-  return { ...ctx, oldTester: tester, fix };
-}
 export const review = (state: State, chief: { threadId: string }, workerThreadId: string, extra: object = {}) => tool(state, "chief_review", { workerThreadId, ...extra }, chief.threadId);
-export const rerunRoute = (planner: { threadId: string }, wave: number, replaces: string) => `chief_delegate (planThreadId: ${planner.threadId}, wave: ${wave}, replaces: ${replaces}, kind: tester)`;
 export const reviewerCount = async (state: State) => (await status(state)).threads.filter((row) => row.role === "reviewer").length;
 
-/** An unplanned task rejected once and fixed by F (a persisted normal worker, kind NULL), ready and idle: F owes a tester rerun. */
-export async function unplannedFix(state: State, first: object = {}) {
-  const chief = await start(state);
-  const worker = await delegate(state, chief.threadId, "Fix totals", first);
-  await readyIdle(state, worker.threadId, "Done");
-  await reviewed(state, chief.threadId, worker.threadId, "request_changes");
-  await tick();
-  const fix = (await delegate(state, chief.threadId, "Fix", { replaces: worker.threadId })).threadId;
-  await readyIdle(state, fix, "Fixed");
-  await tick();
-  return { chief, first: worker.threadId, fix };
+// The review gate pins each target's head through the forge (`gh pr view`), so a gate target carries a branch and a pull request.
+export const PR_URL = "https://github.com/o/r/pull/7";
+/** The forge answers `gh pr view <url>` with that pull request's pinned head (HEAD_SHA, base main); any other command answers empty. */
+export const forgeAnswers = (prs: Record<string, string> = { [PR_URL]: "feature/x" }) =>
+  execFileMock.mockImplementation((file: string, args: string[]) => {
+    const branch = file === "gh" && args[0] === "pr" && args[1] === "view" ? prs[args[2]!] : undefined;
+    return Promise.resolve({ stdout: branch ? ghHead(branch) : "", stderr: "" });
+  });
+export type Gate = { gate_key: string; reviewer_thread_id: string; tester_thread_id: string; fixer_thread_id: string | null; corrector_thread_id: string | null; targets: string };
+/** The review gate that pinned `threadId`. */
+export const gateOf = (state: State, threadId: string) =>
+  (state.db.prepare(`SELECT * FROM review_gates`).all() as Gate[]).find((gate) => (JSON.parse(gate.targets) as { threadId: string }[]).some((target) => target.threadId === threadId));
+/** Opens the review gate on `targetId` (chief_review) and returns it: one reviewer and one tester started. */
+export async function openGate(state: State, chiefThreadId: string, targetId: string) {
+  await tool(state, "chief_review", { workerThreadId: targetId }, chiefThreadId);
+  return gateOf(state, targetId)!;
 }
-export const unplannedRoute = (replaces: string) => `chief_delegate (replaces: ${replaces}, kind: tester)`;
-
-/** Two independent chains [1, 2 test] and [3, 4 test], every row ready and idle; one review rejects both, and both chains are fixed (FA on wave 2, FB on wave 4). */
-export async function twoRejectedChains(state: State) {
-  const chief = await start(state);
-  const planner = await plan(state, chief.threadId, [planWave(1), TEST_WAVE(2), planWave(3, { dependsOn: [] }), TEST_WAVE(4, [3])]);
-  await approvePlan(state, chief.threadId, planner.threadId);
-  const ready = async (waveNo: number, extra: object) => {
-    await delegateWave(state, chief.threadId, planner.threadId, waveNo, extra);
-    const row = workerOn(state, planner.threadId, waveNo).thread_id as string;
-    await readyIdle(state, row);
-    return row;
-  };
-  const implA = await ready(1, { branch: "feature/a" });
-  const testA = await ready(2, { replaces: implA });
-  const implB = await ready(3, { branch: "feature/b" });
-  const testB = await ready(4, { replaces: implB });
-  await reviewed(state, chief.threadId, testA, "request_changes");
-  await tick();
-  const fixA = await ready(2, { replaces: testA, kind: "worker" });
-  const fixB = await ready(4, { replaces: testB, kind: "worker" });
-  await tick();
-  return { chief, planner, fixA, fixB };
+/** The gate tester reports ready (idle) with its test result. */
+export async function testerReady(state: State, gate: Gate, passed: boolean, result = passed ? "Every test passes." : "Tests fail.\n\n## Failing tests\n- totals.test.ts:3 — `npx vitest run totals.test.ts`, exit 1: totals go negative (totals.ts:4)") {
+  await report(state, gate.tester_thread_id, { state: "ready", result, testsPassed: passed });
+  setLive(state, gate.tester_thread_id, "idle");
 }
-
+/** The gate reviewer reports its verdict (idle). */
+export async function reviewerVerdict(state: State, gate: Gate, verdict: "approve" | "request_changes", findings: object[] = verdict === "approve" ? [] : [...REQUEST_CHANGES_FINDINGS]) {
+  await report(state, gate.reviewer_thread_id, { state: "ready", result: verdict === "approve" ? "The change holds." : "Totals go negative.", verdict, findings });
+  setLive(state, gate.reviewer_thread_id, "idle");
+}
+export const REQUEST_CHANGES_FINDINGS = [{ file: "totals.ts", line: 4, severity: "blocking", message: "Totals go negative.", fix: "Clamp at zero" }] as const;
+/** Opens the gate on `targetId` and passes it: green tester, approving reviewer. Chief can then chief_complete the target. */
+export async function passGate(state: State, chiefThreadId: string, targetId: string) {
+  const gate = await openGate(state, chiefThreadId, targetId);
+  await testerReady(state, gate, true);
+  await reviewerVerdict(state, gate, "approve");
+  return gate;
+}
