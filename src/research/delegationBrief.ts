@@ -126,6 +126,8 @@ export type WorkerBriefInput = {
   lane?: "side" | "implementation";
   /** Tester only: a compact no-commit evidence brief. Optional: older callers omit it. */
   evidenceOnly?: boolean;
+  /** Tester with a replaces: the chain's newest ready tester and its parsed receipt (null: missing or incomplete). Optional: older callers omit it. */
+  receipt?: { tester: { thread_id: string; report_path: string | null }; receipt: { text: string } | null };
 };
 
 /** The first Working contract item of a worker or planner brief: the plugin only offers a thread its skills, so the brief orders the load.
@@ -138,7 +140,7 @@ const deviationsLine = "- Your ready result must contain a `## Deviations from p
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, receipt } = input;
   const tester = kind === "tester";
   const evidence = evidenceOnly && tester;
   const specWriter = isWriter(kind);
@@ -268,14 +270,27 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ]),
       ...(!evidence && prior.report_path ? [`Full report: ${prior.report_path}`] : []),
     ] : []),
+    ...(tester && receipt ? [
+      "", `## Prior receipt (${receipt.tester.thread_id})`,
+      ...(receipt.receipt ? [
+        receipt.receipt.text,
+        evidence
+          ? "Its commands are your commands and its Tested commit is Last tested, unless your mission names others."
+          : "Reuse it: rerun the commands the change affects; do not rediscover commands or coverage it already names.",
+      ] : [`${receipt.tester.thread_id}'s report has no complete receipt: ${receipt.tester.report_path ?? `bb chief inspect ${receipt.tester.thread_id}`}. Do not run partial commands from it.`]),
+    ] : []),
     ...(evidence ? [
       "", "## Evidence work",
-      "- This brief overrides the `chief-role-tester` skill: write no tests. Run only the commands your mission names, on the commits it names, in this worktree. Commit nothing, push nothing, edit no tracked file; never use stash, autostash or another worktree. Chief owns the forge.",
+      "- This brief overrides the `chief-role-tester` skill: write no tests. Run only the commands your mission names, else the commands of a complete `## Prior receipt`, in this worktree. Commit nothing, push nothing, edit no tracked file; never use stash, autostash or another worktree. Chief owns the forge.",
       "- Record `git rev-parse HEAD` as `Head commit: <sha>` before any run.",
       "- Base runs: `git switch --detach <base>` on a clean tree; afterwards `git switch -` and check HEAD equals Head commit. After each switch, reinstall dependencies if the lockfile differs, and reset any database or state the suites write.",
-      "- Run each command alone and record `echo exit=$?` right after it (before a pipe, `set -o pipefail`), with per-file pass counts.",
+      "- You need: `Expected head: <sha>` in your mission; `Last tested` (mission, else the receipt's Tested commit); and for each command its cwd, the exact command and the required exit status (mission, else a complete receipt). If any is missing, report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: tester)` without evidenceOnly. Never report ready without them.",
+      "- After the sync, HEAD must equal Expected head; otherwise report blocked naming both commits. Do not compare against the predecessor's commits.",
+      "- If the fix needs a new or changed test (a finding asks for one, the receipt's Coverage lacks the fixed behaviour, or a test asserts the old behaviour), report blocked with the same normal-mode recommendation.",
+      "- Run each command alone as `<cmd> > \"$BB_THREAD_STORAGE/<name>.log\" 2>&1; echo exit=$?`, then `tail -n 80` the log; read more only when the tail does not show the failure. Record per-file pass counts.",
       "- Ready: per command, base and head side by side (commit, exit status, pass counts); explain every difference, since an unexplained one is a regression. Before you report, HEAD equals Head commit and `git status --porcelain` prints nothing.",
       "- Blocked: name the command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: tester)` for a wrong test, `kind: worker` for product code.",
+      "- Your ready result ends with `## Receipt` in the `chief-role-tester` skill format: Coverage and Gaps carried from the prior receipt, Tested commit = Expected head, commands and results updated.",
     ] : []),
     "", "## Working contract",
     ...(evidence ? [

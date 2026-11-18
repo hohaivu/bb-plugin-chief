@@ -243,6 +243,7 @@ export function createDelegation(ctx: Ctx) {
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
       specDocs, specWave, lane, evidenceOnly: params.evidenceOnly,
+      receipt: kind === "tester" && prior ? progress.priorReceipt(prior.thread_id) : undefined,
     });
     // A side-lane writer, first or repair, never reuses a worktree: its own managed worktree is cut from the chain branch, so a stale or half-rebased side checkout never reaches the fold.
     const thread = await ctx.managedSpawn.launch(prepared, {
