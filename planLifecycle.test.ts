@@ -147,11 +147,10 @@ describe("admitDelegation: spec flow", () => {
     expect(() => admit({ ...writer, wave: 1 })).toThrow("wave(s) 1, 2, 3 of 3 are not ready yet");
   });
 
-  test("a first side writer cuts from the chain branch: the owner's when a worker runs, a forge_init branch when none does, and no other", () => {
-    const { admit } = world({ [P]: specPlan }, [{ id: "w", plan: P, wave: 1, pr: "https://pr/1", state: "active", last: null }]);
+  test("the plan's Spec Writer cuts from the chain owner's branch, and no other", () => {
+    const { admit } = world({ [P]: [{ path: "w1", spec: true }] }, [{ id: "w", plan: P, wave: 1, pr: "https://pr/1" }]);
     expect(admit({ ...writer, wave: 1, branch: undefined }).sideChain).toEqual({ branch: CHAIN, prUrl: "https://pr/1" });
     expect(() => admit({ ...writer, wave: 1, branch: "feature/other" })).toThrow(`branch feature/other is not the chain's branch ${CHAIN} (worker w); a Spec Writer folds onto the chain's one branch.`);
-    expect(() => world({ [P]: specPlan }).admit({ ...writer, wave: 1, branch: undefined })).toThrow("Wave 1's Spec Writer needs the chain's branch: run chief_forge_init on head wave 1 first and pass its branch and prUrl.");
   });
 
   test("the first plan writer waits for every chain, then owns the last spec wave even when a later wave exists", () => {
@@ -183,14 +182,15 @@ describe("admitDelegation: spec flow", () => {
   });
 
   test("a first side writer is refused with a live side writer on the wave, behind an unsettled parent, or on a wave that takes none", () => {
-    const live = world({ [P]: specPlan }, [{ id: "sw", plan: P, wave: 1, kind: "spec-writer", state: "active", last: null }]);
-    expect(() => live.admit({ ...writer, wave: 1 })).toThrow();
+    const live = world({ [P]: [{ path: "w1", spec: true }] }, [{ id: "w", plan: P, wave: 1 }, { id: "sw", plan: P, wave: 1, kind: "spec-writer", state: "active", last: null }]);
+    expect(() => live.admit({ ...writer, wave: 1 })).toThrow("is still live");
+    // The writer waits on its own wave's worker too: wave 2 not ready refuses it, a ready, idle or complete one admits it.
     for (const [state, last] of [["active", null], ["blocked", "blocked"]] as const) {
-      const behind = world({ [P]: [{ path: "w1" }, { path: "w2", spec: true }] }, [{ id: "w", plan: P, wave: 1, state, last }]);
-      expect(() => behind.admit({ ...writer, wave: 2 }), state).toThrow();
+      const behind = world({ [P]: [{ path: "w1" }, { path: "w2", spec: true }] }, [{ id: "w", plan: P, wave: 1 }, { id: "w2", plan: P, wave: 2, replaces: "w", state, last }]);
+      expect(() => behind.admit({ ...writer, wave: 2 }), state).toThrow("wave(s) 2 of 2 are not ready yet");
     }
     for (const [state, last] of [["ready", "ready"], ["idle", "ready"], ["complete", null]] as const) {
-      const parent = world({ [P]: [{ path: "w1" }, { path: "w2", spec: true }] }, [{ id: "w", plan: P, wave: 1, state, last }]);
+      const parent = world({ [P]: [{ path: "w1" }, { path: "w2", spec: true }] }, [{ id: "w", plan: P, wave: 1 }, { id: "w2", plan: P, wave: 2, replaces: "w", state, last }]);
       expect(parent.admit({ ...writer, wave: 2 }), state).toMatchObject({ kind: "spec-writer", lane: "side" });
     }
     const none = world({ [P]: [{ path: "w1", spec: true, specsSkipped: "docs exist" }, { path: "w2", design: true, dependsOn: [] }, { path: "w3", dependsOn: [] }] });
@@ -279,13 +279,13 @@ describe("admitDelegation: spec flow", () => {
     expect(() => admit({ ...writer, wave: 2, prior: "w" })).toThrow(/replaces the chain's current implementation row: chief_delegate \(planThreadId: plan, wave: 2, replaces: t, kind: spec-writer\)/);
   });
 
-  test("baseline: a side writer on a baseline wave sets it, whether or not the worker has started; a worker, or a wave without the flag, does not", () => {
+  test("baseline: the plan's Spec Writer and its repair set it on a baseline wave; a worker, or a wave without the flag, does not", () => {
     const waves: PlanWave[] = [{ path: "w1", spec: true, baseline: true }];
-    expect(world({ [P]: waves }).admit({ ...writer, wave: 1 }).baseline).toBe(true);
-    expect(world({ [P]: waves }, [{ id: "sw", plan: P, wave: 1, kind: "spec-writer" }]).admit({ ...writer, wave: 1, prior: "sw" }).baseline).toBe(true);
-    expect(world({ [P]: waves }, [{ id: "w", plan: P, wave: 1 }]).admit({ ...writer, wave: 1 }).baseline).toBe(true);
+    const w = { id: "w", plan: P, wave: 1 };
+    expect(world({ [P]: waves }, [w]).admit({ ...writer, wave: 1 }).baseline).toBe(true);
+    expect(world({ [P]: waves }, [w, { id: "sw", plan: P, wave: 1, kind: "spec-writer" }]).admit({ ...writer, wave: 1, prior: "sw" }).baseline).toBe(true);
     expect(world({ [P]: waves }).admit({ ...planned, wave: 1 }).baseline).toBe(false);
-    expect(world({ [P]: [{ path: "w1", spec: true }] }).admit({ ...writer, wave: 1 }).baseline).toBe(false);
+    expect(world({ [P]: [{ path: "w1", spec: true }] }, [w]).admit({ ...writer, wave: 1 }).baseline).toBe(false);
   });
 
   test("specDocs: a worker on the spec wave lists none, and a later wave's worker lists the chain's Spec Writers with the report path", () => {
@@ -314,34 +314,13 @@ describe("admitDelegation: tester kind", () => {
 });
 
 describe("admitDelegation: specSources", () => {
-  // Contract (wave 1): a Spec Writer keeps its read-only context of the wave's contracts, clipped at 3,000 characters.
-  // Regression: the tester change also dropping or lengthening the Spec Writer's contracts.
-  test("a Spec Writer lists its wave's path and its contracts clipped to about 3000 characters", () => {
-    const long = "x".repeat(10_000);
-    const plan: PlanWave[] = [{ path: "w1", spec: true, contracts: long }, { path: "w2" }];
-    const { admit } = world({ [P]: plan }, [{ id: "w", plan: P, wave: 1, state: "active", last: null }]);
-    const sources = admit({ ...planned, wave: 1, kind: "spec-writer", resolvedKind: "spec-writer", branch: undefined }).specSources;
-    expect(sources).toHaveLength(3);
-    expect(sources[0]).toBe("Wave 1 of 2: w1");
-    expect(sources[2]).toBe("Wave 2 of 2: w2");
-    expect(sources[1]!.length).toBeGreaterThan(2_900);
-    expect(sources[1]!.length).toBeLessThan(3_100);
-    const short = world({ [P]: [{ path: "w1", spec: true, contracts: "contract one" }, { path: "w2" }] }, [{ id: "w", plan: P, wave: 1, state: "active", last: null }]);
-    expect(short.admit({ ...planned, wave: 1, kind: "spec-writer", resolvedKind: "spec-writer", branch: undefined }).specSources).toEqual(["Wave 1 of 2: w1", "contract one", "Wave 2 of 2: w2"]);
-  });
-
-  // Contract (shrink-prompts wave 1): on wave w of a chain of k waves a Spec Writer lists all k `Wave n of N: <path>` lines and only wave w's contracts
-  // (clipped at 3,000); no other wave's contracts reach it. Regression: every wave's contracts pushed for the writer, or the writer's own dropped.
-  test.each([1, 2, 3])("a Spec Writer on wave %i of a four-wave chain lists four paths and only its own wave's contracts", (own) => {
+  // Contract (docs/specs/plan-chains.md: one Spec Writer per plan): the plan's Spec Writer lists every wave's path and no wave's contracts,
+  // which belong to the worker and the tester. Regression: a contracts clip, or only the writer's own wave, comes back.
+  test("the plan's Spec Writer lists every wave's path of a four-wave chain and no contracts", () => {
     const chain: PlanWave[] = [1, 2, 3, 4].map((n) => ({ path: `w${n}`, contracts: `contracts of wave ${n} ${"x".repeat(4_000)}`, spec: true }));
-    const { admit } = world({ [P]: chain }, [{ id: "prev", plan: P, wave: own - 1 || 1 }]);
-    const sources = admit({ ...planned, wave: own, kind: "spec-writer", resolvedKind: "spec-writer", branch: undefined }).specSources;
-    expect(sources.filter((line) => /^Wave \d of 4: w\d$/.test(line))).toEqual([1, 2, 3, 4].map((n) => `Wave ${n} of 4: w${n}`));
-    const contracts = sources.filter((line) => line.startsWith("contracts of wave"));
-    expect(contracts).toHaveLength(1);
-    expect(contracts[0]!.startsWith(`contracts of wave ${own} `)).toBe(true);
-    expect(contracts[0]!.length).toBeLessThan(3_100);
-    expect(sources).toHaveLength(5);
+    const rows: Worker[] = [1, 2, 3, 4].map((n) => ({ id: `w${n}`, plan: P, wave: n, ...(n > 1 ? { replaces: `w${n - 1}` } : {}) }));
+    const sources = world({ [P]: chain }, rows).admit({ ...planned, wave: 4, kind: "spec-writer", resolvedKind: "spec-writer", branch: undefined }).specSources;
+    expect(sources).toEqual([1, 2, 3, 4].map((n) => `Wave ${n} of 4: w${n}`));
   });
 
   test("a design wave on the chain adds the owner's approval line, or says none was recorded", () => {
@@ -591,7 +570,7 @@ describe("docs ownership: the implementation-lane Spec Writer route (C10)", () =
   test("the side lane is unchanged: a first writer on an unwaived spec wave is admitted beside the worker, and a second live one is refused", () => {
     const waves: PlanWave[] = [{ path: "w1", spec: true }];
     expect(world({ [P]: waves }, [{ id: "w", plan: P, wave: 1 }]).admit({ ...planned, kind: "spec-writer", resolvedKind: "spec-writer", branch: CHAIN, wave: 1 })).toMatchObject({ lane: "side" });
-    const live = world({ [P]: waves }, [{ id: "sw", plan: P, wave: 1, kind: "spec-writer", state: "active", last: null }]);
+    const live = world({ [P]: waves }, [{ id: "w", plan: P, wave: 1 }, { id: "sw", plan: P, wave: 1, kind: "spec-writer", state: "active", last: null }]);
     expect(() => live.admit({ ...planned, kind: "spec-writer", resolvedKind: "spec-writer", branch: CHAIN, wave: 1 })).toThrow("is still live");
   });
 

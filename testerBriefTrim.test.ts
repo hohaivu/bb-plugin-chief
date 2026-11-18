@@ -246,19 +246,17 @@ describe("tester working contract", () => {
 describe("chief_delegate: a spec wave with a 5,000-character contract list", () => {
   const long = `# Wave 1\nBuild the totals.\n\n${SPEC_DELTA}\n\n## Contracts to verify\n${contractList("W1", 5_000)}${NOT_DOING}`;
 
-  // Regression: a contract clip on the worker, or the Spec Writer's context losing or lengthening the list.
-  test("the worker gets a plan-file pointer, not the list, and the Spec Writer a 3,000-character clip", async () => {
+  // Regression: a contract clip on the worker, or the plan's Spec Writer getting the contracts that belong to the worker and the tester.
+  test("the worker gets a plan-file pointer, not the list, and the Spec Writer no contracts", async () => {
     const state = await setup();
     await fullChain(state, [{ body: long, spec: true }]);
     const [worker, writer] = state.spawned.filter((entry: any) => entry.prompt.startsWith("You are the managed worker")).map((entry: any) => entry.prompt as string);
     expect(worker).not.toContain("W1 item");
     expect(section(worker!, "Contracts to verify")).toMatch(/plan-1\.md/);
     const context = section(writer!, "Read-only context")!;
-    const full = count(contractList("W1", 5_000), "W1 item");
-    expect(count(context, "W1 item")).toBeGreaterThan(100);
-    expect(count(context, "W1 item")).toBeLessThan(full);
-    expect(context.length).toBeLessThan(5_000);
-    expect(writer).not.toContain("## Contracts to verify");
+    expect(context).not.toContain("W1 item");
+    expect(context).toMatch(/plan-1\.md/);
+    expect(writer).not.toMatch(/^## Contracts to verify/m);
   });
 });
 
