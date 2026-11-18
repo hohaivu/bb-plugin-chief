@@ -144,7 +144,7 @@ describe("admitDelegation: spec flow", () => {
     expect(admit({ ...planned, wave: 1 })).toMatchObject({ kind: "worker", lane: "implementation" });
     expect(admit({ ...planned, wave: 1, kind: "worker", resolvedKind: "worker" })).toMatchObject({ kind: "worker", lane: "implementation" });
     expect(admit({ ...planned, wave: 1, kind: "designer", resolvedKind: "designer" }).kind).toBe("designer");
-    expect(admit({ ...writer, wave: 1 })).toMatchObject({ kind: "spec-writer", lane: "side", baseline: false, specDocs: [], sideChain: { branch: CHAIN, prUrl: null } });
+    expect(() => admit({ ...writer, wave: 1 })).toThrow("wave(s) 1, 2, 3 of 3 are not ready yet");
   });
 
   test("a first side writer cuts from the chain branch: the owner's when a worker runs, a forge_init branch when none does, and no other", () => {
@@ -154,12 +154,29 @@ describe("admitDelegation: spec flow", () => {
     expect(() => world({ [P]: specPlan }).admit({ ...writer, wave: 1, branch: undefined })).toThrow("Wave 1's Spec Writer needs the chain's branch: run chief_forge_init on head wave 1 first and pass its branch and prUrl.");
   });
 
-  test("either order of the writer and the worker is admitted, and the worker never replaces the writer", () => {
+  test("the first plan writer waits for every chain, then owns the last spec wave even when a later wave exists", () => {
+    const waves: PlanWave[] = [
+      { path: "w1", spec: true, baseline: true, contracts: "worker-only contract" },
+      { path: "w2", spec: true, dependsOn: [] },
+      { path: "w3", dependsOn: [2] },
+    ];
+    const rows: Worker[] = [
+      { id: "w1", plan: P, wave: 1, state: "complete" },
+      { id: "w2", plan: P, wave: 2, state: "complete" },
+    ];
+    const pending = world({ [P]: waves }, rows);
+    expect(() => pending.admit({ ...writer, wave: 1 })).toThrow("chief_delegate (planThreadId: plan, wave: 2, kind: spec-writer)");
+    expect(() => pending.admit({ ...writer, wave: 2 })).toThrow("wave(s) 3 of 3 are not ready yet");
+    const ready = world({ [P]: waves }, [...rows, { id: "w3", plan: P, wave: 3, replaces: "w2", state: "ready" }]);
+    expect(ready.admit({ ...writer, wave: 2 })).toMatchObject({ lane: "side", baseline: true, specSources: ["Wave 1 of 3: w1", "Wave 2 of 3: w2", "Wave 3 of 3: w3"] });
+  });
+
+  test("legacy: the worker never replaces an active side writer", () => {
     const writerFirst = world({ [P]: specPlan }, [{ id: "sw", plan: P, wave: 1, kind: "spec-writer", state: "active", last: null }]);
     expect(writerFirst.admit({ ...planned, wave: 1 })).toMatchObject({ kind: "worker", lane: "implementation" });
     expect(writerFirst.admit({ ...planned, wave: 1, kind: "designer", resolvedKind: "designer" }).lane).toBe("implementation");
     const workerFirst = world({ [P]: specPlan }, [{ id: "w", plan: P, wave: 1, state: "active", last: null }]);
-    expect(workerFirst.admit({ ...writer, wave: 1 })).toMatchObject({ kind: "spec-writer", lane: "side" });
+    expect(() => workerFirst.admit({ ...writer, wave: 1 })).toThrow("wave(s) 1, 2, 3 of 3 are not ready yet");
     // a worker never takes the writer's place while it works; only its docs fix does
     expect(() => writerFirst.admit({ ...planned, wave: 1, prior: "sw", kind: "worker", resolvedKind: "worker" })).toThrow(/only its docs fix replaces it — chief_delegate \(planThreadId: plan, wave: 1, replaces: sw, kind: spec-writer\)/);
     expect(() => workerFirst.admit({ ...planned, wave: 1 })).toThrow(/already has worker w on wave 1/);
