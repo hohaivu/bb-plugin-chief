@@ -160,122 +160,80 @@ test("button disabled when there are no projects to pick", async () => {
   expect(rendered.getByText(/Create a project/)).toBeTruthy();
 });
 
-test("marks Chief conversations with a compact header badge", async () => {
-  expect(app.threadHeaderActions.map((action) => action.id)).toEqual(["chief-role", "new-chief"]);
-  const chief = {
-    threadId: "thr_chief",
-    role: "chief" as const,
-    projectId: "proj_1",
-    chiefThreadId: null,
-    workerThreadId: null,
-    title: "Chief · Asha",
-    state: "idle" as const,
-    status: "idle",
-    result: null,
-    blocker: null,
-    recommendation: null,
-    createdAt: 1,
-    updatedAt: 1,
-  };
-  const rendered = renderSlot<
-    { threadId: string; projectId: string; isCompactViewport: boolean },
-    typeof rpcContract
-  >(
-    app.threadHeaderActions.find((action) => action.id === "chief-role")!,
-    { threadId: chief.threadId, projectId: chief.projectId, isCompactViewport: false },
-    {
-      rpc: {
-        role: ({ threadId }) => ({ role: threadId === chief.threadId ? chief.role : null }),
-        start: () => ({ threadId: chief.threadId, created: false }),
-        create: () => ({ threadId: "thr_new", created: true }),
-      },
-    },
-  );
+function renderHeaderAction(
+  id: string,
+  threads: Array<{ id: string; projectId: string }>,
+  options: NonNullable<Parameters<typeof renderSlot<object, typeof rpcContract>>[2]>,
+) {
+  const registration = app.threadActions.find((action) => action.id === id && action.placement === "header");
+  expect(registration, "Missing SDK header action: " + id).toBeDefined();
+  const action = registration!;
+  // The SDK collector exposes registrations, not the host header renderer.
+  function HeaderActionProbe() {
+    const data = action.useData?.({ threadIds: threads.map((thread) => thread.id) });
+    return threads.map((target) => {
+      const item = action.item({
+        data,
+        thread: {
+          ...target, parentThreadId: null, parentNotifications: "auto", archivedAt: null,
+          pinnedAt: null, sectionId: null, isUnread: false, status: "idle", environment: null,
+        },
+      } as Parameters<typeof action.item>[0]);
+      return <div key={target.id} data-testid={target.id}>
+        {item && <button disabled={item.disabled} onClick={() => void item.run({
+          requestRename: () => { throw new Error("Unexpected rename"); },
+        })}>{item.label}</button>}
+      </div>;
+    });
+  }
+  const rendered = renderSlot<object, typeof rpcContract>({ component: HeaderActionProbe }, {}, options);
   unmounts.push(() => rendered.lifecycle.unmount());
+  return rendered;
+}
 
-  await vi.waitFor(() =>
-    expect(rendered.getByLabelText("Chief supervisor").textContent).toContain("Chief"),
-  );
-});
+describe("SDK header actions", () => {
+  test("labels each visible managed thread by role and leaves unmanaged threads unbadged", async () => {
+    const cases = [
+      ["chief", "Chief supervisor"], ["planner", "Chief Planner"], ["worker", "Chief Worker"],
+      ["designer", "Chief Designer"], ["tester", "Chief Tester"], ["spec-writer", "Chief Spec Writer"],
+      ["reviewer", "Chief Reviewer"], ["advisor", "Chief Advisor"], ["researcher", "Chief Researcher"],
+      [null, null],
+    ] as const;
+    const threads = cases.map(([role]) => ({ id: role ?? "unmanaged", projectId: "proj_1" }));
+    const roles = new Map<string, (typeof cases)[number][0]>(cases.map(([role]) => [role ?? "unmanaged", role]));
+    const rendered = renderHeaderAction("chief-role", threads, {
+      rpc: { role: ({ threadId }) => {
+        if (!roles.has(threadId)) throw new Error("Unexpected role lookup");
+        return { role: roles.get(threadId)! };
+      } },
+    });
 
-test("shows the role chip on managed threads and nothing on others", async () => {
-  const worker = {
-    threadId: "thr_worker", role: "worker" as const, projectId: "proj_1", chiefThreadId: "thr_chief",
-    workerThreadId: null, title: "Fix totals", state: "idle" as const, status: "idle",
-    result: null, blocker: null, recommendation: null, createdAt: 1, updatedAt: 1,
-  };
-  const render = (threadId: string) => {
-    const rendered = renderSlot<
-      { threadId: string; projectId: string; isCompactViewport: boolean },
-      typeof rpcContract
-    >(
-      app.threadHeaderActions.find((action) => action.id === "chief-role")!,
-      { threadId, projectId: "proj_1", isCompactViewport: false },
-      { rpc: { role: ({ threadId }) => ({ role: threadId === worker.threadId ? worker.role : null }) } },
-    );
-    unmounts.push(() => rendered.lifecycle.unmount());
-    return rendered;
-  };
-  const managed = render(worker.threadId);
-  await vi.waitFor(() => expect(managed.getByLabelText("Chief Worker").textContent).toBe("Worker"));
-  managed.lifecycle.unmount();
-  const other = render("thr_other");
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  expect(other.queryByLabelText(/Chief/)).toBeNull();
-});
-
-// Contract (header badge): one label per role id; Crown only on chief and researcher; compact view shows the Crown alone for those two;
-// the accessible name stays `Chief supervisor` for chief and is `Chief <label>` for the rest, compact or not; rpc role null renders nothing.
-// Regression: a designer, tester or spec-writer id read "Worker"/"Spec-writer", and researcher got no Crown.
-describe("header badge per role", () => {
-  const cases = [
-    { id: "chief", label: "Chief", name: "Chief supervisor", crown: true },
-    { id: "planner", label: "Planner", name: "Chief Planner", crown: false },
-    { id: "worker", label: "Worker", name: "Chief Worker", crown: false },
-    { id: "designer", label: "Designer", name: "Chief Designer", crown: false },
-    { id: "tester", label: "Tester", name: "Chief Tester", crown: false },
-    { id: "spec-writer", label: "Spec Writer", name: "Chief Spec Writer", crown: false },
-    { id: "reviewer", label: "Reviewer", name: "Chief Reviewer", crown: false },
-    { id: "advisor", label: "Advisor", name: "Chief Advisor", crown: false },
-    { id: "researcher", label: "Researcher", name: "Chief Researcher", crown: true },
-  ] as const;
-  const badge = (role: string | null, isCompactViewport: boolean) => {
-    const rendered = renderSlot<{ threadId: string; projectId: string; isCompactViewport: boolean }, typeof rpcContract>(
-      app.threadHeaderActions.find((action) => action.id === "chief-role")!,
-      { threadId: "thr_1", projectId: "proj_1", isCompactViewport },
-      { rpc: { role: () => ({ role: role as any }) } },
-    );
-    unmounts.push(() => rendered.lifecycle.unmount());
-    return rendered;
-  };
-
-  test.each(cases)("$id shows $label, Crown $crown, named $name", async ({ id, label, name, crown }) => {
-    const rendered = badge(id, false);
-    const pill = await vi.waitFor(() => rendered.getByLabelText(name));
-    expect(pill.textContent).toBe(label);
-    expect(pill.querySelector("svg") !== null).toBe(crown);
-    expect(pill.getAttribute("title")).toBe(name);
+    await vi.waitFor(() => {
+      for (const [role, label] of cases) {
+        const header = within(rendered.getByTestId(role ?? "unmanaged"));
+        if (label) expect((header.getByRole("button", { name: label }) as HTMLButtonElement).disabled).toBe(true);
+        else expect(header.queryByRole("button")).toBeNull();
+      }
+    });
+    expect(rendered.rpcCalls).toEqual(threads.map(({ id }) => ({ method: "role", input: { threadId: id } })));
   });
 
-  test.each(cases.filter((c) => c.crown))("$id in a compact viewport shows the Crown only and keeps its accessible name", async ({ id, name }) => {
-    const rendered = badge(id, true);
-    const pill = await vi.waitFor(() => rendered.getByLabelText(name));
-    expect(pill.textContent).toBe("");
-    expect(pill.querySelector("svg")).not.toBeNull();
-  });
-
-  test.each(cases.filter((c) => !c.crown))("$id in a compact viewport still shows its label and no Crown", async ({ id, label, name }) => {
-    const rendered = badge(id, true);
-    const pill = await vi.waitFor(() => rendered.getByLabelText(name));
-    expect(pill.textContent).toBe(label);
-    expect(pill.querySelector("svg")).toBeNull();
-  });
-
-  test("rpc role null renders nothing", async () => {
-    const rendered = badge(null, false);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(rendered.queryByLabelText(/Chief/)).toBeNull();
-    expect(rendered.container.textContent).toBe("");
+  test("New Chief launches in the header's project, not a personal or unknown project", async () => {
+    const rendered = renderHeaderAction("new-chief", [
+      { id: "repo", projectId: "proj_repo" },
+      { id: "personal", projectId: "proj_me" },
+      { id: "unknown", projectId: "proj_missing" },
+    ], {
+      sidebarThreads: { projects: [project("proj_other"), project("proj_me", true), project("proj_repo")] },
+      rpc: { create: createRpc.create },
+    });
+    expect(within(rendered.getByTestId("personal")).queryByRole("button")).toBeNull();
+    expect(within(rendered.getByTestId("unknown")).queryByRole("button")).toBeNull();
+    fireEvent.click(within(rendered.getByTestId("repo")).getByRole("button", { name: "New Chief" }));
+    await vi.waitFor(() => expect(rendered.navigateCalls).toEqual([
+      { method: "toThread", threadId: "thr_proj_repo_new" },
+    ]));
+    expect(rendered.rpcCalls).toEqual([{ method: "create", input: { projectId: "proj_repo" } }]);
   });
 });
 
