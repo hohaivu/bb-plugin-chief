@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { makeThreadResponse } from "@get-bb/plugin-sdk/testing";
-import plugin from "./server";
 import { CLOSE_OUT, chiefReview, delegate, disposeAll, elapse, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { gateWorld } from "./test/gateWorld";

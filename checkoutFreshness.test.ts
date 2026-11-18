@@ -4,7 +4,7 @@ import { appendFile, mkdtemp, readFile, writeFile, realpath } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { delegate, disposeAll, execFileMock, setup, start, status, wave } from "./test/harness";
+import { delegate, disposeAll, execFileMock, setup, start } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -15,7 +15,6 @@ afterEach(disposeAll);
 // Real git runs against local bare remotes; every other CLI is refused. Git goes through execFileMock so each call is recorded
 // with the number of threads spawned when it started, and so a test can hold one the way a slow network would.
 describe("checkout freshness", () => {
-  type State = Awaited<ReturnType<typeof setup>>;
   const PRIMARY = { config: async () => ({ primaryHostId: "host_1" }), usageLimits: async () => ({}) };
   const CTX = { projectId: "proj_1" };
   const SURVEY = (question: string) => ({ question });
@@ -128,7 +127,6 @@ describe("checkout freshness", () => {
   };
   /** A git call that never answers on its own: it fails when execFile's `timeout` option elapses, as a killed child does. */
   const killedAfterTimeout = (options: any) => new Promise<void>((_, reject) => setTimeout(() => reject(Object.assign(new Error("Command failed: git (killed after timeout)"), { killed: true })), options.timeout));
-  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   const withFakeTimers = async (body: () => Promise<void>) => {
     vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
     try { await body(); } finally { vi.useRealTimers(); }

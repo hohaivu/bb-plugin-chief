@@ -411,7 +411,6 @@ describe("Chief backend", () => {
       ],
     }, { threadId: planner.threadId, projectId: "proj_1" });
     await approvePlan(state, chief.threadId, planner.threadId);
-    const path1 = planFile(state, planner.threadId, 1);
     const path2 = planFile(state, planner.threadId, 2);
     const path3 = planFile(state, planner.threadId, 3);
 
@@ -556,7 +555,6 @@ describe("Chief backend", () => {
       plan: [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [] }],
     }, { threadId: planner.threadId, projectId: "proj_1" });
     await approvePlan(state, chief.threadId, planner.threadId);
-    const path1 = planFile(state, planner.threadId, 1);
     const path2 = planFile(state, planner.threadId, 2);
     const delegateWave = async (n: number, branch: string) => JSON.parse((await state.harness.behavior.runCli([
       "delegate", "--title", `Wave ${n} work`, "--mission", "Do it",
