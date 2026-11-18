@@ -186,7 +186,7 @@ Shared worktree cleanup coordinates action ownership:
 
 ### Evidence-Only Tester Brief
 
-An evidence-only tester runs the commands that the mission names, on the commits that the mission names. It returns exit statuses and a base-to-head comparison.
+An evidence-only tester runs the commands that the mission names, or the commands of a complete prior receipt, on the commits that the mission names. It returns exit statuses and a base-to-head comparison.
 
 - `chief_delegate` accepts the optional input `evidenceOnly: true`. The CLI flag is `--evidence-only`. Reason: Chief needs one explicit way to ask for run evidence instead of tests.
 - `startWorker` refuses `evidenceOnly: true` when the kind that `admitDelegation` resolves is not `tester`. Reason: workers never run tests, and a run of suites on base and head is test running.
@@ -207,13 +207,14 @@ An evidence-only tester runs the commands that the mission names, on the commits
 - The first line of `## Wave` in an evidence brief names the wave number and total, and drops `Implement only this wave's plan file.`. Reason: the tester implements no plan file.
 - `## Git workflow` renders only when the call has a branch. It has one line: fetch the task branch, then fast-forward to it, and report blocked on a failure. Reason: the tester reads the folded docs and code of the task.
 - `## Evidence work` orders the tester to follow these rules. Reason: a run is evidence only when the commit, the state, and the exit status are known.
+  - Run only the commands that the mission names, else the commands of a complete `## Prior receipt`, in this worktree.
   - Write no test. This brief overrides the `chief-role-tester` skill.
   - Commit nothing, push nothing, and edit no tracked file.
   - Never use stash, autostash, or another worktree.
   - Record `git rev-parse HEAD` as `Head commit` before any run.
   - Run base commits with `git switch --detach <base>` on a clean tree. Afterwards, `git switch -` returns to the head and HEAD must equal `Head commit`.
   - After each switch, reinstall dependencies when the lockfile differs, and reset any database or state that the suites write.
-  - Run each command alone, and record `echo exit=$?` right after it. Use `set -o pipefail` before a pipe. Record the pass count of each file.
+  - Run each command alone as `<cmd> > "$BB_THREAD_STORAGE/<name>.log" 2>&1; echo exit=$?`, then read the last 80 lines of the log. Read more only when the tail does not show the failure. Record the pass count of each file. Reason: the full output stays in the log, and the tail keeps the context short.
   - A ready report lists base and head side by side for each command, with commit, exit status, and pass counts. It explains every difference. Reason: an unexplained difference is a regression.
   - Before the report, HEAD equals `Head commit` and `git status --porcelain` prints nothing.
   - A blocked report names the command, its exit status, and an output excerpt. It recommends `kind: tester` for a wrong test and `kind: worker` for product code.
@@ -228,6 +229,14 @@ An evidence-only tester runs the commands that the mission names, on the commits
 - A plan-linked evidence brief keeps the `## Deviations from plan` line. Reason: report intake refuses a plan-linked ready report without that heading.
 - The example brief of 13,996 bytes renders at 5,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. Reason: a clipped obligation can hide a required step.
 - A ready evidence-only tester discharges retest debt like any ready Tester. Reason: its run repeats the tests.
+- Inputs. An evidence-only tester needs these inputs before any run. Reason: a run without a pin or a command list is not valid evidence.
+  - `Expected head: <sha>` in the mission. It is the branch tip after the fix and any intended Spec Writer fold, not the predecessor's commit.
+  - `Last tested: <sha>` in the mission, else the Tested commit of the complete prior receipt.
+  - For each command, its cwd, exact command and required exit status: from the mission, else from the complete prior receipt. Mission values win.
+  - A missing input makes the tester report blocked. The report recommends `chief_delegate (replaces: <your thread id>, kind: tester)` without `evidenceOnly`.
+- Pin. After the sync, HEAD must equal Expected head. Otherwise the report is blocked and names both commits. The check never compares with the predecessor's Head commit. Reason: neither the predecessor's commit nor a synced HEAD pins the rerun.
+- Escalation. A finding that asks for a new or changed test, a receipt whose Coverage lacks the fixed behaviour, or a test that asserts the old behaviour makes the tester report blocked with the same normal-mode recommendation. Reason: an evidence tester writes no test.
+- Receipt. A ready result ends with `## Receipt` in the `chief-role-tester` skill format. Coverage and Gaps carry over from the prior receipt, Tested commit equals Expected head, and commands and results are updated. Reason: the next retest starts from this receipt.
 
 ### Spec Writer Side Lane
 
@@ -337,6 +346,11 @@ A tester brief has these rules:
 - When the prior report names no Head commit, the section says so and orders the tester to read the full report. Reason: the full report holds the facts that the section omits.
 - The tester rules come from the `chief-role-tester` skill. The working contract keeps the test-files-only boundary: the tester never changes product code or `docs/`. It omits the user-journey wording, the `## Docs needed` route, and the re-plan line. Reason: those lines belong to workers.
 - No brief renders the refactor oracle rule. The `chief-role-tester` skill holds it. Reason: the rule applies to the tester role, so the skill owns it once.
+- A tester delegated with `replaces:` gets `## Prior receipt (<id>)` after `## Predecessor's last report`. The evidence-only brief keeps it too. `<id>` is the prior tester: the newest row of its task chain with kind `tester` and a ready last report, in any row state. `priorReceipt` in `src/plan/planProgress.ts` finds it. Reason: the next tester starts from the last complete receipt.
+- A receipt is the `## Receipt` section at the end of a tester's ready result. It is complete when it has a `Tested commit: <7-40 hex>` line, at least one command line, `Coverage:` and `Gaps:` lines, a last non-blank line that reads `Receipt end.`, and at most 3,000 characters. Reason: the end line proves the stored text was not cut.
+- A complete receipt renders in full. Normal mode adds: "Reuse it: rerun the commands the change affects; do not rediscover commands or coverage it already names." Evidence mode adds: "Its commands are your commands and its Tested commit is Last tested, unless your mission names others."
+- A prior tester without a complete receipt renders a pointer line: "<id>'s report has no complete receipt: <report path, else `bb chief inspect <id>`>. Do not run partial commands from it." An older receipt never stands in for the newest tester's, and no receipt is clipped. Reason: an older receipt may name stale coverage.
+- A tester with no prior tester gets no section. An absent or incomplete receipt never refuses a delegation. Workers, designers and Spec Writers never get the section. Reason: only a tester reuses a receipt.
 
 ### Retest Debt
 
@@ -367,6 +381,9 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
   - An unplanned owner that is a Spec Writer gives a worker hand-off first, because the lane rules forbid a writer-to-Tester hand-off.
 - The Tester of the retest hand-off skips the consult and user rungs of `ledger.replacement`. Every other replacement keeps them. Reason: the rerun adds no new rejection and needs no new advice.
 - The pre-review advisory stays. After a Tester failure and a code fix, and with no verdict, the ready alert still asks for a Tester. Reason: before a review the rerun is advice, not a gate.
+- The tester route of a retest hand-off (`retestLines` in `src/runtime/nextAction.ts`) names the evidence-only option only when the chain's newest ready tester has a complete receipt. The option names that tester and its Tested commit, and it needs `Expected head` in the mission. Otherwise the route says that no complete receipt exists, and it names normal Tester mode. Reason: an evidence-only rerun needs a complete receipt and a pin.
+- The `wait`, `workerFirst` and `none` routes, the product-first sentence and the waiver sentence do not change. Reason: only the tester route needs a receipt.
+- Debt discharge does not change. A ready tester of either mode, created after the fix, pays the debt. A blocked one does not. Reason: the mode changes the brief, and the gate stays the same.
 - The migration adds `retest_skipped` to `managed_threads`. Display shows it in the roster, in the thread inspection, and in the Completed comment. `chief_complete` and `tests_skipped` are unchanged.
 
 ### Pull Request Pinning
