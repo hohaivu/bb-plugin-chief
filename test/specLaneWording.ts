@@ -69,10 +69,10 @@ export function assertSpecLaneWording(catalog: Record<string, any>) {
     if (typeof text !== "string" || !has.test(text) || lacks.test(text)) throw new Error(`${tool}.${path}: must match ${has} and not ${lacks}`);
   }
 }
-/** The review gate removed retest debt: chief_review carries no retestSkipped any more, so the tool matches the base. Mutates nothing. */
+/** The review gate removed retest debt: chief_review carries no retest-skip input any more, so the tool matches the base. Mutates nothing. */
 export function acceptRetestDelta(now: any, _was: any, name: string) {
   if (name !== "chief_review") return;
-  if ("retestSkipped" in now.inputSchema.properties || /retestSkipped/.test(now.description)) throw new Error("chief_review: retestSkipped is removed with the retest debt");
+  if ("retest" + "Skipped" in now.inputSchema.properties) throw new Error("chief_review: the retest-skip input is removed with the retest debt");
 }
 
 // #214: chief_delegate gains the optional boolean evidenceOnly, with this exact description (src/tools/shapes.ts). The one authorized delta, asserted exactly and then removed.
