@@ -71,7 +71,7 @@ export function hasSpecBaseline(body: string): boolean {
 }
 
 /** Every reason a report cannot be saved, one line per failing field: the field, its actual size or value, the limit, and the fix. */
-export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, params: ReportParams, plan: string | unknown[] | undefined): string[] {
+export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id" | "research_design">, params: ReportParams, plan: string | unknown[] | undefined): string[] {
   const errors: string[] = [];
   const num = (n: number) => n.toLocaleString("en-US");
   const ready = params.state === "ready";
@@ -101,6 +101,9 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, pa
   onlyWhenReady("regression", params.regression);
   onlyWhenReady("plan", params.plan);
   onlyWhenReady("findings", params.findings);
+  if (params.waitingOnUser !== undefined && !(row.role === "researcher" && row.research_design === 1 && (params.state === "active" || params.state === "blocked"))) {
+    errors.push(`waitingOnUser is only for a design researcher's active or blocked report (role ${row.role}, state "${params.state}"); remove it.`);
+  }
   // Emptiness, length and role are independent of each other and of state: each failing one gets its own line.
   if (params.lesson !== undefined) {
     if (!params.lesson) errors.push("lesson is empty; send text or omit it.");
@@ -439,7 +442,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
     const found = await lookupRow(threadId, callerProjectId);
     // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
-    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null });
+    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null, research_design: null });
     if (!candidate || candidate.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
     if (found.row && ["complete", "archived", "deleted"].includes(found.row.state)) {
       throw new Error(`Managed thread ${threadId} is ${found.row.state} and can no longer report.`);
@@ -525,7 +528,8 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         recommendation: params.recommendation ?? null, verdict,
         planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails,
         findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null,
-        testsPassed: params.testsPassed === undefined ? null : params.testsPassed ? 1 : 0, now,
+        testsPassed: params.testsPassed === undefined ? null : params.testsPassed ? 1 : 0,
+        waitingOnUser: params.waitingOnUser ? 1 : 0, now,
       });
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         store.markAdvised(threadId, now);

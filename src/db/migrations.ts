@@ -453,4 +453,8 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN tests_passed INTEGER`,
     // A fix run's origin, set at admission: 'gate' (the review gate's one fix worker) or 'chat' (a change asked for after completion); NULL otherwise.
     `ALTER TABLE managed_threads ADD COLUMN fix_run TEXT`,
+    // chief_research design mode: NULL/0 light, 1 design; the researcher whose design a planner builds on (wave 2); the typed wait marker that mutes stall alerts.
+    `ALTER TABLE managed_threads ADD COLUMN research_design INTEGER`,
+    `ALTER TABLE managed_threads ADD COLUMN research_thread_id TEXT`,
+    `ALTER TABLE managed_threads ADD COLUMN waiting_on_user INTEGER NOT NULL DEFAULT 0`,
 ];

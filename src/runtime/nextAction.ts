@@ -10,6 +10,7 @@ import { bounded } from "./exec";
 import { forgeEnv, prHead } from "../forge/forge";
 import { heavySlotCount } from "../research/heavySlots";
 import type { Ctx } from "./context";
+import { researcherNextLine } from "../research/research";
 
 const REVIEW_IDLE_WAIT_MS = 60_000;
 
@@ -232,6 +233,10 @@ export function createNextAction(ctx: Ctx) {
       if (row.kind === "tester") {
         return `Tester blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester.`;
       }
+    }
+    if (row.role === "researcher") {
+      const line = researcherNextLine(row, ctx.state.plannerActive);
+      if (line) return line;
     }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     if (row.state !== "ready") return null;

@@ -222,6 +222,8 @@ export function registerLifecycle(ctx: Ctx) {
           const now = Date.now();
           for (const row of store.all()) {
             if (row.role === "chief" || row.state !== "active" || row.active_since === null) continue;
+            // A design researcher waiting on the user has no timeout.
+            if (row.role === "researcher" && row.waiting_on_user === 1) continue;
             const elapsed = now - row.active_since;
             if (elapsed < threshold) continue;
             const hard = elapsed >= 2 * threshold;
