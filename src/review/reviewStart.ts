@@ -568,7 +568,7 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           const head = await pinHead(target, projectDir);
           // The builder's own checkout must be committed and pushed: the pin holds its HEAD (a Spec Writer fold may be ahead).
           const builderDir = live.environmentId ? await host.localPath(live.environmentId) : null;
-          if (!builderDir) throw new Error(`Worker ${target.thread_id}'s checkout is not on the plugin server, so its clean tree and pushed HEAD cannot be proved and the gate cannot pin it. Have it commit and push on its host (chief_continue (threadId: ${target.thread_id})), or move its checkout to this host, then call chief_review again.`);
+          if (!builderDir) throw new Error(`Worker ${target.thread_id}'s checkout is not on the plugin server, so its clean tree and pushed HEAD cannot be proved and the gate cannot pin it. A commit and push on that host cannot satisfy this. Hand the work to a worker whose checkout is on this host (chief_delegate (replaces: ${target.thread_id}, kind: worker)), wait for its ready report, then call chief_review again.`);
           await builderCheck(target, builderDir, head.sha, head.branch);
           pinned.push({ threadId: target.thread_id, reportSeq: target.report_seq, branch: head.branch, prUrl: target.pr_url, headSha: head.sha, base: head.base });
         }

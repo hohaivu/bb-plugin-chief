@@ -52,7 +52,11 @@ export function createCompletion(ctx: Ctx) {
     const chain = ledger.taskChain(row.thread_id);
     // A chat fix is unplanned: its provenance is the newest non-chat row it replaces (the original plan's target), whose writers stay authorized.
     const origin = row.fix_run === "chat" ? chain.map((id) => store.get(id)).find((other) => !!other && other.fix_run !== "chat") : undefined;
-    const allowed = new Set([...taskWriters(row, chain), ...(origin ? taskWriters(origin, ledger.taskChain(origin.thread_id)) : [])].map((writer) => writer.thread_id));
+    // A gate fixer or tester origin has no wave: use the gate's pinned target on this chat fix's PR or branch, never the whole plan.
+    const gate = origin && store.isGateActor(origin.thread_id) ? store.gateFor(origin.thread_id) : undefined;
+    const pinned = gate?.targets.find((target) => (row.pr_url && target.prUrl === row.pr_url) || (!!row.branch && target.branch === row.branch));
+    const source = (pinned && store.get(pinned.threadId)) || (gate ? undefined : origin);
+    const allowed = new Set([...taskWriters(row, chain), ...(source ? taskWriters(source, ledger.taskChain(source.thread_id)) : [])].map((writer) => writer.thread_id));
     const offending = found.commits.filter((commit) => !commit.writer || !commit.writer.split(",").some((id) => allowed.has(id.trim())));
     if (!offending.length) return null;
     const owner = row.plan_thread_id && row.plan_wave != null ? chainOwner(row.plan_thread_id, planWavesFor(row.plan_thread_id), row.plan_wave) : undefined;

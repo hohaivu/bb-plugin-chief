@@ -71,7 +71,11 @@ export function gateDecision<Row extends ProgressRow>(input: {
     .filter((writer, _, all) => !all.some((other) => other.replaces_thread_id === writer.thread_id));
   // Every repair delegated after the verdict must settle; the newest live one is the one waited on.
   const repair = repairs.find((writer) => !isSettled(writer) && !input.terminal(writer.state)) ?? repairs.at(-1);
-  const docsSettled = !docsFindings.length || (!!repairs.length && repairs.every(isSettled));
+  const gateWriters = gate.targets.map((target) => row(target.threadId)).filter((target): target is Row => !!target && isWriter(target.kind));
+  // A finding names no owner, so several writers' docs findings never auto-pass: Chief checks every repair, then completes with override.
+  const multiDocs = !!docsFindings.length && gateWriters.length > 1;
+  const multiEscalate = { kind: "escalate" as const, why: `the review found docs findings and the gate has ${gateWriters.length} Spec Writers (${gateWriters.map((writer) => writer.thread_id).join(", ")}); assign each finding to its owning writer: chief_delegate (replaces: <that writer>, kind: spec-writer) with only its findings, once per owning writer. Chief checks every docs repair, then completes with override` };
+  const docsSettled = !docsFindings.length || (!multiDocs && !!repairs.length && repairs.every(isSettled));
   const docsWait = !!docsFindings.length && !!repair && !isSettled(repair) && !input.terminal(repair.state);
   const done = (fixRow: Row) => isReady(fixRow) || fixRow.state === "complete";
   const corrector = actor(gate.corrector_thread_id);
@@ -79,6 +83,7 @@ export function gateDecision<Row extends ProgressRow>(input: {
     if (!done(corrector) && !["failed", "blocked"].includes(corrector.state)) return { kind: "wait", who: [corrector] };
     if (done(corrector) && corrector.tests_passed === 1 && docsSettled) return { kind: "pass" };
     if (docsWait) return { kind: "wait", who: [repair!] };
+    if (multiDocs && done(corrector) && corrector.tests_passed === 1) return multiEscalate;
     return { kind: "escalate", why: `corrector ${corrector.thread_id} ended ${corrector.state}${corrector.tests_passed === 0 ? " with failing tests" : ""}` };
   }
   const fixer = actor(gate.fixer_thread_id);
@@ -96,9 +101,7 @@ export function gateDecision<Row extends ProgressRow>(input: {
   if (!fixer && (tester!.tests_passed !== 1 || codeFindings)) return { kind: "fix", redTests: tester!.tests_passed !== 1, codeFindings };
   if (docsSettled) return { kind: "pass" };
   if (docsWait) return { kind: "wait", who: [repair!] };
-  const gateWriters = gate.targets.map((target) => row(target.threadId)).filter((target): target is Row => !!target && isWriter(target.kind));
-  // A finding names no owner, so only a one-writer gate assigns its docs findings safely; several writers need Chief's assignment.
-  if (gateWriters.length > 1 && !repairs.length) return { kind: "escalate", why: `the review found docs findings and the gate has ${gateWriters.length} Spec Writers (${gateWriters.map((writer) => writer.thread_id).join(", ")}); assign each finding to its owning writer: chief_delegate (replaces: <that writer>, kind: spec-writer) with only its findings, once per owning writer` };
+  if (multiDocs) return multiEscalate;
   const writer = gateWriters[0];
   return writer ? { kind: "docsRepair", writer } : { kind: "escalate", why: `the review found docs findings and no side-lane Spec Writer of this gate can repair them` };
 }
