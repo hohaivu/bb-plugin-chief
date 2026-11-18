@@ -453,11 +453,10 @@ A slot limits how many heavy commands run at once on one computer. The slot wrap
 - After 480 seconds of waiting, the wrapper exits 75 with a run-again line, and the command never runs. Reason: an agent tool call times out on a long wait, and the agent then runs the command again.
 - A call with `CHIEF_HEAVY_HELD` set runs its command directly and takes no slot. Reason: a command inside a slot must not wait for a second slot.
 - A usage error exits 2 and runs nothing. Reason: an unknown pool must never run a command.
-- A failure in heavy preparation logs a warning. The brief then has no `## Heavy commands`. Reason: heavy preparation must never block a delegation.
-- Spec Writers get no `## Heavy commands` and no wrapper fence. Reason: they run no builds or tests.
-- A wrapper fence appears under the Verify command only when the brief renders a Verify block. Reason: the fence belongs to the Verify block and follows its existing conditions.
-- The fence wraps the exact verify command, and the agent fills in `<pool>`. The plugin never chooses the pool from the command text. Reason: the plugin cannot know what a command does.
-- The `## Heavy commands` section still appears for every worker, designer, and tester brief, with or without a Verify block. Reason: those agents still run builds and tests through the wrapper.
+- Chief adds `## Heavy commands` to worker, designer, and tester briefs only when a published slot wrapper path is available. This rule includes evidence-only testers and briefs without a Verify block. Reason: those agents run builds and tests through the wrapper.
+- Chief adds a wrapper fence under `## Verify command` only when the brief already includes that block and a wrapper path is available. The raw Verify fence stays unchanged. The wrapper fence wraps the exact Verify command. The agent fills in `<pool>`. Chief does not choose the pool from the command text. Reason: the plugin cannot know what a command does.
+- If Chief cannot read the heavy-slot setting or publish the wrapper, it logs a warning and continues delegation. The brief has neither `## Heavy commands` nor a wrapper fence. Any Verify block that the brief normally includes stays unchanged. Reason: heavy preparation must never block a delegation.
+- Spec Writers get neither `## Heavy commands` nor a wrapper fence. Reason: Spec Writers do not run builds or tests.
 - A published script is never removed or rewritten. Its file name carries the first 12 hex characters of its content hash. Reason: a running brief keeps a script that exists.
 - `artifactDir` keeps its paths and fallbacks. Heavy preparation reads the data directory through the same lookup. Reason: artifacts and heavy files must share one data root.
 
