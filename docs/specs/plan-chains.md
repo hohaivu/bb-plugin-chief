@@ -32,6 +32,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Pinned review**: a review round bound to a specific pull request commit SHA.
 - **Unpinned review**: a review round without a readable commit SHA.
 - **Cleanup claim**: a persistent record in `cleanup_environment_claims` that assigns an environment action to one thread.
+- **Merge proof**: the forge answer that a pull request is merged. Cleanup needs it before it archives a row that has a pull request.
 - **Repair target**: a worker thread that a reviewer covers. An open target is a repair target with work still open.
 - **Loose target**: an open target that is not in a legacy stack.
 - **Reject streak**: the rejection count that a reviewer row carries as `reject_streak`.
@@ -53,7 +54,7 @@ Seven modules own the plan chains domain:
 
 1. `src/plan/waveSchedule.ts` owns graph traversal, wave relationships, wave absence, the lane predicate `sideLane`, `writerPending`, and the plan base of a chain head (`planBase`).
 2. `src/plan/planLifecycle.ts` owns delegation admission, role progression, and waivers.
-3. `src/runtime/delegation.ts` owns `startWorker`, which launches workers and Spec Writers. `src/tools/forgeInit.ts` owns forge initialization. `src/runtime/cleanup.ts` owns cleanup steps.
+3. `src/runtime/delegation.ts` owns `startWorker`, which launches workers and Spec Writers. `src/tools/forgeInit.ts` owns forge initialization. `src/runtime/cleanup.ts` owns cleanup steps and the merge cache. `src/forge/cleanup.ts` owns `taskPullRequests`.
 4. `src/plan/planProgress.ts` owns progress checks, review readiness, the release route to the tester, legacy restack rules, and the repair decision after a reviewer verdict.
 5. `src/runtime/nextAction.ts` and `src/runtime/completion.ts` own the text of the next call and the completion rules. `src/runtime/host.ts` (`chiefCoreRules`) owns the core rule that sends follow-up work to a fresh worker, with its one in-place exception.
 6. `src/research/delegationBrief.ts` owns the worker brief. `src/review/reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
@@ -460,6 +461,25 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 - A cleanup job that later observes the environment destroyed can claim branch deletion after a previous in-use observation. Reason: earlier in-use states do not lock future deletion ownership.
 - A single cleanup job on an unshared environment retains existing baseline step transitions, outcomes, and alerts. Reason: cleanup behavior for non-shared environments must not regress.
 
+### Merge Proof Before Cleanup
+
+- `taskPullRequests` in `src/forge/cleanup.ts` returns the pull request URLs that decide a row. An empty set means the row has no pull request. Reason: cleanup uses the same links as `cleanupEligible`.
+  - A worker gives its own `pr_url` and the `pr_url` of its successor chain.
+  - A reviewer gives the `pr_url` of each covered target. It uses `review_targets.pr_url`, or else the target row's `pr_url`.
+  - An advisor gives the `pr_url` of its worker, or of the workers of its plan.
+  - A planner gives the `pr_url` of every wave worker.
+- `observeCleanup` checks merge proof before it enqueues a row. A row whose pull request is open never enters the queue. Reason: until merge the task stays live.
+- Before a queued job runs its `archive` or `branch` step, the job checks merge proof again. Reason: the rule holds for jobs that were queued earlier.
+  - When a pull request lacks merge proof, the job waits for a later pass. It counts no attempt and records no error.
+  - `teardown` and `storage` keep their order after `archive`.
+- Merge proof comes from one in-memory cache in `createCleanup` (`src/runtime/cleanup.ts`). The `branch` step reads the same cache. Reason: one owner gives every step the same answer.
+  - The cache keeps a merged answer. It holds at most 500 entries and evicts the oldest first. Reason: bounds the cache size.
+  - Any other answer is asked again no sooner than 5 minutes later, for each pull request. Other answers are open, closed without merge, and failed (`prMerged` returns null). Reason: a failed answer keeps the row and its branch.
+- At most 10 forge lookups run in each `observeCleanup` pass. Lookups past the limit wait for a later pass. Reason: bounds the forge calls of one pass.
+- A pull request closed without merge keeps its rows and its job until Chief archives them by hand, or until a later merge. Reason: until merge the task stays live.
+- A row with no pull request on itself or its links keeps the timing of the earlier cleanup. Reason: rows without a pull request must not change.
+- Branch deletion keeps every safety check: `ownedBranch`, `deleteSafeBranch`, and the origin check that holds every commit. Reason: merge proof adds a gate and removes no check.
+
 ### Legacy Restack Handling
 
 - `src/plan/planProgress.ts` evaluates restack requirements only for legacy plans where waves have distinct branches. Reason: new chains share a single branch and never require branch restacking.
@@ -523,6 +543,7 @@ Known limits:
 - The report alert, `chief_roster` Pending, and the action panel read the same `reviewAdvice` answer. Reason: the three surfaces must never give different advice.
 - The task branch and pull request of a stacked or branch-based chain are based on its plan base. They never start from `origin/HEAD`, `main`, or `master`. Reason: the pull request must show only the changes of its own chain.
 - A plan with no `stackOn` and a planner with no branch behaves as before. Reason: existing plans must not change.
+- A row with a pull request is archived, and its branch deleted, only after merge proof for each such pull request. Missing or failed forge evidence keeps the row. Reason: until merge the task stays live, so a chat-requested fix can continue it.
 
 ## Related Decisions
 
