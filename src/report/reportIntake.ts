@@ -68,7 +68,7 @@ export function contractsOf(body: string): string | undefined {
 /** A tester result's `## Receipt` when complete, else null: a `Tested commit: <7-40 hex>` line, a command line (4+ `|` fields), `Coverage:` and `Gaps:` lines,
  * `Receipt end.` as the last line, at most 3,000 characters. The end line proves the stored text was not cut; a receipt is never clipped. */
 export function receiptOf(result: string | null): { text: string; testedCommit: string } | null {
-  const text = result === null ? undefined : sectionOf(result, "receipt")?.trim();
+  const text = sectionOf(result ?? "", "receipt")?.trim();
   if (!text || text.length > 3_000 || text.split(/\r?\n/).at(-1)!.trim() !== "Receipt end.") return null;
   const line = (label: string) => new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?${label}`, "im");
   const testedCommit = /^[ \t]*(?:[-*][ \t]+)?Tested commit:[ \t]*`?([0-9a-f]{7,40})`?[ \t]*$/im.exec(text)?.[1];

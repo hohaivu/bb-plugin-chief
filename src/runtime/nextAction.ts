@@ -40,10 +40,10 @@ export function createNextAction(ctx: Ctx) {
   const inPlaceLine = (row: ManagedRow) => `If the blocker is an environment or permission problem (a blocked command, a dirty build-cache file, a needed permission), not a code, test or spec defect: answer it in place with chief_continue (threadId: ${row.thread_id}, instruction: the allowed step, at most ${MAX_NUDGE_LENGTH} characters); it keeps its worktree.`;
 
   /** The evidence-only rerun option after a tester call: offered only when the chain's newest ready tester has a complete receipt. */
-  function evidenceOption(threadId: string, call: string): string {
+  function evidenceOption(threadId: string, args: string): string {
     const prior = progress.priorReceipt(threadId);
     return prior?.receipt
-      ? ` Its prior tester ${prior.tester.thread_id} has a complete receipt (Tested commit ${prior.receipt.testedCommit}): if no test needs to change, rerun evidence-only instead — ${call.replace(/\)$/, ", evidenceOnly: true)")} with \`Expected head: <branch tip after the fix and any intended fold>\` in the mission.`
+      ? ` Its prior tester ${prior.tester.thread_id} has a complete receipt (Tested commit ${prior.receipt.testedCommit}): if no test needs to change, rerun evidence-only instead — chief_delegate (${args}, kind: tester, evidenceOnly: true) with \`Expected head: <branch tip after the fix and any intended fold>\` in the mission.`
       : " No complete tester receipt on this chain: rerun in normal Tester mode (no evidenceOnly).";
   }
 
@@ -52,10 +52,11 @@ export function createNextAction(ctx: Ctx) {
     const lines = debts.map(({ fix, tester, route }) => {
       switch (route.kind) {
         case "tester": {
-          const call = `chief_delegate (${route.wave === undefined ? "" : `planThreadId: ${fix.plan_thread_id}, wave: ${route.wave}, `}replaces: ${route.replaces.thread_id}, kind: tester)`;
+          const args = `${route.wave === undefined ? "" : `planThreadId: ${fix.plan_thread_id}, wave: ${route.wave}, `}replaces: ${route.replaces.thread_id}`;
+          const call = `chief_delegate (${args}, kind: tester)`;
           const productFirst = tester && tester.thread_id === route.replaces.thread_id && ["blocked", "failed"].includes(tester.state)
             ? ` Or, if ${tester.thread_id}'s blocked report shows a product bug, fix it first — chief_delegate (replaces: ${tester.thread_id}, kind: worker).` : "";
-          return `${fix.thread_id} changed code after the review's rejection and no tester started after it has reported ready: rerun the tests — ${call}.${productFirst}${evidenceOption(route.replaces.thread_id, call)}`;
+          return `${fix.thread_id} changed code after the review's rejection and no tester started after it has reported ready: rerun the tests — ${call}.${productFirst}${evidenceOption(route.replaces.thread_id, args)}`;
         }
         case "wait": return `Tester ${route.tester.thread_id} (${route.tester.state}) is rerunning the tests after ${fix.thread_id}: wait for its ready report.`;
         case "workerFirst": return `Spec Writer ${route.replaces.thread_id} owns the branch: hand off to a worker first — chief_delegate (replaces: ${route.replaces.thread_id}, kind: worker) — then rerun the tests with kind: tester.`;
@@ -139,7 +140,7 @@ export function createNextAction(ctx: Ctx) {
       }
       case "retest":
         if (isWriter(row.kind)) return `A Spec Writer changed docs on test wave ${row.plan_wave}: rerun the tests against them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review. If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
-        return `A worker changed code on test wave ${row.plan_wave} after the tests ran: rerun them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review.${evidenceOption(row.thread_id, `chief_delegate (replaces: ${row.thread_id}, kind: tester)`)} If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
+        return `A worker changed code on test wave ${row.plan_wave} after the tests ran: rerun them — chief_delegate (replaces: ${row.thread_id}, kind: tester) — then review.${evidenceOption(row.thread_id, `replaces: ${row.thread_id}`)} If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, reason) or start the review: chief_review (workerThreadId: ${row.thread_id}).`;
       case "retestOwed": return `A code fix after the review's rejection owes a tester rerun before the next review. ${retestLines(row, step.debts)}`;
       case "unplanned":
         return `${row.kind === "tester" ? "" : `Workers never test: delegate a tester on this branch first — chief_delegate (replaces: ${row.thread_id}, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. `}Start its review now: chief_review (workerThreadId: ${row.thread_id}), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: ${row.thread_id}, skipReview: your reason).`;
