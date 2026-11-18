@@ -201,7 +201,7 @@ describe("skipReview docs/ ownership gate", () => {
       await git(peer, "checkout", "-q", "task");
       await git(peer, "rebase", "-q", "feature-a");
       await git(peer, "push", "-q", "-f", "origin", "HEAD:task");
-      await w.call("chief_plan", { title: "Rework checkout", mission: "Propose how to fix totals", ...(opts.plannerBranch ? { branch: opts.plannerBranch } : {}) });
+      await w.call("chief_plan", { undesignedReason: "small fix", title: "Rework checkout", mission: "Propose how to fix totals", ...(opts.plannerBranch ? { branch: opts.plannerBranch } : {}) });
       const planner = (await status(w.state)).threads.filter((row) => row.role === "planner" && row.chiefThreadId === w.chief.threadId).at(-1)!;
       const waves = [{ body: contracts(1) }, { body: wave(2), dependsOn: [], ...(opts.stackOn ? { stackOn: opts.stackOn } : {}) }];
       await report(w.state, planner.threadId, { state: "ready", result: "Plan summary.", plan: waves });

@@ -497,7 +497,7 @@ describe("Chief backend", () => {
     const state = await setup();
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
-    for (const question of ["Who calls this?", "Where is it stored?"]) await state.harness.behavior.callAgentTool("chief_research", { question }, opts);
+    for (const question of ["Who calls this?", "Where is it stored?"]) await state.harness.behavior.callAgentTool("chief_research", { question, design: false }, opts);
     const row = state.db.prepare(`INSERT INTO chief_research_calls (caller_thread_id, role, mode, run_id, outcome, started_at, ended_at) VALUES (?, ?, ?, NULL, ?, 1, 2)`);
     row.run(chief.threadId, "chief", null, "error");
     row.run(chief.threadId, "planner", "survey", "succeeded");
@@ -516,7 +516,7 @@ describe("Chief backend", () => {
   test("stats text labels a fresh chief_research start as calls, never resume", async () => {
     const state = await setup();
     const chief = await start(state);
-    await state.harness.behavior.callAgentTool("chief_research", { question: "Who calls this?" }, { threadId: chief.threadId, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_research", { question: "Who calls this?", design: false }, { threadId: chief.threadId, projectId: "proj_1" });
     const result = await state.harness.behavior.runCli(["stats", "--project", "proj_1"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Research: chief calls 1/1 succeeded");

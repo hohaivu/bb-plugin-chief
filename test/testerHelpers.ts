@@ -11,7 +11,7 @@ export const setLive = (state: State, threadId: string, status: string) => state
 
 /** A planner whose ready report carries `waves` (default: one implementation wave). Two implementation waves need an advisor review before delegation: approvePlan. */
 export async function plan(state: State, chiefThreadId: string, waves: object[] = [{ body: PLAN_FIXTURE }]) {
-  await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chiefThreadId));
+  await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"], ctxOf(state, chiefThreadId));
   const planner = (await status(state)).threads.filter((row) => row.role === "planner" && row.chiefThreadId === chiefThreadId).at(-1)!;
   await report(state, planner.threadId, { state: "ready", result: "Waves written.", plan: waves });
   return planner;

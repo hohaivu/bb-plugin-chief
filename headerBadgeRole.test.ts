@@ -53,7 +53,7 @@ describe("role rpc", () => {
     const planner = await plan(state, chief.threadId, [planWave(1), planWave(2)]);
     await state.harness.behavior.callAgentTool("chief_review", { branch: "feature/x" }, opts);
     await state.harness.behavior.callAgentTool("chief_consult", { planThreadId: planner.threadId, title: "Advice", mission: "Explore" }, opts);
-    await state.harness.behavior.callAgentTool("chief_research", { mode: "survey", question: "Who calls this?", items: ["a.ts"] }, opts);
+    await state.harness.behavior.callAgentTool("chief_research", { mode: "survey", question: "Who calls this?", design: false, items: ["a.ts"] }, opts);
 
     const threads = (await status(state)).threads;
     for (const role of ["planner", "reviewer", "advisor", "researcher"]) {

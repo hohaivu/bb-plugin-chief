@@ -28,6 +28,10 @@ export interface ThreadInsert<Role extends string = string, State extends string
   verifyCommand?: string | null;
   /** The Coordinator a new child Chief reports to; written only on a new row, a later insert keeps the stored link. */
   coordinatorThreadId?: string | null;
+  /** Researcher row: true for design mode; omitted on an upsert keeps the stored value. */
+  researchDesign?: boolean | null;
+  researchThreadId?: string | null;
+  researchReportSeq?: number | null;
 }
 
 /** The columns a report writes to its row; reserveReport maps them onto the UPDATE's parameters. */
@@ -49,6 +53,8 @@ export interface ReportReservation {
   findings: string | null;
   /** A gate tester's ready testsPassed (1/0); null on every other report keeps the stored value. */
   testsPassed: 0 | 1 | null;
+  /** A design researcher waiting on the user; every report rewrites it. */
+  waitingOnUser: 0 | 1;
   now: number;
 }
 
@@ -128,8 +134,8 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id, research_design, research_thread_id, research_report_seq
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -140,6 +146,9 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
       kind=excluded.kind, verify_command=excluded.verify_command,
       planner_on=COALESCE(excluded.planner_on, managed_threads.planner_on),
+      research_design=COALESCE(excluded.research_design, managed_threads.research_design),
+      research_thread_id=COALESCE(excluded.research_thread_id, managed_threads.research_thread_id),
+      research_report_seq=COALESCE(excluded.research_report_seq, managed_threads.research_report_seq),
       coordinator_thread_id=COALESCE(managed_threads.coordinator_thread_id, excluded.coordinator_thread_id),
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
@@ -150,6 +159,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       input.kind ?? null, input.plannerOn == null ? null : input.plannerOn ? 1 : 0, input.verifyCommand ?? null,
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now, input.coordinatorThreadId ?? null,
+      input.researchDesign == null ? null : input.researchDesign ? 1 : 0, input.researchThreadId ?? null, input.researchReportSeq ?? null,
     );
     wrote();
   }
@@ -308,12 +318,12 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     /** chief_report: reserves the next report_seq and stores the report's columns; returns the reserved seq and result_rev. */
     reserveReport(report: ReportReservation) {
       const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
-        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), findings=?, tests_passed = COALESCE(?, tests_passed), report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
+        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), findings=?, tests_passed = COALESCE(?, tests_passed), waiting_on_user=?, report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
         last_report_state=?, owner_approval=NULL, owner_approved_at=NULL,
         active_since = CASE WHEN ?='active' THEN active_since ELSE NULL END, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
         report.state, report.result, report.summary, report.blocker,
         report.recommendation, report.verdict,
-        report.planWaves, report.regression, report.fails, report.findings, report.testsPassed,
+        report.planWaves, report.regression, report.fails, report.findings, report.testsPassed, report.waitingOnUser,
         report.state, report.state, report.state, report.now, report.threadId,
       ) as { report_seq: number; result_rev: number };
       wrote();
@@ -374,18 +384,20 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     syncLive(sync: LiveSync) {
       db.prepare(`UPDATE managed_threads SET state=?, status=?, active_since=?,
       active_cycle=active_cycle+?, stall_alerted_cycle=CASE WHEN ? THEN NULL ELSE stall_alerted_cycle END,
+      waiting_on_user=CASE WHEN ?='failed' THEN 0 ELSE waiting_on_user END,
       updated_at=? WHERE thread_id=?`).run(
         sync.state, sync.status,
         sync.activeSince,
-        sync.enteringActive ? 1 : 0, sync.enteringActive ? 1 : 0, sync.now, sync.threadId,
+        sync.enteringActive ? 1 : 0, sync.enteringActive ? 1 : 0, sync.state, sync.now, sync.threadId,
       );
       wrote();
     },
 
     /** lifecycle: a Chief, or any thread that went idle, failed, archived or deleted, takes the state its event names. */
     recordState(threadId: string, state: string, status: string, now: number) {
-      db.prepare(`UPDATE managed_threads SET state=?, status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-        state, status, now, threadId,
+      db.prepare(`UPDATE managed_threads SET state=?, status=?, active_since=NULL,
+        waiting_on_user=CASE WHEN ?='failed' THEN 0 ELSE waiting_on_user END, updated_at=? WHERE thread_id=?`).run(
+        state, status, state, now, threadId,
       );
       wrote();
     },

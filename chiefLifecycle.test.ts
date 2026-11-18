@@ -29,7 +29,7 @@ describe("Chief backend", () => {
     const { state, chief } = world;
     const opts = { threadId: chief, projectId: state.live.get(chief)!.projectId };
     expect((await state.harness.behavior.runCli(
-      ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals"], opts,
+      ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals", "--undesigned-reason", "small fix"], opts,
     )).exitCode).toBe(0);
     const worker = await world.worker();
     await world.ready(worker.threadId);
@@ -43,7 +43,7 @@ describe("Chief backend", () => {
     const { state, chief } = world;
     const opts = { threadId: chief, projectId: state.live.get(chief)!.projectId };
     expect((await state.harness.behavior.runCli(
-      ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals"], opts,
+      ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals", "--undesigned-reason", "small fix"], opts,
     )).exitCode).toBe(0);
     const worker = await world.worker();
     await world.ready(worker.threadId);

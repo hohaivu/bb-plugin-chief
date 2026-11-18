@@ -16,7 +16,7 @@ describe("tester role", () => {
     const withContracts = (n: number, contracts: string) => `# Wave ${n}\nDo the work.\n\n## Contracts to verify\n- ${contracts}\n\n## What we're NOT doing\n- x`;
     /** An approved plan with the given waves; its ready result is `summary`. */
     async function chainPlan(state: State, chiefThreadId: string, waves: object[], summary = "Plan summary.") {
-      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctxOf(state, chiefThreadId));
+      await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", "--undesigned-reason", "small fix"], ctxOf(state, chiefThreadId));
       const planner = (await status(state)).threads.filter((row) => row.role === "planner" && row.chiefThreadId === chiefThreadId).at(-1)!;
       await report(state, planner.threadId, { state: "ready", result: summary, plan: waves });
       await approvePlan(state, chiefThreadId, planner.threadId);

@@ -295,7 +295,7 @@ describe("plugin warnings leave no script, prompt or code in the Sentry envelope
     const chief = await start(state);
     state.db.exec(`CREATE TRIGGER refuse_call_row BEFORE INSERT ON chief_research_calls BEGIN SELECT RAISE(ABORT, '${diagnostic.replace(/'/g, "''")}'); END`);
 
-    const reply = await state.harness.behavior.callAgentTool("chief_research", { question: "Who calls this?" }, { threadId: chief.threadId, projectId: "proj_1" }) as string;
+    const reply = await state.harness.behavior.callAgentTool("chief_research", { question: "Who calls this?", design: false }, { threadId: chief.threadId, projectId: "proj_1" }) as string;
     await flush();
 
     expect(reply).toContain("Started researcher thread");
