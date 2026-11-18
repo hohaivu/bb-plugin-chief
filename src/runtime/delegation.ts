@@ -1,5 +1,6 @@
 import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
-import { MAX_CARRIED_FAILS } from "../report/reportIntake";
+import { MAX_CARRIED_FAILS, sectionOf } from "../report/reportIntake";
+import { chainOf, isWriter } from "../plan/waveSchedule";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
@@ -15,7 +16,7 @@ const MAX_STALL_RESETS = 2;
 const MAX_LOG_READ = 30;
 
 export function createDelegation(ctx: Ctx) {
-  const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, progress, reviewerFails, store } = ctx;
+  const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, progress, reviewerFails, schedule, store } = ctx;
   /** A read-only role's environment: a fresh worktree on `branch` when it names one, else the project default. */
   async function readerEnvironment(projectId: string, branch?: string) {
     return branch ? worktreeEnvironment(await ctx.projectHost(projectId), branch) : { type: "project-default" as const };
@@ -239,10 +240,31 @@ export function createDelegation(ctx: Ctx) {
     const ruledOut = prior ? chainFails(prior.thread_id) : [];
     let structured: ReportFinding[] | undefined;
     try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
+    // A same-plan side-lane docs repair carries every known docs item of the waves its writer owns: wave w and the later chain waves before the next spec wave.
+    const docsWork: { items: string[]; sources: string[] } = { items: [], sources: [] };
+    if (isWriter(kind) && lane === "side" && prior && planThreadId !== undefined && prior.plan_thread_id === planThreadId && wave !== undefined) {
+      const waves = planWavesFor(planThreadId);
+      const chain = chainOf(waves, wave);
+      const next = chain.slice(chain.indexOf(wave) + 1).findIndex((n) => waves[n - 1]?.spec);
+      const owned = [wave, ...chain.slice(chain.indexOf(wave) + 1, next < 0 ? undefined : chain.indexOf(wave) + 1 + next)];
+      for (const n of owned) {
+        for (const row of schedule.waveWorkers(planThreadId, n)) {
+          const text = isWriter(row.kind) ? undefined : sectionOf(row.result ?? "", "docs needed")?.trim();
+          if (!text || /^none\.?$/i.test(text)) continue;
+          docsWork.items.push(`${row.thread_id} (wave ${n}): ${text}`);
+          docsWork.sources.push(row.thread_id);
+        }
+      }
+      if (prior.blocker && (prior.state === "blocked" || prior.last_report_state === "blocked")) {
+        docsWork.items.push(`${prior.thread_id} (blocker): ${prior.blocker}`);
+        docsWork.sources.push(prior.thread_id);
+      }
+    }
     const { prompt, reviewerBrief } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
-      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly,
+      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly, docsWork,
+      sharedReview: !!findings && ledger.targets(findings.thread_id).length > 1,
       receipt: kind === "tester" && prior ? progress.priorReceipt(prior.thread_id) : undefined,
     });
     // A side-lane writer, first or repair, never reuses a worktree: its own managed worktree is cut from the chain branch, so a stale or half-rebased side checkout never reaches the fold.

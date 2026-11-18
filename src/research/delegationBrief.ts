@@ -124,6 +124,10 @@ export type WorkerBriefInput = {
   specWave?: boolean;
   /** side: a Spec Writer in its own side worktree, folding docs/ onto the chain branch. Absent or implementation: every other row. */
   lane?: "side" | "implementation";
+  /** Same-plan side-lane Spec Writer repair: every known docs item of its owned waves and the prior blocker, with each item's source thread id. Optional: empty or absent renders nothing. */
+  docsWork?: { items: string[]; sources: string[] };
+  /** The replaced worker's open review covers more than one target, so its findings are not all this thread's. */
+  sharedReview?: boolean;
   /** Tester only: a compact no-commit evidence brief. Optional: older callers omit it. */
   evidenceOnly?: boolean;
   /** Tester with a replaces: the chain's newest ready tester and its parsed receipt (null: missing or incomplete). Optional: older callers omit it. */
@@ -137,10 +141,25 @@ const loadLine = (skills: string[], holds = "") =>
 
 const deviationsLine = "- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`.";
 
+const DOCS_WORK_MAX = 4_000;
+
+/** The repair's docs work list: whole items while the section stays within DOCS_WORK_MAX, then a pointer to every remaining source. */
+function docsWorkSection(wave: number | undefined, items: string[], sources: string[]): string[] {
+  const build = (shown: number) => [
+    "", `## Docs work list (wave ${wave})`,
+    ...items.slice(0, shown),
+    ...(shown < items.length ? [`${items.length - shown} more items not shown. Read each \`## Docs needed\` in full: ${sources.slice(shown).map((id) => `bb chief inspect ${id}`).join("; ")}.`] : []),
+    "Fix every item that still holds, together with the Spec delta and the docs findings your mission assigns, then fold once (section 10). List an item already true in the docs at your HEAD under `## Already done`, and one that does not hold under `## Disputed findings`.",
+  ];
+  let shown = items.length;
+  while (shown > 0 && build(shown).join("\n").length > DOCS_WORK_MAX) shown--;
+  return build(shown);
+}
+
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, receipt } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, receipt, docsWork, sharedReview = false } = input;
   const tester = kind === "tester";
   const evidence = evidenceOnly && tester;
   const specWriter = isWriter(kind);
@@ -174,6 +193,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
         ...findingLines(structured.map((entry) => moved.includes(entry) ? { ...entry, fix: undefined } : entry), "blocking"),
         ...(structured.some((entry) => entry.severity === "nit") ? ["Optional nits:", ...findingLines(structured, "nit")] : []),
       ] : verdictPreview(findings)),
+      ...(specWriter && sharedReview ? ["This review covers several branches and waves. Fix only the docs findings your mission assigns to this wave; leave the others to their owners and do not list them as disputed."] : []),
       ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
       ...(evidence ? ["Verify each finding first; list one that does not hold under `## Disputed findings` with evidence. An `[AMBIGUOUS: …]` item is a question for Chief."] : [
         "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
@@ -206,6 +226,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "Read each in full, with the docs they name. Derive every test case from these, never from the implementation.",
       ...specSources,
     ] : []),
+    ...(specWriter && docsWork?.items.length ? docsWorkSection(wave, docsWork.items, docsWork.sources) : []),
     ...((specDocs.length || specWave) && !specWriter && !evidence ? [
       "", "## Spec",
       tester
