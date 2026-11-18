@@ -291,7 +291,7 @@ The review gate is the one review of a plan. It gives one verdict and one test r
 - A pass stamps `cleanup_approved_at` on the target and on the gate actors. Reason: cleanup needs proof of a pass.
 - `skipReview` completes a row without the gate. It never stamps `cleanup_approved_at`. Reason: a skipped review is not a pass.
 - `override` completes a row without the gate. It never stamps `cleanup_approved_at`. The note reads `Completed without the review gate: <reason>`. Reason: an override is Chief's decision, not a review result.
-- An implementation-lane Spec Writer completes when its `replaces:` chain reaches a gate target whose gate passed. It needs no hand-off worker and no override. Reason: not stated in the code.
+- An implementation-lane Spec Writer completes when its `replaces:` chain reaches a gate target whose gate passed. The gate's pass line names it. It needs no hand-off worker and no override. Reason: the existing passed gate covers this repair path, and an unnecessary hand-off worker would have no gate.
 
 ### Gate decision
 

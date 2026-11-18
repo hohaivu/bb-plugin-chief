@@ -98,17 +98,20 @@ A plan chain follows this lifecycle:
 
 A plan with spec waves gets one Spec Writer, which runs after the last wave:
 
-1. Chief delegates each wave's worker without a kind. After every wave is ready, Chief delegates the plan's Spec Writer with `kind: spec-writer`, no `replaces:`, and the plan Spec Writer wave.
-2. The server launches the Spec Writer in a new side worktree on a `bb/` side branch cut from the task branch. It completes no row and repoints no row.
-3. The Spec Writer commits only `docs/` files on its side branch.
-4. Before it reports ready, the Spec Writer folds its commits onto the task branch. It runs these steps on a clean tree:
+1. Chief delegates each wave's worker without a kind.
+2. When every wave is ready, the ready alert of the last wave names two routes. Chief takes one of them:
+   1. Delegate the plan's Spec Writer: `chief_delegate (planThreadId: <plan id>, wave: <plan Spec Writer wave>, kind: spec-writer)`, with no `replaces:`. The writer runs in steps 3 to 6.
+   2. Go without it: `chief_skip_specs (planThreadId: <plan id>, reason)`. The reason goes on every spec wave that has no Spec Writer row. No writer runs.
+3. The server launches the Spec Writer in a new side worktree on a `bb/` side branch cut from the task branch. It completes no row and repoints no row.
+4. The Spec Writer commits only `docs/` files on its side branch.
+5. Before it reports ready, the Spec Writer folds its commits onto the task branch. It runs these steps on a clean tree:
    1. Set `B` to the writer's Base commit, once, before the first attempt.
    2. Fetch the task branch and note the commit `U` and the commit `H` of `HEAD`.
    3. Rebase the writer's own commits (`B..HEAD`) onto `U` with no autostash: `git rebase --no-autostash --onto origin/<branch> $B`. On a conflict, run `git rebase --quit` and report blocked with `Pre-fold head: H`, `B`, `U` and the conflicting paths. The writer does not restore the checkout, and nothing reuses it.
    4. Check that the diff `U..HEAD` lists only `docs/` paths.
    5. Push `HEAD` to the task branch with a plain push. A rejected push sets `B` to this attempt's `U` and repeats the steps from the fetch.
-5. The Spec Writer records Fold base and Fold head, or `Fold: none`.
-6. `chief_review` refuses to start while the plan's Spec Writer is missing or not settled, or while a legacy writer of another spec wave is not settled. Once every writer reports ready, the review gate starts its reviewer and its tester.
+6. The Spec Writer records Fold base and Fold head, or `Fold: none`.
+7. `chief_review` refuses to start while the plan's Spec Writer is missing or not settled, or while a legacy writer of another spec wave is not settled. While the plan's Spec Writer has no row, the refusal names the same two routes as the last ready alert. Once every writer reports ready, the review gate starts its reviewer and its tester. After the skip route, the review starts once no legacy writer is unsettled. A spec wave that never had a writer never blocks the review.
 
 Independent chains run in parallel:
 
@@ -249,14 +252,14 @@ An evidence-only tester runs only the commands that the mission names, on the co
 - A ready report and an idle thread after a ready report count the same for both triggers. Reason: the thread convention is the same in every ready check.
 - The plan review is rejected while a spec wave has a pending writer. Reason: the review must see the folded docs.
 - A side-lane Spec Writer is a separate review target. It never joins a legacy stack. Reason: the writer shares the task branch, so it is not a stacked branch.
-- A side-lane Spec Writer completes with a covering approve, `skipReview`, or `override`. An implementation-lane `spec-writer` keeps the rejection. Reason: a side writer has its own report and fold head.
+- A side-lane Spec Writer completes with a covering approve, `skipReview`, or `override`. An implementation-lane `spec-writer` completes only when its `replaces:` chain reaches a target of a passed gate. It then needs no hand-off worker and no override. Without that passed target, it keeps the rejection, and its worker follows it. Reason: a side writer has its own report and fold head, and a hand-off worker would have no gate.
 - `chief_skip_specs` takes `{planThreadId, reason}`. It records the reason on every unbypassed spec wave that has no Spec Writer row. It is refused for a plan with no `spec: true` implementation wave, and once the plan Spec Writer wave has a writer row. A repeat call changes nothing. Reason: it bypasses only a Spec Writer that Chief never delegated.
 - A spec waiver waives the planned Spec delta only. It does not block an incidental docs correction. Reason: a waiver and a docs repair are different decisions.
 - A side-lane Spec Writer folds by rebasing only its own commits (`B..HEAD`) onto the task branch, then pushes with a plain push. It never force-pushes. Reason: a force-push can erase the commits of the worker, and a full-branch rebase replays commits that the worker already rewrote.
 - On a fold conflict, a side-lane Spec Writer runs `git rebase --quit` and reports blocked. It does not restore its checkout, and the checkout may stay detached or partial. Nothing reuses that checkout. The writer never runs `git rebase --abort`, `git restore`, `git reset --hard`, `git checkout -- <path>` or a forced checkout. Reason: a user safety hook blocks those commands.
 - The Spec Writer takes its content from the `## Spec delta` of the wave only. It reads code only to check a name or path that the delta states. Reason: the planner already read the code, and a second read costs tokens and can give a second, conflicting reading.
 - The planner names the code path of each delta item as file and symbol. Reason: the writer does not read code to find it.
-- Before the fold, the Spec Writer may check each identifier that its docs name with `git grep` at HEAD. The writer lists a missing name under `## Unverified names` and does not wait for the worker. Reason: the writer runs in parallel, so the code of the worker may not exist yet.
+- Before the fold, the Spec Writer may check each identifier that its docs name with `git grep` at HEAD. The workers have pushed by then, so a missing name is a gap. The writer lists it under `## Unverified names` and continues. Reason: the writer starts after the last wave is ready, so a missing name is not work in progress.
 - The Spec Writer model is the per-machine `spec-writer` pick in Chief settings. Without a pick, it uses the Worker pick (`MODEL_FALLBACK` in `src/core/roles.ts`). Reason: a cheaper model can apply a precise delta.
 - An implementation-lane agent that reuses the chain worktree first requires a clean tree, fetches the task branch, and fast-forwards to it. It reports blocked when the fast-forward fails. Reason: the folded docs must be in the checkout before the agent reads files.
 - A Tester checks that the Fold head of each listed Spec Writer is an ancestor of its HEAD. Reason: the Tester must test against the folded docs.
@@ -264,17 +267,17 @@ An evidence-only tester runs only the commands that the mission names, on the co
 - A worker or designer on a spec wave treats the plan as its source of truth, and pre-plan specs can be stale. Reason: the Spec Writer records the change after the last wave.
 - A first plan Spec Writer and a same-plan side-lane repair get a `## Docs work list (wave <w>)` section. Reason: one writer fixes and folds every known docs item.
 - The section lists the `## Docs needed` of each worker, designer and tester row on the owned waves. Reason: those rows report the docs that their waves need.
-- The owned waves are wave `w` and each later wave of its chain before the next `spec: true` wave. Reason: the writer owns the docs of its chain segment only.
-- The plan Spec Writer owns every wave of the plan, across all chains. Reason: it covers the delta of every spec wave after the last wave.
+- The owned waves of the plan Spec Writer are every wave of the plan, across all chains. Reason: it covers the delta of every spec wave after the last wave.
+- The owned waves of a legacy repair on another spec wave are wave `w` and each later wave of its chain before the next `spec: true` wave. Reason: a legacy writer owns the docs of its chain segment only.
 - Each item carries its source thread id and wave. Reason: the writer checks each item against the docs and finds its owner.
-- Rows of other waves, other chains, other plans, and Spec Writer rows never appear in the section. Reason: other owners fix their own docs items.
+- Rows of other plans and Spec Writer rows never appear in the section. A legacy repair also leaves out every row outside its segment. Reason: other owners fix their own docs items.
 - A `None` section is skipped. Reason: it holds no docs item.
 - The section lists the prior writer's blocker only when its last report was blocked. Reason: an open blocker is docs work that the repair must fix.
 - The section holds whole items within 4,000 characters. Reason: a cut item loses its meaning.
 - The section shows the longest whole-item prefix that leaves room, within 4,000 characters, for the exact omitted count and every omitted source thread id. The prefix may be empty. Reason: inline items let the writer fix them without a file read.
 - When no prefix leaves that room, the section shows the exact omitted count and the path of one file in `$BB_THREAD_STORAGE`. The file holds the full work list. It has every collected worker, designer and tester `## Docs needed` item of the owned waves. It also has the prior writer's blocker when its last report was blocked. Reason: no item is dropped without a way to recover it.
-- A repair with no items gets no section. Reason: an empty section adds only noise.
-- An unplanned first writer, an implementation-lane or unplanned repair, a writer adopted by a new plan, and every non-writer kind get no section. Reason: only a same-plan side-lane repair owns the docs of its owned waves.
+- A work list with no items gets no section, on a first delegation or a repair. Reason: an empty section adds only noise.
+- An unplanned first writer, an implementation-lane or unplanned repair, a writer adopted by a new plan, and every non-writer kind get no section. Reason: only a same-plan side-lane writer owns the docs of its owned waves.
 - The writer fixes each item that still holds, then folds once. Reason: one repair replaces separate fix and fold writers.
 - On a review with several targets, a Spec Writer's findings section gets one scope line. Reason: findings carry no wave or target, so the writer needs a scope.
 - The scope line tells the writer to fix only the docs findings that its mission assigns. Reason: other findings belong to their owners. The findings list itself does not change.
