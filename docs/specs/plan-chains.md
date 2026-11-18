@@ -456,7 +456,9 @@ Known limits:
 - A snapshot is write-once. A later bind from the same researcher returns the same paths and leaves the snapshots unchanged. Reason: a design edited after approval must not change a plan.
 - The facts snapshot holds the full ready result of the researcher row. Reason: the planner must read the fact report in full.
 - `chief_plan` with `undesignedReason` requires research on, and no `researchThreadId` and no `revises`. Reason: each plan records its design or its skip.
-- `researchThreadId` and `undesignedReason` are refused together, and neither is accepted with `revises`. Reason: one plan has one design source.
+- With research off, `undesignedReason` is optional. When given, the server accepts it and the brief gets `Design discussion skipped: <reason>`. Reason: a skip stays on record even when the design flow is off.
+- The CLI takes the two inputs as `--research-thread thr_id` (`researchThreadId`) and `--undesigned-reason "…"` (`undesignedReason`). `bb chief plan` calls the same `startPlan`, so the CLI accepts and refuses the same inputs as the tool. Reason: one validation path keeps both entry points in agreement.
+- `researchThreadId` and `undesignedReason` are refused together, and neither is accepted with `revises`. This applies to the CLI flags too. Reason: one plan has one design source.
 - A `revises` planner copies `research_thread_id` and gets the same snapshot paths. Reason: a revision builds on the same design.
 - The planner brief holds `## Approved design` before `## Problem`, with both paths and no inline design text. Reason: the planner reads the design from its file.
 - `chief_forge_init` adds the design text, read from the snapshot, after the plan block of the pull request body, with a marker. Reason: reviewers read the approved design with the code.
