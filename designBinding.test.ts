@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
-import { TEST_WAVE, delegate, disposeAll, execFileMock, setup, start, status } from "./test/harness";
+import { PLAN_FIXTURE, TEST_WAVE, delegate, disposeAll, execFileMock, setup, start, status } from "./test/harness";
 import { planWave, report, rowOf, tool } from "./test/testerHelpers";
 import { provideSdk } from "./test/sdk";
 
@@ -231,6 +231,22 @@ describe("approved design binding", () => {
       expect(script).toContain(`Fact report: ${snap.facts}`);
       expect(script.indexOf("Plan — chain of waves")).toBeLessThan(script.indexOf(marker));
       expect(script).not.toContain("FACTS-TAIL");
+    });
+
+    // Contract (plan-chains.md Pull request body: "A plan without a design keeps the pull request body it had before this change"): the BODY and ISSUE_BODY of an undesigned plan's wave 1 are the bytes 16bbc52 produced
+    // (the literal below was captured from 16bbc52 with this same plan). Regression: a design block, marker or blank line leaking into a design-less body.
+    test("an undesigned plan's forge body is byte-identical to the body 16bbc52 produced", async () => {
+      const state = await setup({ heavyFiles: true });
+      await state.harness.behavior.setSettings({ plannerEnabled: true });
+      const chief = await start(state);
+      await state.harness.behavior.callAgentTool("chief_plan", { title: "Sessions", mission: "Plan it", undesignedReason: "small fix" }, { threadId: chief.threadId, projectId: "proj_1" });
+      const planner = plannerRows(state).at(-1)!.thread_id;
+      await report(state, planner, { state: "ready", result: "Waves written.", plan: [{ body: PLAN_FIXTURE }, TEST_WAVE(2)] });
+      const script = await tool(state, "chief_forge_init", { title: "Wave 1 work", planThreadId: planner, wave: 1 }, chief.threadId) as string;
+      const body = `Tracking work for Wave 1 work.\n\n<details><summary>Plan — chain of waves 1, 2 of 2 (planner ${planner})</summary>\n\nWaves written.\n</details>\n\n<details><summary>Wave 1 of 2 — Plan</summary>\n\n### Contracts to verify\n- Totals stay non-negative\n</details>\n\n<details><summary>Wave 2 of 2 — Wave 2</summary>\n\n### Contracts to verify\n- Wave 2 keeps its invariant\n</details>`;
+      expect(script).toContain(`\nBODY='${body}'\n`);
+      expect(script).toContain("\nDESIGN_MARKER=''\n");
+      expect(script).not.toContain("chief-design");
     });
 
     // Contract (plan-chains.md Pull request body): a reused pull request whose script reports the design block missing refuses the call. Regression: the call hands Chief a pull request with no design.
