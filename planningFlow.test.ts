@@ -196,7 +196,12 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configured.instructions).toContain("well-specified");
-    expect(configured.instructions).toContain("chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
+    // Research is on by default: the order starts with the design discussion.
+    expect(configured.instructions).toContain("chief_research (design: true; skipped only with chief_plan undesignedReason: your reason) → the user approves the design in the researcher thread → chief_plan (researchThreadId; no user plan review) (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
+    await state.harness.behavior.callRpc("setResearchSettings", { enabled: false } as never);
+    const off = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(off.instructions).toContain("Order: chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
+    expect(off.instructions).not.toContain("undesignedReason");
   });
 
   test("keeps planning off when the setting is turned off", async () => {

@@ -51,8 +51,8 @@ describe("chief_research", () => {
     const spawn = researcherSpawn(state);
     expect(spawn.prompt).toBe(row!.brief);
     for (const part of [
-      "## Question\nWho calls this?", RESEARCH_ONLY, "--parent-self", '--lifecycle-owner-thread "$BB_THREAD_ID"', '--environment "$BB_ENVIRONMENT_ID"',
-      "at most 6 helper threads", "bb thread wait", "Helpers:", "chief_report", `Report to that Chief.`, `Chief thread ${chief}`,
+      "## Ticket\nWith no separate ticket, this is the ticket.\nWho calls this?", RESEARCH_ONLY, "--parent-self", '--lifecycle-owner-thread "$BB_THREAD_ID"', '--environment "$BB_ENVIRONMENT_ID"',
+      "at least 1 and at most 6", "bb thread wait", "Helpers:", "chief_report", `Report to that Chief.`, `Chief thread ${chief}`,
     ]) expect(spawn.prompt).toContain(part);
     expect(spawn.environment).toEqual({ type: "reuse", environmentId: state.live.get(chief)!.environmentId });
     expect(callRows(state)).toEqual([{ caller_thread_id: chief, role: "chief", mode: null, run_id: null, outcome: "spawned" }]);
