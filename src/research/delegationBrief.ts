@@ -128,7 +128,7 @@ export type WorkerBriefInput = {
   /** Tester only: a compact no-commit evidence brief. Optional: older callers omit it. */
   evidenceOnly?: boolean;
   /** The published slot wrapper's path; set, every kind but a Spec Writer gets `## Heavy commands`. Optional: older callers omit it. */
-  heavyScript?: string | null;
+  heavyPath?: string | null;
 };
 
 /** The first Working contract item of a worker or planner brief: the plugin only offers a thread its skills, so the brief orders the load.
@@ -141,7 +141,7 @@ const deviationsLine = "- Your ready result must contain a `## Deviations from p
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, heavyScript = null } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, heavyPath = null } = input;
   const tester = kind === "tester";
   const evidence = evidenceOnly && tester;
   const specWriter = isWriter(kind);
@@ -241,14 +241,14 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
         "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
         "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
       ]),
-      ...(heavyScript && !specWriter ? [
+      ...(heavyPath ? [
         "Run it once through the slot wrapper; that run counts as running this exact command. Pool: sim if it boots or drives a simulator, emulator or device; test if it runs tests; else build:",
-        ...fenced(`bash "${heavyScript}" <pool> -- sh -c ${quote(verifyCommand)}`),
+        ...fenced(`bash "${heavyPath}" <pool> -- sh -c ${quote(verifyCommand)}`),
       ] : []),
     ] : []),
-    ...(heavyScript && !specWriter ? [
+    ...(heavyPath && !specWriter ? [
       "", "## Heavy commands",
-      `Slot wrapper: \`bash "${heavyScript}" <sim|test|build> -- <command>\`. Run every build and test command through it in the foreground, choosing the pool as your role skill says.`,
+      `Slot wrapper: \`bash "${heavyPath}" <sim|test|build> -- <command>\`. Run every build and test command through it in the foreground, choosing the pool as your role skill says.`,
     ] : []),
     ...(evidence ? (branch ? ["", "## Git workflow", `Before you read any file, on a clean tree run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`; if either fails, report blocked.`] : []) : branch || issueUrl || prUrl ? [
       "", "## Git workflow",

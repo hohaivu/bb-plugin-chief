@@ -51,6 +51,11 @@ export function createArtifacts(ctx: Ctx) {
     return { hostId, dir: join(dataDir, "chief", projectId, threadId) };
   }
 
+  async function readFile(hostId: string, path: string) {
+    const file = await bb.sdk.files.read({ hostId, path });
+    return typeof file === "string" ? file : (file as { content?: string }).content ?? "";
+  }
+
   /** Writes one of Chief's artifacts to its shared folder and returns the absolute path. */
   async function writeArtifact(threadId: string, projectId: string, name: string, content: string, onHost?: string) {
     const { hostId, dir } = await artifactDir(threadId, projectId, onHost);
@@ -93,8 +98,7 @@ export function createArtifacts(ctx: Ctx) {
     const { dir: dataDir, reason } = await hostDataDir(hostId);
     if (!dataDir) throw new Error(`Host ${hostId}'s BB data dir is unavailable (${reason})`);
     const heavy = join(dataDir, "chief", "heavy");
-    const read = (path: string) => bb.sdk.files.read({ hostId, path })
-      .then((file) => typeof file === "string" ? file : (file as { content?: string }).content ?? "", () => null);
+    const read = (path: string) => readFile(hostId, path).catch(() => null);
     if ((await read(join(heavy, "slots"))) !== `${slots}\n`) await atomicWrite(hostId, join(heavy, "slots"), `${slots}\n`);
     const content = heavyScript();
     const path = join(heavy, `chief-heavy-${createHash("sha256").update(content).digest("hex").slice(0, 12)}.sh`);
@@ -119,8 +123,7 @@ export function createArtifacts(ctx: Ctx) {
     try {
       const { hostId, dir } = await artifactDir(threadId, projectId);
       const path = join(dir, name);
-      const file = await bb.sdk.files.read({ hostId, path });
-      return { path, text: typeof file === "string" ? file : (file as { content?: string }).content ?? "" };
+      return { path, text: await readFile(hostId, path) };
     } catch {
       return null;
     }
