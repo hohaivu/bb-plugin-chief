@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { branchReviewBrief, reviewBrief, reviewContext, type BriefTarget, type ReviewBriefInput } from "./src/review/reviewStart";
 import { checkPlan } from "./src/report/reportIntake";
-import { REVIEWER_NATIVE_LINE, replaceText, spliceAfter, wave } from "./test/harness";
+import { REVIEWER_NATIVE_LINE, TEST_FILES, replaceText, spliceAfter, wave } from "./test/harness";
 import {
   EARLIER_OLD, IMPACT_OLD, INSPECT_PLAN_SUFFIX, NATIVE_NO_RESHAPE_LINE, NATIVE_RESHAPE_PAREN, NATIVE_RESHAPE_TAIL, PLAN_FULL_OLD, PLAN_LINE_OLD,
   REPORTS_NEW, REPORTS_OLD, REREVIEW_OLD, TEST_AUDIT_LINE, TEST_AUDIT_PAREN_WITH, TEST_AUDIT_PAREN_WITHOUT, WORKER_REPORTED_RULE,
@@ -362,7 +362,7 @@ describe("a merged rule is stated once", () => {
 
 describe("checkPlan: feature and reshape flags", () => {
   const NOT_DOING = "\n\n## What we're NOT doing\n- x";
-  const W = (n: number, extra: object = {}) => ({ body: wave(n) + NOT_DOING, ...extra });
+  const W = (n: number, extra: object = {}) => ({ body: `${wave(n)}${NOT_DOING}\n\n${TEST_FILES}`, ...extra });
   const TEST_WAVE_N = (n: number, dependsOn: number[]) => W(n, { test: true, dependsOn });
 
   // Contract: feature and reshape are booleans with spec's error shape, and never on a test or design wave; a plan with no such key gets the errors it always got.

@@ -51,13 +51,22 @@ export function findingLines(list: ReportFinding[], severity: ReportFinding["sev
 }
 
 /** The untrimmed text under the first heading named `name` (any level), up to the next heading of the same or higher level. Undefined without the heading. */
-export function sectionOf(body: string, name: string): string | undefined {
-  // ponytail: headings inside code blocks are deliberately out of scope, as for the NOT-doing check.
-  const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(body);
+export function sectionOf(body: string, name: string, skipFenced = false): string | undefined {
+  // With skipFenced, headings inside fenced code are blanked for matching only (same length, so indices still fit `body`); contractsOf keeps the plain scan.
+  let fenced = false;
+  const scan = skipFenced
+    ? body.split(/(\r?\n)/).map((line, i) => {
+      if (i % 2) return line;
+      if (/^(```|~~~)/.test(line.trim())) { fenced = !fenced; return " ".repeat(line.length); }
+      return fenced ? " ".repeat(line.length) : line;
+    }).join("")
+    : body;
+  const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(scan);
   if (!heading) return undefined;
-  const rest = body.slice(heading.index + heading[0].length).replace(/^\r?\n/, "");
-  const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(rest);
-  return end ? rest.slice(0, end.index) : rest;
+  const start = heading.index + heading[0].length;
+  const skip = /^\r?\n/.exec(scan.slice(start))?.[0].length ?? 0;
+  const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(scan.slice(start + skip));
+  return body.slice(start + skip, end ? start + skip + end.index : undefined);
 }
 
 /** A wave body's `Contracts to verify` section, trimmed. */
@@ -329,13 +338,13 @@ export function checkPlan(plan: string | unknown[]): string[] {
   bodies.forEach((body, index) => {
     if (body === undefined || !tests[index]) return;
     const n = index + 1;
-    const contracts = sectionOf(body, "contracts to verify");
+    const contracts = sectionOf(body, "contracts to verify", true);
     if (contracts !== undefined) {
       const count = topLevelItems(contracts);
       if (!count && contracts.trim()) errors.push(`plan wave ${n} is a test wave whose "## Contracts to verify" has no Markdown list item; write each contract as a list item (-, *, +, 1. or 1)).`);
       else if (count > MAX_TEST_CONTRACTS) errors.push(`plan wave ${n} is a test wave with ${count} contracts; max ${MAX_TEST_CONTRACTS}. Split the implementation into more chains (dependsOn [] or stackOn k), each ending with its own test wave.`);
     }
-    const files = sectionOf(body, "test files");
+    const files = sectionOf(body, "test files", true);
     if (files === undefined) errors.push(`plan wave ${n} is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max ${MAX_TEST_FILES}).`);
     else {
       const count = topLevelItems(files);
