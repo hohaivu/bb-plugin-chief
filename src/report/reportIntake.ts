@@ -8,6 +8,7 @@ import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../type
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
 import { ALERT_MARKER_ROOM, COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
 import { waveTitle } from "../plan/waveSchedule";
+import { BUSY_STATUSES } from "../runtime/constants";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 
@@ -36,8 +37,6 @@ export interface ReportIntakeAdapters {
   /** Hands the files an accepted report wrote to the tracker sync. Called after the commit and before the alert; never awaited, never throws. */
   trackFiles(row: ManagedRow, files: { name: string; content: string }[]): void;
   warn(message: string): void;
-  /** nextAction.ts planAdvisors: the plan's in-flight advisor, if any. */
-  planAdvisors(plannerId: string): { inFlight?: ManagedRow };
   /** One chief_events row, in the caller's transaction (observe.event); unset, nothing is ledgered. */
   event?(kind: string, row: Partial<ManagedRow>, detail?: string | null): void;
 }
@@ -481,7 +480,9 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const plannerReady = row.role === "planner" && params.state === "ready";
     // A replacement plan would drop the live advisor's gate: refuse it before the plan files or the state change.
     const advisorBusy = () => {
-      const reviewing = plannerReady && planInput ? adapters.planAdvisors(threadId).inFlight : undefined;
+      // Same in-flight test as nextAction.ts planAdvisors.
+      const reviewing = plannerReady && planInput
+        ? store.all().find((r) => r.role === "advisor" && r.plan_thread_id === threadId && r.advised_at == null && BUSY_STATUSES.has(r.state)) : undefined;
       if (reviewing) throw new Error(`chief_report was not saved: plan ${threadId} is in its one advisor review (${reviewing.thread_id}); wait for its report before submitting a new plan.`);
     };
     advisorBusy();
