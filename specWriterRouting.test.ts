@@ -1179,6 +1179,27 @@ describe("docs work list", () => {
     expect(again).not.toContain("(blocker)");
   });
 
+  // Contract 3 (fix 4): chief_stop blocks a row with a synthetic "Stopped by Chief" blocker though its last report was ready, or it never reported.
+  // The repair that replaces it carries no blocker line. Regression: the blocker is included whenever the row's state is blocked.
+  test.each([["a writer whose last report was ready", true], ["a writer that never reported", false]])("a chief_stop synthetic blocker is not listed for %s", async (_name, reported) => {
+    const state = await setup();
+    const ctx = await docsChains(state, OWN);
+    if (!reported) {
+      const fresh = await swap(state, ctx.chief, ctx.P, 5, ctx.s5, "spec-writer");
+      expect(rowOf(state, fresh).last_report_state).toBeNull();
+      ctx.s5 = fresh;
+    }
+    setLive(state, ctx.s5, "active");
+    const stopped = await state.harness.behavior.runCli(["stop", ctx.s5, "--reason", "stuck"], ctxOf(state, ctx.chief.threadId));
+    expect(stopped.exitCode).toBe(0);
+    expect(rowOf(state, ctx.s5)).toMatchObject({ state: "blocked" });
+    expect(rowOf(state, ctx.s5).blocker).toContain("Stopped by Chief");
+    const list = docsWorkList(await repair(state, ctx, 5, ctx.s5));
+    expect(list).toContain(`${ctx.w5} (wave 5): - W5NOTE`);
+    expect(list).not.toContain("(blocker)");
+    expect(list).not.toContain("Stopped by Chief");
+  });
+
   // Contract 4 (4,000 characters): whole items in order while the section fits; the overflow line names the count and every remaining source
   // id. Three sources of about 2,000 characters each (worker, tester, blocker) fit one item, so two sources remain.
   // Regression: an item cut mid-text, a section over the cap, or a dropped item with no pointer.
@@ -1191,10 +1212,65 @@ describe("docs work list", () => {
     expect(list).toContain(`${ctx.w5} (wave 5): ${big("END-W5")}`);
     expect(list).not.toContain("END-T6");
     expect(list).not.toContain("aaaa".repeat(10) + "END-T6");
-    expect(list).toMatch(/\n2 more items not shown\./);
-    expect(list).toContain(`bb chief inspect ${ctx.t6}`);
-    expect(list).toContain(`bb chief inspect ${ctx.s5}`);
-    expect(list).not.toContain(`bb chief inspect ${ctx.w5}`);
+    // One inspect instruction, then the remaining source ids inline in item order; the shown item's id is not repeated.
+    expect(list).toContain(`\n2 more items not shown. Read each \`## Docs needed\` in full with bb chief inspect <id>: ${ctx.t6} ${ctx.s5}.\n`);
+    expect(list.split("bb chief inspect")).toHaveLength(2);
+    expect(list.split(ctx.w5)).toHaveLength(2);
+  });
+
+  // Contract 4 at high cardinality (fix 1): there is no lifetime row cap, so a chain can own far more rows than the 4,000 characters hold. Clones of
+  // the tester row (14-character ids, as real ones) stand for rows retained over many repairs. The overflow notice is sized into the cap: whole
+  // items first, then the count and every remaining id inline; past what the ids themselves fit, the line points to `bb chief status` instead.
+  // Regression: the notice is added after the cut and the section exceeds the cap; a source is neither shown nor named nor pointed to.
+  const cloneRows = async (state: State, ctx: { chief: { threadId: string }; t6: string }, count: number) => {
+    const cols = (state.db.prepare("PRAGMA table_info(managed_threads)").all() as { name: string }[]).map((column) => column.name);
+    const insert = state.db.prepare(`INSERT INTO managed_threads (${cols.join(",")}) SELECT ${cols.map((name) => (name === "thread_id" ? "?" : name)).join(",")} FROM managed_threads WHERE thread_id=?`);
+    const ids = Array.from({ length: count }, (_, n) => `thr_${String(n + 1).padStart(10, "0")}`);
+    for (const id of ids) insert.run(id, ctx.t6);
+    await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, ctx.chief.threadId);
+    return ids;
+  };
+  const sourcesOf = (list: string) => ({
+    shown: [...list.matchAll(/^(thr_\w+) \(wave \d+\): /gm)].map((match) => match[1]!),
+    overflow: list.match(/^(\d+) more items not shown([.,].*)$/m),
+  });
+
+  // Whatever the representation, every source is shown as an item, named inline in the overflow line, or covered by the bb chief status pointer;
+  // the count in the line is exactly the number of items not shown. Inline ids are required while they fit (a short list of long items).
+  test.each([[8, "x".repeat(600), true], [150, "", false]])("with %i retained rows the section stays within 4,000 characters and accounts for every source", async (count, filler, inlineIds) => {
+    const state = await setup();
+    const ctx = await docsChains(state, { ...OWN, t6: `- T6NOTE${filler}` });
+    const clones = await cloneRows(state, ctx, count);
+    const list = docsWorkList(await repair(state, ctx, 5, ctx.s5));
+    const total = [ctx.w5, ctx.t6, ...clones];
+    const { shown, overflow } = sourcesOf(list);
+    expect(list.length).toBeLessThanOrEqual(4_000);
+    expect(shown.length).toBeGreaterThan(0);
+    expect(overflow).not.toBeNull();
+    expect(Number(overflow![1])).toBe(total.length - shown.length);
+    expect(shown).toEqual(total.slice(0, shown.length));
+    expect(list.split("bb chief inspect")).toHaveLength(2);
+    const pointed = overflow![2]!.includes("`bb chief status`");
+    if (inlineIds) expect(pointed).toBe(false);
+    if (!pointed) {
+      const named = overflow![2]!.split(": ")[1]!.replace(/\.$/, "").split(" ");
+      expect([...shown, ...named].sort()).toEqual([...total].sort());
+    }
+  });
+
+  test("when even the ids cannot fit, the overflow line gives the count and the bb chief status pointer, within 4,000 characters", async () => {
+    const state = await setup();
+    const ctx = await docsChains(state, OWN);
+    const clones = await cloneRows(state, ctx, 400);
+    const list = docsWorkList(await repair(state, ctx, 5, ctx.s5));
+    const { shown, overflow } = sourcesOf(list);
+    expect(list.length).toBeLessThanOrEqual(4_000);
+    expect(overflow).not.toBeNull();
+    expect(Number(overflow![1])).toBe(2 + clones.length - shown.length);
+    expect(overflow![2]).toContain("`bb chief status`");
+    expect(overflow![2]).toContain("bb chief inspect <id>");
+    expect(overflow![2]).not.toContain(clones.at(-1)!);
+    expect(list).toContain("Fix every item that still holds");
   });
 
   // Contract 5 (no section elsewhere): a first writer, an implementation-lane repair, an unplanned repair, a writer adopted by a new plan, and
@@ -1259,19 +1335,38 @@ describe("docs work list", () => {
     expect(lastPrompt(single)).not.toContain(SCOPE);
   });
 
-  // Contract 7 (texts): the shared review's hand-off alert names both chains' writers and carries the routing sentence once; a plan with no
-  // spec chain does not get it. The blocked-writer and spec-wrong sentences are asserted where those alerts are (blocked-alert tests above).
-  // Regression: the sentence is repeated per writer, or leaks onto a hand-off that names no Spec Writer.
-  test("the review hand-off carries the docs routing sentence once for several writers and never without a Spec Writer", async () => {
-    const SENTENCE = "In each Spec Writer's mission, list the docs findings that wave owns (verdict file item or file:line); a finding on a docs path several waves share goes to the wave whose Spec delta names it. The plugin attaches that wave's `## Docs needed` items.";
+  // Contract 7 (fix 2): the docs routing sentence is in the alert Chief is actually sent, once, inside the retained 1,200-character action, on a
+  // direct writer route (a side-lane writer is itself a target) and on the shared review of several chains' writers;
+  // a plan with no Spec Writer never gets it. The alert is read from what was delivered (lastAlert), not from the roster, which is not clipped.
+  // Regression: the sentence is repeated per writer, appended past the cap and clipped away, skipped on the direct side-lane arm, or leaks.
+  const SENTENCE = "In each Spec Writer's mission, list the docs findings that wave owns (verdict file item or file:line); a finding on a docs path several waves share goes to the wave whose Spec delta names it. The plugin attaches that wave's `## Docs needed` items.";
+  const once = (alert: string) => expect(alert.split(SENTENCE)).toHaveLength(2);
+  test("the shared two-chain review's delivered alert carries the docs routing sentence once, with every writer named", async () => {
     const state = await setup();
     const ctx = await docsChains(state, OWN);
     await reviewed(state, ctx.chief.threadId, ctx.t4, "request_changes");
-    // The alert's tail is clipped for a plan this long, so the full advice is read from the roster.
+    const alert = lastAlert(state);
+    expect(alert).toContain("The reviewer requires changes.");
+    once(alert);
+    for (const writer of [ctx.s1, ctx.s3, ctx.s5]) expect(alert).toContain(`replaces: ${writer}, kind: spec-writer`);
+    expect(alert).toContain("their findings are attached automatically.");
     const advice = (await roster(state, ctx.chief.threadId)).split("\n").find((line) => line.includes("The reviewer requires changes"))!;
-    for (const writer of [ctx.s1, ctx.s3, ctx.s5]) expect(advice).toContain(`replaces: ${writer}, kind: spec-writer`);
-    expect(advice.split(SENTENCE)).toHaveLength(2);
+    once(advice);
+  });
 
+  test("a direct side-lane writer handoff carries the docs routing sentence once in the delivered alert", async () => {
+    const state = await setup();
+    const chain = await fullChain(state);
+    await reviewed(state, chain.chief.threadId, chain.tester, "request_changes");
+    const alert = lastAlert(state);
+    expect(alert).toContain(`chief_delegate (replaces: ${chain.writer}, kind: spec-writer) for docs findings`);
+    once(alert);
+    // Inside the retained action, ahead of its escalate tail (a sentence appended after the whole action is what the cap clips).
+    expect(alert.indexOf(SENTENCE)).toBeGreaterThan(-1);
+    expect(alert.indexOf(SENTENCE)).toBeLessThan(alert.indexOf("Escalate if the disagreement"));
+  });
+
+  test("a plan with no Spec Writer never gets the docs routing sentence in its alert", async () => {
     const plain = await setup();
     const p = await specPlan(plain, [planWave(1), TEST_WAVE(2)]);
     await delegateWave(plain, p.chief.threadId, p.planner.threadId, 1);
@@ -1282,6 +1377,37 @@ describe("docs work list", () => {
     await reviewed(plain, p.chief.threadId, t2, "request_changes");
     expect(lastAlert(plain)).not.toContain("Docs needed");
     expect(lastAlert(plain)).not.toContain("Spec Writer");
+    expect(lastAlert(plain)).not.toContain(SENTENCE);
+  });
+
+  // Contract 7 (fix 3): the blocked Spec Writer alert promises the `## Docs needed` attachment only where startWorker collects it (a same-plan
+  // side-lane retry); an implementation-lane writer on a test wave and an unplanned writer keep the old instructions.
+  // Regression: the promise is made on a route whose retry gets no work list.
+  test("the blocked-writer alert promises the Docs needed attachment only on a same-plan side-lane writer", async () => {
+    const PROMISE = "The retry gets this wave's `## Docs needed` items with the blocker";
+    const state = await setup();
+    const side = await docsChains(state, OWN, true);
+    expect(lastAlert(state)).toContain("Spec Writer blocked: Delta names no domain.");
+    expect(lastAlert(state).split(PROMISE)).toHaveLength(2);
+    expect(await roster(state, side.chief.threadId)).toContain(PROMISE);
+
+    const lane = await setup();
+    const { chief, planner, tester } = await fullChain(lane);
+    const onTest = await swap(lane, chief, planner.threadId, 2, tester, "spec-writer");
+    await report(lane, onTest, { state: "blocked", result: "Cannot write", blocker: "Delta names no domain", recommendation: "Re-plan" });
+    expect(lastAlert(lane)).toContain(`Retry it with the fix: chief_delegate (replaces: ${onTest}, kind: spec-writer)`);
+    expect(lastAlert(lane)).not.toContain("Docs needed");
+    expect(await roster(lane, chief.threadId)).not.toContain(PROMISE);
+
+    const plain = await setup();
+    const c = await start(plain);
+    const first = (await delegate(plain, c.threadId, "Fix totals")).threadId;
+    await readyIdle(plain, first);
+    const docs = (await delegate(plain, c.threadId, "Docs", { replaces: first, kind: "spec-writer" })).threadId;
+    await report(plain, docs, { state: "blocked", result: "Cannot write", blocker: "Delta names no domain", recommendation: "Re-plan" });
+    expect(lastAlert(plain)).toContain("Spec Writer blocked: Delta names no domain.");
+    expect(lastAlert(plain)).not.toContain("Docs needed");
+    expect(await roster(plain, c.threadId)).not.toContain(PROMISE);
   });
 
   // Contract 8 (route unchanged): the same-plan repair still gets its own fresh worktree on the chain branch, the Fold section and the trailer line.
