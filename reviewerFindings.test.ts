@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
-import { APPROVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, rowOf, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
+import { APPROVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, planTwoWaves, rowOf, setup, start, status, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -234,17 +234,18 @@ describe("reviewer lesson from chief_report to the next reviewer", () => {
 
   test("an advisor's lesson shows under earlier-review lessons for every managed role, and not under Review lessons", async () => {
     const { state, chief, nextReviewer } = await firstReview();
-    await state.harness.behavior.runCli(["consult", "--title", "Rework checkout", "--mission", "Explore a fix for the discount bug"], as(chief.threadId));
+    const { planner } = await planTwoWaves(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan before delegation" }, as(chief.threadId));
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done", lesson: "Plans name their test wave." }, as(advisor.threadId));
-    expect(lessonRows(state)).toEqual([expect.objectContaining({ text: "Plans name their test wave.", source_thread_id: advisor.threadId, role: "advisor" })]);
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done", verdict: "approve", lesson: "Plans name their contracts." }, as(advisor.threadId));
+    expect(lessonRows(state)).toEqual([expect.objectContaining({ text: "Plans name their contracts.", source_thread_id: advisor.threadId, role: "advisor" })]);
     await acceptAll(state, chief.threadId);
     const seeded = (role: string) => ({ role, chiefThreadId: chief.threadId });
     const next = await nextReviewer();
     const texts: [string, string][] = [["reviewer", await instructionsOf(state, next)]];
     for (const role of ["worker", "planner", "advisor"]) texts.push([role, await instructionsOf(state, `thr_seed_${role}`, "proj_1", seeded(role))]);
     for (const [role, text] of texts) {
-      expect(section(text, EARLIER), role).toBe(`${EARLIER}\n- Plans name their test wave.`);
+      expect(section(text, EARLIER), role).toBe(`${EARLIER}\n- Plans name their contracts.`);
       expect(text, role).not.toContain(REVIEW);
     }
   });
