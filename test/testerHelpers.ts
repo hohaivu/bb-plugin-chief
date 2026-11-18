@@ -80,7 +80,9 @@ export const PR_URL = "https://github.com/o/r/pull/7";
 /** The forge answers `gh pr view <url>` with that pull request's pinned head (HEAD_SHA, base main); any other command answers empty. */
 export const forgeAnswers = (prs: Record<string, string> = { [PR_URL]: "feature/x" }) =>
   execFileMock.mockImplementation((file: string, args: string[]) => {
-    const branch = file === "gh" && args[0] === "pr" && args[1] === "view" ? prs[args[2]!] : undefined;
+    // The forge reads a pull request URL as its number plus --repo, so the number picks the pull request.
+    const url = file === "gh" && args[0] === "pr" && args[1] === "view" ? Object.keys(prs).find((key) => key.endsWith(`/pull/${args[2]}`)) : undefined;
+    const branch = url ? prs[url] : undefined;
     return Promise.resolve({ stdout: branch ? ghHead(branch) : "", stderr: "" });
   });
 export type Gate = { gate_key: string; reviewer_thread_id: string; tester_thread_id: string; fixer_thread_id: string | null; corrector_thread_id: string | null; targets: string };
