@@ -15,7 +15,7 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 
 ## 1a. Review gate tester
 
-When your brief has `## Gate targets`, you are the review gate's tester. This section wins over sections 2-6 where they differ.
+When your brief has `## Gate targets`, you are the review gate's tester. This section wins over sections 2-5 where they differ.
 
 - `## Gate targets` and `## Test scope` replace the source-of-truth list and the contracts checklist. For each target read `git diff origin/<base>...<pinned sha>`, the plan files, the docs the Spec Writers changed and the repository's test rules, then decide which tests to write and at which level.
 - Per branch: `git fetch origin && git checkout --detach origin/<branch>`, write the tests, run them filtered, commit, `git push origin HEAD:<branch>`. Never force-push. On a rejected push run `git fetch origin && git rebase origin/<branch>` once and push again; if it is rejected again, report blocked. When targets stack, put the tests on the stack's tip branch only.
@@ -44,38 +44,11 @@ Pick the level by what changed. Write the test at the lowest level that would ca
 
 Writing tests
 - New non-trivial logic gets at least one test. Trivial code (getters, pass-through, constants) gets none.
-- Bug fix: a test that reproduces the bug and fails first.
 - Test behavior through public APIs, not implementation details. Mock only at the boundary you don't own (network, clock, OS). No mocks of your own classes just to reach coverage.
 - Follow the project's existing test style, folders and helpers. Report blocked (ask) before adding a new test framework or the first test of a kind (unit, screenshot, E2E) to a repo with none.
 - Architecture tests: maintain them if the project has them; don't add new ones unasked.
 
-Maintaining tests
-- A test the change breaks is part of the change: fix the test, or report the code for a worker. Never skip, delete or loosen it to pass without saying why.
-- A test that was already failing on the base is not a blocker: don't fix it, list it in your report. A required exit-0 receipt is the exception (section 6).
-- When the change is a refactor or migration meant to keep behaviour, the base commit is the oracle: where practical, compare old and new behaviour through tests on the same inputs, report the comparison under Automated Verification, and explain every difference.
-
-Running tests
-- Every test command needs a filter. No filter = full suite.
-  - iOS: `xcodebuild test ... -only-testing:Target/Class`
-  - Swift package: `swift test --filter Module.Class`
-  - Flutter unit/widget/screenshot: `flutter test test/path/x_test.dart`
-  - Patrol: `patrol test -t integration_test/x_test.dart`
-  - Maestro: one `.yaml` flow, never a directory
-  - Vitest: `npx vitest run <file> -t "<name>"`
-- After a failure, re-run only the failing tests, not the suite.
-- Caps on every test run you write the command for, unless the project's own rules set others: Vitest/Jest `--maxWorkers=2`; `xcodebuild test ... -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`; `flutter test --concurrency=2`; Gradle `--max-workers=2`; `swift test` without `--parallel`. A Verify command runs exactly as given; its slot caps it.
-
-Simulators / emulators
-- Under `## Heavy commands`, boot, test and shut down a device you boot inside one wrapped `sim` command (e.g. `sh -c 'xcrun simctl boot <UDID> && xcodebuild test ...; s=$?; xcrun simctl shutdown <UDID>; exit $s'`), so the sim slot covers boot through teardown.
-- Shut down every simulator/emulator you booted as soon as you no longer need it, before ending your turn.
-  - Before booting, note which devices are already running (`xcrun simctl list devices booted`, `adb devices`). Leave those running.
-  - iOS: `xcrun simctl shutdown <UDID>` for each one you booted. Never `shutdown all`.
-  - Android: `adb -s emulator-<port> emu kill` for each one you booted.
-  - You can keep a device running if you'll test again right away in the same task; shut it down when the task ends.
-  - In your final report, list the devices you shut down.
-
-## 4. Authoring gate
-
+Authoring gate (short form of the `bb-global-skills:test-audit` skill's Authoring gate, Junk patterns and Retention bar; read it in full at `~/.bb/skills/test-audit/SKILL.md` or the bb-global-skills plugin when installed. Its Validation and Landing sections (run-vitest.mjs, check-changed.mjs, openclaw, crabbox, autoreview) do not apply: run tests as below.)
 Before adding any test, answer four questions; a missing answer means do not add it yet:
 1. What observable behavior, invariant, or independent contract does it protect?
 2. What credible regression makes it fail?
@@ -98,17 +71,44 @@ Reject a test that matches a junk pattern, unless it independently guards a publ
 - negative controls that pass for an unrelated reason;
 - names or fixtures that promise more than the input exercises.
 
+Retention bar: keep an existing test that independently guards one of those contracts, observable call ordering, or a regression with a credible failure mode. Static or slow is not a reason to delete. A retained test that fails on the base is a possible product bug: report it, do not delete it.
+
 A regression test must be shown failing on the pre-fix code (or a reverted control) for the intended reason. One regression at the owner boundary covers the bug.
 
 Persist required behavioral proofs in the existing test harness unless the brief explicitly requests run-only evidence. Map each proof to a receipt that executes it. Reuse existing coverage.
 
 Execute a mutation only when the brief requires it. Name the assertion that must fail and record that failure. A timeout or unrelated setup error is not proof. Never edit tracked product code for this check. Use a pre-fix commit or an isolated untracked copy of the real entry point. Do not add a production seam. Record restoration evidence and rerun the unmodified target. If this cannot respect your scope, report blocked.
 
-## 5. Campaigns
+Maintaining tests
+- A test the change breaks is part of the change: fix the test, or report the code for a worker. Never skip, delete or loosen it to pass without saying why.
+- A test that was already failing on the base is not a blocker: don't fix it, list it in your report. A required exit-0 receipt is the exception (section 5).
+- When the change is a refactor or migration meant to keep behaviour, the base commit is the oracle: where practical, compare old and new behaviour through tests on the same inputs, report the comparison under Automated Verification, and explain every difference.
+
+Running tests
+- Every test command needs a filter. No filter = full suite.
+  - iOS: `xcodebuild test ... -only-testing:Target/Class`
+  - Swift package: `swift test --filter Module.Class`
+  - Flutter unit/widget/screenshot: `flutter test test/path/x_test.dart`
+  - Patrol: `patrol test -t integration_test/x_test.dart`
+  - Maestro: one `.yaml` flow, never a directory
+  - Vitest: `npx vitest run <file> -t "<name>"`
+- After a failure, re-run only the failing tests, not the suite.
+- Caps on every test run you write the command for, unless the project's own rules set others: Vitest/Jest `--maxWorkers=2`; `xcodebuild test ... -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`; `flutter test --concurrency=2`; Gradle `--max-workers=2`; `swift test` without `--parallel`. A Verify command runs exactly as given; its slot caps it.
+
+Simulators / emulators
+- Under `## Heavy commands`, boot, test and shut down a device you boot inside one wrapped `sim` command (e.g. `sh -c 'xcrun simctl boot <UDID> && xcodebuild test ...; s=$?; xcrun simctl shutdown <UDID>; exit $s'`), so the sim slot covers boot through teardown.
+- Shut down every simulator/emulator you booted as soon as you no longer need it, before ending your turn.
+  - Before booting, note which devices are already running (`xcrun simctl list devices booted`, `adb devices`). Leave those running.
+  - iOS: `xcrun simctl shutdown <UDID>` for each one you booted. Never `shutdown all`.
+  - Android: `adb -s emulator-<port> emu kill` for each one you booted.
+  - You can keep a device running if you'll test again right away in the same task; shut it down when the task ends.
+  - In your final report, list the devices you shut down.
+
+## 4. Campaigns
 
 Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN.md](CAMPAIGN.md) beside this skill. Never start one on your own.
 
-## 6. Report
+## 5. Report
 
 - Never change docs/, with or without a `## Spec` block: list a needed docs change under `## Docs needed` in your ready result.
 - When your brief names a task branch, before you read any file, sync the checkout: require a clean tree, run `git fetch origin <branch>` then `git merge --ff-only origin/<branch>`, and record the synced `git rev-parse HEAD` as your Base commit (below). Reading the SKILL.md files of the skills your brief orders loaded is the only exception: load them first, then sync. When the fast-forward fails, report blocked.
@@ -122,6 +122,6 @@ Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN
   - Docs are wrong: blocked, recommend `kind: spec-writer`.
   - The Spec delta cannot be built: blocked, recommend a fresh `chief_plan`.
   - A new spec's baseline (named in the Spec Writer's report) is a source for regression tests, the same as the Spec delta's contracts. When the delta changes a baseline statement, test only the delta's value. Behaviour under the Spec Writer's Open questions is not a contract: do not test it as one.
-- Ready: tests committed and pushed; every test you ran passes, or fails only on the base (listed) and is not a required exit-0 receipt. Automated Verification lists each filtered command with its exit status and maps each test to the contract it proves and the mutation it catches.
+- Ready: tests committed and pushed; every test you ran passes, or fails only on the base (listed) and is not a required exit-0 receipt. Automated Verification lists each filtered command with its exit status and maps each test to the contract it proves and, per new test, the credible regression it catches.
 - Blocked when a test fails because product code is wrong: commit and push the tests; the blocker names the failing tests, the filtered command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: worker)` with the failures as its mission.
 - Missing tooling or a first-of-kind test also reports blocked.
