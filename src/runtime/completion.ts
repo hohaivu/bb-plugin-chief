@@ -159,10 +159,11 @@ export function createCompletion(ctx: Ctx) {
   }[cleanup];
 
   /** After a worker completes: flips its draft pull request to ready, best-effort. A forge failure
-   * never undoes the completion. "skipped" means there was no pull request to flip. */
+   * never undoes the completion. Without pr_url it flips by branch name. "skipped" means there was no pull request to flip. */
   async function readyPullRequest(row: ManagedRow): Promise<{ prReady: boolean | "skipped"; error?: string; line: string }> {
-    if (row.role !== "worker" || !row.pr_url) return { prReady: "skipped", line: "" };
-    const { ready, error } = await markPrReady(row.pr_url, await ctx.projectPath(row.project_id));
+    const target = row.pr_url ?? row.branch;
+    if (row.role !== "worker" || !target) return { prReady: "skipped", line: "" };
+    const { ready, error } = await markPrReady(target, await ctx.projectPath(row.project_id));
     return ready
       ? { prReady: true, line: "\nIts pull request is marked ready for review." }
       : { prReady: false, error, line: `\nCould not mark its pull request ready (${error}); the work is complete either way. Tell the user it is still a draft.` };
