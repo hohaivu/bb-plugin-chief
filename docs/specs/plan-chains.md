@@ -6,11 +6,11 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 
 ## Domain Terms
 
-- **Plan wave**: an ordered unit of implementation, design, or testing in a plan.
+- **Plan wave**: an ordered unit of implementation or design work in a plan.
 - **Wave dependency**: the optional `dependsOn` field of a plan wave. It is an array of integers with at most one entry. `[k]` means that the wave builds on wave `k` and continues on its branch. `[]` means that the wave is independent and starts its own branch and pull request. An omitted field means that the wave depends on the previous wave. Wave 1 has no parent dependency.
-- **Wave flags**: the optional booleans of a plan wave: `design`, `test`, `spec`, `feature` and `reshape`.
-- **Feature wave**: an implementation wave with `feature: true`. It adds new behaviour. Its review runs the native-design check. A wave that is neither `test` nor `design` is an implementation wave.
-- **Reshape wave**: an implementation wave with `reshape: true`. It is the make-native wave of a big feature. `feature` and `reshape` never mark a test wave or a design wave.
+- **Wave flags**: the optional booleans of a plan wave: `design`, `spec`, `feature` and `reshape`. A `test` key is refused.
+- **Feature wave**: an implementation wave with `feature: true`. It adds new behaviour. Its review runs the native-design check. A wave that is not `design` is an implementation wave.
+- **Reshape wave**: an implementation wave with `reshape: true`. It is the make-native wave of a big feature. `feature` and `reshape` never mark a design wave.
 - **Chain**: an ordered sequence of waves from a head wave to a tip wave.
 - **Chain head**: a plan wave with no parent dependency.
 - **Chain tip**: a plan wave that has no successor wave.
@@ -18,7 +18,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Plan base**: the base branch that a stacked or branch-based chain is fixed to. The server derives it, and `null` means the project default.
 - **Task branch**: the Git branch created for a plan chain.
 - **Worker environment**: the managed worktree environment assigned to a worker thread.
-- **Spec wave**: a plan wave marked `spec: true` that a test, design, or skipped-specs rule does not exclude.
+- **Spec wave**: a plan wave marked `spec: true` that a design or skipped-specs rule does not exclude.
 - **Side-lane Spec Writer**: a planned `spec-writer` row on a spec wave. Every row in its `replaces:` ancestry is also a `spec-writer`. It runs in parallel with the wave worker, in its own side worktree.
 - **Implementation lane**: every other worker row. This includes worker, designer, and tester rows. It also includes a `spec-writer` that replaced a worker, designer, or tester.
 - **Side worktree**: a private managed worktree on a `bb/` side branch cut from the task branch. A side-lane Spec Writer uses it.
@@ -35,14 +35,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Merge proof**: the forge answer that a pull request is merged. Cleanup needs it before it archives a row that has a pull request.
 - **Repair target**: a worker thread that a reviewer covers. An open target is a repair target with work still open.
 - **Loose target**: an open target that is not in a legacy stack.
-- **Reject streak**: the rejection count that a reviewer row carries as `reject_streak`.
-- **Rung**: the advice level (fix, consult, or stop) that `ledger.rung` returns for a reject streak.
-- **Raw chain**: the chain that `chainOf` finds in the wave list with absent waived test waves included.
-- **Code row**: a worker row in the implementation lane, not on a design wave, with kind `worker` or no kind. A Spec Writer, a Tester, and a Designer are never code rows.
-- **Rejection**: the newest `request_changes` verdict of a chain, when no later verdict exists. Its time is the verdict time.
-- **Fix**: the newest code row of a chain that Chief created after the rejection.
 - **Spec Writers of this task**: the Spec Writers in the `replaces:` chain of a task row, plus the side-lane writers on the waves of its chain. `taskWriters` returns them.
-- **Retest debt**: the duty to rerun the tests after a fix. A chain owes it when a fix exists and nothing discharges it.
 - **Evidence-only tester**: a Tester that Chief delegates with `evidenceOnly: true`. It runs commands that already exist, compares the results, writes no test, and makes no commit.
 - **Heavy command**: a build, a test run, or a simulator, emulator or device run that a worker, designer or tester starts.
 - **Slot pool**: one of three independent groups of heavy-command slots: `sim`, `test` and `build`.
@@ -82,9 +75,7 @@ Callers interact with these entry points:
   - The advice names the layout: whole plan, single managed worker, or unowned branch.
   - The advice lists the open targets, the legacy stack groups in wave order, and the loose targets.
   - For each target, the advice states whether it is a tester branch and whether it sits on a spec-bearing chain.
-  - A tester branch is a tester row or a worker on a test wave.
-- `retestDebts(row)`: returns the owed retest debts of every chain that the review of `row` covers, and the debts that Chief waived. Each owed debt names the fix, the outstanding Tester if any, and one route.
-- `chainTests(planThreadId, n)`: returns the test waves of the raw chain of wave `n`, head to tip. `chainWaiver(planThreadId, n)` returns the first waiver reason on those test waves.
+  - A tester branch is a tester row.
 - `newestVerdictAt(threadIds)`: returns the newest reviewer verdict and its time for a set of worker threads.
 - `onSpecChain(row)`: returns true for a plan chain with a Spec Writer on an unbypassed spec wave. It also returns true for an unplanned task chain that holds a Spec Writer.
 - `reusableEnvironment(threadId)`: returns the environment of an earlier reviewer if it is available for reuse.
@@ -105,7 +96,7 @@ A plan chain follows this lifecycle:
 6. Chief calls `chief_delegate` for the next wave using `replaces:` referencing the chain owner.
 7. The server assigns the existing worker environment, task branch, and pull request.
 8. Later waves in the chain repeat this replacement sequence.
-9. The chain tip worker reports ready, and Chief starts the plan review.
+9. Chief starts the review gate with `chief_review` after every wave and Spec Writer reports ready. See [review-engine.md](review-engine.md).
 
 A spec wave adds a Spec Writer that runs in parallel with the wave worker:
 
@@ -119,7 +110,7 @@ A spec wave adds a Spec Writer that runs in parallel with the wave worker:
    4. Check that the diff `U..HEAD` lists only `docs/` paths.
    5. Push `HEAD` to the task branch with a plain push. A rejected push sets `B` to this attempt's `U` and repeats the steps from the fetch.
 5. The Spec Writer records Fold base and Fold head, or `Fold: none`.
-6. The tester call of the test wave waits until every Spec Writer of the chain reports ready. Then Chief delegates the tester with `replaces:` referencing the chain owner of the parent wave.
+6. `chief_review` refuses to start while a Spec Writer of the chain is not ready. Once every writer reports ready, the review gate starts its tester.
 
 Independent chains run in parallel:
 
@@ -163,7 +154,7 @@ Shared worktree cleanup coordinates action ownership:
 
 ### Stacked Chain Base
 
-- A plan wave accepts `stackOn: k` only when it heads a chain. `k` is an integer from 1 to n-1, and wave `k` is neither a test wave nor a design wave. Reason: only an implementation wave of another chain gives a base to build on.
+- A plan wave accepts `stackOn: k` only when it heads a chain. `k` is an integer from 1 to n-1, and wave `k` is not a design wave. Reason: only an implementation wave of another chain gives a base to build on.
 - `checkReport` refuses `stackOn` on any other wave, with one error line for each broken rule. Reason: a non-head wave continues the branch of its parent.
 - `planBase` derives the base of a chain head in this order. Reason: one owner gives forge, admission, review and completion one value.
   1. A head with `stackOn: k` takes the task branch of the implementation owner of wave `k`'s chain. Until that chain has a task branch, the base is unresolved. Reason: only the implementation lane holds the code of wave `k`, and a side-lane Spec Writer does not count.
@@ -180,12 +171,11 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
 - `admitDelegation` names `replaces: <chain owner>` when it rejects a non-head wave without a replacement target. Reason: callers must know the latest implementation thread to continue the chain.
 - `admitDelegation` rejects an implementation delegation without `replaces:` when any wave in the chain already has an implementation-lane row. Reason: started chains must not allocate duplicate workers or environments.
-- `admitDelegation` rejects `kind: tester` on a non-test wave only when the raw chain of that wave has a test wave. This includes an absent waived test wave. The text lists the test waves of that chain. Reason: a Tester of that chain runs on its test wave, and the test wave of another chain does not change this.
-- `admitDelegation` admits `kind: tester` on a non-test wave when the raw chain has no test wave. The call needs `replaces:` of the worker whose branch it tests, or a new branch once that worker is complete. Reason: the retest route of a chain with no test wave must be a legal call.
+- `admitDelegation` refuses `kind: tester` while a review gate is open, unless `evidenceOnly` is true. Reason: the gate starts its own tester.
 - A later implementation wave is admitted while a Spec Writer is pending. Reason: Spec Writers never gate implementation waves.
 - `admitDelegation` rejects a replacement target from another chain of the same plan. Reason: independent chains must not inherit foreign branches or environments.
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
-- `admitDelegation` permits a tester wave to start fresh on a new branch when the tested worker completed. Reason: post-merge testing verifies code after branch deletion.
+- `admitDelegation` permits a tester to start fresh on a new branch when the tested worker completed. Reason: post-merge testing verifies code after branch deletion.
 - `admitDelegation` permits a fresh plan wave 1 delegation to replace a blocked row of another plan. The rule applies to each lane. Reason: re-planning allows recovery on the blocked worktree or side worktree.
 - `admitDelegation` refuses a fresh delegation (without `replaces:`) to a chain head with a plan base, while that base waits or is unresolved. Reason: the head must not build before its parent code exists.
 - `admitDelegation` refuses a fresh delegation to such a head without `branch`, and it never falls back to the project default. Reason: forge init cuts the branch from the plan base, so admission, forge and review agree on one value.
@@ -234,16 +224,7 @@ An evidence-only tester runs the commands that the mission names, or the command
 - The findings section keeps one guidance line instead of four. The line orders the tester to verify each finding first, and to list a finding that does not hold under `## Disputed findings`. Reason: the evidence brief must stay short.
 - The line `Read the verdict file in full.` appears only when the call attaches a verdict file path. An evidence tester without findings gets no findings section and no verdict line. Reason: the line must not point to a file that does not exist.
 - A plan-linked evidence brief keeps the `## Deviations from plan` line. Reason: report intake refuses a plan-linked ready report without that heading.
-- The example brief of 13,996 bytes renders at 6,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. The budget fits the required evidence instructions without cutting obligations. Reason: a clipped obligation can hide a required step.
-- A ready evidence-only tester discharges retest debt like any ready Tester. Reason: its run repeats the tests.
-- Inputs. An evidence-only tester needs these inputs before any run. Reason: a run without a pin or a command list is not valid evidence.
-  - `Expected head: <sha>` in the mission. It is the branch tip after the fix and any intended Spec Writer fold, not the predecessor's commit.
-  - `Last tested: <sha>` in the mission, else the Tested commit of the complete prior receipt.
-  - For each command, its cwd, exact command and required exit status: from the mission, else from the complete prior receipt. Mission values win.
-  - A missing input makes the tester report blocked. The report recommends `chief_delegate (replaces: <your thread id>, kind: tester)` without `evidenceOnly`.
-- Pin. After the sync, HEAD must equal Expected head. Otherwise the report is blocked and names both commits. The check never compares with the predecessor's Head commit. Reason: neither the predecessor's commit nor a synced HEAD pins the rerun.
-- Escalation. A finding that asks for a new or changed test makes the tester report blocked. So does a receipt whose Coverage lacks the fixed behaviour, or a test that asserts the old behaviour. The report recommends the same normal-mode call. Reason: an evidence tester writes no test.
-- Receipt. A ready result ends with `## Receipt` in the `chief-role-tester` skill format. Coverage and Gaps carry over from the prior receipt. Tested commit equals Expected head. Commands and results are updated. Reason: the next retest starts from this receipt.
+- The example brief of 13,996 bytes renders at 5,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. Reason: a clipped obligation can hide a required step.
 
 ### Spec Writer Side Lane
 
@@ -259,13 +240,13 @@ An evidence-only tester runs the commands that the mission names, or the command
 - `replaces:` a side-lane Spec Writer with another kind is rejected, and the text names the chain owner. Reason: a product repair belongs to the implementation lane.
 - A worker or designer may replace a ready writer only when the wave has no implementation-lane row. Reason: this legacy hand-off covers a head Spec Writer that ran before its worker.
 - A `spec-writer` that replaced a worker, designer, or tester is in the implementation lane, and its hand-off stays normal. A `spec-writer` without a plan is never in the side lane. Reason: no data migration is needed.
-- A test wave delegation is rejected while a spec wave of its chain has a pending writer. The text names each pending writer, or the wave that has no writer. Reason: the Tester derives tests from the committed docs.
-- The tester call has `replaces:` referencing the chain owner of the parent wave. Reason: the tester continues the implementation worktree.
-- `planProgress` returns a `waitWriters` step when the parent implementation row reports ready while a writer is pending. It returns the exact tester call when the last writer reports ready. Reason: Chief must not call a tester that admission rejects.
+- `chief_review` refuses to start while a spec wave of its chain has a pending writer. The text names each pending writer, or the wave that has no writer. Reason: the Tester derives tests from the committed docs.
+- The gate tester has no `replaces:`. It gets a fresh worktree on the first target branch. Reason: the tester supersedes no row.
+- `planProgress` returns a `waitWriters` step when the parent implementation row reports ready while a writer is pending. It returns the exact `chief_review` call when the last writer reports ready. Reason: Chief must not call a step that admission rejects.
 - A ready report and an idle thread after a ready report count the same for both triggers. Reason: the thread convention is the same in every ready check.
-- The plan review is rejected while a spec wave has a pending writer. The review step names an implementation chain tip. Reason: the review must see the folded docs.
+- The plan review is rejected while a spec wave has a pending writer. Reason: the review must see the folded docs.
 - A side-lane Spec Writer is a separate review target. `fixRound` never puts it in a legacy stack. It always lists the writer as a loose target. Reason: the writer shares the task branch, so it is not a stacked branch.
-- A side-lane Spec Writer completes with a covering approve, `skipReview`, or `override`. An implementation-lane `spec-writer` keeps the rejection, except on a waived test wave. Reason: a side writer has its own report and fold head.
+- A side-lane Spec Writer completes with a covering approve, `skipReview`, or `override`. An implementation-lane `spec-writer` keeps the rejection. Reason: a side writer has its own report and fold head.
 - `chief_skip_specs` is rejected after the wave has any `spec-writer` row. It works while only the worker exists. Reason: it only bypasses a Spec Writer that Chief never delegated.
 - A spec waiver waives the planned Spec delta only. It does not block an incidental docs correction. Reason: a waiver and a docs repair are different decisions.
 - A side-lane Spec Writer folds by rebasing only its own commits (`B..HEAD`) onto the task branch, then pushes with a plain push. It never force-pushes. Reason: a force-push can erase the commits of the worker, and a full-branch rebase replays commits that the worker already rewrote.
@@ -310,7 +291,7 @@ Only a Spec Writer changes `docs/`. The sections above define the lanes. This se
 - A worker, designer, or tester never changes `docs/`, on any plan wave or on unplanned work. Reason: the owner gives docs to the Spec Writer.
 - A worker or designer brief states the rule and its route. A needed docs change goes under `## Docs needed` in the ready result, and Chief delegates a Spec Writer. Reason: a needed change must reach the owner of docs.
 - A tester brief states the rule only. Its route lives in the `chief-role-tester` skill, which the brief orders the tester to follow. Reason: a tester brief carries no worker-only block, and the route keeps one owner.
-- `admitDelegation` admits an implementation-lane Spec Writer on any non-design wave. The writer replaces the chain owner. The wave can be a non-spec wave, a waived spec wave, a test wave, or a spec wave whose prior row is the worker. Reason: every non-design wave needs a legal docs route, and the chain owner holds the checkout.
+- `admitDelegation` admits an implementation-lane Spec Writer on any non-design wave. The writer replaces the chain owner. The wave can be a non-spec wave, a waived spec wave, or a spec wave whose prior row is the worker. Reason: every non-design wave needs a legal docs route, and the chain owner holds the checkout.
 - `admitDelegation` rejects a Spec Writer that replaces a row other than the chain owner. The text names the call that replaces the owner. Reason: a second row on the checkout would break the single implementation owner.
 - `admitDelegation` rejects a Spec Writer on a design-only wave. The text names the successor wave and the call for it. Reason: a design wave changes no repository files, so its docs need goes to the successor wave.
 - Such a writer shares the chain worktree and never completes on its own. It is not a retest fix. Reason: its worker, or a tester rerun, follows it.
@@ -361,7 +342,7 @@ A tester brief has these rules:
 - It omits `## Success criteria` and `## Constraints` when the list is empty. Other kinds always render both. Reason: an empty section adds only the text "None stated."
 - `## Verify command` keeps the command fence and has one rule. The tester lists the exit status under Automated Verification and never changes product code to make the command pass. The wrapper fence of the [Heavy Command Slots](#heavy-command-slots) section also applies. Reason: the worker rule "Fix the work until it exits 0" contradicts the ban on product code.
 - A failure at the tester's Base commit is present before the tester's test edits, not proof the failure predates the feature. The tester lists it without changing product code. It does not waive an explicit exit-0 receipt. Reason: Base commit is the tester's starting checkout (after the feature commits), so a Base failure can be caused by the feature. A required exit-0 receipt still blocks ready.
-- The tester runs a command for the whole suite only when its mission or the `## Contracts to verify` of its plan file asks for it. Otherwise it lists the command as "not run: full suite not asked for". In a plan, only the last test wave (the highest-numbered) owns the one full-suite run. When the Verify command is that suite, its one run counts for both. A failure is rechecked by rerunning only the failing files at the chain's base commit. Unplanned work keeps the request-only rule. Reason: the full suite is slow, and one run per plan covers the contracts. A contract such as `npx vitest run` exit 0 counts as a request.
+- The tester runs a command for the whole suite only when its mission or the `## Contracts to verify` of its plan file asks for it. Otherwise it lists the command as "not run: full suite not asked for". A failure is rechecked by rerunning only the failing files at the chain's base commit. Unplanned work keeps the request-only rule. Reason: the full suite is slow, and one run per plan covers the contracts. A contract such as `npx vitest run` exit 0 counts as a request.
 - It tells the tester to record the synced `git rev-parse HEAD` as `Base commit` one time. With a branch, the sync sentence holds the instruction. Without a branch, `## Test work` holds it. A worker brief records it as `Local sync`. Reason: one commit needs one record.
 - `## Test work` holds the one procedure for a test that fails because product code is wrong. It recommends `chief_delegate (... kind: worker)`. The `## Spec` block points to that procedure for code that contradicts the docs. Reason: two procedures for one failure conflict.
 - The `## Spec` block keeps the route for wrong docs: report blocked and recommend `kind: spec-writer`. Reason: only a Spec Writer changes docs.
@@ -381,40 +362,6 @@ A tester brief has these rules:
 - A prior tester without a complete receipt renders a pointer line: "<id>'s report has no complete receipt: <report path, else `bb chief inspect <id>`>. Do not run partial commands from it." An older receipt never stands in for the newest tester's, and no receipt is clipped. Reason: an older receipt may name stale coverage.
 - A tester with no prior tester gets no section. An absent or incomplete receipt never refuses a delegation. Workers, designers and Spec Writers never get the section. Reason: only a tester reuses a receipt.
 
-### Retest Debt
-
-A fix after a rejection is the riskiest change, and one review covers the whole plan. For this reason `chief_review` refuses to start while a covered chain owes a tester rerun.
-
-- A chain owes retest debt only when its newest verdict is `request_changes` and a code row exists that Chief created after that verdict. Reason: an approve closes the rejection.
-- Writers, Testers, Designers, side-lane rows, and rows on a design wave never create debt. Reason: only a code change invalidates the earlier test result.
-- `planProgress` finds the debt from the rows of the chain. It never reads Testers to find it. Reason: a Tester row proves no result.
-- A Tester that Chief created after the fix discharges the debt only when it has a ready report. Reason: row creation proves nothing about the tests.
-  - A busy, blocked, failed, stopped, or idle Tester without a ready report keeps the debt.
-  - A Tester older than the fix never discharges it.
-- Three more events discharge the debt:
-  - The raw chain has a waived test wave. A waived wave that no worker ran counts too.
-  - Chief passed `retestSkipped`, which is stored on the fix.
-  - A current review covers the latest report of the fix.
-- `retestDebts` adds up every chain of the plan review. `chief_review` on any chain tip is refused while one chain owes. The text names the route of the chain that owes. Reason: one review covers all chains.
-- `reviewBlock` checks retest debt last. The order of the other refusals is unchanged. An unplanned worker gets only this check. Reason: the new gate must not hide an older refusal.
-- `chief_review` with `retestSkipped` stores the reason on every owed fix in one batch, then starts the review.
-  - It stores nothing when another refusal applies.
-  - It is refused when no debt is owed, or when `pullRequest` or `branch` is present.
-  - The reviewer brief lists each waived retest and says that the reviewer judges those fixes without a rerun.
-  - Reason: Chief must record why a rerun was skipped, and one reason covers the whole list.
-- Each route names the live owner of the chain. It never names a completed row. Reason: `admitDelegation` and the branch-holder check of `startWorker` must accept the call.
-  - A working Tester that owns the chain gives `wait`.
-  - A chain with a test wave gives `chief_delegate (wave: <test wave>, replaces: <owner>, kind: tester)`. This includes an implementation-lane writer on the test wave.
-  - A chain with no test wave gives a Tester on the wave of the owner.
-  - An owner on an earlier wave of a legacy stack gives `restack`. The restacked Tester discharges the debt.
-  - An unplanned owner that is a Spec Writer gives a worker hand-off first, because the lane rules forbid a writer-to-Tester hand-off.
-- The Tester of the retest hand-off skips the consult and user rungs of `ledger.replacement`. Every other replacement keeps them. Reason: the rerun adds no new rejection and needs no new advice.
-- The pre-review advisory stays. After a Tester failure and a code fix, and with no verdict, the ready alert still asks for a Tester. Reason: before a review the rerun is advice, not a gate.
-- The tester route of a retest hand-off (`retestLines` in `src/runtime/nextAction.ts`) names the evidence-only option only when the chain's newest ready tester has a complete receipt. The option names that tester and its Tested commit, and it needs `Expected head` in the mission. Otherwise the route says that no complete receipt exists, and it names normal Tester mode. Reason: an evidence-only rerun needs a complete receipt and a pin.
-- The `wait`, `workerFirst` and `none` routes, the product-first sentence and the waiver sentence do not change. Reason: only the tester route needs a receipt.
-- Debt discharge does not change. A ready tester of either mode, created after the fix, pays the debt. A blocked one does not. Reason: the mode changes the brief, and the gate stays the same.
-- The migration adds `retest_skipped` to `managed_threads`. Display shows it in the roster, in the thread inspection, and in the Completed comment. `chief_complete` and `tests_skipped` are unchanged.
-
 ### Pull Request Pinning
 
 - `admitDelegation` rejects a delegation when `params.prUrl` differs from the pull request URL of the prior worker. Reason: replacement workers on a chain must preserve the established pull request.
@@ -428,7 +375,6 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 - `chief_forge_init` rejects a chain head when its chain already contains a row in any lane, so a chain with only a side-lane Spec Writer counts as started. Reason: started chains must not allocate duplicate forge resources.
 - `chief_forge_init` names the chain owner when it rejects a started chain head and an owner exists. Reason: callers must continue started work through replacement.
 - `chief_forge_init` includes one section for each wave of the chain in the pull request body. Reason: reviewers inspect contracts for the entire chain in a single pull request.
-- `chief_forge_init` includes waived test waves in the pull request body with their recorded waiver reasons. Reason: reviewers must see omitted test coverage and its justification.
 - `chief_forge_init` clips wave contracts at 2,000 characters in the pull request body. Reason: bounded bodies prevent forge payload limit rejections.
 - `chief_forge_init` clips the planner summary at 1,500 characters in the pull request body. Reason: bounded summaries keep the pull request readable.
 - `chief_forge_init` formats the tracking issue body to state one pull request per chain. Reason: the tracking issue text must describe the chain pull request model.
@@ -492,7 +438,8 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 - `parentOf` returns null when a wave has empty dependencies or index 1. Reason: head waves have no parent dependency.
 - `successorOf` returns the first non-absent wave that depends on the specified wave. Reason: graph traversal skips waves that have no execution.
 - `chainOf` traverses backward to the head and forward to the tip. Reason: callers require the complete sequence of linked waves.
-- `planWavesFor` marks a waived test wave as absent when no worker executed on it. Reason: undelegated waived tests do not participate in active scheduling.
+- A plan is 1 to 8 implementation waves (`checkPlan`). A `test` key is refused. Reason: the review gate runs the tests, so a test wave adds no work.
+- A persisted legacy test wave without rows is `absent`. It is never pending, and its index is kept. With rows, it is an ordinary wave (`planWavesFor`). Reason: stored plans keep their indices and their rows.
 
 ### Heavy Command Slots
 
@@ -548,7 +495,6 @@ Known limits:
 ## Related Decisions
 
 - [Spec Writer runs in parallel on a side worktree](../decisions/2026-11-10-spec-writer-parallel-side-worktree.md)
-- [Retest after a fix round gates the review](../decisions/2026-11-10-retest-after-fix-round.md)
 - [Only a Spec Writer changes docs](../decisions/2026-11-10-docs-owned-by-spec-writer.md)
 - [Stacked chains use a stackOn field](../decisions/2026-11-14-stacked-chains-stackon.md)
 - [Heavy commands run through a host slot wrapper](../decisions/2026-11-18-heavy-slots-host-capacity.md)
