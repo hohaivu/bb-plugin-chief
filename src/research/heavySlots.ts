@@ -32,7 +32,7 @@ case "$1" in sim|test|build) ;; *) usage ;; esac
 POOL=$1
 shift 2
 
-if [ -n "$CHIEF_HEAVY_HELD" ]; then exec "$@"; fi
+if ( set -u; : "$CHIEF_HEAVY_HELD" ) 2>/dev/null; then exec "$@"; fi
 if ! command -v lockf >/dev/null 2>&1; then
   echo "[chief-heavy] no lockf: running unthrottled" >&2
   exec "$@"
@@ -87,6 +87,14 @@ beat() {
   printf '[chief-heavy] waiting %ss for %s (%s busy): %s\n' "$SECONDS" "$POOL" "$1" "$out" >&2
 }
 
+# The deadline gates every round: checked after each failed round and after each poll sleep, before lockf runs again.
+expired() {
+  if [ "$SECONDS" -ge "$WAIT" ]; then
+    printf '[chief-heavy] %s: all %s slots busy for %ss; run the same command again in the foreground\n' "$POOL" "$1" "$SECONDS" >&2
+    exit 75
+  fi
+}
+
 WAITED=""
 LAST_BEAT=0
 while :; do
@@ -105,15 +113,13 @@ while :; do
     i=$(( i + 1 ))
   done
   WAITED=$SECONDS
-  if [ "$SECONDS" -ge "$WAIT" ]; then
-    printf '[chief-heavy] %s: all %s slots busy for %ss; run the same command again in the foreground\n' "$POOL" "$N" "$SECONDS" >&2
-    exit 75
-  fi
+  expired "$N"
   if [ $(( SECONDS - LAST_BEAT )) -ge "$BEAT" ]; then
     beat "$N"
     LAST_BEAT=$SECONDS
   fi
   sleep "$POLL"
+  expired "$N"
 done
 `;
 }

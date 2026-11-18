@@ -29,12 +29,12 @@ export function createArtifacts(ctx: Ctx) {
   /** The host's BB data dir (cached per process: a moved dir needs a plugin reload), or null with the reason it is unknown. */
   async function hostDataDir(hostId: string): Promise<{ dir: string | null; reason: string }> {
     let reason = "its thread storage root is unknown";
-    if (!ctx.state.dataDirs.has(hostId)) {
-      const dataDir = await bb.sdk.hosts.get({ hostId }).then((host) => host.threadStorageRootPath ? dirname(host.threadStorageRootPath) : null)
-        .catch((error) => { reason = `reading it failed: ${String(error)}`; return null; });
-      if (dataDir) ctx.state.dataDirs.set(hostId, dataDir);
-    }
-    return { dir: ctx.state.dataDirs.get(hostId) ?? null, reason };
+    const cached = ctx.state.dataDirs.get(hostId);
+    if (cached) return { dir: cached, reason };
+    const dataDir = await bb.sdk.hosts.get({ hostId }).then((host) => host.threadStorageRootPath ? dirname(host.threadStorageRootPath) : null)
+      .catch((error) => { reason = `reading it failed: ${String(error)}`; return null; });
+    if (dataDir) ctx.state.dataDirs.set(hostId, dataDir);
+    return { dir: dataDir, reason }; // this call's own lookup: another call's cache fill never turns its failure into success
   }
   async function artifactDir(threadId: string, projectId: string, onHost?: string) {
     // A named host skips storageLocation, which answers HTTP 409 while a new environment provisions.

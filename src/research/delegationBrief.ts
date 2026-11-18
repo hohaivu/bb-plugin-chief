@@ -164,6 +164,8 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   // The reviewer gets the same sections, with a long mission or context clipped —
   // it judges against the criteria and constraints, which stay in full.
   const reviewerBrief = render(clip(params.mission, 1_500), context && clipMiddle(context, 1_500));
+  // A code span keeps the shell text literal; its backtick run is one longer than any run inside, padded with spaces.
+  const span = (text: string) => ((ticks) => `${ticks} ${text} ${ticks}`)("`".repeat(Math.max(1, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1))));
   // A fence longer than any backtick run in the text, so a ``` line in it cannot close it.
   const fenced = (text: string) => ((fence) => [`${fence}sh`, text, fence])("`".repeat(Math.max(3, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1))));
   const prompt = [
@@ -243,12 +245,12 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ]),
       ...(heavyPath ? [
         "Run it once through the slot wrapper; that run counts as running this exact command. Pool: sim if it boots or drives a simulator, emulator or device; test if it runs tests; else build:",
-        ...fenced(`bash "${heavyPath}" <pool> -- sh -c ${quote(verifyCommand)}`),
+        ...fenced(`bash ${quote(heavyPath)} <pool> -- sh -c ${quote(verifyCommand)}`),
       ] : []),
     ] : []),
     ...(heavyPath && !specWriter ? [
       "", "## Heavy commands",
-      `Slot wrapper: \`bash "${heavyPath}" <sim|test|build> -- <command>\`. Run every build and test command through it in the foreground, choosing the pool as your role skill says.`,
+      `Slot wrapper: ${span(`bash ${quote(heavyPath)} <sim|test|build> -- <command>`)}. Run every build and test command through it in the foreground, choosing the pool as your role skill says.`,
     ] : []),
     ...(evidence ? (branch ? ["", "## Git workflow", `Before you read any file, on a clean tree run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`; if either fails, report blocked.`] : []) : branch || issueUrl || prUrl ? [
       "", "## Git workflow",
