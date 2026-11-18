@@ -125,7 +125,7 @@ export type WorkerBriefInput = {
   /** side: a Spec Writer in its own side worktree, folding docs/ onto the chain branch. Absent or implementation: every other row. */
   lane?: "side" | "implementation";
   /** Same-plan side-lane Spec Writer repair: every known docs item of its owned waves and the prior blocker, each with its source thread id. Optional: empty or absent renders nothing. */
-  docsWork?: { id: string; text: string }[];
+  docsWork?: DocsWorkItem[];
   /** The replaced worker's open review covers more than one target, so its findings are not all this thread's. */
   sharedReview?: boolean;
   /** Tester only: a compact no-commit evidence brief. Optional: older callers omit it. */
@@ -142,34 +142,50 @@ const loadLine = (skills: string[], holds = "") =>
 const deviationsLine = "- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`.";
 
 const DOCS_WORK_MAX = 4_000;
+/** The file name, under the repair's own thread storage, that holds the full work list when the section cannot name every omitted id. */
+export const DOCS_WORK_FILE = "docs-work.md";
 
-/** The repair's docs work list: whole items while the section stays within DOCS_WORK_MAX, then one overflow line with the count and every
- * remaining source id; when even the ids cannot fit, the line points to the complete list instead. */
-function docsWorkSection(wave: number | undefined, items: { id: string; text: string }[]): string[] {
-  const build = (shown: number, manifest: boolean) => {
-    const rest = items.length - shown;
-    return [
-      "", `## Docs work list (wave ${wave})`,
-      ...items.slice(0, shown).map((item) => `${item.id} ${item.text}`),
-      ...(rest <= 0 ? [] : [manifest
-        ? `${rest} more items not shown, too many ids to list. Run \`bb chief status\` for every worker and tester thread of this chain, then read each \`## Docs needed\` in full with bb chief inspect <id>.`
-        : `${rest} more items not shown. Read each \`## Docs needed\` in full with bb chief inspect <id>: ${items.slice(shown).map((item) => item.id).join(" ")}.`]),
-      "Fix every item that still holds, together with the Spec delta and the docs findings your mission assigns, then fold once (section 10). List an item already true in the docs at your HEAD under `## Already done`, and one that does not hold under `## Disputed findings`.",
-    ];
-  };
-  for (let shown = items.length; shown > 0; shown--) {
-    for (const manifest of [false, true]) if (build(shown, manifest).join("\n").length <= DOCS_WORK_MAX) return build(shown, manifest);
+/** One docs item of the repair's work list, with where it came from: a worker, designer or tester `## Docs needed`, or the prior writer's blocker. */
+export type DocsWorkItem = { id: string; kind: string; wave: number | null; blocker?: boolean; text: string };
+
+/** The repair's docs work list. The section is at most DOCS_WORK_MAX characters. It shows the longest prefix of whole items (possibly none)
+ * that leaves room for the exact omitted count and every omitted source id. Only when no prefix fits with the ids does the overflow line
+ * point to `file`, the full list written to the repair's thread storage; `file` is then that text. */
+function docsWorkSection(wave: number | undefined, items: DocsWorkItem[]): { lines: string[]; file?: string } {
+  const heading = `## Docs work list (wave ${wave})`;
+  const closing = "Fix every item that still holds, together with the Spec delta and the docs findings your mission assigns, then fold once (section 10). List an item already true in the docs at your HEAD under `## Already done`, and one that does not hold under `## Disputed findings`.";
+  const lines = items.map((item) => `${item.id} ${item.blocker ? "(blocker)" : `(wave ${item.wave})`}: ${item.text}`);
+  const n = items.length;
+  const itemsLen = [0];
+  for (const line of lines) itemsLen.push(itemsLen[itemsLen.length - 1] + line.length);
+  const idsLen = Array<number>(n + 1).fill(0);
+  for (let i = n - 1; i >= 0; i--) idsLen[i] = idsLen[i + 1] + items[i].id.length + (i < n - 1 ? 1 : 0);
+  const inlineLine = (shown: number) => `${n - shown} more items not shown. Read each in full with bb chief inspect <id>: its \`## Docs needed\`, or its blocker for the prior writer's id: ${items.slice(shown).map((item) => item.id).join(" ")}.`;
+  const fileLine = (shown: number) => `${n - shown} more items not shown, too many ids to list. All ${n} items, each in full with its source id, kind and wave, are in $BB_THREAD_STORAGE/${DOCS_WORK_FILE}: read that file.`;
+  // The serialized size: heading, shown lines, the optional overflow line and the closing line, joined by newlines after the empty first line.
+  const size = (shown: number, overflow: number) => heading.length + closing.length + itemsLen[shown] + overflow + (shown + (overflow ? 4 : 3) - 1);
+  const render = (shown: number, overflow: string) => ["", heading, ...lines.slice(0, shown), ...(overflow ? [overflow] : []), closing];
+  if (size(n, 0) <= DOCS_WORK_MAX) return { lines: render(n, "") };
+  // The inline line's length is its fixed text plus the id list: measure it from the suffix lengths, and build only the winner.
+  const fixed = inlineLine(0).length - idsLen[0];
+  for (let shown = n - 1; shown >= 0; shown--) {
+    if (size(shown, fixed + String(n - shown).length - String(n).length + idsLen[shown]) <= DOCS_WORK_MAX) return { lines: render(shown, inlineLine(shown)) };
   }
-  return build(0, items.length > 0 && build(0, false).join("\n").length > DOCS_WORK_MAX);
+  let shown = n - 1;
+  while (shown > 0 && size(shown, fileLine(shown).length) > DOCS_WORK_MAX) shown--;
+  const file = [`# Docs work list (wave ${wave}): all ${n} items`, "",
+    ...items.flatMap((item) => [`## ${item.id}: ${item.blocker ? "prior writer's blocker" : `${item.kind}, wave ${item.wave}`}`, "", item.text, ""])].join("\n");
+  return { lines: render(shown, fileLine(shown)), file };
 }
 
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
-export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
+export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string; /** The full docs work list, only when the brief's section points to it. */ docsWorkFile: string | undefined } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, planContextLine,
     kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, receipt, docsWork, sharedReview = false } = input;
   const tester = kind === "tester";
   const evidence = evidenceOnly && tester;
   const specWriter = isWriter(kind);
+  const docsSection = specWriter && docsWork?.length ? docsWorkSection(wave, docsWork) : undefined;
   const side = specWriter && lane === "side" && branch !== undefined;
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
   // Evidence mode: with no Chief constraints, the blocking findings' fixes become the constraints (each fix once).
@@ -233,7 +249,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "Read each in full, with the docs they name. Derive every test case from these, never from the implementation.",
       ...specSources,
     ] : []),
-    ...(specWriter && docsWork?.length ? docsWorkSection(wave, docsWork) : []),
+    ...(docsSection?.lines ?? []),
     ...((specDocs.length || specWave) && !specWriter && !evidence ? [
       "", "## Spec",
       tester
@@ -372,7 +388,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- Blocked when the Spec delta contradicts the plan or cannot be written: recommend a fresh chief_plan with this report in context. Never recommend kind: worker.",
     ] : []),
   ].join("\n");
-  return { prompt, brief, reviewerBrief };
+  return { prompt, brief, reviewerBrief, docsWorkFile: docsSection?.file };
 }
 
 const branchLine = (branch: string) => `Your worktree is based on branch ${branch} (an open branch, not the project default). Read and plan against it.`;

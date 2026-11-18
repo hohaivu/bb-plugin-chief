@@ -1,4 +1,4 @@
-import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
+import { DOCS_WORK_FILE, advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
 import { MAX_CARRIED_FAILS, sectionOf } from "../report/reportIntake";
 import { isWriter } from "../plan/waveSchedule";
 import { worktreeEnvironment } from "../research/managedSpawn";
@@ -244,11 +244,11 @@ export function createDelegation(ctx: Ctx) {
     const docsWork = isWriter(kind) && lane === "side" && prior && planThreadId !== undefined && prior.plan_thread_id === planThreadId && wave !== undefined ? [
       ...schedule.ownedWorkers(planThreadId, wave).flatMap((row) => {
         const text = sectionOf(row.result ?? "", "docs needed")?.trim();
-        return text && !/^none\.?$/i.test(text) ? [{ id: row.thread_id, text: `(wave ${row.plan_wave}): ${text}` }] : [];
+        return text && !/^none\.?$/i.test(text) ? [{ id: row.thread_id, kind: row.kind ?? "worker", wave: row.plan_wave, text }] : [];
       }),
-      ...(prior.blocker && prior.last_report_state === "blocked" ? [{ id: prior.thread_id, text: `(blocker): ${prior.blocker}` }] : []),
+      ...(prior.blocker && prior.last_report_state === "blocked" ? [{ id: prior.thread_id, kind: "spec-writer", wave: prior.plan_wave, blocker: true, text: prior.blocker }] : []),
     ] : [];
-    const { prompt, reviewerBrief } = workerBrief({
+    const { prompt, reviewerBrief, docsWorkFile } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
       specDocs, specWave, lane, evidenceOnly: params.evidenceOnly, docsWork,
@@ -267,6 +267,11 @@ export function createDelegation(ctx: Ctx) {
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
       kind: kind === "worker" ? null : kind, plannerOn, verifyCommand,
     });
+    // The overflow file is written after the spawn, once the thread's own storage exists; the brief names it by $BB_THREAD_STORAGE.
+    if (docsWorkFile) {
+      await ctx.retryWhileProvisioning(() => ctx.writeStorageFile(thread.id, DOCS_WORK_FILE, docsWorkFile))
+        .catch((error) => bb.log.warn(`Could not write ${thread.id}'s docs work list: ${String(error)}`));
+    }
     if (prior) {
       const now = Date.now();
       store.batch(() => {
