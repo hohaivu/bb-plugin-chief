@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import plugin from "./server";
-import { APPROVE, CLOSE_OUT, REQUEST_CHANGES, chiefReview, completeWorker, configurationContext, delegate, disposeAll, planTwoWaves, readyAction, setup, start, status, wave } from "./test/harness";
+import { APPROVE, CLOSE_OUT, REQUEST_CHANGES, approvePlan, completeWorker, configurationContext, delegate, disposeAll, planTwoWaves, readyAction, setup, start, status, wave } from "./test/harness";
+import { forgeAnswers, forged, startGate } from "./test/gateForge";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -268,10 +269,11 @@ describe("Chief backend", () => {
 
   test("the roster's Pending block uses the same wording as the lifecycle alert", async () => {
     const state = await setup();
+    forgeAnswers(state);
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
 
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
     const workerAlert = state.sent.at(-1).input[0].text as string;
     const workerAction = readyAction(worker.threadId);
@@ -282,29 +284,34 @@ describe("Chief backend", () => {
     expect(roster).toContain("Pending:");
     expect(roster).toContain(`- worker “Fix checkout totals” (${worker.threadId}): ${workerAction}`);
 
-    // Once the review is actually in flight, the worker drops out of Pending.
-    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
+    // With the gate open the worker stays in Pending and names the busy sides (gateDecision wait).
+    const { reviewerId, testerId } = await startGate(state, chief.threadId, worker.threadId);
+    const waiting = `- worker “Fix checkout totals” (${worker.threadId}): The review gate is waiting on reviewer ${reviewerId}`;
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).not.toContain(`- worker “Fix checkout totals” (${worker.threadId}):`);
+    expect(roster).toContain(waiting);
 
-    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Looks correct", ...APPROVE,
-    }, { threadId: reviewer.threadId, projectId: "proj_1" });
-    const reviewAlert = state.sent.at(-1).input[0].text as string;
-    const approveAction = `The reviewer approves. chief_complete (threadId: ${worker.threadId}); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.`;
-    expect(reviewAlert).toContain(approveAction);
+    // An approve alone does not pass the gate: the alert and the roster still wait for the tester.
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Looks correct", ...APPROVE }, { threadId: reviewerId!, projectId: "proj_1" });
+    expect(state.sent.at(-1).input[0].text).toContain(`tester ${testerId}`);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`- reviewer “Review · Fix checkout totals” (${reviewer.threadId}): ${approveAction}`);
+    expect(roster).toContain(`(${worker.threadId}): The review gate is waiting on tester ${testerId}`);
 
-    // Once Chief completes the worker, the approved reviewer must not keep advertising it.
-    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed", ...CLOSE_OUT }, opts);
+    // The green tester passes the gate: the alert and the roster name the same completion.
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Tests pass", testsPassed: true }, { threadId: testerId!, projectId: "proj_1" });
+    const passAction = `chief_complete (threadId: ${worker.threadId})`;
+    expect(state.sent.at(-1).input[0].text).toContain(passAction);
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain(`(${worker.threadId}): The review gate passed. Complete it: ${passAction}`);
+
+    // Once Chief completes the worker, nothing keeps advertising it.
+    await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, opts);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster.startsWith("Pending: none.")).toBe(true);
   });
 
   test("the Pending block shows a blocked worker and a rejected review the same way its alert does", async () => {
     const state = await setup();
+    forgeAnswers(state);
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
 
@@ -315,18 +322,19 @@ describe("Chief backend", () => {
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain(`- worker “Blocked work” (${blockedWorker.threadId}): Blocked: Missing staging credentials — decide or escalate to the user.`);
 
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals");
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
-    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
+    const { reviewerId, testerId } = await startGate(state, chief.threadId, worker.threadId);
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Off by one in the discount calc", ...REQUEST_CHANGES,
-    }, { threadId: reviewer.threadId, projectId: "proj_1" });
-    const reviewAlert = state.sent.at(-1).input[0].text as string;
-    const fixAction = `The reviewer requires changes. Hand the fix to a fresh worker with chief_delegate (replaces: ${worker.threadId}); its findings are attached automatically. Escalate if the disagreement is a genuine decision.`;
-    expect(reviewAlert).toContain(fixAction);
+    }, { threadId: reviewerId!, projectId: "proj_1" });
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Tests pass", testsPassed: true }, { threadId: testerId!, projectId: "proj_1" });
+    // A blocking code finding makes gateDecision fix: the one fix run replaces the tester.
+    const fixAction = `chief_delegate (replaces: ${testerId}, kind: worker)`;
+    expect(state.sent.at(-1).input[0].text).toContain(fixAction);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`- reviewer “Review · Fix checkout totals” (${reviewer.threadId}): ${fixAction}`);
+    expect(roster).toContain(`(${worker.threadId}): The review gate needs a fix`);
+    expect(roster).toContain(fixAction);
   });
 
   test("the Pending block tells Chief to delegate a planner's wave 1 until it is delegated", async () => {
@@ -336,7 +344,12 @@ describe("Chief backend", () => {
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const { planner } = await planTwoWaves(state, chief.threadId);
 
+    // A two-wave plan waits for its one advisor review before Pending tells Chief to delegate wave 1.
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+    expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Plan ${planner.threadId} has 2 implementation waves: get its one advisor review first`);
+    expect(roster).not.toContain("Delegate wave 1 now");
+    await approvePlan(state, chief.threadId, planner.threadId);
+    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Delegate wave 1 now: run chief_forge_init (planThreadId: ${planner.threadId}, wave: 1), then chief_delegate (planThreadId: ${planner.threadId}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`);
 
     await state.harness.behavior.runCli([
@@ -353,6 +366,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     const { planner, path1, path2 } = await planTwoWaves(state, chief.threadId);
+    await approvePlan(state, chief.threadId, planner.threadId);
 
     const result = await state.harness.behavior.runCli([
       "delegate", "--title", "Wave 1 work", "--mission", "Correct and verify totals",
@@ -401,7 +415,7 @@ describe("Chief backend", () => {
     const chief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chiefId));
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
-    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_coordinate", "chief_attach", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_tests", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
+    expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_coordinate", "chief_attach", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
     expect(chief.skills).toEqual(["chief", "coordinator"]);
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
     expect(worker.skills).toEqual(["chief-worker", "chief-role-worker"]);
@@ -427,13 +441,14 @@ describe("Chief backend", () => {
 
   test("exposes chief_report to a reviewer even before its row is persisted", async () => {
     const state = await setup();
+    forgeAnswers(state);
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
+    const { reviewerId } = await startGate(state, chief.threadId, worker.threadId);
     // insertThread only runs after threads.spawn resolves, so the tool set for a
     // brand-new thread's first turn cannot depend on that row already existing —
     // it has to come from what was seeded into pluginMetadata at spawn time.
-    expect(state.spawned.at(-1).pluginMetadata).toEqual({ role: "reviewer", chiefThreadId: chief.threadId });
+    expect(state.spawned[Number(reviewerId!.slice("thr_".length)) - 1].pluginMetadata).toEqual({ role: "reviewer", chiefThreadId: chief.threadId });
 
     const resolved = await state.harness.behavior.resolveAgentConfiguration({
       ...configurationContext("thr_not_yet_persisted"),
