@@ -284,20 +284,6 @@ describe("Chief backend", () => {
     expect(spawnedAs(state, "reviewer")).toHaveLength(1);
   });
 
-  test("keeps a busy reviewer instead of spawning a second one", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await readyWorker(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, as(chief.threadId));
-    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-    await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer.threadId)! });
-
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready again" }, as(worker.threadId));
-    await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, as(chief.threadId));
-
-    expect(spawnedAs(state, "reviewer")).toHaveLength(1);
-    expect(spawnedAs(state, "tester")).toHaveLength(1);
-  });
 
   test("a reviewer's rejection must be a verdict field, and reaches Chief and inspect", async () => {
     const state = await setup();

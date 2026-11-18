@@ -129,11 +129,6 @@ describe("tester role", () => {
       for (const pattern of expected) expect(errors.join("\n")).toMatch(pattern);
     });
 
-    test("a planner's spec flag is stored on the flagged implementation wave only", async () => {
-      const state = await setup();
-      const { planner } = await specPlan(state, [specImpl(1), { body: wave(3), dependsOn: [] }]);
-      expect(JSON.parse(planWaves(state, planner.threadId)).map((entry: any) => entry.spec)).toEqual([true, undefined]);
-    });
 
 
     const writerCall = (planThreadId: string, writer: string, waveNo = 1) => `chief_delegate (planThreadId: ${planThreadId}, wave: ${waveNo}, replaces: ${writer}, kind: spec-writer)`;

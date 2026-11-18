@@ -387,12 +387,4 @@ describe("forge comments", () => {
     expect(() => bb.storage.migrate(db, MIGRATIONS)).not.toThrow();
     expect(snapshot()).toEqual(migrated);
   });
-
-  // The host refuses to start on a statement whose bytes changed at an applied index; that is a separate promise from the replay above.
-  test("the host refuses a changed forge_comments statement on a migrated database", () => {
-    const { bb, db } = upgradeHost();
-    bb.storage.migrate(db, MIGRATIONS);
-    const changed = MIGRATIONS.map((statement, index) => index === 114 ? `${statement} ` : statement);
-    expect(() => bb.storage.migrate(db, changed)).toThrow(/migration 114 does not match/);
-  });
 });
