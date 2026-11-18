@@ -13,7 +13,8 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 /** createArtifacts over a real temp dir, with a host `move` that refuses an existing destination as the production host does. */
-async function world(moveFails: (call: number) => Error | undefined = () => undefined, dataDirKnown = true) {
+async function world(moveFails: (call: number) => Error | undefined = () => undefined, dataDirKnown = true,
+  extra: { hosts?: (root: string) => { get: (args: { hostId: string }) => Promise<{ threadStorageRootPath?: string }> }; db?: object; storage?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), "chief-artifact-"));
   roots.push(root);
   const calls: string[] = [];
@@ -32,10 +33,15 @@ async function world(moveFails: (call: number) => Error | undefined = () => unde
     read: async ({ path }: { path: string }) => ({ content: await readFile(path, "utf8") }), // a missing path rejects, as on the host
   };
   // The BB data dir is the parent of the host's thread storage root.
-  const hosts = { get: async () => (dataDirKnown ? { threadStorageRootPath: join(root, "thread-storage") } : {}) };
-  const bb = { onDispose: () => undefined, sdk: { files, hosts, threads: { storageLocation: async () => ({ hostId: "host_1", storageRootPath: root }) } } };
-  const { writeStorageFile, publishHeavy } = createArtifacts({ bb, db: {}, state: { dataDirs: new Map() } } as never);
-  return { root, calls, publishHeavy, write: (content: string) => writeStorageFile("thr_1", "out/file.md", content), path: join(root, "out/file.md") };
+  const hosts = extra.hosts?.(root) ?? { get: async () => (dataDirKnown ? { threadStorageRootPath: join(root, "thread-storage") } : {}) };
+  const warnings: string[] = [];
+  const storageCalls: string[] = [];
+  const bb = {
+    onDispose: () => undefined, log: { warn: (message: string) => warnings.push(message) },
+    sdk: { files, hosts, threads: { storageLocation: async () => { storageCalls.push("storageLocation"); return { hostId: "host_1", storageRootPath: extra.storage ?? root }; } } },
+  };
+  const { writeStorageFile, publishHeavy, writeArtifact } = createArtifacts({ bb, db: extra.db ?? {}, state: { dataDirs: new Map() } } as never);
+  return { root, calls, warnings, storageCalls, publishHeavy, writeArtifact, write: (content: string) => writeStorageFile("thr_1", "out/file.md", content), path: join(root, "out/file.md") };
 }
 
 describe("atomicWrite", () => {
@@ -141,5 +147,105 @@ describe("publishHeavy", () => {
     const w = await world(undefined, false);
     await expect(w.publishHeavy("host_1", 2)).rejects.toThrow(/data dir is unavailable/);
     expect(w.calls).toEqual([]);
+  });
+});
+
+// Contracts (docs/specs/observability.md, "Artifact writes"; unchanged since a5d01fe306e898c97d2108e6ab8d497632dea1b6): an artifact lands in
+// <BB data dir>/chief/<project>/<thread>/ of the host; the data dir is the parent of the host's thread storage root, looked up once per host;
+// when it is unknown, a write with a named host throws, and a write without one warns, records artifact_fallbacks and uses the thread's storage root.
+// Every expected value below is what a5d01fe's artifactDir gives for the same lookup inputs (the same cases were run against that commit).
+describe("artifactDir through writeArtifact", () => {
+  type Host = { threadStorageRootPath?: string };
+  const unknownRoot = "its thread storage root is unknown";
+  const recorder = () => {
+    const rows: unknown[][] = [];
+    return { rows, db: { prepare: (sql: string) => ({ run: (...args: unknown[]) => { rows.push([sql.replace(/\s+/g, " "), args[0]]); } }) } };
+  };
+  const waitFor = async (ready: () => boolean) => {
+    for (let i = 0; i < 400 && !ready(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(ready()).toBe(true);
+  };
+  /** A host lookup whose first answer the test settles by hand; every later lookup answers with the host at <root>/thread-storage. */
+  const cold = () => {
+    const gate: { lookups: number; reject: (error: Error) => void } = { lookups: 0, reject: () => undefined };
+    const hosts = (root: string) => ({
+      get: (): Promise<Host> => (++gate.lookups === 1 ? new Promise<Host>((_, reject) => { gate.reject = reject; }) : Promise.resolve({ threadStorageRootPath: join(root, "thread-storage") })),
+    });
+    return { gate, hosts };
+  };
+
+  test("a known host: the artifact lands under data dir, project and thread without asking for the thread's storage, and the lookup runs once", async () => {
+    let lookups = 0;
+    const w = await world(undefined, true, { hosts: (root) => ({ get: async () => { lookups++; return { threadStorageRootPath: join(root, "thread-storage") }; } }) });
+    expect(await w.writeArtifact("thr_1", "proj_1", "a.md", "A", "host_1")).toBe(join(w.root, "chief", "proj_1", "thr_1", "a.md"));
+    expect(await w.writeArtifact("thr_1", "proj_1", "b.md", "B", "host_1")).toBe(join(w.root, "chief", "proj_1", "thr_1", "b.md"));
+    expect(await readFile(join(w.root, "chief", "proj_1", "thr_1", "a.md"), "utf8")).toBe("A");
+    expect(lookups).toBe(1);
+    expect(w.storageCalls).toEqual([]);
+  });
+
+  test.each([
+    ["no thread storage root", async (): Promise<Host> => ({}), unknownRoot],
+    ["a rejected lookup", async (): Promise<Host> => { throw new Error("boom"); }, "reading it failed: Error: boom"],
+  ])("a named host with %s throws the unavailable-data-dir error, writes nothing and records no fallback", async (_name, get, reason) => {
+    const { rows, db } = recorder();
+    const w = await world(undefined, true, { hosts: () => ({ get }), db });
+    await expect(w.writeArtifact("thr_1", "proj_1", "a.md", "A", "host_9")).rejects.toThrow(`Host host_9's BB data dir is unavailable (${reason})`);
+    expect(w.calls).toEqual([]);
+    expect(w.warnings).toEqual([]);
+    expect(w.storageCalls).toEqual([]);
+    expect(rows).toEqual([]);
+  });
+
+  test.each([
+    ["no thread storage root", async (): Promise<Host> => ({}), unknownRoot],
+    ["a rejected lookup", async (): Promise<Host> => { throw new Error("boom"); }, "reading it failed: Error: boom"],
+  ])("with no named host and %s, it warns with that reason, records artifact_fallbacks for the thread and writes into the thread's storage root", async (_name, get, reason) => {
+    const { rows, db } = recorder();
+    const storage = await mkdtemp(join(tmpdir(), "chief-artifact-storage-"));
+    roots.push(storage);
+    const w = await world(undefined, true, { hosts: () => ({ get }), db, storage });
+    expect(await w.writeArtifact("thr_1", "proj_1", "a.md", "A")).toBe(join(storage, "a.md"));
+    expect(await readFile(join(storage, "a.md"), "utf8")).toBe("A");
+    expect(w.warnings).toEqual([`Host host_1's BB data dir is unavailable (${reason}); writing Chief artifacts to thread storage instead.`]);
+    expect(rows).toEqual([["INSERT OR IGNORE INTO artifact_fallbacks (thread_id, at) VALUES (?, ?)", "thr_1"]]);
+  });
+
+  test("a failed lookup is not cached: the next write of the host looks again", async () => {
+    let lookups = 0;
+    const w = await world(undefined, true, { hosts: (root) => ({ get: async () => { if (++lookups === 1) throw new Error("boom"); return { threadStorageRootPath: join(root, "thread-storage") }; } }) });
+    await expect(w.writeArtifact("thr_1", "proj_1", "a.md", "A", "host_1")).rejects.toThrow("reading it failed");
+    expect(await w.writeArtifact("thr_1", "proj_1", "a.md", "A", "host_1")).toBe(join(w.root, "chief", "proj_1", "thr_1", "a.md"));
+    expect(lookups).toBe(2);
+  });
+
+  // Regression: a cold-cache lookup that fails kept its own failure only while no other call had filled the cache first.
+  test("a named-host write whose own lookup rejects still throws when another call of the host fills the cache before the rejection", async () => {
+    const { gate, hosts } = cold();
+    const w = await world(undefined, true, { hosts });
+    const first = w.writeArtifact("thr_1", "proj_1", "a.md", "A", "host_1");
+    const outcome = first.then(() => "wrote", (error: Error) => error.message);
+    await waitFor(() => gate.lookups === 1);
+    await w.writeArtifact("thr_2", "proj_1", "b.md", "B", "host_1"); // the second lookup succeeds and fills the cache
+    gate.reject(new Error("late failure"));
+    expect(await outcome).toBe("Host host_1's BB data dir is unavailable (reading it failed: Error: late failure)");
+    expect(w.calls.filter((call) => call.includes("thr_1"))).toEqual([]);
+  });
+
+  test("a write with no named host whose own lookup rejects still warns, records the fallback and uses thread storage when another call fills the cache first", async () => {
+    const { rows, db } = recorder();
+    const storage = await mkdtemp(join(tmpdir(), "chief-artifact-storage-"));
+    roots.push(storage);
+    const { gate, hosts } = cold();
+    const w = await world(undefined, true, { hosts, db, storage });
+    const first = w.writeArtifact("thr_1", "proj_1", "a.md", "A");
+    await waitFor(() => gate.lookups === 1);
+    await w.writeArtifact("thr_2", "proj_1", "b.md", "B"); // the second lookup succeeds and fills the cache
+    expect(rows).toEqual([]);
+    gate.reject(new Error("late failure"));
+    expect(await first).toBe(join(storage, "a.md"));
+    expect(w.warnings).toEqual(["Host host_1's BB data dir is unavailable (reading it failed: Error: late failure); writing Chief artifacts to thread storage instead."]);
+    expect(rows).toEqual([["INSERT OR IGNORE INTO artifact_fallbacks (thread_id, at) VALUES (?, ?)", "thr_1"]]);
+    expect(await readFile(join(w.root, "chief", "proj_1", "thr_2", "b.md"), "utf8")).toBe("B");
   });
 });

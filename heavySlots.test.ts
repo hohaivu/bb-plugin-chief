@@ -159,16 +159,40 @@ describe.skipIf(!existsSync("/usr/bin/lockf"))("heavy wrapper with real /usr/bin
     expect(w.overlap(["A", "B", "C"])).toBe(2);
   });
 
-  test("a holder that outlasts waitSeconds makes the waiter exit 75 with the run-again line, a bounded heartbeat, and its command never runs", async () => {
+  test("a holder that outlasts waitSeconds makes the waiter exit 75 with the run-again line, and its command never runs", async () => {
     const w = world("1", { waitSeconds: 3, beatSeconds: 1, pollSeconds: 1 });
     await hold(w, "A");
     const b = w.run(w.pay("test", "B"));
     expect(await b.done).toEqual({ code: 75, signal: null });
     expect(b.out.stderr).toMatch(/\[chief-heavy\] test: all 1 slots busy for \d+s; run the same command again in the foreground/);
-    expect(beats(b)).toBeGreaterThanOrEqual(1);
-    expect(beats(b)).toBeLessThanOrEqual(3);
     expect(w.entered("B")).toBe(false);
     expect(w.runs("B")).toBe(0);
+  });
+
+  // Regression: the deadline was only checked after a failed round, so a round that ran after the poll sleep could admit a caller past it.
+  // wait 2, poll 4: the only retry is at about 4s, after the deadline; the holder frees the slot at about 3s, between the two.
+  test("a slot that frees after the deadline but before the next retry admits nobody: exit 75 with the run-again line and the command never runs", async () => {
+    const w = world("1", { waitSeconds: 2, beatSeconds: 1, pollSeconds: 4 });
+    await hold(w, "A");
+    const b = w.run(w.pay("test", "B"));
+    await new Promise((resolve) => setTimeout(resolve, 3000)); // the timing is the contract: no event marks "after the deadline"
+    w.release("A");
+    expect(await b.done).toEqual({ code: 75, signal: null });
+    expect(b.out.stderr).toMatch(/\[chief-heavy\] test: all 1 slots busy for \d+s; run the same command again in the foreground/);
+    expect(w.events()).toEqual(["start A", "end A"]);
+    expect(w.entered("B")).toBe(false);
+    expect(w.runs("B")).toBe(0);
+  });
+
+  test("heartbeat lines of a long wait are spaced at least beatSeconds apart, not one per poll round", async () => {
+    const w = world("1", { waitSeconds: 7, beatSeconds: 2, pollSeconds: 1 });
+    await hold(w, "A");
+    const b = w.run(w.pay("test", "B"));
+    expect((await b.done).code).toBe(75);
+    const at = b.out.stderr.split("\n").flatMap((line) => line.match(/^\[chief-heavy\] waiting (\d+)s /)?.[1] ?? []).map(Number);
+    expect(at.length).toBeGreaterThanOrEqual(2);
+    expect(at.length).toBeLessThanOrEqual(4); // a line per poll round would give 6
+    at.slice(1).forEach((seconds, index) => expect(seconds - at[index]!).toBeGreaterThanOrEqual(2));
   });
 
   test("a SIGKILLed holder frees its slot at once, with no cleanup of the lock file", async () => {
@@ -188,6 +212,17 @@ describe.skipIf(!existsSync("/usr/bin/lockf"))("heavy wrapper with real /usr/bin
     expect(await run.done).toEqual({ code: 7, signal: null });
     expect(w.runs("N")).toBe(1);
     expect(run.out.stderr).not.toContain("waiting");
+  });
+
+  // Regression: `-n "$CHIEF_HEAVY_HELD"` tested for a non-empty value, so an exported empty string took the acquisition path.
+  test("a CHIEF_HEAVY_HELD that is set but empty bypasses acquisition: the command runs at once while the only slot is held", async () => {
+    const w = world("1");
+    await hold(w, "A");
+    const b = w.run(w.pay("test", "B"), { CHIEF_HEAVY_HELD: "" });
+    expect(await b.done).toEqual({ code: 0, signal: null });
+    expect(w.runs("B")).toBe(1);
+    expect(w.events()).toEqual(["start A", "start B", "end B"]);
+    expect(b.out.stderr).not.toContain("[chief-heavy]");
   });
 
   test("without lockf on the PATH the command runs unthrottled after one notice", async () => {
