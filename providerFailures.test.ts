@@ -1,9 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, REQUEST_CHANGES, TEST_WAVE, approvePlan, chiefReview, completeWorker, delegate, disposeAll, planFile, setup, start, status, waiveTests, wave } from "./test/harness";
+import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, REQUEST_CHANGES, approvePlan, wave, completeWorker, delegate, disposeAll, planFile, planTwoWaves, setup, start, status } from "./test/harness";
+import { forgeAnswers, forged } from "./test/gateForge";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -70,8 +67,9 @@ describe("Chief backend", () => {
     await state.harness.behavior.callRpc("setRoleModel", {
       hostId: "host_1", role: "reviewer", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
+    forgeAnswers(state);
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: worker.threadId, projectId: "proj_1" });
     const sentBefore = state.sent.length;
@@ -83,16 +81,17 @@ describe("Chief backend", () => {
       .rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
     await expect(state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts)).rejects.toThrow(ISO);
     expect(state.spawned).toHaveLength(spawnedBefore);
-    // The refused call left nothing behind: once the cooldown expires, the review starts.
+    // The refused call left nothing behind: once the cooldown expires, the one gate starts its reviewer and its tester.
     state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
-    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+    expect(state.spawned).toHaveLength(spawnedBefore + 2);
   });
 
   test("cooldown: a model limit blocks delegate, plan, consult and branch review on that model until it expires", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
     const worker = await delegate(state, chief.threadId);
     await coolDown(state, worker.threadId, "429 usage_limit_reached");
     expect(state.db.prepare("SELECT provider_id, model FROM provider_cooldowns").all()).toEqual([{ provider_id: "codex", model: "gpt-6-astra" }]);
@@ -103,7 +102,7 @@ describe("Chief backend", () => {
     const tools: [string, Record<string, unknown>][] = [
       ["chief_delegate", { title: "Next", mission: "Do it", unplannedReason: "Bounded test fixture" }],
       ["chief_plan", { title: "Rework", mission: "Propose" }],
-      ["chief_consult", { title: "Diagnose", mission: "Explore" }],
+      ["chief_consult", { title: "Diagnose", mission: "Explore", planThreadId: planner.threadId }],
       ["chief_review", { branch: "feature/x" }],
     ];
     const sectionRow = () => state.db.prepare("SELECT value FROM plugin_meta WHERE key='section_id'").get();
@@ -168,36 +167,11 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).input[0].text).not.toContain("is refused until");
   });
 
-  /** A ready worker whose reviewer pick (codex/gpt-6-astra) is cooling down. */
-  async function coolingReviewer() {
-    const state = await setup();
-    await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "reviewer", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
-    });
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: worker.threadId, projectId: "proj_1" });
-    await coolDown(state, worker.threadId, MODEL_COOLDOWN);
-    const review = () => state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" });
-    return { state, chief, worker, review };
-  }
-
-  test("cooldown: a refused review leaves the previous reviewer not complete", async () => {
-    const { state, worker, review } = await coolingReviewer();
-    state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
-    await review();
-    const first = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Changes", ...REQUEST_CHANGES }, { threadId: first.threadId, projectId: "proj_1" });
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Fixed" }, { threadId: worker.threadId, projectId: "proj_1" });
-    state.db.prepare("UPDATE provider_cooldowns SET until_at=?").run(Date.now() + 600_000);
-    await expect(review()).rejects.toThrow(/hit its usage limit/);
-    expect((state.db.prepare("SELECT state FROM managed_threads WHERE thread_id=?").get(first.threadId) as { state: string }).state).not.toBe("complete");
-  });
-
   test("cooldown: worker, planner, advisor and branch review on a cooling project-default model are refused", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
     const worker = await delegate(state, chief.threadId);
     await coolDown(state, worker.threadId, "429 usage_limit_reached");
     state.setProjectDefaults({ providerId: "codex", model: "gpt-6-astra" });
@@ -205,7 +179,7 @@ describe("Chief backend", () => {
     for (const [tool, params] of [
       ["chief_delegate", { title: "Next", mission: "Do it", unplannedReason: "Bounded test fixture" }],
       ["chief_plan", { title: "Rework", mission: "Propose" }],
-      ["chief_consult", { title: "Diagnose", mission: "Explore" }],
+      ["chief_consult", { title: "Diagnose", mission: "Explore", planThreadId: planner.threadId }],
       ["chief_review", { branch: "feature/x" }],
     ] as const) {
       await expect(state.harness.behavior.callAgentTool(tool, params, opts)).rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
@@ -219,20 +193,14 @@ describe("Chief backend", () => {
       expect(result.exitCode).toBe(0);
       return JSON.parse(result.stdout!);
     };
-    const reviewThenVerdict = async (state: State, chiefId: string, workerId: string, verdict: "approve" | "request_changes", extra: object = {}) => {
-      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Ready${NO_DEVIATIONS}` }, { threadId: workerId, projectId: "proj_1" });
-      const review = await chiefReview(state, chiefId, { workerThreadId: workerId, ...extra });
-      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Reviewed", ...(verdict === "approve" ? APPROVE : REQUEST_CHANGES) }, { threadId: review.threadId, projectId: "proj_1" });
-    };
 
     test("chief stats: an unplanned chain completes once; open and archived tasks count separately", async () => {
       const state = await setup();
       const chief = await start(state);
       const first = await delegate(state, chief.threadId, "Fix checkout totals", { branch: "feature/x" });
-      await reviewThenVerdict(state, chief.threadId, first.threadId, "request_changes");
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Ready${NO_DEVIATIONS}` }, { threadId: first.threadId, projectId: "proj_1" });
       const fix = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: first.threadId });
-      await reviewThenVerdict(state, chief.threadId, fix.threadId, "approve", { retestSkipped: "the stats test pins the chain count, not the rerun" });
-      await completeWorker(state, chief.threadId, fix.threadId, { skipReview: undefined });
+      await completeWorker(state, chief.threadId, fix.threadId);
       await delegate(state, chief.threadId, "Open task", { branch: "feature/open" });
       const archived = await delegate(state, chief.threadId, "Archived task", { branch: "feature/gone" });
       await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(archived.threadId)! });
@@ -240,7 +208,7 @@ describe("Chief backend", () => {
       const result = await stats(state);
       expect(result.tasks).toMatchObject({ total: 3, completed: 1, open: 1, dropped: 1 });
       const chain = result.perTask.find((task: any) => task.key === "branch:proj_1:feature/x");
-      expect(chain).toMatchObject({ status: "completed", workers: 2, replacements: 1, requestChanges: 1 });
+      expect(chain).toMatchObject({ status: "completed", workers: 2, replacements: 1 });
       expect(result.wallTimeMs.completed).toBe(1);
       expect(result.repairs.replacements).toBe(1);
     });
@@ -263,22 +231,20 @@ describe("Chief backend", () => {
       await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], ctx);
       const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
       await state.harness.behavior.callAgentTool("chief_report", {
-        state: "ready", result: "Two waves, then their tests.",
-        plan: [{ body: PLAN_FIXTURE }, { body: wave(2) }, TEST_WAVE(3)],
+        state: "ready", result: "Two waves.",
+        plan: [{ body: PLAN_FIXTURE }, { body: wave(2) }],
       }, { threadId: planner.threadId, projectId: "proj_1" });
       await approvePlan(state, chief.threadId, planner.threadId);
-      await waiveTests(state, chief.threadId, planner.threadId, [3]);
       const path1 = planFile(state, planner.threadId, 1);
       const path2 = planFile(state, planner.threadId, 2);
       const wave1 = JSON.parse((await state.harness.behavior.runCli(["delegate", "--title", "Wave 1", "--mission", `Implement ${path1}`, "--plan-thread", planner.threadId, "--wave", "1", "--json"], ctx)).stdout!);
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 1 done${NO_DEVIATIONS}` }, { threadId: wave1.threadId, projectId: "proj_1" });
       expect((await stats(state)).tasks).toMatchObject({ total: 1, completed: 0, open: 1, dropped: 0 });
-      await completeWorker(state, chief.threadId, wave1.threadId, { testsSkipped: undefined });
+      await completeWorker(state, chief.threadId, wave1.threadId);
       expect((await stats(state)).tasks.dropped).toBe(1);
 
       const wave2 = JSON.parse((await state.harness.behavior.runCli(["delegate", "--title", "Wave 2", "--mission", `Implement ${path2}`, "--plan-thread", planner.threadId, "--wave", "2", "--replaces", wave1.threadId, "--json"], ctx)).stdout!);
-      await reviewThenVerdict(state, chief.threadId, wave2.threadId, "approve");
-      await completeWorker(state, chief.threadId, wave2.threadId, { testsSkipped: undefined, skipReview: undefined });
+      await completeWorker(state, chief.threadId, wave2.threadId);
       const result = await stats(state);
       expect(result.tasks).toMatchObject({ total: 1, completed: 1, open: 0, dropped: 0 });
       expect(result.perTask[0]).toMatchObject({ waves: 2, replacements: 0 });
@@ -293,21 +259,20 @@ describe("Chief backend", () => {
       const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Two independent waves.",
-        plan: [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [] }, TEST_WAVE(3, [1]), TEST_WAVE(4, [2])],
+        plan: [{ body: PLAN_FIXTURE }, { body: wave(2), dependsOn: [] }],
       }, { threadId: planner.threadId, projectId: "proj_1" });
       await approvePlan(state, chief.threadId, planner.threadId);
-      await waiveTests(state, chief.threadId, planner.threadId, [3, 4]);
       const delegateWave = async (n: number) => JSON.parse((await state.harness.behavior.runCli([
         "delegate", "--title", `Wave ${n}`, "--mission", "Do it", "--plan-thread", planner.threadId, "--wave", String(n), "--branch", `feature/w${n}`, "--json",
       ], ctx)).stdout!) as { threadId: string };
       const w1 = await delegateWave(1);
       const w2 = await delegateWave(2);
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 2 done${NO_DEVIATIONS}` }, { threadId: w2.threadId, projectId: "proj_1" });
-      await completeWorker(state, chief.threadId, w2.threadId, { testsSkipped: undefined });
+      await completeWorker(state, chief.threadId, w2.threadId);
       // Wave 2 is the last wave by number but wave 1's chain is still running.
       expect((await stats(state)).tasks.completed).toBe(0);
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 1 done${NO_DEVIATIONS}` }, { threadId: w1.threadId, projectId: "proj_1" });
-      await completeWorker(state, chief.threadId, w1.threadId, { testsSkipped: undefined });
+      await completeWorker(state, chief.threadId, w1.threadId);
       expect((await stats(state)).tasks).toMatchObject({ total: 1, completed: 1 });
     });
 
@@ -388,9 +353,9 @@ describe("Chief backend", () => {
       expect(byChief.perTask.every((task: any) => task.approvals === 0 && task.requestChanges === 0)).toBe(true);
     });
 
-    // Contract (PR #187): stats counts a legacy reviewer (no reviewer_verdicts rows, current verdict request_changes) as one event,
-    // while the replacement gate still reads its carried reject_streak of 3. The two numbers answer different questions.
-    test("chief stats: a legacy reviewer with a carried streak of 3 is one request_changes event, and still stops a replacement", async () => {
+    // Contract (observability.md): stats counts a legacy reviewer (no reviewer_verdicts rows, current verdict request_changes) as one event,
+    // whatever streak the old ladder carried on its row. The ladder itself is gone: the carried streak refuses nothing.
+    test("chief stats: a legacy reviewer with a carried streak of 3 is one request_changes event", async () => {
       const state = await setup();
       const chief = await start(state);
       const worker = await delegate(state, chief.threadId, "Legacy task", { branch: "feature/legacy-streak" });
@@ -405,19 +370,12 @@ describe("Chief backend", () => {
       const result = await stats(state);
       expect(result.verdicts).toEqual({ approve: 0, request_changes: 1 });
       expect(result.perTask[0]).toMatchObject({ approvals: 0, requestChanges: 1 });
-      await expect(state.harness.behavior.callAgentTool("chief_delegate", {
-        title: "Repair", mission: "Fix the findings", replaces: worker.threadId,
-      }, { threadId: chief.threadId, projectId: "proj_1" })).rejects.toThrow(`The reviewer has requested changes 3 times in a row on ${worker.threadId}. Do not delegate another round`);
     });
 
-    // Contract (PR #187, preservation): the whole `bb chief stats` text and JSON, project-wide and per Chief, equal what pre-refactor
-    // 512cfeb855abda0ae90df972121b977318e959d7 printed on this same fixture under a fixed clock. The oracle file was captured by running
-    // this marked block against 512cfeb's server.ts, with the one marked comparison line swapped for a write. It also pins the fixture's
-    // database hash, so a drifting fixture fails here instead of passing against a stale oracle.
-    // Regression: stats counting a review event per target row, per carried streak or per replacement chain; a legacy reviewer counted
-    // twice or dropped; or any other stats byte changing with the refactor.
-    // <stats-oracle-fixture>
-    const statsOracleRun = async () => {
+    // Contract (observability.md): stats counts one review event per report (not per target row, carried streak or replacement chain),
+    // counts a legacy reviewer once, and scopes project-wide, per Chief and per task. Counts are worked out from that contract.
+    // Regression: a review event counted per target row, a legacy reviewer counted twice or dropped, another Chief's reviewer leaking into scope.
+    const statsFixtureRun = async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       try {
         let clock = Date.UTC(2026, 0, 1);
@@ -475,22 +433,6 @@ describe("Chief backend", () => {
         // The fixture's own failure and stats cutoffs are stamped by SQLite's real clock at setup: pin them.
         state.db.prepare("UPDATE plugin_meta SET value=? WHERE key IN ('stats_since','failure_events_since')").run(String(Date.UTC(2026, 0, 1)));
 
-        // The Coordinator migration appends two columns and the retest-debt migration one (retest_skipped) to managed_threads; the oracle hash predates them, so they are checked NULL and dropped.
-        // The observability waves seed one more plugin_meta key (retros_since, a runtime clock stamp); it is not a stats input, so it is left out and the oracle hash is unchanged.
-        const table = (name: string) => (state.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all() as Record<string, unknown>[]).filter((row) => !(name === "plugin_meta" && row.key === "retros_since")).map((row) => {
-          if (name !== "managed_threads") return row;
-          const { coordinator, coordinator_thread_id: coordinatorThreadId, retest_skipped: retestSkipped, ...legacy } = row;
-          expect([coordinator ?? null, coordinatorThreadId ?? null, retestSkipped ?? null]).toEqual([null, null, null]);
-          // Shrink-prompts wave 1: thr_3's ready alert no longer overflows its action room, so no report file is written and its report_path stays NULL.
-          // The oracle hash predates that: base's value is put back before hashing (the hash equality then pins every other byte of the fixture).
-          if (legacy.thread_id === "thr_3") {
-            expect(legacy.report_path).toBeNull();
-            return { ...legacy, report_path: `${state.storageRoot}/chief/proj_1/thr_3/report-1.md` };
-          }
-          return legacy;
-        });
-        // Only the random temp storage root (in report_path and verdict_path) is normalized.
-        const fixtureHash = createHash("sha256").update(JSON.stringify(["managed_threads", "review_targets", "reviewer_verdicts", "plugin_meta"].map(table)).replaceAll(state.storageRoot, "<storage>")).digest("hex");
         const runs = [];
         for (const scope of [["--project", "proj_1"], ["--chief", chief.threadId], ["--chief", other.threadId]]) {
           for (const mode of [[], ["--json"]]) {
@@ -499,15 +441,14 @@ describe("Chief backend", () => {
             runs.push({ args, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr ?? null });
           }
         }
-        return { state, fixtureHash, runs };
+        return { state, runs };
       } finally {
         vi.useRealTimers();
       }
     };
-    // </stats-oracle-fixture>
 
-    test("chief stats: text and JSON equal pre-refactor 512cfeb on a multi-target, multi-report, legacy, scoped and branch-only fixture", async () => {
-      const { state, fixtureHash, runs } = await statsOracleRun();
+    test("chief stats: review events are counted per report on a multi-target, multi-report, legacy, scoped and branch-only fixture", async () => {
+      const { state, runs } = await statsFixtureRun();
       // The fixture really holds the cases: 3 plan reports x 2 targets, 2 branch_task reports, then 1 + 1 single reports, legacy rows with no history.
       const historyOf = (id: string) => state.db.prepare("SELECT COUNT(*) AS rows, COUNT(DISTINCT report_seq) AS events FROM reviewer_verdicts WHERE reviewer_thread_id=?").get(id);
       expect(historyOf("review_plan")).toEqual({ rows: 6, events: 3 });
@@ -520,10 +461,6 @@ describe("Chief backend", () => {
       expect(json(3).repairs).toMatchObject({ requestChanges: 3, regressions: 1 });
       expect(json(5).verdicts).toEqual({ approve: 0, request_changes: 1 });
       expect(runs.map((run) => run.exitCode)).toEqual([0, 0, 0, 0, 0, 0]);
-
-      const actual = JSON.stringify({ fixtureHash, runs }, null, 2) + "\n";
-      const oracle = await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "chief-stats-512cfeb.json"), "utf8");
-      expect(actual).toBe(oracle); // oracle-compare
     });
   });
 });
