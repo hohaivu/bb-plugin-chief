@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -117,6 +117,41 @@ describe("approved design binding", () => {
     failSnapshotReads = false;
     expect(await readFile(snap.design, "utf8")).toBe(DESIGN);
     expect(await readFile(snap.facts, "utf8")).toBe(rowOf(state, researcher).result);
+  });
+
+  // Contract (plan-chains.md Approved Design Binding): an unreadable snapshot refuses the plan before any planner starts; it is never replaced from the edited design.md.
+  // Regression: the refusal swallowed (plan starts on no design) or the bind falling back to the live design.md.
+  test("an unreadable design snapshot refuses a later plan before any planner starts", async () => {
+    let failSnapshotReads = false;
+    const { state, chief, researcher } = await approved({ onFileRead: (path) => { if (failSnapshotReads && path.includes("-approved-")) throw new Error("HTTP 503: host unavailable"); } });
+    await planWith(state, chief, researcher);
+    const snap = snapshotsOf(state, researcher);
+    await writeFile(designFile(state, researcher), EDITED);
+    failSnapshotReads = true;
+    const spawned = plannerSpawns(state).length;
+    await expect(planWith(state, chief, researcher)).rejects.toThrow(/Could not read design-approved-r1\.md.*nothing was started/);
+    failSnapshotReads = false;
+    expect(plannerSpawns(state)).toHaveLength(spawned);
+    expect(plannerRows(state)).toHaveLength(spawned);
+    expect(await readFile(snap.design, "utf8")).toBe(DESIGN);
+  });
+
+  // Contract (plan-chains.md Approved Design Binding): a revision reads only its bound snapshot pair; a missing snapshot refuses before any spawn and is never recreated from design.md.
+  // Regression: a revision that re-snapshots the live design.md or starts without the design.
+  test("a revision whose bound snapshot is missing refuses before any planner starts and recreates nothing", async () => {
+    const { state, chief, researcher } = await approved();
+    await planWith(state, chief, researcher);
+    const snap = snapshotsOf(state, researcher);
+    const original = plannerRows(state).at(-1)!.thread_id;
+    await report(state, original, { state: "ready", result: "Waves written.", plan: [planWave(1), planWave(2), TEST_WAVE(3)] });
+    await tool(state, "chief_consult", { planThreadId: original, title: "Plan", mission: "Review this plan" }, chief);
+    const advisor = (await status(state)).threads.filter((row: { role: string }) => row.role === "advisor").at(-1)!;
+    await report(state, advisor.threadId, { state: "ready", result: "Split the waves differently.", verdict: "request_changes" });
+    await rm(snap.design);
+    const spawned = plannerSpawns(state).length;
+    await expect(tool(state, "chief_plan", { title: "Revise", mission: "Propose again", revises: original }, chief)).rejects.toThrow(/design-approved-r1\.md.*is missing; nothing was started/);
+    expect(plannerSpawns(state)).toHaveLength(spawned);
+    await expect(readFile(snap.design, "utf8")).rejects.toThrow();
   });
 
   describe("chief_plan refusals", () => {
