@@ -30,9 +30,10 @@
 - [Stacked chains use a stackOn field](decisions/2026-11-14-stacked-chains-stackon.md)
 - [Owner answers reach a child through a marked relay](decisions/2026-11-16-owner-answer-relay-marker.md)
 - [Researcher is a normal agent with a role model](decisions/2026-11-17-researcher-normal-agent.md)
-- [Evidence-only retest needs a complete receipt](decisions/2026-11-18-evidence-retest-needs-complete-receipt.md)
 - [Heavy commands run through a host slot wrapper](decisions/2026-11-18-heavy-slots-host-capacity.md)
+- [One review gate per plan](decisions/2026-11-18-single-review-gate.md)
 
 ## Superseded decisions
 
 - [Retest after a fix round gates the review](decisions/2026-11-10-retest-after-fix-round.md)
+- [Evidence-only retest needs a complete receipt](decisions/2026-11-18-evidence-retest-needs-complete-receipt.md)
