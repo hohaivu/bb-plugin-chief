@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { branchReviewBrief, reviewBrief, reviewContext, type BriefTarget, type ReviewBriefInput } from "./src/review/reviewStart";
 import { checkPlan } from "./src/report/reportIntake";
-import { REVIEWER_NATIVE_LINE, TEST_FILES, replaceText, spliceAfter, wave } from "./test/harness";
+import { REVIEWER_NATIVE_LINE, replaceText, spliceAfter, wave } from "./test/harness";
 import {
   EARLIER_OLD, IMPACT_OLD, INSPECT_PLAN_SUFFIX, NATIVE_NO_RESHAPE_LINE, NATIVE_RESHAPE_PAREN, NATIVE_RESHAPE_TAIL, PLAN_FULL_OLD, PLAN_LINE_OLD,
-  REPORTS_NEW, REPORTS_OLD, REREVIEW_OLD, TEST_AUDIT_LINE, TEST_AUDIT_PAREN_WITH, TEST_AUDIT_PAREN_WITHOUT, WORKER_REPORTED_RULE,
+  REPORTS_NEW, REPORTS_OLD, WORKER_REPORTED_RULE,
 } from "./test/reviewWave1";
 
 // Contracts (wave 1, plan-1.md, "Contracts to verify"): reviewBrief renders one target line per pull request or unpinned branch, with header counts that
@@ -96,37 +96,6 @@ describe("reviewBrief: one line per pull request", () => {
   });
 });
 
-describe("reviewBrief: re-review scope per pull request", () => {
-  // Contract: the scope text is the same as before, taken from the group's single `since`; the section says "each pull request that names a range".
-  test("a pull request with a since reviews the range, one without reviews the whole pull request", () => {
-    const { prompt } = reviewBrief(brief([pinned("thr_a", PR1, { since: "dead00" }), pinned("thr_t", PR1, { since: "dead00" }), pinned("thr_b", PR2)]));
-    const [first, second] = targetLines(prompt);
-    expect(first).toContain("then review only the changes since the previous review: `git diff dead00..sha100000000`");
-    expect(first).toContain("(the whole pull request, `git diff origin/main...sha100000000`, is context only)");
-    expect(second).toContain("then review `git diff origin/main...sha200000000`.");
-    expect(second).not.toContain("dead00");
-    expect(count(prompt, "dead00")).toBe(1);
-  });
-
-  test("the Re-review scope section renders iff some target names a range, and says pull request", () => {
-    const withRange = reviewBrief(brief([pinned("thr_a", PR1, { since: "dead00" }), pinned("thr_b", PR2)])).prompt;
-    expect(count(withRange, "## Re-review scope")).toBe(1);
-    expect(withRange).toContain("up to the previous reviewed head named above for each pull request that names a range.");
-    expect(withRange).not.toContain("for each target that names a range");
-    const whole = reviewBrief(brief([pinned("thr_a", PR1), pinned("thr_b", PR2)])).prompt;
-    expect(whole).not.toContain("## Re-review scope");
-    expect(whole).not.toContain("dead00");
-  });
-
-  test("a single-worker re-review keeps the single wording (no 'each pull request') and names the range once in the subject", () => {
-    const { prompt } = reviewBrief(single({ worker: { ...pinned("thr_a", PR1, { since: "dead00" }), kind: null, brief: null, reported: "Done" } }));
-    expect(prompt).toContain("only the worker's changes since the previous review, which covered dead00: `git diff dead00..sha100000000`");
-    expect(prompt).toContain("## Re-review scope");
-    expect(prompt).not.toContain("for each pull request that names a range");
-    expect(prompt).not.toContain("A pull request with no range is reviewed whole against its base.");
-  });
-});
-
 describe("reviewerPrompt rule blocks through reviewBrief", () => {
   const blocks = (over: Partial<ReviewBriefInput> = {}) => reviewBrief(single(over)).prompt;
 
@@ -157,21 +126,6 @@ describe("reviewerPrompt rule blocks through reviewBrief", () => {
       expect(none).not.toContain("A reshape commit belongs to its feature");
       expect(none).toBe(replaceText(both, `${REVIEWER_NATIVE_LINE}\n`, "", 1));
     }
-  });
-
-  // Contract: the test-audit rule renders iff testAudit; the do-not-report parenthesis names it only then.
-  test("test audit: the rule and its parenthesis follow the flag", () => {
-    const on = blocks({ testAudit: true });
-    expect(count(on, TEST_AUDIT_LINE)).toBe(1);
-    expect(count(on, TEST_AUDIT_PAREN_WITH)).toBe(1);
-    expect(count(on, TEST_AUDIT_PAREN_WITHOUT)).toBe(0);
-    const off = blocks({ testAudit: false });
-    expect(count(off, "Test audit:")).toBe(0);
-    expect(count(off, TEST_AUDIT_LINE)).toBe(0);
-    expect(count(off, TEST_AUDIT_PAREN_WITH)).toBe(0);
-    expect(count(off, TEST_AUDIT_PAREN_WITHOUT)).toBe(1);
-    expect(off).toBe(replaceText(replaceText(on, `${TEST_AUDIT_LINE}\n`, "", 1), TEST_AUDIT_PAREN_WITH, TEST_AUDIT_PAREN_WITHOUT, 1));
-    expect(blocks()).toBe(on);
   });
 
   test("Docs ownership renders iff docs, once, and defaults on", () => {
@@ -241,12 +195,10 @@ describe("acceptedGaps", () => {
 });
 
 describe("branchReviewBrief defaults", () => {
-  // Contract: a branch review keeps native yes, reshape no, test audit yes, and has no Docs ownership section.
-  test("renders the native line without the reshape parts, the test audit, and no Docs ownership", () => {
+  // Contract: a branch review keeps native yes, reshape no, and has no Docs ownership section.
+  test("renders the native line without the reshape parts, and no Docs ownership", () => {
     const prompt = branchReviewBrief({ branch: "feature/x", pullRequestRef: PR1, chiefThreadId: "thr_c" });
     expect(prompt.split("\n")).toContain(NATIVE_NO_RESHAPE_LINE);
-    expect(count(prompt, TEST_AUDIT_LINE)).toBe(1);
-    expect(count(prompt, TEST_AUDIT_PAREN_WITH)).toBe(1);
     expect(prompt).not.toContain("## Docs ownership");
   });
 });
@@ -294,7 +246,7 @@ describe("review-context.md: one read line or one inline copy", () => {
 
 describe("a merged rule is stated once", () => {
   const SIDE = pinned("thr_s", PR2, { kind: "spec-writer", lane: "side" });
-  const planReview = () => reviewBrief(brief([pinned("thr_a", PR1, { since: "dead00", earlier: [{ threadId: "thr_e", kind: "tester", reportPath: "/r/e.md" }] }), pinned("thr_t", PR1, { kind: "tester", since: "dead00" }), SIDE], {
+  const planReview = () => reviewBrief(brief([pinned("thr_a", PR1, { earlier: [{ threadId: "thr_e", kind: "tester", reportPath: "/r/e.md" }] }), pinned("thr_t", PR1, { kind: "tester" }), SIDE], {
     specWaves: [1], writers: [{ threadId: "thr_s", reportPath: "/r/s.md" }], sideWriters: [{ threadId: "thr_s", wave: 1, reportPath: "/r/s.md" }],
   })).prompt;
 
@@ -306,7 +258,6 @@ describe("a merged rule is stated once", () => {
     expect(count(prompt, "findings only on lines")).toBe(0);
     expect(count(prompt, "Report findings only on lines")).toBe(0);
     expect(count(prompt, IMPACT_OLD)).toBe(0);
-    expect(count(prompt, REREVIEW_OLD)).toBe(0);
     const withSlice = reviewBrief(single({ impactSlices: [{ threadId: "thr_a", branch: "feature/thr_a", lines: ["a.ts:1: f"], entries: 1 }] })).prompt;
     expect(withSlice).toContain("never report a finding on a slice line.");
     expect(count(withSlice, "report findings only on lines")).toBe(0);
@@ -319,8 +270,7 @@ describe("a merged rule is stated once", () => {
       expect(count(prompt, "read each in full before judging")).toBe(0);
       for (const old of Object.values(PLAN_LINE_OLD)) expect(count(prompt, old)).toBe(0);
     }
-    const scoped = planReview();
-    expect(scoped).toContain("Read each plan wave file in review-context.md in full and review the change against it, only within its re-review range where one is named.");
+    expect(planReview()).toContain("Read each plan wave file in review-context.md in full and review the change against it.");
     expect(reviewBrief(single()).prompt).toContain("Read each plan wave file in review-context.md in full and review the change against it.\n");
     expect(reviewBrief(single({ wavePaths: [], chain: [] })).prompt).not.toContain("Read each plan wave file");
   });
@@ -361,42 +311,30 @@ describe("a merged rule is stated once", () => {
 });
 
 describe("checkPlan: feature and reshape flags", () => {
-  const NOT_DOING = "\n\n## What we're NOT doing\n- x";
-  const W = (n: number, extra: object = {}) => ({ body: `${wave(n)}${NOT_DOING}\n\n${TEST_FILES}`, ...extra });
-  const TEST_WAVE_N = (n: number, dependsOn: number[]) => W(n, { test: true, dependsOn });
+  const W = (n: number, extra: object = {}) => ({ body: `${wave(n)}\n\n## What we're NOT doing\n- x`, ...extra });
 
-  // Contract: feature and reshape are booleans with spec's error shape, and never on a test or design wave; a plan with no such key gets the errors it always got.
-  // Regression: accepting a string flag lets a wave that never reads as a feature gate the review; dropping the test/design refusal marks a tester's wave a feature wave.
+  // Contract: feature and reshape are booleans with spec's error shape, and never on a design wave; a plan with no such key gets the errors it always got.
+  // Regression: accepting a string flag lets a wave that never reads as a feature gate the review.
   test("a valid plan with both flags is accepted, as is one without any", () => {
-    expect(checkPlan([W(1, { feature: true }), W(2, { feature: true, reshape: true, dependsOn: [1] }), TEST_WAVE_N(3, [2])])).toEqual([]);
-    expect(checkPlan([W(1, { feature: false, reshape: false }), TEST_WAVE_N(2, [1])])).toEqual([]);
-    expect(checkPlan([W(1), TEST_WAVE_N(2, [1])])).toEqual([]);
+    expect(checkPlan([W(1, { feature: true }), W(2, { feature: true, reshape: true, dependsOn: [1] })])).toEqual([]);
+    expect(checkPlan([W(1, { feature: false, reshape: false })])).toEqual([]);
+    expect(checkPlan([W(1)])).toEqual([]);
   });
 
   test.each([["feature", "yes"], ["reshape", "yes"], ["feature", 1], ["reshape", null]])("refuses a non-boolean %s (%j) with one error that names it", (flag, value) => {
-    expect(checkPlan([W(1, { [flag]: value }), TEST_WAVE_N(2, [1])])).toEqual([
+    expect(checkPlan([W(1, { [flag]: value })])).toEqual([
       `plan wave 1 ${flag} is ${JSON.stringify(value)} (${typeof value}); allowed true or false. Send a boolean, or drop ${flag}.`,
     ]);
   });
 
-  test("feature: true on a test wave, reshape: true on a test wave or a design wave: one error each", () => {
-    expect(checkPlan([W(1), W(2, { test: true, feature: true, dependsOn: [1] })])).toEqual([
-      "plan wave 2 is feature: true and test: true; feature and reshape mark an implementation wave only.",
-    ]);
-    expect(checkPlan([W(1), W(2, { test: true, reshape: true, dependsOn: [1] })])).toEqual([
-      "plan wave 2 is reshape: true and test: true; feature and reshape mark an implementation wave only.",
-    ]);
-    expect(checkPlan([W(1, { design: true, reshape: true }), W(2), TEST_WAVE_N(3, [2])])).toEqual([
+  test("reshape: true on a design wave: one error", () => {
+    expect(checkPlan([W(1, { design: true, reshape: true }), W(2)])).toEqual([
       "plan wave 1 is reshape: true and design: true; feature and reshape mark an implementation wave only.",
     ]);
   });
 
-  test("feature: false on a test wave is allowed (only true marks the wave)", () => {
-    expect(checkPlan([W(1), W(2, { test: true, feature: false, reshape: false, dependsOn: [1] })])).toEqual([]);
-  });
-
   test("both flags wrong on one wave give both errors, feature first", () => {
-    expect(checkPlan([W(1, { feature: "yes", reshape: "no" }), TEST_WAVE_N(2, [1])])).toEqual([
+    expect(checkPlan([W(1, { feature: "yes", reshape: "no" })])).toEqual([
       "plan wave 1 feature is \"yes\" (string); allowed true or false. Send a boolean, or drop feature.",
       "plan wave 1 reshape is \"no\" (string); allowed true or false. Send a boolean, or drop reshape.",
     ]);
