@@ -157,7 +157,7 @@ describe("event ledger: one row at each detection point", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
     try {
-      const state = await setup();
+      const state = await setup({ heavyFiles: true }); // a failed heavy publish logs a warning, which Sentry would receive
       await state.harness.behavior.setSettings({ sentryDsn: DSN });
       const chief = await start(state);
       const worker = await delegate(state, chief.threadId);
@@ -179,7 +179,7 @@ describe("ledger and Sentry through the real report transaction", () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 
   async function blockedWorker() {
-    const state = await setup();
+    const state = await setup({ heavyFiles: true }); // a failed heavy publish logs a warning, which Sentry would receive
     await state.harness.behavior.setSettings({ sentryDsn: DSN });
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);

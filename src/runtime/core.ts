@@ -31,6 +31,12 @@ export function createCore(ctx: Ctx) {
   const settings = bb.settings.define({
     chiefProject: { type: "project", label: "Default Chief project" },
     stallMinutes: { type: "string", label: "Stall threshold (minutes)", default: "15" },
+    heavySlots: {
+      type: "string",
+      label: "Heavy-command slots",
+      description: "How many builds and how many test runs Chief's workers and testers may run at once on this computer, each (1 to 8, default 2). Simulators and emulators always get one slot. Takes effect at the next delegation.",
+      default: "2",
+    },
     plannerEnabled: {
       type: "boolean",
       label: "Plan before delegating",
