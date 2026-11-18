@@ -227,7 +227,7 @@ An evidence-only tester runs the commands that the mission names, or the command
 - The findings section keeps one guidance line instead of four. The line orders the tester to verify each finding first, and to list a finding that does not hold under `## Disputed findings`. Reason: the evidence brief must stay short.
 - The line `Read the verdict file in full.` appears only when the call attaches a verdict file path. An evidence tester without findings gets no findings section and no verdict line. Reason: the line must not point to a file that does not exist.
 - A plan-linked evidence brief keeps the `## Deviations from plan` line. Reason: report intake refuses a plan-linked ready report without that heading.
-- The example brief of 13,996 bytes renders at 5,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. Reason: a clipped obligation can hide a required step.
+- The example brief of 13,996 bytes renders at 6,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. Reason: a clipped obligation can hide a required step. The budget rose from 5,000 because the Evidence work lines of wave 3 need about 700 bytes, and trimming them would cut existing obligations.
 - A ready evidence-only tester discharges retest debt like any ready Tester. Reason: its run repeats the tests.
 - Inputs. An evidence-only tester needs these inputs before any run. Reason: a run without a pin or a command list is not valid evidence.
   - `Expected head: <sha>` in the mission. It is the branch tip after the fix and any intended Spec Writer fold, not the predecessor's commit.
