@@ -430,7 +430,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- Follow the `chief-role-tester` skill: it is your testing policy and wins over the shared skill's verification lines.",
       "- Change only test files, fixtures, test helpers and test config; never product code.",
       ...(branch === undefined ? ["- When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report."] : []),
-      "- Ready: tests committed and pushed; Automated Verification lists each filtered test command with its exit status and maps each test to the contract it proves.",
+      "- Ready: tests committed and pushed; Automated Verification lists each filtered test command with its exit status and maps each test to the contract it proves and, per new test, the regression it catches.",
       `- Blocked when a test fails because product code is wrong: commit and push the tests, name the failing tests, the filtered command, its exit status and an output excerpt, and recommend \`chief_delegate (replaces: <your thread id>, kind: worker)\` with the failures as its mission.`,
       "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.",
     ] : []),
