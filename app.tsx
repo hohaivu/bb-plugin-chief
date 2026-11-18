@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   experimental_useSidebarThreads,
@@ -7,7 +7,6 @@ import {
   useRpc,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
-import type { PluginAppSlots } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { rpcContract } from "./src/rpcContract";
 import type { ModelConfiguration, ModelSelection } from "./src/types";
@@ -277,66 +276,34 @@ function HostModelPicker({ hostId, value, disabled, onPick }: {
   );
 }
 
-function ChiefHeaderBadge({
-  threadId,
-  isCompactViewport,
-}: {
-  threadId: string;
-  projectId: string;
-  isCompactViewport: boolean;
-}) {
+function useHeaderRoles({ threadIds }: { threadIds: readonly string[] }) {
   const rpc = useRpc<typeof rpcContract>();
-  const [role, setRole] = useState<string | null>(null);
+  const [roles, setRoles] = useState<ReadonlyMap<string, string | null>>(new Map());
+  const requested = useRef(new Set<string>());
 
   useEffect(() => {
-    let current = true;
-    void rpc.call("role", { threadId }).then((result) => {
-      if (current) setRole(result.role);
-    }).catch(() => undefined);
-    return () => {
-      current = false;
-    };
-  }, [rpc, threadId]);
+    for (const threadId of threadIds) {
+      if (requested.current.has(threadId)) continue;
+      requested.current.add(threadId);
+      void rpc.call("role", { threadId }).then((result) => {
+        setRoles((previous) => new Map(previous).set(threadId, result.role));
+      }).catch(() => requested.current.delete(threadId));
+    }
+  }, [rpc, threadIds]);
 
-  if (!role) return null;
-  const crowned = role === "chief" || role === "researcher";
-  const name = ROLES.find((entry) => entry.role === role)?.label ?? role.charAt(0).toUpperCase() + role.slice(1);
-  const accessibleName = role === "chief" ? "Chief supervisor" : `Chief ${name}`;
-  return (
-    <span
-      aria-label={accessibleName}
-      title={accessibleName}
-      style={{
-        alignItems: "center",
-        background: "color-mix(in srgb, var(--primary) 10%, transparent)",
-        border: "1px solid color-mix(in srgb, var(--primary) 20%, transparent)",
-        borderRadius: 999,
-        color: "var(--primary)",
-        display: "inline-flex",
-        fontSize: 12,
-        fontWeight: 500,
-        gap: 5,
-        height: 26,
-        padding: isCompactViewport ? "0 6px" : "0 9px",
-      }}
-    >
-      {crowned ? <Crown /> : null}
-      {crowned && isCompactViewport ? null : name}
-    </span>
-  );
+  return roles;
 }
 
-function NewChiefButton({ projectId }: { projectId: string; threadId: string; isCompactViewport: boolean }) {
+function useCreateChief() {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
   const [isLaunching, setIsLaunching] = useState(false);
   const { projects } = experimental_useSidebarThreads();
 
-  // Render only once the project is known to be non-personal (a personal project has no repo for workers to branch from).
-  const project = projects.find((candidate) => candidate.id === projectId);
-  if (!project || project.isPersonal) return null;
+  // Offer it only once the project is known to be non-personal (a personal project has no repo for workers to branch from).
+  const canLaunch = (projectId: string) => projects.some((candidate) => candidate.id === projectId && !candidate.isPersonal);
 
-  const launch = async () => {
+  const launch = async (projectId: string) => {
     if (isLaunching) return;
     setIsLaunching(true);
     try {
@@ -345,23 +312,11 @@ function NewChiefButton({ projectId }: { projectId: string; threadId: string; is
     } catch (cause) {
       toast.error(errorMessage(cause));
     } finally {
-      // The header stays mounted on the old thread in split panes, so never leave it disabled.
       setIsLaunching(false);
     }
   };
 
-  return (
-    <button
-      type="button"
-      aria-label="New Chief"
-      title="New Chief"
-      disabled={isLaunching}
-      onClick={() => void launch()}
-      className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-state-hover hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
-    >
-      <Crown plus />
-    </button>
-  );
+  return { canLaunch, isLaunching, launch };
 }
 
 export default definePluginApp((app) => {
@@ -376,16 +331,39 @@ export default definePluginApp((app) => {
     description: "Live provider and model choices scanned from each enrolled machine.",
     component: ChiefModelSettings,
   });
-  // The SDK retired this slot from its typings but the host still runs it. experimental_threadAction(placement "header") only draws labelled buttons, so it cannot render the role badge.
-  const slots = app.slots as PluginAppSlots & { experimental_threadHeaderAction(registration: { id: string; title: string; component: typeof ChiefHeaderBadge }): void };
-  slots.experimental_threadHeaderAction({
+  app.experimental_icons.register({ name: "chief/crown", component: () => <Crown /> });
+  app.experimental_icons.register({ name: "chief/crown-plus", component: () => <Crown plus /> });
+  app.slots.experimental_threadAction({
     id: "chief-role",
     title: "Chief role",
-    component: ChiefHeaderBadge,
+    icon: "chief/crown",
+    group: "chief",
+    order: 0,
+    placement: "header",
+    useData: useHeaderRoles,
+    item: ({ thread, data }) => {
+      const role = data.get(thread.id);
+      if (!role) return null;
+      const name = ROLES.find((entry) => entry.role === role)?.label ?? role.charAt(0).toUpperCase() + role.slice(1);
+      return {
+        label: role === "chief" ? "Chief supervisor" : `Chief ${name}`,
+        icon: "chief/crown",
+        disabled: true,
+        run: () => undefined,
+      };
+    },
   });
-  slots.experimental_threadHeaderAction({
+  app.slots.experimental_threadAction({
     id: "new-chief",
     title: "New Chief",
-    component: NewChiefButton,
+    icon: "chief/crown-plus",
+    group: "chief",
+    order: 1,
+    placement: "header",
+    useData: () => useCreateChief(),
+    item: ({ thread, data }) => data.canLaunch(thread.projectId)
+      ? { label: "New Chief", icon: "chief/crown-plus", disabled: data.isLaunching, run: () => data.launch(thread.projectId) }
+      : null,
   });
+
 });
