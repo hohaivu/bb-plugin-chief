@@ -252,6 +252,8 @@ export interface ManagedRow {
   /** Researcher row: 1 for design mode; NULL or 0 is light. */
   research_design: number | null;
   research_thread_id: string | null;
+  /** Planner row: the bound researcher ready report's report_seq. */
+  research_report_seq: number | null;
   /** Design researcher: 1 while its design questions wait on the user. */
   waiting_on_user: number;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */

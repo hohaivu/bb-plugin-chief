@@ -31,6 +31,7 @@ export interface ThreadInsert<Role extends string = string, State extends string
   /** Researcher row: true for design mode; omitted on an upsert keeps the stored value. */
   researchDesign?: boolean | null;
   researchThreadId?: string | null;
+  researchReportSeq?: number | null;
 }
 
 /** The columns a report writes to its row; reserveReport maps them onto the UPDATE's parameters. */
@@ -133,8 +134,8 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id, research_design, research_thread_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id, research_design, research_thread_id, research_report_seq
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -147,6 +148,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       planner_on=COALESCE(excluded.planner_on, managed_threads.planner_on),
       research_design=COALESCE(excluded.research_design, managed_threads.research_design),
       research_thread_id=COALESCE(excluded.research_thread_id, managed_threads.research_thread_id),
+      research_report_seq=COALESCE(excluded.research_report_seq, managed_threads.research_report_seq),
       coordinator_thread_id=COALESCE(managed_threads.coordinator_thread_id, excluded.coordinator_thread_id),
       updated_at=excluded.updated_at`).run(
       input.threadId, input.role, input.projectId, input.chiefThreadId ?? null,
@@ -157,7 +159,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       input.kind ?? null, input.plannerOn == null ? null : input.plannerOn ? 1 : 0, input.verifyCommand ?? null,
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now, input.coordinatorThreadId ?? null,
-      input.researchDesign == null ? null : input.researchDesign ? 1 : 0, input.researchThreadId ?? null,
+      input.researchDesign == null ? null : input.researchDesign ? 1 : 0, input.researchThreadId ?? null, input.researchReportSeq ?? null,
     );
     wrote();
   }
@@ -393,8 +395,9 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
 
     /** lifecycle: a Chief, or any thread that went idle, failed, archived or deleted, takes the state its event names. */
     recordState(threadId: string, state: string, status: string, now: number) {
-      db.prepare(`UPDATE managed_threads SET state=?, status=?, active_since=NULL, updated_at=? WHERE thread_id=?`).run(
-        state, status, now, threadId,
+      db.prepare(`UPDATE managed_threads SET state=?, status=?, active_since=NULL,
+        waiting_on_user=CASE WHEN ?='failed' THEN 0 ELSE waiting_on_user END, updated_at=? WHERE thread_id=?`).run(
+        state, status, state, now, threadId,
       );
       wrote();
     },

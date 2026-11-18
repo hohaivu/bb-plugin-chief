@@ -79,11 +79,10 @@ export function registerForgeInitTool(ctx: Ctx) {
           stacked = true;
         }
         // The approved design rides in full from its write-once snapshot (never design.md); a binding failure refuses before the script runs.
-        const researcher = planner.research_thread_id ? store.get(planner.research_thread_id) : undefined;
-        if (planner.research_thread_id && !researcher) throw new Error(`Researcher ${planner.research_thread_id} of plan ${planThreadId} is no longer recorded; run chief_forge_init again after checking it.`);
-        const design = researcher ? await ctx.approvedDesign(researcher, caller.project_id) : undefined;
+        const researcherId = planner.research_thread_id;
+        const design = researcherId ? await ctx.approvedDesign(researcherId, planner.research_report_seq, caller.project_id) : undefined;
         // Plain text without < or >: glab's JSON escapes those, so a grep on the marker still matches.
-        designMarker = researcher ? `chief-design ${researcher.thread_id} r${researcher.report_seq}` : undefined;
+        designMarker = researcherId ? `chief-design ${researcherId} r${planner.research_report_seq}` : undefined;
         body = [
           params.body ?? `Tracking work for ${params.title}.`,
           ...(briefSections.length ? ["", ...briefSections] : []),
@@ -91,7 +90,7 @@ export function registerForgeInitTool(ctx: Ctx) {
           "", clip(planner.result ?? "", 1_500),
           "</details>",
           ...(design ? [
-            "", `<details><summary>Design — approved by the user (researcher ${researcher!.thread_id})</summary>`,
+            "", `<details><summary>Design — approved by the user (researcher ${researcherId})</summary>`,
             `<!-- ${designMarker} -->`,
             "", sanitizeForge(design.designText),
             "", `Fact report: ${design.factsPath}`,
