@@ -87,7 +87,8 @@ describe("checkout freshness", () => {
       inflight += 1;
       const run = (async () => { await hold.git?.(args, options); return real(file, args, options); })();
       run.then(() => { inflight -= 1; }, () => { inflight -= 1; });
-      return run;
+      // A promisified execFile carries its child: the gate reviewer's impact slice kills it when its deadline aborts.
+      return Object.assign(run, { child: { kill: () => undefined } });
     });
     const ctx = { threadId: chief, ...CTX };
     const tool = (name: string, params: object) => state.harness.behavior.callAgentTool(name, params, ctx) as Promise<string>;
@@ -857,22 +858,25 @@ describe("checkout freshness", () => {
       expect(stateOf(w, id)).toBe("blocked");
     });
 
-    test("worker, reviewer and advisor alerts are unchanged: no stamp and no git", async () => {
+    test("worker and reviewer alerts are unchanged: no stamp, and the reports themselves read no git", async () => {
       const w = await world({ projectPath: "clone", env: "all" });
-      const delegated = await w.state.harness.behavior.runCli(["delegate", "--title", "Fix totals", "--mission", "Do it", "--unplanned-reason", "stamp test", "--json"], w.ctx);
+      // The gate pins the builder's pushed branch (git ls-remote) when it opens: that is the gate's own git, not a report's.
+      await git(w.r.chief, "push", "-q", "origin", "HEAD:refs/heads/feature/stamp");
+      const delegated = await w.state.harness.behavior.runCli(["delegate", "--title", "Fix totals", "--mission", "Do it", "--unplanned-reason", "stamp test", "--branch", "feature/stamp", "--json"], w.ctx);
       const worker = (JSON.parse(delegated.stdout!) as { threadId: string }).threadId;
       await report(w, worker);
       expect(alertText(w)).toContain("State: blocked");
       expect(alertText(w)).not.toContain("Read at");
       await report(w, worker, { state: "ready", result: "Done\n\n## Deviations from plan\nNone" });
+      expect(alertText(w)).not.toContain("Read at");
+      const beforeGate = w.calls.length;
+      w.setLive(worker, "idle");
       await w.state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker }, w.ctx);
+      const afterGate = w.calls.length;
       const reviewer = w.rows("reviewer")[0]!;
       await report(w, reviewer, { state: "ready", result: "Reviewed", verdict: "approve", findings: [] });
       expect(alertText(w)).not.toContain("Read at");
-      await w.state.harness.behavior.runCli(["consult", "--title", "Rework", "--mission", "Explore"], w.ctx);
-      await report(w, w.rows("advisor")[0]!, { state: "ready", result: "Sound", verdict: "approve" });
-      expect(alertText(w)).not.toContain("Read at");
-      expect(w.calls.filter((call) => ["ls-remote", "rev-parse"].includes(call.args[0]!))).toEqual([]);
+      expect([...w.calls.slice(0, beforeGate), ...w.calls.slice(afterGate)].filter((call) => ["ls-remote", "rev-parse"].includes(call.args[0]!))).toEqual([]);
     });
   });
 

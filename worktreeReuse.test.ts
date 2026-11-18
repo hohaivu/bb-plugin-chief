@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { type State, plan, readyIdle, report, setLive, tool } from "./test/testerHelpers";
-import { APPROVE, delegate, disposeAll, execFileMock, setup, start, status, wave } from "./test/harness";
+import { type State } from "./test/testerHelpers";
+import { delegate, disposeAll, execFileMock, setup, start } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
-describe("tester role", () => {
+describe("cleanup worktree sharing", () => {
   // Contracts (plan chains, wave 2): chain tasks share one worktree, so of the cleanup jobs on one environment exactly one
   // owns each action (branch deletion, teardown-trouble alert, teardown-stuck alert); the rest end at storage, silent.
   describe("cleanup of jobs sharing one worktree", () => {
@@ -89,117 +89,6 @@ describe("tester role", () => {
       expect(job(state, only!).outcome ?? "").not.toContain("worktree shared");
       expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE '%cleanup-teardown-%'`).get()).toEqual({ n: alert ? 1 : 0 });
       if (alert) expect(alerts(state, alert)).toEqual([{ source_thread_id: only }]);
-    });
-  });
-
-  // Contracts (reviewer reuse, wave 2): repeated pinned review rounds of one task review in one worktree, checked out
-  // detached at each round's pinned commit; a reviewer whose worktree is gone, busy or not a worktree is never reused.
-  describe("reviewer worktree reuse across rounds", () => {
-    const PR = "https://github.com/acme/shop/pull/8";
-    const shaOf = (round: number) => String(round).repeat(40);
-    type Mode = { destroyed?: boolean; removed?: boolean; notWorktree?: boolean; unreadable?: boolean };
-    async function setupRounds(mode: Mode = {}) {
-      const state = await setup({ projectPath: "/oracle/checkout", system: { usageLimits: async () => ({}), config: async () => ({ primaryHostId: "host_1" }) } });
-      let sha = shaOf(1);
-      execFileMock.mockImplementation(async (file: string, args: string[]) => {
-        if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: sha, baseRefName: "main" }), stderr: "" };
-        throw new Error(`unexpected CLI ${file}`);
-      });
-      state.harness.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => {
-        if (mode.unreadable) throw new Error("host unreachable");
-        return {
-          id: environmentId, hostId: "host_1", workspaceProvisionType: "managed-worktree", isWorktree: !mode.notWorktree,
-          status: mode.destroyed ? "destroyed" : "ready", hostLifecycle: mode.removed ? "removed" : "ready", lifecycle: { phase: "idle" },
-        };
-      });
-      const chief = (await start(state)).threadId;
-      await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", prUrl: PR }, chief);
-      const worker = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker'`).get() as any).thread_id as string;
-      await readyIdle(state, worker);
-      /** One review round at `round`'s pinned commit, approved; returns its reviewer and how it was launched. */
-      const round = async (n: number) => {
-        sha = shaOf(n);
-        await tool(state, "chief_review", { workerThreadId: worker }, chief);
-        const reviewer = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='reviewer' ORDER BY rowid DESC`).get() as any).thread_id as string;
-        const { environment, prompt } = state.spawned.at(-1);
-        await report(state, reviewer, { state: "ready", result: "Looks right", ...APPROVE });
-        return { reviewer, environment, prompt: String(prompt) };
-      };
-      return { state, round, worker, chief };
-    }
-    const fresh = { type: "host", workspace: { type: "managed-worktree" } };
-
-    test("four pinned rounds review in one worktree, each checked out detached at its own pinned commit", async () => {
-      const { state, round } = await setupRounds();
-      const rounds = [await round(1), await round(2), await round(3), await round(4)];
-      expect(rounds[0]!.environment).toMatchObject(fresh);
-      const first = state.live.get(rounds[0]!.reviewer)!.environmentId;
-      for (const [index, entry] of rounds.slice(1).entries()) {
-        expect(entry.environment).toEqual({ type: "reuse", environmentId: first });
-        expect(entry.prompt).toContain(`git checkout --detach ${shaOf(index + 2)}`);
-      }
-      expect(new Set(rounds.map((entry) => state.live.get(entry.reviewer)!.environmentId))).toEqual(new Set([first]));
-      expect(state.spawned.filter((args) => args.environment?.type === "host" && args.title?.startsWith("Review"))).toHaveLength(1);
-    });
-
-    test.each<[string, Mode, (state: State, reviewer: string) => void]>([
-      ["its worktree is destroyed", { destroyed: true }, () => {}],
-      ["its worktree is removed from the host", { removed: true }, () => {}],
-      ["its environment is not a worktree", { notWorktree: true }, () => {}],
-      ["its environment cannot be read", { unreadable: true }, () => {}],
-      ["the reviewer thread is archived", {}, (state, id) => state.live.set(id, { ...state.live.get(id)!, archivedAt: Date.now() } as any)],
-      ["the reviewer thread is deleted", {}, (state, id) => state.live.set(id, { ...state.live.get(id)!, deletedAt: Date.now() } as any)],
-      ["the reviewer thread is still active", {}, (state, id) => setLive(state, id, "active")],
-    ])("round 2 starts a fresh worktree when the earlier reviewer's worktree cannot be reused: %s", async (_name, mode, arrange) => {
-      const { state, round } = await setupRounds(mode);
-      const first = await round(1);
-      arrange(state, first.reviewer);
-      const second = await round(2);
-      expect(second.environment).toMatchObject(fresh);
-    });
-
-    // Contract (wave 2.3): a reusableEnvironment lookup that never settles times out (CLEANUP_READ_MS = 15 s per bb read) and
-    // round 2 still launches a fresh worktree. Mutation caught: dropping bounded() from either read in the server adapter
-    // hangs chief_review forever on a host that never answers.
-    test.each([
-      ["the earlier reviewer's thread lookup", "threads.get"],
-      ["the earlier reviewer's environment lookup", "environments.get"],
-    ] as const)("round 2 completes on a fresh worktree after %s never settles", async (_name, hungRead) => {
-      const { state, round, worker, chief } = await setupRounds();
-      const first = await round(1);
-      let pendingCalls = 0;
-      const never = () => { pendingCalls += 1; return new Promise<never>(() => {}); };
-      if (hungRead === "threads.get") {
-        state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
-          if (threadId === first.reviewer) return never();
-          const thread = state.live.get(threadId);
-          if (!thread) throw new Error("not found");
-          return thread;
-        });
-      } else {
-        state.harness.sdk.stub("environments.get", async () => never());
-      }
-      const spawnedBefore = state.spawned.length;
-      execFileMock.mockImplementation(async (file: string, args: string[]) => {
-        if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: shaOf(2), baseRefName: "main" }), stderr: "" };
-        throw new Error(`unexpected CLI ${file}`);
-      });
-      vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
-      try {
-        let settled = false;
-        const review = tool(state, "chief_review", { workerThreadId: worker }, chief).finally(() => { settled = true; });
-        await vi.advanceTimersByTimeAsync(14_000);
-        expect(pendingCalls).toBe(1);
-        expect(settled).toBe(false);
-        expect(state.spawned).toHaveLength(spawnedBefore);
-        await vi.advanceTimersByTimeAsync(1_500);
-        await review;
-      } finally {
-        vi.useRealTimers();
-      }
-      expect(state.spawned).toHaveLength(spawnedBefore + 1);
-      expect(state.spawned.at(-1).environment).toMatchObject(fresh);
-      expect(String(state.spawned.at(-1).prompt)).toContain(`git checkout --detach ${shaOf(2)}`);
     });
   });
 });

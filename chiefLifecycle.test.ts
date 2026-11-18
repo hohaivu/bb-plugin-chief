@@ -3,6 +3,7 @@ import { makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { CLOSE_OUT, chiefReview, delegate, disposeAll, elapse, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
+import { gateWorld } from "./test/gateWorld";
 import { provideSdk } from "./test/sdk";
 
 provideSdk(sdkTesting);
@@ -24,35 +25,33 @@ describe("Chief backend", () => {
     });
   });
 
-  test("files planner, worker and reviewer threads as children of their Chief", async () => {
-    const state = await setup();
-    await state.harness.behavior.setSettings({ plannerEnabled: true });
-    const chief = await start(state);
-    const opts = { threadId: chief.threadId, projectId: state.live.get(chief.threadId)!.projectId };
+  test("files planner, worker, reviewer and tester threads as children of their Chief", async () => {
+    const world = await gateWorld({ before: async (state) => { await state.harness.behavior.setSettings({ plannerEnabled: true }); } });
+    const { state, chief } = world;
+    const opts = { threadId: chief, projectId: state.live.get(chief)!.projectId };
     expect((await state.harness.behavior.runCli(
       ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals"], opts,
     )).exitCode).toBe(0);
-    const worker = await delegate(state, chief.threadId);
-    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
-    await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
+    const worker = await world.worker();
+    await world.ready(worker.threadId);
+    await chiefReview(state, chief, { workerThreadId: worker.threadId });
     expect(state.spawned.slice(1).map((entry: any) => entry.parentThreadId))
-      .toEqual([chief.threadId, chief.threadId, chief.threadId]);
+      .toEqual([chief, chief, chief, chief]);
   });
 
   test.each([false, true])("sets lifecycleOwnerThreadId on child spawns only when cascadeArchive is %s", async (cascadeArchive) => {
-    const state = await setup();
-    await state.harness.behavior.setSettings({ plannerEnabled: true, cascadeArchive });
-    const chief = await start(state);
-    const opts = { threadId: chief.threadId, projectId: state.live.get(chief.threadId)!.projectId };
+    const world = await gateWorld({ before: async (state) => { await state.harness.behavior.setSettings({ plannerEnabled: true, cascadeArchive }); } });
+    const { state, chief } = world;
+    const opts = { threadId: chief, projectId: state.live.get(chief)!.projectId };
     expect((await state.harness.behavior.runCli(
       ["plan", "--title", "Plan checkout", "--mission", "Plan how to correct and verify the checkout totals"], opts,
     )).exitCode).toBe(0);
-    const worker = await delegate(state, chief.threadId);
-    state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
-    await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
+    const worker = await world.worker();
+    await world.ready(worker.threadId);
+    await chiefReview(state, chief, { workerThreadId: worker.threadId });
     expect(state.spawned[0].lifecycleOwnerThreadId).toBeUndefined();
     expect(state.spawned.slice(1).map((entry: any) => entry.lifecycleOwnerThreadId))
-      .toEqual(Array(3).fill(cascadeArchive ? chief.threadId : undefined));
+      .toEqual(Array(4).fill(cascadeArchive ? chief : undefined));
   });
 
   test("after a transfer only the current owner sees and controls the work", async () => {
@@ -392,9 +391,10 @@ describe("Chief backend", () => {
   });
 
   test("keeps a ready report while the reporting turn is still live, then reviews", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
+    const world = await gateWorld();
+    const { state } = world;
+    const chief = { threadId: world.chief };
+    const worker = await world.worker("Fix checkout totals");
     // chief_report runs inside the worker's own turn, so the live status is
     // still "active" for a while after the row is marked ready.
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
@@ -423,9 +423,10 @@ describe("Chief backend", () => {
   describe("waits for a just-reported worker to go idle", () => {
     const reviews = (state: Awaited<ReturnType<typeof setup>>) =>
       state.spawned.filter((entry) => entry.title === "Review · Fix checkout totals");
-    const reportWhileActive = async (state: Awaited<ReturnType<typeof setup>>) => {
-      const chief = await start(state);
-      const worker = await delegate(state, chief.threadId);
+    const reportWhileActive = async (world: Awaited<ReturnType<typeof gateWorld>>) => {
+      const { state } = world;
+      const chief = { threadId: world.chief };
+      const worker = await world.worker("Fix checkout totals");
       state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Totals fixed",
@@ -434,8 +435,9 @@ describe("Chief backend", () => {
     };
 
     test("chief_review waits, then reviews", async () => {
-      const state = await setup();
-      const { chief, worker } = await reportWhileActive(state);
+      const world = await gateWorld();
+      const { state } = world;
+      const { chief, worker } = await reportWhileActive(world);
       vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
       try {
         const call = state.harness.behavior.callAgentTool(
@@ -453,8 +455,9 @@ describe("Chief backend", () => {
     });
 
     test("chief_review gives up after the wait cap", async () => {
-      const state = await setup();
-      const { chief, worker } = await reportWhileActive(state);
+      const world = await gateWorld();
+      const { state } = world;
+      const { chief, worker } = await reportWhileActive(world);
       vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
       try {
         const call = state.harness.behavior.callAgentTool(
@@ -485,8 +488,9 @@ describe("Chief backend", () => {
     });
 
     test("chief_delegate replaces: waits, then hands off", async () => {
-      const state = await setup();
-      const { chief, worker } = await reportWhileActive(state);
+      const world = await gateWorld();
+      const { state } = world;
+      const { chief, worker } = await reportWhileActive(world);
       vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
       try {
         const call = delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
