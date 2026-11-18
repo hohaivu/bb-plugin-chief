@@ -155,6 +155,14 @@ export function createDelegation(ctx: Ctx) {
       if (!priorLive.environmentId) throw new Error(`Worker ${prior.thread_id} has no reusable environment.`);
       if (params.branch && params.branch !== prior.branch) throw new Error(`replaces: ${prior.thread_id} carries branch ${prior.branch}; pass no --branch or the same one.`);
     }
+    // An open review gate pinned its targets: fixes go through the gate, and its one tester is the gate's.
+    const gate = prior ? store.gateFor(prior.thread_id) : params.planThreadId ? store.gate(`plan:${params.planThreadId}`) : undefined;
+    if (gate?.targets.some((target) => store.get(target.threadId)?.state !== "complete")) {
+      if (prior && gate.targets.some((target) => target.threadId === prior.thread_id) && params.kind !== "spec-writer") {
+        throw new Error(`The review gate pinned ${prior.thread_id}; fixes go through the gate's fix worker. ${ctx.gateLine(gate, ctx.gateOf(prior)!.decision)}`);
+      }
+      if (params.kind === "tester" && !params.evidenceOnly) throw new Error(`Review gate ${gate.gate_key} is open: its one tester writes the tests. Pass evidenceOnly for an evidence-only tester.`);
+    }
     const resolved = resolveDelegation(params, prior);
     const { issueUrl, planThreadId, wave, verifyCommand, unplannedReason } = resolved;
     // Planning on means every new delegation starts from a plan wave. replaces: hands off
@@ -246,10 +254,7 @@ export function createDelegation(ctx: Ctx) {
     }
     if (prior) {
       const now = Date.now();
-      store.batch(() => {
-        store.completeSuperseded(prior.thread_id, now);
-        ledger.repoint(prior.thread_id, thread.id, now);
-      });
+      store.completeSuperseded(prior.thread_id, now);
     }
     void (!prior && !planThreadId ? ctx.trackerSync.start(store.get(thread.id)!, params.mission) : ctx.trackerSync.join(store.get(thread.id)!));
     return { threadId: thread.id, title: params.title, projectId };

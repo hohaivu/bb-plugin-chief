@@ -98,6 +98,7 @@ export function createInspect(ctx: Ctx) {
       ...(row.unplanned_reason ? [`Unplanned: ${clip(row.unplanned_reason, 300)}`] : []),
       ...(row.review_skipped ? [`Review skipped: ${clip(row.review_skipped, 300)}`] : []),
       ...(row.role === "planner" ? planWavesFor(threadId).flatMap((wave, index) => wave.specsSkipped ? [`wave ${index + 1}: specs skipped: ${clip(wave.specsSkipped, 300)}`] : []) : []),
+      ...((gated) => gated ? [`Review gate: ${ctx.gateLine(gated.gate, gated.decision)}`] : [])(ctx.gateOf(row)),
       `Persisted state: ${row.state}`,
       `Live status: ${liveStatus ?? "unknown"}`,
       ...(row.summary ? [`Summary: ${row.summary}`] : []),

@@ -20,18 +20,12 @@ interface LedgerRow {
   state: string;
 }
 
-/** The managed_threads writes the ledger makes; the thread store owns them and they run in the caller's store.batch. */
-interface LedgerWrites {
-  repointReviewer(priorThreadId: string, successorThreadId: string, now: number): void;
-}
-
 /** One module owns verdict recording, and review targets. It returns data and decisions,
  * never sentences, and its write functions run inside the caller's transaction: they never open their own.
  * getRow reads the server's live row cache, which is reloaded after writes. */
 export function createReviewLedger<Row extends LedgerRow>(
   db: ReturnType<BbPluginApi["storage"]["database"]>,
   getRow: (threadId: string) => Row | undefined,
-  writes: LedgerWrites,
   states: { busy: (status: string) => boolean },
 ) {
   // A worker's reviewers are found through review_targets: one plan review covers the latest worker of every branch.
@@ -64,14 +58,6 @@ export function createReviewLedger<Row extends LedgerRow>(
     return chain;
   }
 
-  /** The newest reviewer of any state that was pinned to a head (reviewed_head_sha set) and covers any worker in these workers' task chains; null when none.
-   * An unpinned review ran in a worker's own environment and is never returned. */
-  function lastPinnedReviewer(workerThreadIds: string[]): string | null {
-    const chain = [...new Set(workerThreadIds.flatMap(taskChain))];
-    const row = db.prepare(`SELECT r.thread_id FROM managed_threads r JOIN review_targets t ON t.reviewer_thread_id=r.thread_id WHERE r.role='reviewer' AND r.reviewed_head_sha IS NOT NULL AND t.worker_thread_id IN (${chain.map(() => "?").join(",")}) ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`).get(...chain) as { thread_id: string } | undefined;
-    return row?.thread_id ?? null;
-  }
-
   /** Every open review of these workers' task chains, newest first; inFlight is the first one still busy. */
   function openReviews(workerThreadIds: string[]) {
     const open = [...new Set(workerThreadIds.flatMap(taskChain))]
@@ -85,13 +71,6 @@ export function createReviewLedger<Row extends LedgerRow>(
    * names this one when it refuses skipReview. reviewStart's openReviews.inFlight orders by age instead. */
   const busyReview = (workerThreadId: string) => taskChain(workerThreadId).map(openReview).find((review) => review && states.busy(review.state));
 
-  /** replaces: re-points an open review at the fresh worker: the reviewer row and every target of an open review. */
-  function repoint(priorThreadId: string, successorThreadId: string, now: number) {
-    writes.repointReviewer(priorThreadId, successorThreadId, now);
-    // The same re-point for every worker an open review covers, so a plan review's other branches follow their fresh workers too.
-    db.prepare(`UPDATE review_targets SET worker_thread_id=?, report_seq=NULL WHERE worker_thread_id=? AND reviewer_thread_id IN (SELECT thread_id FROM managed_threads WHERE role='reviewer' AND state NOT IN ('complete','archived','deleted'))`).run(successorThreadId, priorThreadId);
-  }
-
   /** One review_targets row per covered worker, bound to the head and report the review was started for. */
   function addTargets(reviewerThreadId: string, covered: { threadId: string; reportSeq: number | null; headSha: string | null; prUrl: string | null; branch: string | null }[]) {
     for (const target of covered) {
@@ -101,7 +80,7 @@ export function createReviewLedger<Row extends LedgerRow>(
   }
 
   /** A reviewer's verdict writes one reviewer_verdicts row per covered worker, each with the head and report it was
-   * bound to (-1 marks a target re-pointed to a fresh worker, which no report matches). */
+   * bound to (-1 marks a legacy target whose report was cleared). */
   function recordVerdict(row: { thread_id: string; role: string }, verdict: string | null, reportSeq: number, now: number) {
     if (row.role !== "reviewer" || !verdict) return;
     const covered = targets(row.thread_id);
@@ -130,22 +109,6 @@ export function createReviewLedger<Row extends LedgerRow>(
       { verdict: string; head_sha: string | null; worker_thread_id: string | null; reviewed_report_seq: number | null } | undefined;
   }
 
-  /** Whether the newest verdict is an approve for what the worker would ship. With a pull request that is the head
-   * currentHead reports now (read only when an approve exists and pr_url is set); without one, the worker's current report. */
-  async function headApproval(worker: { thread_id: string; report_seq: number; pr_url: string | null }, currentHead: () => Promise<{ sha: string } | null>) {
-    const newest = newestVerdict(worker);
-    if (!newest) return { approved: false, reason: "no-verdict" } as const;
-    if (newest.verdict !== "approve") return { approved: false, reason: "not-approve", verdict: newest.verdict } as const;
-    if (worker.pr_url) {
-      const head = await currentHead();
-      if (!head) return { approved: false, reason: "head-unreadable" } as const;
-      if (newest.head_sha?.toLowerCase() !== head.sha) return { approved: false, reason: "head-moved", approvedSha: newest.head_sha, headSha: head.sha } as const;
-      return { approved: true } as const;
-    }
-    if (newest.worker_thread_id !== worker.thread_id || newest.reviewed_report_seq !== worker.report_seq) return { approved: false, reason: "report-moved" } as const;
-    return { approved: true } as const;
-  }
-
   /** Read-only. How many approve and request_changes events each given reviewer gave. One event is one report
    * (reviewer_thread_id, report_seq), however many target rows it wrote. A reviewer with history uses only its
    * history; one from before reviewer_verdicts existed has none, so its current verdict counts once (null adds
@@ -167,5 +130,5 @@ export function createReviewLedger<Row extends LedgerRow>(
     return counts;
   }
 
-  return { targets, openReview, openReviews, lastPinnedReviewer, busyReview, covering, isCurrent, taskChain, headApproval, repoint, addTargets, recordVerdict, newestVerdict, newestVerdictAt, eventCounts };
+  return { targets, openReview, openReviews, busyReview, covering, isCurrent, taskChain, addTargets, recordVerdict, newestVerdict, newestVerdictAt, eventCounts };
 }

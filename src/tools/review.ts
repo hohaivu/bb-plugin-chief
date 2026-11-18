@@ -18,7 +18,7 @@ export function registerReviewTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_review",
     presentation: { label: { pending: "Starting review…", completed: "Started review" } },
-    description: "Only the active Chief starts reviews; the server refuses every other caller. Start or return an independent read-only review: for a worker with no plan link, in its existing worktree; for a plan worker, ONE review of the whole plan covering the latest worker of every branch, each pull request pinned to its own head commit. It is refused for an intermediate wave, a superseded worker, a design wave, and while any wave of the plan is not ready. With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
+    description: "Only the active Chief starts reviews; the server refuses every other caller. Opens the review gate of a worker's plan (or unplanned task): it pins every target branch's head (the pull request head, else origin's branch tip) and starts one read-only reviewer and one tester in parallel, each in a fresh worktree. It is refused for an intermediate wave, a superseded worker, a design wave, while any wave of the plan or its Spec Writer is not ready, and while a builder's checkout has uncommitted or unpushed work. A second call starts only a missing, failed or blocked side; with both live it starts nothing. With no worker, it reviews a pull request or branch in a fresh worktree; a branch a managed worker carries is refused (review that worker).",
     parameters: reviewParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

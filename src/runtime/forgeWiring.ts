@@ -105,7 +105,7 @@ export function createForgeWiring(ctx: Ctx) {
         lines: [
           `**${forgeText(row.title, 160)}**${row.plan_wave && waves ? ` · wave ${row.plan_wave} of ${waves}` : ""}`,
           ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
-          ...(overrideReason ? [`**Completed without a matching approve:** ${forgeText(overrideReason, 1_000)}`] : []),
+          ...(overrideReason ? [`**Completed without the review gate:** ${forgeText(overrideReason, 1_000)}`] : []),
           ...(row.unplanned_reason ? [`**Planning skipped:** ${forgeText(row.unplanned_reason, 500)}`] : []),
           ...(row.review_skipped ? [`**Review skipped:** ${forgeText(row.review_skipped, 500)}`] : []),
           ...(row.plan_thread_id && row.plan_wave != null ? ((plan) => plan.flatMap((wave, index) => wave.specsSkipped && chainOf(plan, index + 1)[0] === chainOf(plan, row.plan_wave!)[0]

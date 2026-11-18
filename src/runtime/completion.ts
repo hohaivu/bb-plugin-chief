@@ -9,24 +9,16 @@ import { isWriter } from "../plan/waveSchedule";
 
 export function createCompletion(ctx: Ctx) {
   const { bb, chainOwner, isDesignWave, ledger, planBaseOf, planWavesFor, progress, sideLane, store, taskWriters } = ctx;
-  /** Why a worker may not complete yet, or null when its newest review covers what it would ship.
-   * With a pull request the verdict must be an approve given for the PR head the forge reports now;
-   * without one it must be an approve for the worker's current report. A design-wave worker needs the owner's recorded approval instead.
-   * Unreadable forge state refuses: fail closed. */
+  /** Why a worker, or a gate's reviewer or tester, may not complete yet, or null when its review gate passed.
+   * A design-wave worker needs the owner's recorded approval instead. Completion never needs a re-review or an approve on the latest head. */
   async function completionRefusal(row: ManagedRow): Promise<string | null> {
     if (isDesignWave(row)) {
       return row.owner_approval ? null : `${row.thread_id} is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: ${row.thread_id}), or pass override with a reason to complete anyway.`;
     }
-    const next = `Start a fresh review with chief_review (workerThreadId: ${row.thread_id}${row.plan_thread_id ? "; on a plan it covers every branch, once every wave is ready" : ""}), complete it without a review with skipReview (your reason), or pass override with a reason to complete anyway.`;
-    const approval = await ledger.headApproval(row, async () => prHead(row.pr_url!, await ctx.projectPath(row.project_id)));
-    if (approval.approved) return null;
-    switch (approval.reason) {
-      case "no-verdict": return `${row.thread_id} has no review verdict. ${next}`;
-      case "not-approve": return `The newest review of ${row.thread_id} is ${approval.verdict}, not an approve. ${next}`;
-      case "head-unreadable": return `Cannot read the current head of ${row.pr_url} from the forge, so the approve cannot be matched to it. Retry, or pass override with a reason to complete anyway.`;
-      case "head-moved": return `The approve covers ${approval.approvedSha ?? "no recorded commit"} but ${row.pr_url} is now at ${approval.headSha}. ${next}`;
-      case "report-moved": return `The newest approve does not cover ${row.thread_id}'s current report (report ${row.report_seq}). ${next}`;
-    }
+    const gated = ctx.gateOf(row);
+    if (!gated) return `${row.thread_id} has no review gate. Start the review gate: chief_review (workerThreadId: ${row.thread_id}${row.plan_thread_id ? "; on a plan it covers every branch, once every wave is ready" : ""}), complete it without one with skipReview (your reason), or pass override with a reason to complete anyway.`;
+    if (gated.decision.kind === "pass") return null;
+    return `the review gate ${gated.gate.gate_key} has not passed (${gated.decision.kind}). ${ctx.gateLine(gated.gate, gated.decision)}`;
   }
 
   /** The skipReview docs/ check: refuses when the pushed branch has a docs/ commit no Spec Writer of this task is recorded on (Chief-Spec-Writer trailer).
@@ -86,16 +78,20 @@ export function createCompletion(ctx: Ctx) {
       if (row.last_report_state !== "ready") refuse(`its latest report is ${row.last_report_state ?? "missing"}, not ready.`);
       const busy = ledger.busyReview(threadId);
       if (busy) refuse(`review ${busy.thread_id} is still running; wait for its verdict.`);
+      const gate = store.gateFor(threadId);
+      const busyActor = gate && [gate.reviewer_thread_id, gate.tester_thread_id, gate.fixer_thread_id, gate.corrector_thread_id]
+        .map((id) => (id ? store.get(id) : undefined)).find((actor) => actor && BUSY_STATUSES.has(actor.state));
+      if (busyActor) refuse(`review gate ${gate!.gate_key} is still running ${busyActor.thread_id}; wait for its report.`);
       docsNote = await docsGate(row, refuse);
       reviewSkipped = reason.data!;
-    } else if (row.role === "worker") {
+    } else if (row.role === "worker" || (row.role === "reviewer" && store.gateFor(threadId))) {
       const refusal = await completionRefusal(row);
       approved = refusal === null;
       if (refusal) {
         const reason = overrideSchema.safeParse(override);
         if (!reason.success || !reason.data) throw new Error(`Refusing to complete ${threadId}: ${refusal}`);
         overrideReason = reason.data;
-        overrideNote = `\n\nCompleted without a matching approve: ${reason.data}`;
+        overrideNote = `\n\nCompleted without the review gate: ${reason.data}`;
         bb.log.warn(`Completing ${threadId} with an override (${refusal}) Reason: ${reason.data}`);
       }
     }
@@ -106,11 +102,20 @@ export function createCompletion(ctx: Ctx) {
     const now = Date.now();
     store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && ctx.state.cleanupActive ? now : null, reviewSkipped });
     const completed = store.get(threadId)!;
+    // The gate's last target completed: its idle actors complete with it, approved for cleanup like the targets.
+    const gate = store.gateFor(threadId);
+    if (gate && approved && gate.targets.every((target) => store.get(target.threadId)?.state === "complete")) {
+      for (const id of [gate.reviewer_thread_id, gate.tester_thread_id, gate.fixer_thread_id, gate.corrector_thread_id]) {
+        const actor = id ? store.get(id) : undefined;
+        if (!actor || terminal(actor.state) || BUSY_STATUSES.has(actor.state)) continue;
+        store.markComplete({ status: actor.status ?? actor.state, result: null, note: null, now, threadId: actor.thread_id, cleanupApprovedAt: ctx.state.cleanupActive ? now : null, reviewSkipped: null });
+      }
+    }
     if (reviewSkipped) ctx.observe.event("review_skipped", completed, reviewSkipped);
     if (overrideReason) ctx.observe.event("override", completed, overrideReason);
     ctx.enqueueCompletionComment(completed, overrideReason);
     const cleanup: "queued" | "override" | "unapproved" | "off" | null = row.role !== "worker" ? null
-      : overrideNote !== null ? "override" : !approved ? "unapproved" : ctx.state.cleanupActive ? "queued" : "off";
+      : overrideNote !== null || reviewSkipped !== null ? "override" : !approved ? "unapproved" : ctx.state.cleanupActive ? "queued" : "off";
     return { row: completed, overridden: overrideNote !== null, skipped: reviewSkipped !== null, cleanup, docsNote };
   }
 
@@ -134,8 +139,8 @@ export function createCompletion(ctx: Ctx) {
   /** The line chief_complete and the CLI add for a worker's cleanup outcome; non-workers have none. */
   const cleanupLine = (cleanup: "queued" | "override" | "unapproved" | "off" | null) => cleanup === null ? "" : {
     queued: "\nCleanup queued: a background cleanup worker archives this task's threads (worker, reviewers, advisors, and the planner after its last wave) once nothing else would be archived with them, deletes their bb/ worktree branches after bb removes the worktree and only when origin holds every commit, and clears their thread storage unless Chief's evidence is stored there; any failure alerts you.",
-    override: "\nNo cleanup: completed with override.",
-    unapproved: "\nNo cleanup: no approving review.",
+    override: "\nNo cleanup: completed without the gate.",
+    unapproved: "\nNo cleanup: the review gate did not pass.",
     off: "\nNo cleanup: the cleanupApproved setting is off.",
   }[cleanup];
 

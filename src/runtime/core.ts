@@ -188,8 +188,8 @@ export function createCore(ctx: Ctx) {
       void ctx.sweep();
     },
   });
-  const ledger = createReviewLedger<ManagedRow>(db, store.get, store, { busy: (status) => BUSY_STATUSES.has(status) });
-  const schedule = createWaveSchedule<ManagedRow>(store.rows);
+  const ledger = createReviewLedger<ManagedRow>(db, store.get, { busy: (status) => BUSY_STATUSES.has(status) });
+  const schedule = createWaveSchedule<ManagedRow>(store.rows, (row) => row.plan_wave == null && store.isGateActor(row.thread_id));
   const { planWavesFor, isDesignWave, latestWorker, latestSideWriter, specWave, reviewTargetsFor, coexists, sideLane, specWriters, taskWriters, writerPending, chainOwner, chainStarted, planBase, planBaseOf } = schedule;
 
   const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });

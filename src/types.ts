@@ -157,6 +157,9 @@ export const reportParams = z.object({
   recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
   fails: failsParam,
   findings: findingsParam,
+  testsPassed: z.boolean().optional().describe(
+    "Ready only, review-gate tester only (required there): true when every test you ran passed on every branch head you pushed, false when any failed (list them under ## Failing tests). Every other role leaves this unset.",
+  ),
 });
 
 export type ReportParams = z.infer<typeof reportParams>;
@@ -254,6 +257,8 @@ export interface ManagedRow {
   thread_errors: number;
   /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
   busy_rejections: number;
+  /** Gate tester row only: its latest ready report's testsPassed (1/0); null otherwise. */
+  tests_passed: number | null;
   /** Worker row only: when chief_complete stamped it as positively approved while cleanupApproved was on; NULL otherwise, and on every row from before the column. */
   cleanup_approved_at: number | null;
   created_at: number;

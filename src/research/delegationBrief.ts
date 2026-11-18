@@ -533,3 +533,38 @@ export function advisorBrief(input: AdvisorBriefInput): string {
     "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
   ].join("\n");
 }
+
+/** The review gate's tester: one tester per gate, in parallel with its reviewer, over every pinned target. Pure. */
+export function gateTesterBrief(input: {
+  title: string; chiefThreadId: string | null; gateKey: string;
+  targets: { threadId: string; branch: string; prUrl: string | null; headSha: string; base: string }[];
+  planFiles: string[]; writers: { threadId: string; reportPath: string | null }[];
+  verifyCommand: string | null; heavyPath: string | null;
+}): string {
+  const { targets, heavyPath } = input;
+  return [
+    `You are the review gate's tester for “${input.title}” (gate ${input.gateKey}). Report to Chief thread ${input.chiefThreadId ?? "Chief"}.`,
+    "", "## Working contract",
+    loadLine(managedSkills("worker", "tester")),
+    "- You run in parallel with the gate's reviewer. Never wait for it, address it, or read its verdict.",
+    "- Never change product code or docs/. Only tests, fixtures, test helpers and test config.",
+    "", "## Gate targets",
+    ...targets.map((target) => `- ${target.threadId}: branch ${target.branch}${target.prUrl ? `, ${target.prUrl}` : ""}, pinned ${target.headSha}, base ${target.base}`),
+    "", "## Test scope",
+    "- Read `git diff origin/<base>...<pinned sha>` for each target, the plan files, the docs the Spec Writers changed, and the repository's test rules. Decide which tests to write and at which level.",
+    ...(input.planFiles.length ? [`- Plan files: ${input.planFiles.join(", ")}`] : []),
+    ...input.writers.map((writer) => `- Spec Writer ${writer.threadId}${writer.reportPath ? `: report ${writer.reportPath}` : ""}`),
+    "- Per branch: `git fetch origin && git checkout --detach origin/<branch>`, write the tests, run them filtered, commit, then `git push origin HEAD:<branch>`. Never force-push. When a push is rejected, run `git fetch origin && git rebase origin/<branch>` once and push again; if it is rejected again, report blocked.",
+    "- When targets stack on each other, put the tests on the stack's tip branch only.",
+    "- Run the full suite once on each branch head you pushed.",
+    ...(input.verifyCommand ? [`- Verify command: ${span(input.verifyCommand)}.`] : []),
+    ...(heavyPath ? [`- Slot wrapper: ${span(`bash ${quote(heavyPath)} <sim|test|build> -- <command>`)}. Run every build and test command through it in the foreground.`] : []),
+    "", "## Report",
+    "- Report ready with `testsPassed` (true only when every test you ran passed) and a `## Failing tests` section: per failure the test file:line, the command, its exit status, an output excerpt and the product file:line behind it.",
+    ...(input.planFiles.length ? [deviationsLine] : []),
+    "- Report blocked only for an environment problem, with your recommended next action.",
+  ].join("\n");
+}
+
+/** A code span that keeps the shell text literal. */
+const span = (text: string) => ((ticks) => `${ticks} ${text} ${ticks}`)("`".repeat(Math.max(1, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1))));

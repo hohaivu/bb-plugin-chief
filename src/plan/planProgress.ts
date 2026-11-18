@@ -1,6 +1,8 @@
-import { chainOf, heads, isWriter, successorOf, tips, type PlanWave } from "./waveSchedule";
+import { chainOf, heads, isReady, isSettled, isWriter, successorOf, tips, type PlanWave } from "./waveSchedule";
+import type { ReviewGate } from "../db/threadStore";
+import type { ReportFinding } from "../types";
 import type { createWaveSchedule } from "./waveSchedule";
-import type { createReviewLedger, ReviewTarget } from "../review/reviewLedger";
+import type { createReviewLedger } from "../review/reviewLedger";
 
 /** What plan progress reads of a managed_threads row; the server's ManagedRow satisfies it. */
 export interface ProgressRow {
@@ -19,20 +21,75 @@ export interface ProgressRow {
   verdict: string | null;
   worker_thread_id: string | null;
   regression: number | null;
+  findings: string | null;
+  tests_passed: number | null;
 }
 
-/** One worker a reviewer covers: its lane (a side-lane Spec Writer or an implementation row), its wave, whether it is a tester row,
- * and whether it sits on a spec-bearing chain. */
-export interface RepairTarget { threadId: string; wave: number | null; tested: boolean; spec: boolean; lane: "side" | "implementation" }
-/** What a reviewer verdict covers: a whole plan (stacks are legacy chains fixed in wave order; loose is every other
- * open target), one managed worker, or a branch no worker owns. */
-export type RepairWork =
-  | { layout: "plan"; open: RepairTarget[]; stacks: RepairTarget[][]; loose: RepairTarget[] }
-  | { layout: "single"; target: RepairTarget }
-  | { layout: "branch" };
-export type ReviewAdvice =
-  | { kind: "approve"; work: RepairWork }
-  | { kind: "fix"; work: RepairWork; regression: boolean };
+/** What the review gate asks for next. First match wins (gateDecision). */
+export type GateDecision<Row> =
+  | { kind: "start" }
+  | { kind: "block"; refusal: string }
+  | { kind: "restart"; sides: ("reviewer" | "tester")[]; blocked: Row[] }
+  | { kind: "wait"; who: Row[] }
+  | { kind: "fix"; redTests: boolean; codeFindings: number }
+  | { kind: "docsRepair"; writer: Row }
+  | { kind: "wrongTest"; fixer: Row }
+  | { kind: "escalate"; why: string }
+  | { kind: "pass" };
+
+/** The review gate's next step. Pure: it reads only what it is given.
+ * startRefusal: the readiness refusal for an unopened gate (null: it may start). writers: every Spec Writer row of the gate's plan or task. */
+export function gateDecision<Row extends ProgressRow>(input: {
+  gate: ReviewGate | undefined;
+  row: (threadId: string) => Row | undefined;
+  startRefusal: string | null;
+  verdictAt: number | null;
+  writers: Row[];
+  terminal: (state: string) => boolean;
+}): GateDecision<Row> {
+  const { gate, row } = input;
+  if (!gate) return input.startRefusal ? { kind: "block", refusal: input.startRefusal } : { kind: "start" };
+  const moved = gate.targets.find((target) => row(target.threadId)?.report_seq !== target.reportSeq);
+  if (moved) return { kind: "escalate", why: `${moved.threadId} changed after the gate pinned it (report ${moved.reportSeq})` };
+  const actor = (id: string | null) => (id ? row(id) : undefined);
+  const reviewer = actor(gate.reviewer_thread_id);
+  const tester = actor(gate.tester_thread_id);
+  const down = (side: Row | undefined) => !side || ["failed", "blocked", "archived", "deleted"].includes(side.state);
+  const sides = ([["reviewer", reviewer], ["tester", tester]] as const).filter(([, side]) => down(side));
+  if (sides.length) return { kind: "restart", sides: sides.map(([name]) => name), blocked: sides.flatMap(([, side]) => side?.state === "blocked" ? [side] : []) };
+  const busy = [reviewer!, tester!].filter((side) => !isReady(side) && side.state !== "complete");
+  if (busy.length) return { kind: "wait", who: busy };
+  // Docs findings go only to a Spec Writer repair created after the verdict.
+  const findings = (reviewer!.findings ? JSON.parse(reviewer!.findings) as ReportFinding[] : []).filter((entry) => entry.severity === "blocking");
+  const docsFindings = findings.filter((entry) => entry.file.startsWith("docs/"));
+  const repairs = input.verdictAt === null ? [] : input.writers.filter((writer) => writer.created_at > input.verdictAt!);
+  const repair = repairs.at(-1);
+  const docsSettled = !docsFindings.length || (!!repair && isSettled(repair));
+  const docsWait = !!docsFindings.length && !!repair && !isSettled(repair) && !input.terminal(repair.state);
+  const done = (fixRow: Row) => isReady(fixRow) || fixRow.state === "complete";
+  const corrector = actor(gate.corrector_thread_id);
+  if (corrector) {
+    if (!done(corrector) && !["failed", "blocked"].includes(corrector.state)) return { kind: "wait", who: [corrector] };
+    if (done(corrector) && corrector.tests_passed === 1 && docsSettled) return { kind: "pass" };
+    if (docsWait) return { kind: "wait", who: [repair!] };
+    return { kind: "escalate", why: `corrector ${corrector.thread_id} ended ${corrector.state}${corrector.tests_passed === 0 ? " with failing tests" : ""}` };
+  }
+  const fixer = actor(gate.fixer_thread_id);
+  if (fixer) {
+    if (fixer.state === "blocked") return { kind: "wrongTest", fixer };
+    if (fixer.state === "failed") return { kind: "escalate", why: `fix worker ${fixer.thread_id} failed: chief_continue (threadId: ${fixer.thread_id}) it, or escalate` };
+    if (!done(fixer)) return { kind: "wait", who: [fixer] };
+    if (fixer.tests_passed === 1 && docsSettled) return { kind: "pass" };
+    if (docsWait) return { kind: "wait", who: [repair!] };
+    if (fixer.tests_passed !== 1) return { kind: "escalate", why: `fix worker ${fixer.thread_id} reported without passing tests` };
+  }
+  const codeFindings = findings.length - docsFindings.length;
+  if (!fixer && (tester!.tests_passed !== 1 || codeFindings)) return { kind: "fix", redTests: tester!.tests_passed !== 1, codeFindings };
+  if (docsSettled) return { kind: "pass" };
+  if (docsWait) return { kind: "wait", who: [repair!] };
+  const writer = gate.targets.map((target) => row(target.threadId)).filter((target): target is Row => !!target && isWriter(target.kind)).at(-1);
+  return writer ? { kind: "docsRepair", writer } : { kind: "escalate", why: `the review found docs findings and no side-lane Spec Writer of this gate can repair them` };
+}
 
 /** The two row-state tests the server owns: a terminal row, and a live thread status that is busy. */
 export interface ProgressStates {
@@ -163,50 +220,10 @@ export function createPlanProgress<Row extends ProgressRow>(
     return reviewStep();
   }
 
-  /** A reviewer verdict's open branches: the covered targets, those whose worker is not complete yet, and whether
-   * the review spans a plan. stacks groups the open targets of one chain (two or more, each in wave order): they build
-   * on each other, so they are fixed one at a time. loose is every other open target, a side-lane Spec Writer always (it never builds on an implementation row). Null when a covered target was re-pointed to a fresh worker (its findings were handed off)
-   * or every covered worker is already complete. */
-  function fixRound(reviewer: { thread_id: string }): { covered: ReviewTarget[]; open: ReviewTarget[]; plan: boolean; stacks: ReviewTarget[][]; loose: ReviewTarget[] } | null {
-    const covered = ledger.targets(reviewer.thread_id);
-    if (covered.some((target) => target.report_seq === null)) return null;
-    // Workers independently marked complete already absorbed this reviewer's verdict; only the rest still need a call.
-    const open = covered.filter((target) => rows().get(target.worker_thread_id)?.state !== "complete");
-    if (covered.length && !open.length) return null;
-    const chains = new Map<string, { target: ReviewTarget; wave: number }[]>();
-    for (const target of open) {
-      const worker = rows().get(target.worker_thread_id);
-      if (!worker?.plan_thread_id || worker.plan_wave == null || sideLane(worker)) continue;
-      const key = `${worker.plan_thread_id}:${chainOf(planWavesFor(worker.plan_thread_id), worker.plan_wave)[0]}`;
-      chains.set(key, [...(chains.get(key) ?? []), { target, wave: worker.plan_wave }]);
-    }
-    const stacks = [...chains.values()].filter((chain) => chain.length > 1)
-      .map((chain) => chain.sort((a, b) => a.wave - b.wave).map((entry) => entry.target));
-    const stacked = new Set(stacks.flat());
-    return { covered, open, plan: covered.length > 1, stacks, loose: open.filter((target) => !stacked.has(target)) };
-  }
-
   /** The row sits on a spec-bearing chain: a plan chain with a Spec Writer on an unbypassed spec wave, or an unplanned task chain holding a Spec Writer. */
   function onSpecChain(row: Row): boolean {
     if (row.plan_thread_id && row.plan_wave != null) return specChain(row.plan_thread_id, planWavesFor(row.plan_thread_id), row.plan_wave);
     return ledger.taskChain(row.thread_id).some((id) => isWriter(rows().get(id)?.kind));
-  }
-
-  /** The repair decision after a reviewer verdict, or null (no verdict, or nothing left to repair). */
-  function reviewAdvice(reviewer: Row): ReviewAdvice | null {
-    if (reviewer.role !== "reviewer" || !reviewer.verdict) return null;
-    const round = fixRound(reviewer);
-    if (!round) return null;
-    const target = (threadId: string): RepairTarget => {
-      const row = rows().get(threadId);
-      return { threadId, wave: row?.plan_wave ?? null, tested: row?.kind === "tester", spec: !!row && onSpecChain(row), lane: row ? laneOf(row) : "implementation" };
-    };
-    const ofTarget = (entry: ReviewTarget) => target(entry.worker_thread_id);
-    const work: RepairWork = round.plan
-      ? { layout: "plan", open: round.open.map(ofTarget), stacks: round.stacks.map((stack) => stack.map(ofTarget)), loose: round.loose.map(ofTarget) }
-      : reviewer.worker_thread_id ? { layout: "single", target: target(reviewer.worker_thread_id) } : { layout: "branch" };
-    if (reviewer.verdict === "approve") return { kind: "approve", work };
-    return { kind: "fix", work, regression: !!reviewer.regression };
   }
 
   /** A planner's progress: one segment per chain, and how many of all its waves are done. An absent legacy test wave
@@ -263,5 +280,5 @@ export function createPlanProgress<Row extends ProgressRow>(
     return { waves, next: successorOf(waves, row.plan_wave!) };
   }
 
-  return { reviewBlock, waitingOn, readyStep, reviewAdvice, onSpecChain, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
+  return { reviewBlock, waitingOn, readyStep, onSpecChain, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
 }

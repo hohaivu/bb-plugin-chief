@@ -538,6 +538,11 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       try { reportFindings = JSON.parse(reportFindings); } catch { /* checkReport refuses the string */ }
     }
     const errors = checkReport(candidate, { ...params, fails: reportFails, findings: reportFindings }, plan);
+    // testsPassed belongs to the review gate's tester alone, and its ready report must carry it.
+    const gateTester = !!found.row && store.gateFor(threadId)?.tester_thread_id === threadId;
+    if (params.testsPassed !== undefined && !gateTester) errors.push("testsPassed is only for the review gate's tester; remove it.");
+    else if (params.testsPassed !== undefined && params.state !== "ready") errors.push(`testsPassed is only for a ready report (state is ${params.state}); remove it.`);
+    else if (gateTester && params.state === "ready" && params.testsPassed === undefined) errors.push("testsPassed is missing: send true when every test you ran passed on every branch head you pushed, false otherwise (list them under ## Failing tests).");
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
     // The launch row may have landed while the lookup awaited; keep it, as a recovery candidate has no PR or branch.
     if (found.pending && !store.get(threadId)) store.insert(found.pending);
@@ -594,7 +599,8 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         blocker: params.state === "blocked" ? params.blocker ?? null : null,
         recommendation: params.recommendation ?? null, verdict,
         planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails,
-        findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null, now,
+        findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null,
+        testsPassed: params.testsPassed === undefined ? null : params.testsPassed ? 1 : 0, now,
       });
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         store.markAdvised(threadId, now);
