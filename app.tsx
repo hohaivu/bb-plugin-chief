@@ -279,15 +279,27 @@ function HostModelPicker({ hostId, value, disabled, onPick }: {
 function useHeaderRoles({ threadIds }: { threadIds: readonly string[] }) {
   const rpc = useRpc<typeof rpcContract>();
   const [roles, setRoles] = useState<ReadonlyMap<string, string | null>>(new Map());
-  const requested = useRef(new Set<string>());
+  // One token per visible lifetime: re-entering the visible set refetches, and stale completions are dropped.
+  const lifetimes = useRef(new Map<string, object>());
 
   useEffect(() => {
-    for (const threadId of threadIds) {
-      if (requested.current.has(threadId)) continue;
-      requested.current.add(threadId);
+    const visible = new Set(threadIds);
+    const left = [...lifetimes.current.keys()].filter((threadId) => !visible.has(threadId));
+    for (const threadId of left) lifetimes.current.delete(threadId);
+    if (left.length > 0) setRoles((previous) => {
+      const next = new Map(previous);
+      for (const threadId of left) next.delete(threadId);
+      return next;
+    });
+    for (const threadId of visible) {
+      if (lifetimes.current.has(threadId)) continue;
+      const token = {};
+      lifetimes.current.set(threadId, token);
       void rpc.call("role", { threadId }).then((result) => {
-        setRoles((previous) => new Map(previous).set(threadId, result.role));
-      }).catch(() => requested.current.delete(threadId));
+        if (lifetimes.current.get(threadId) === token) setRoles((previous) => new Map(previous).set(threadId, result.role));
+      }).catch(() => {
+        if (lifetimes.current.get(threadId) === token) lifetimes.current.delete(threadId);
+      });
     }
   }, [rpc, threadIds]);
 
@@ -297,26 +309,29 @@ function useHeaderRoles({ threadIds }: { threadIds: readonly string[] }) {
 function useCreateChief() {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
-  const [isLaunching, setIsLaunching] = useState(false);
+  const [launching, setLaunching] = useState<ReadonlySet<string>>(new Set());
+  const inFlight = useRef(new Set<string>());
   const { projects } = experimental_useSidebarThreads();
 
   // Offer it only once the project is known to be non-personal (a personal project has no repo for workers to branch from).
   const canLaunch = (projectId: string) => projects.some((candidate) => candidate.id === projectId && !candidate.isPersonal);
 
-  const launch = async (projectId: string) => {
-    if (isLaunching) return;
-    setIsLaunching(true);
+  const launch = async (threadId: string, projectId: string) => {
+    if (inFlight.current.has(threadId)) return;
+    inFlight.current.add(threadId);
+    setLaunching(new Set(inFlight.current));
     try {
       const result = await rpc.call("create", { projectId });
       navigate.toThread(result.threadId);
     } catch (cause) {
       toast.error(errorMessage(cause));
     } finally {
-      setIsLaunching(false);
+      inFlight.current.delete(threadId);
+      setLaunching(new Set(inFlight.current));
     }
   };
 
-  return { canLaunch, isLaunching, launch };
+  return { canLaunch, launching, launch };
 }
 
 export default definePluginApp((app) => {
@@ -362,7 +377,7 @@ export default definePluginApp((app) => {
     placement: "header",
     useData: () => useCreateChief(),
     item: ({ thread, data }) => data.canLaunch(thread.projectId)
-      ? { label: "New Chief", icon: "chief/crown-plus", disabled: data.isLaunching, run: () => data.launch(thread.projectId) }
+      ? { label: "New Chief", icon: "chief/crown-plus", disabled: data.launching.has(thread.id), run: () => data.launch(thread.id, thread.projectId) }
       : null,
   });
 
