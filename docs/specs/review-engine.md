@@ -136,6 +136,8 @@ The review start chooses the base ref of the slice for each target without a pin
 1. It checks the worker and the Chief that owns it. A second call for the same gate joins the first call.
 2. It loads the gate, or opens it in one batch. It pins each target: the pull request head, else the branch head from `git ls-remote origin refs/heads/<branch>`. All targets of one pull request share one pinned head.
 3. It checks the builder environment. The tree must be clean, and the pinned commit must contain the builder HEAD. A failed check refuses the call and names the target and the recovery. It never falls back to a mutable checkout.
+   - A builder checkout that is not on the plugin host refuses the call before the gate opens. The plugin cannot prove its clean tree or its pushed HEAD there, so it never treats the checkout as clean. The refusal names the worker and two recoveries: commit and push on its host, then call `chief_continue`; or move the checkout to the plugin host. Then call `chief_review` again.
+   - Reason: a gate on an older origin commit would review code that the builder does not hold. Refusing first keeps the pin honest.
 4. It launches only the missing side. A reviewer launches when its gate id is null or failed or blocked. A tester launches under the same rule.
 5. It reads the impact slices. They never refuse a review. Each success carries the changed paths and the docs history.
 6. It writes `review-context.md` to the attempt folder, before the launch. It makes 3 attempts with 1 s then 2 s of backoff. The file content is the context plus a newline. An empty context writes no file.
@@ -334,11 +336,11 @@ A `fix` decision admits one fix run. A blocked fix run with wrong-test evidence 
 
 A change that the owner asks for after completion gets a chat fix. It gets no review.
 
-- A chat fix is a fresh `kind: worker` that replaces a completed gate target or a completed fix run. It is admitted only while that row's pull request is not merged.
+- A chat fix is a fresh `kind: worker` that replaces a completed gate target or a completed fix run.
+- The plugin admits a chat fix only when the forge reports that row's pull request open and unmerged. The plugin reads the pull request from the row, else from the gate target. A merged, closed, missing or unknown answer refuses the call, and the refusal names the state and the recovery: start new work without `replaces:`, or retry when the forge answers. Reason: the fix pushes to the pull request branch, so a merged or closed pull request cannot take it.
 - The chat fix runs with `fix_run='chat'`. It reuses that row's environment, and its brief tells it to fetch and fast-forward to the origin branch before it edits.
 - The chat fix gets no old findings. Its mission is the chat request.
 - The chat fix completes on its own green run: `ready`, `testsPassed` true, and a passing `docsGate`. It stamps `cleanup_approved_at` when cleanup is active.
-- The chat fix is refused once the pull request is merged and cleaned up. Reason: cleanup deletes the branch that the fix needs.
 
 ## Contracts and Invariants
 

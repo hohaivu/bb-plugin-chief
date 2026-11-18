@@ -102,7 +102,7 @@ sequenceDiagram
 
   opt the owner asks for a change before the merge
     Chief->>FixRun: chief_delegate replaces: completed row, kind worker, chat fix
-    Note over Chief,FixRun: no review and no replayed findings. The run completes on its own green run
+    Note over Chief,FixRun: admitted only while the forge reports the PR open and unmerged. No review and no replayed findings. The run completes on its own green run
   end
 ```
 
