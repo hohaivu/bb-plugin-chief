@@ -72,6 +72,24 @@ describe("chief_consult on a plan", () => {
     expect(await roster(state)).toContain(`plan review: in review (${advisor!.threadId})`);
   });
 
+  test("plan intake refuses a replacement during review and preserves the eventual decision on resubmission", async () => {
+    const { state, chief, planner } = await plannedChief();
+    await consult(state, chief.threadId, planner.threadId);
+    const [advisor] = await advisors(state);
+    const original = rowOf(state, planner.threadId);
+    const replacement = { state: "ready", result: "Simplified plan.", plan: PLAN_FIXTURE };
+
+    expect(await refusal(report(state, planner.threadId, replacement))).toContain(`(${advisor!.threadId}); wait for its report`);
+    expect(rowOf(state, planner.threadId).plan_waves).toBe(original.plan_waves);
+    expect(rowOf(state, planner.threadId).plan_review).toBe("required");
+
+    await report(state, advisor!.threadId, { state: "ready", result: "Revisit the plan.", verdict: "request_changes" });
+    await report(state, planner.threadId, replacement);
+    expect(JSON.parse(rowOf(state, planner.threadId).plan_waves)).toHaveLength(1);
+    expect(rowOf(state, planner.threadId).plan_review).toBe("changes");
+    expect(await refusal(delegateOne(state, chief.threadId, planner.threadId))).toContain("chief_plan");
+  });
+
   test("a stopped advisor blocks nothing: the plan delegates, the roster says `consulted, no advice`, and a fresh consult may start", async () => {
     const { state, chief, planner } = await plannedChief();
     await consult(state, chief.threadId, planner.threadId);
