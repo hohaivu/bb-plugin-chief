@@ -380,7 +380,8 @@ describe("Chief backend", () => {
     // Mirrored into Chief's storage so Chief can echo inline-vis previews.
     expect(await readFile(join(state.storageRoot, chief.threadId, "plans", planner.threadId, "plan-2.md"), "utf8")).toBe(`${wave(2, "Migrate the data.")}\n`);
     expect(reported).toContain(`::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-1.md"}`);
-    expect(reported).toContain(`Plan ${planner.threadId} has 4 implementation waves: get its one advisor review first`);
+    expect(reported).not.toContain("chief_consult");
+    expect(reported).toContain("Delegate wave");
     expect(reported).not.toContain("Read that file in full");
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
@@ -473,7 +474,8 @@ describe("Chief backend", () => {
     for (const line of lines) expect(reported).toContain(line);
     expect(lines.map((line) => reported.indexOf(line))).toEqual([...lines.map((line) => reported.indexOf(line))].sort((a, b) => a - b));
     expect(reported).not.toMatch(/Wave \d of 8:/);
-    expect(reported).toContain(`Plan ${planner.threadId} has 8 implementation waves: get its one advisor review first — chief_consult (planThreadId: ${planner.threadId}`);
+    expect(reported).not.toContain("chief_consult");
+    expect(reported).toMatch(/Delegate waves? \d/);
   });
 
   test("rejects a planner's ready report with more than 8 waves", async () => {
