@@ -109,7 +109,7 @@ export function world({ realPlan = false, projectPath = null, heads = {}, engine
   const chief = { thread_id: "chief", project_id: "proj" } as ManagedRow;
   const nextReport = (threadId: string) => store.reserveReport({
     threadId, state: "ready", result: "Done", summary: "Done", blocker: null, recommendation: null, verdict: null,
-    planWaves: null, regression: 0, fails: null, findings: null, now: Date.now(),
+    planWaves: null, regression: 0, fails: null, findings: null, testsPassed: null, waitingOnUser: 0, now: Date.now(),
   });
   /** A worker at `reports` reports (report_seq = reports), through the store's own reservation. */
   const worker = (id: string, over: { prUrl?: string; branch?: string; reports?: number; kind?: string; planWave?: number } = {}) => {

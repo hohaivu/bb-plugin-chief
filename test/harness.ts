@@ -322,6 +322,20 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   }
   await (options.module ?? plugin)(bb);
   disposals.push(() => harness.lifecycle.dispose());
+  // Research is on by default, so a plan needs a design source and chief_research needs `design`. Most tests are about something else:
+  // they get the skip reason / light mode filled in unless they name the input themselves. `state.raw` is the unfilled behavior.
+  const raw = { runCli: harness.behavior.runCli.bind(harness.behavior), callAgentTool: harness.behavior.callAgentTool.bind(harness.behavior) };
+  if (!options.module) {
+    harness.behavior.runCli = ((argv: string[], ctx?: any) => {
+      const bare = argv[0] === "plan" && !argv.some((a) => ["--revises", "--research-thread", "--undesigned-reason"].includes(a));
+      return raw.runCli(bare ? [...argv, "--undesigned-reason", "test: no design"] : argv, ctx);
+    }) as typeof harness.behavior.runCli;
+    harness.behavior.callAgentTool = ((name: string, params: any, ctx?: any) => {
+      if (name === "chief_plan" && !params?.revises && !params?.researchThreadId && !params?.undesignedReason) params = { ...params, undesignedReason: "test: no design" };
+      if (name === "chief_research" && params && !("design" in params)) params = { ...params, design: false };
+      return raw.callAgentTool(name, params, ctx);
+    }) as typeof harness.behavior.callAgentTool;
+  }
 
   async function supervisorCycle() {
     const service = harness.behavior.runService("supervisor");
@@ -332,6 +346,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
 
   return {
     harness,
+    raw,
     db: bb.storage.database(),
     storageRoot,
     spawned,
