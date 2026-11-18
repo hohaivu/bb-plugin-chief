@@ -269,8 +269,15 @@ export function createDelegation(ctx: Ctx) {
     });
     // The overflow file is written after the spawn, once the thread's own storage exists; the brief names it by $BB_THREAD_STORAGE.
     if (docsWorkFile) {
-      await ctx.retryWhileProvisioning(() => ctx.writeStorageFile(thread.id, DOCS_WORK_FILE, docsWorkFile))
-        .catch((error) => bb.log.warn(`Could not write ${thread.id}'s docs work list: ${String(error)}`));
+      // The file is the only place the omitted source items live, so a failed write must not leave a repair running without it:
+      // stop and retire the new thread (so the branch is free for the retry), keep the prior writer active, and hand Chief a retryable error.
+      try {
+        await ctx.retryWhileProvisioning(() => ctx.writeStorageFile(thread.id, DOCS_WORK_FILE, docsWorkFile));
+      } catch (error) {
+        await bb.sdk.threads.stop({ threadId: thread.id }).catch((stopError) => bb.log.warn(`Could not stop ${thread.id} after its docs work list failed: ${String(stopError)}`));
+        store.completeSuperseded(thread.id, Date.now());
+        throw new Error(`Could not write the docs work list for the repair writer ${thread.id} (${clip(String(error), 300)}). That thread was stopped and retired; ${prior ? `${prior.thread_id} stays the active writer` : "nothing else changed"}. Repeat this chief_delegate call.`);
+      }
     }
     if (prior) {
       const now = Date.now();

@@ -4,6 +4,7 @@ import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
 import { createReviewStart } from "../review/reviewStart";
 import { terminal, type ManagedRow } from "../types";
 import { clip } from "../core/text";
+import { ACTION_ROOM } from "../reportLimits";
 import { chainOf, isWriter, type PlanWave } from "../plan/waveSchedule";
 import { BUSY_STATUSES, MAX_NUDGE_LENGTH } from "./constants";
 import { bounded } from "./exec";
@@ -304,6 +305,13 @@ export function createNextAction(ctx: Ctx) {
       : target.tested
       ? { text: `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings or chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings`, writerRoute: false }
       : { text: `chief_delegate (replaces: ${target.threadId})`, writerRoute: false };
+    // The alert's action is clipped at ACTION_ROOM: keep whole routes only and point at chief_roster, which prints the full text, for the rest.
+    const fitRoutes = (routes: { text: string }[], build: (list: string) => string) => {
+      const list = (n: number) => `${routes.slice(0, n).map((route) => route.text).join(" / ")}${n < routes.length ? `${n ? " / " : ""}and ${routes.length - n} more branch(es) omitted here: read the complete handoff in chief_roster before delegating` : ""}`;
+      let n = routes.length;
+      while (forAlert && n > 0 && build(list(n)).length > ACTION_ROOM) n--;
+      return build(list(n));
+    };
     // A stacked chain's waves each build on the one before, so they are fixed one at a time, never in parallel.
     if (work.layout === "plan") {
       const { open, stacks, loose } = work;
@@ -319,10 +327,10 @@ export function createNextAction(ctx: Ctx) {
       }
       if (stacks.length) {
         const routes = loose.map(handoff);
-        return `The reviewer requires changes.${flagged}${docsNote(routes)} ${stacks.map((stack) => `Waves ${stack.map((target) => target.wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${target.wave}: ${target.threadId}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${routes.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${routes.map((route) => route.text).join(" / ")}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`;
+        return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} ${stacks.map((stack) => `Waves ${stack.map((target) => target.wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${target.wave}: ${target.threadId}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${routes.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${list}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`);
       }
       const routes = open.map(handoff);
-      return `The reviewer requires changes.${flagged}${docsNote(routes)} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${routes.map((route) => route.text).join(" / ")}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`;
+      return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${list}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`);
     }
     const single = work.layout === "single" ? handoff(work.target) : undefined;
     if (advice.kind === "consult") {

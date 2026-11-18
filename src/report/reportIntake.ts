@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ReviewTarget, createReviewLedger } from "../review/reviewLedger";
 import type { Role } from "../core/roles";
-import { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
+import { ACTION_ROOM, LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../types";
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
 import { ALERT_MARKER_ROOM, COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
@@ -411,7 +411,6 @@ export type ReportAlertInput = {
 export function reportAlert(input: ReportAlertInput) {
   const { role, title, threadId, params, action, recorded, failList, verdict, verdictPath, waveLines, inlinePlans, preview, stamp, lessonId } = input;
   const FIELD_ROOM = 600;
-  const ACTION_ROOM = 1_200;
   const MIN_RESULT_ROOM = 200;
   const alertRoom = MAX_ALERT_LENGTH - "[Chief lifecycle alert]\n".length - ALERT_MARKER_ROOM;
   const longLabel = "Result (clipped, full text in the report file): ";
