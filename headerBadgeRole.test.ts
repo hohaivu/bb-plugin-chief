@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { plan, planWave } from "./test/testerHelpers";
 import { delegate, disposeAll, execFileMock, setup, start, status } from "./test/harness";
-import { withTester } from "./test/testerHelpers";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -24,8 +24,11 @@ describe("role rpc", () => {
 
   test("a tester worker row answers tester", async () => {
     const state = await setup();
-    const { tester } = await withTester(state);
-    expect(await roleOf(state, tester)).toBe("tester");
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
+    const tester = await delegate(state, chief.threadId, "Evidence", { replaces: worker.threadId, kind: "tester" });
+    expect(await roleOf(state, tester.threadId)).toBe("tester");
   });
 
   test("a worker row without a kind answers worker, and chief answers chief", async () => {
@@ -47,9 +50,9 @@ describe("role rpc", () => {
       stdout: JSON.stringify(args[1] === "run" ? { runId: "wfr_1" } : { status: "succeeded", result: { rows: [], table: "| Item | Finding | Evidence |" } }),
       stderr: "",
     }));
-    await state.harness.behavior.runCli(["plan", "--title", "Rework", "--mission", "Propose"], opts);
+    const planner = await plan(state, chief.threadId, [planWave(1), planWave(2)]);
     await state.harness.behavior.callAgentTool("chief_review", { branch: "feature/x" }, opts);
-    await state.harness.behavior.runCli(["consult", "--title", "Advice", "--mission", "Explore"], opts);
+    await state.harness.behavior.callAgentTool("chief_consult", { planThreadId: planner.threadId, title: "Advice", mission: "Explore" }, opts);
     await state.harness.behavior.callAgentTool("chief_research", { mode: "survey", question: "Who calls this?", items: ["a.ts"] }, opts);
 
     const threads = (await status(state)).threads;

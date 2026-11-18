@@ -39,7 +39,7 @@ describe("tester role", () => {
       });
       await state.harness.behavior.setSettings(settings);
       const chief = (await start(state)).threadId;
-      await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", prUrl: PR }, chief);
+      await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", prUrl: PR, branch: "feature/x" }, chief);
       const worker = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker'`).get() as any).thread_id as string;
       await readyIdle(state, worker);
       await tool(state, "chief_review", { workerThreadId: worker }, chief);
@@ -49,7 +49,7 @@ describe("tester role", () => {
       const attempts = await readdir(reportFolder).catch(() => [] as string[]);
       const engineDir = attempts.length === 1 ? join(reportFolder, attempts[0]!) : null;
       const file = (name: string) => readFile(join(engineDir ?? join(reportFolder, "none"), name), "utf8").catch(() => null);
-      return { prompt: String(state.spawned.at(-1).prompt), file, engineDir, attempts, writes, worker, state };
+      return { prompt: String(state.spawned[Number(reviewer.slice("thr_".length)) - 1].prompt), file, engineDir, attempts, writes, worker, state };
     }
 
     test("the two settings default to reviewer and PR_AGENT_DIR", async () => {

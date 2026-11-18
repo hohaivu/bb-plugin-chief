@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { RESEARCH_ONLY } from "./src/core/roles";
 import { MIGRATIONS } from "./src/db/migrations";
+import { plan, planWave } from "./test/testerHelpers";
 import { configurationContext, delegate, disposals, elapse, disposeAll, execFileMock, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -29,7 +30,10 @@ describe("chief_research", () => {
     if (role === "worker") return (await delegate(state, chief.threadId)).threadId;
     if (role === "planner") await state.harness.behavior.runCli(["plan", "--title", "Rework", "--mission", "Propose"], opts);
     if (role === "reviewer") await state.harness.behavior.callAgentTool("chief_review", { branch: "feature/x" }, opts);
-    if (role === "advisor") await state.harness.behavior.runCli(["consult", "--title", "Rework", "--mission", "Explore"], opts);
+    if (role === "advisor") {
+      const planner = await plan(state, chief.threadId, [planWave(1), planWave(2)]);
+      await state.harness.behavior.callAgentTool("chief_consult", { planThreadId: planner.threadId, title: "Rework", mission: "Explore" }, opts);
+    }
     if (role === "researcher") await state.harness.behavior.callAgentTool("chief_research", ask(), opts);
     return (await status(state)).threads.find((row) => row.role === role)!.threadId;
   }

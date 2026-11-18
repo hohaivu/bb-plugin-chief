@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { configurationContext, delegate, disposeAll, setup, start, status } from "./test/harness";
 import { provideSdk } from "./test/sdk";
+import { forgeAnswers, forged } from "./test/gateForge";
+import { plan, planWave } from "./test/testerHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -21,16 +23,18 @@ const statusOf = (state: State, id: number) => (state.db.prepare(`SELECT status 
 async function withReport(role: "advisor" | "reviewer", text: string) {
   const state = await setup();
   const chief = (await start(state)).threadId;
-  const worker = (await delegate(state, chief)).threadId;
+  forgeAnswers(state);
+  const worker = (await delegate(state, chief, "Fix checkout totals", forged())).threadId;
   await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready for review" }, as(worker));
   if (role === "reviewer") {
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker }, as(chief));
     const reviewer = (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId;
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Reviewed", verdict: "approve", findings: [], lesson: text }, as(reviewer));
   } else {
-    await state.harness.behavior.runCli(["consult", "--title", "Rework", "--mission", "Explore"], as(chief));
+    const planner = await plan(state, chief, [planWave(1), planWave(2)]);
+    await state.harness.behavior.callAgentTool("chief_consult", { planThreadId: planner.threadId, title: "Rework", mission: "Explore" }, as(chief));
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!.threadId;
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done", lesson: text }, as(advisor));
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done", verdict: "approve", lesson: text }, as(advisor));
   }
   const id = (state.db.prepare(`SELECT id FROM chief_lessons ORDER BY id DESC`).get() as { id: number }).id;
   const reviewerSeed = { role: "reviewer", chiefThreadId: chief };
