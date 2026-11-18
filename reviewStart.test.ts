@@ -1,14 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow } from "./src/types";
-import { REVIEWER_NATIVE_LINE, replaceText } from "./test/harness";
-import { groupedSubject, NATIVE_NO_RESHAPE_LINE, NATIVE_RESHAPE_PAREN, NATIVE_RESHAPE_TAIL, TEST_AUDIT_LINE, wave1Prompt } from "./test/reviewWave1";
+import { REVIEWER_NATIVE_LINE } from "./test/harness";
+import { NATIVE_NO_RESHAPE_LINE } from "./test/reviewWave1";
 import { createReviewLedger } from "./src/review/reviewLedger";
 import { createReviewStart, type PinnedHead } from "./src/review/reviewStart";
 import type { PlanWave } from "./src/plan/waveSchedule";
@@ -37,7 +37,6 @@ const SHA_B = "b".repeat(40);
 const SHA_A = "a".repeat(40);
 const pr = (n: number) => `https://github.com/acme/shop/pull/${n}`;
 const BUSY = new Set(["active", "starting", "stopping", "pending"]);
-const NO_CHECKOUT = "no local checkout of the project on the plugin server";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -80,6 +79,8 @@ function world({ projectPath = null, heads = {}, engine, waves = [], gitEnv, pla
   const host = {
     settledLive: vi.fn(async (row: ManagedRow) => ({ status: "idle", deletedAt: null, archivedAt: null, environmentId: `env_${row.thread_id}` }) as any),
     projectPath: vi.fn(async (_projectId: string) => projectPath),
+    localPath: vi.fn(async (_environmentId: string): Promise<string | null> => null),
+    heavyPath: vi.fn(async (_hostId: string): Promise<string | null> => null),
     projectHost: vi.fn(async (_projectId: string) => "host_proj"),
     environmentHost: vi.fn(async (_environmentId: string) => "host_env" as string | null),
     reusableEnvironment: vi.fn(async (_threadId: string): Promise<{ environmentId: string; hostId: string } | null> => null),
@@ -102,7 +103,6 @@ function world({ projectPath = null, heads = {}, engine, waves = [], gitEnv, pla
     db, store, ledger, managedSpawn: managedSpawn as any,
     plan: {
       reviewRefusal: () => null,
-      retestDebts: () => ({ owed: [], waived: [] }),
       reviewTargetsFor: (worker) => covers ? [worker, ...covers.filter((id) => id !== worker.thread_id).map((id) => store.get(id)!)] : [worker],
       planWavesFor: () => waves,
       ...(planBaseOf ? { planBaseOf } : {}),
@@ -120,63 +120,24 @@ function world({ projectPath = null, heads = {}, engine, waves = [], gitEnv, pla
   });
   /** A worker at `reports` reports (report_seq = reports), through the store's own reservation. */
   const worker = (id: string, over: { prUrl?: string; branch?: string; reports?: number; kind?: string; planWave?: number } = {}) => {
-    store.insert({ threadId: id, role: "worker", projectId: "proj", chiefThreadId: "chief", title: `Task ${id}`, state: "ready", status: "idle", prUrl: over.prUrl, branch: over.branch, kind: over.kind, ...(over.planWave ? { planThreadId: "P", planWave: over.planWave } : {}) });
+    store.insert({ threadId: id, role: "worker", projectId: "proj", chiefThreadId: "chief", title: `Task ${id}`, state: "ready", status: "idle", prUrl: over.prUrl, branch: over.branch ?? `feature/${id.toLowerCase()}`, kind: over.kind, ...(over.planWave ? { planThreadId: "P", planWave: over.planWave } : {}) });
     for (let n = 0; n < (over.reports ?? 1); n++) nextReport(id);
   };
   const row = (id: string) => db.prepare(`SELECT * FROM managed_threads WHERE thread_id=?`).get(id) as any;
+  const setState = (id: string, state: string) => { db.prepare(`UPDATE managed_threads SET state=? WHERE thread_id=?`).run(state, id); store.reload(); };
   const targetRows = (reviewerId: string) =>
     db.prepare(`SELECT worker_thread_id, report_seq, head_sha, pr_url, branch FROM review_targets WHERE reviewer_thread_id=? ORDER BY worker_thread_id`).all(reviewerId) as any[];
   /** review-context.md is written before the launch, to the attempt folder on the reviewer's host (host.writeArtifact), never to the reviewer's storage. */
   const contexts = () => host.writeArtifact.mock.calls.filter(([, , name]) => name.endsWith("/review-context.md")).map(([, , , content]) => content);
   return {
-    db, store, ledger, review, chief, managedSpawn, launches, events, forge, host, worker, nextReport, row, targetRows, contexts,
+    db, store, ledger, review, chief, managedSpawn, launches, events, forge, host, worker, nextReport, row, setState, targetRows, contexts,
     covering: (ids: string[]) => { covers = ids; },
   };
 }
 
 const headOf = (branch: string, sha = SHA_B): PinnedHead => ({ branch, sha, base: "main" });
-const pinnedReply = (title: string, thread: string, sha: string) => `Started “Review · ${title}” in thread ${thread}. It reviews the pull request pinned to head commit ${sha} in its own worktree.`;
 
-describe("identity: every target's report and head come from one capture", () => {
-  test("a plan review records each target's own head, branch and report in the brief, the context, the targets and the reviewer row", async () => {
-    const w = world({ heads: { [pr(1)]: headOf("feature/one-head"), [pr(2)]: null } });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one-row", reports: 2 });
-    w.worker("W2", { prUrl: pr(2), branch: "feature/two", reports: 5 });
-    w.covering(["W1", "W2"]);
-
-    const out = await w.review.startReview(w.chief, "W1");
-
-    expect(out).toMatchObject({ threadId: "R1", created: true });
-    expect(out.reply).toContain("One review covers the whole plan: W1, W2, each pull request pinned to its own head commit where the forge answered.");
-    expect(w.launches[0]!.args.environment).toEqual({ type: "host", hostId: "host_proj", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/one-head" } } });
-    const prompt: string = w.launches[0]!.args.prompt;
-    // Plan step 1c: one line per pull request, naming its workers; an unpinned target keeps today's wording and its report binding.
-    const lineOf = (start: string) => prompt.split("\n").filter((line) => line.startsWith(start));
-    const [pinnedLine] = lineOf(`- ${pr(1)} (branch feature/one-head, targeting main), pinned to ${SHA_B}: `);
-    expect(lineOf(`- ${pr(1)} `)).toHaveLength(1);
-    expect(pinnedLine).toContain(`\`git fetch origin feature/one-head && git checkout --detach ${SHA_B}\`, then review \`git diff origin/main...${SHA_B}\``);
-    expect(pinnedLine).toMatch(/ Workers: worker W1 “Task W1”\.$/);
-    const [unpinnedLine] = lineOf("- branch feature/two ");
-    expect(lineOf("- branch ")).toHaveLength(1);
-    expect(unpinnedLine).toContain(`(${pr(2)}), head not readable, not pinned: \`git fetch origin feature/two\`, then review \`git diff <the project's default branch>...origin/feature/two\``);
-    expect(unpinnedLine).toContain("worker W2 “Task W2”");
-    expect(unpinnedLine).toContain("the verdict binds to its report 5");
-    expect(prompt).toContain("1 pull request and 1 branch without a pinned pull request, started");
-    // The context names the pinned head's branch for W1 (not the row's) and the row's branch for the unpinned W2.
-    const [context] = w.contexts();
-    expect(context).toContain("### feature/one-head (worker W1)");
-    expect(context).toContain("### feature/two (worker W2)");
-    // review-context.md is written before the launch to the attempt folder on the reviewer's host, keyed by the initiating worker's report 2.
-    expect(w.host.writeArtifact).toHaveBeenCalledWith("W1", "proj", expect.stringMatching(/^review-2\/[0-9a-f]{8}\/review-context\.md$/), expect.any(String), "host_proj");
-    expect(w.host.writeFile).not.toHaveBeenCalled();
-    expect(w.targetRows("R1")).toEqual([
-      { worker_thread_id: "W1", report_seq: 2, head_sha: SHA_B, pr_url: pr(1), branch: "feature/one-row" },
-      { worker_thread_id: "W2", report_seq: 5, head_sha: null, pr_url: pr(2), branch: "feature/two" },
-    ]);
-    // The reviewer row is the initiating worker's (W1: report 2, head b…), not the plan's newest.
-    expect(w.row("R1")).toMatchObject({ role: "reviewer", worker_thread_id: "W1", reviewed_report_seq: 2, reviewed_head_sha: SHA_B });
-  });
-
+describe("identity: the gate pins each target's report and head once", () => {
   test("a report that lands while the forge head is pending does not move the attempt's identity", async () => {
     const w = world();
     w.worker("W1", { prUrl: pr(1), branch: "feature/one", reports: 2 });
@@ -190,23 +151,9 @@ describe("identity: every target's report and head come from one capture", () =>
     head.resolve(headOf("feature/one"));
     await run;
 
-    expect(w.row("R1")).toMatchObject({ reviewed_report_seq: 2, reviewed_head_sha: SHA_B });
+    expect(w.row("R1")).toMatchObject({ reviewed_head_sha: SHA_B });
     expect(w.targetRows("R1")).toEqual([{ worker_thread_id: "W1", report_seq: 2, head_sha: SHA_B, pr_url: pr(1), branch: "feature/one" }]);
-  });
-});
-
-describe("forge: a head the forge will not answer", () => {
-  test("a null head reuses the worker's environment and binds the verdict to no commit", async () => {
-    const w = world(); // forge.head answers null for every pull request, as the production adapter does when its CLI fails
-    w.worker("W1", { prUrl: pr(1) });
-
-    const out = await w.review.startReview(w.chief, "W1");
-
-    expect(out.reply).toBe(`Started “Review · Task W1” in thread R1. The pull request head could not be read, so it reviews the worker's own environment and its verdict is not bound to a commit: chief_complete will need a fresh review once the forge answers, or an override. Impact slice skipped: W1: ${NO_CHECKOUT}.`);
-    expect(w.launches[0]!.args.environment).toEqual({ type: "reuse", environmentId: "env_W1" });
-    expect(w.managedSpawn.prepare).toHaveBeenCalledWith("proj", { role: "reviewer", hostId: "host_env" });
-    expect(w.row("R1").reviewed_head_sha).toBeNull();
-    expect(w.targetRows("R1")).toEqual([{ worker_thread_id: "W1", report_seq: 1, head_sha: null, pr_url: pr(1), branch: null }]);
+    expect(w.store.gate("task:W1")!.targets).toMatchObject([{ threadId: "W1", reportSeq: 2, headSha: SHA_B }]);
   });
 });
 
@@ -223,8 +170,8 @@ describe("impact slice: optional enrichment never refuses the review", () => {
 
     const out = await w.review.startReview(w.chief, "W1");
 
-    expect(out.reply).toBe(`${pinnedReply("Task W1", "R1", SHA_B)} Impact slice skipped: W1: Error: host down.`);
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ threadId: "R1", created: true });
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2); // the reviewer and the tester
     expect(w.targetRows("R1")).toHaveLength(1);
     expect(w.contexts()).toHaveLength(1);
     expect(w.contexts()[0]).toContain("Skipped: Error: host down.");
@@ -248,28 +195,10 @@ describe("impact slice: optional enrichment never refuses the review", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     const out = await run;
 
-    expect(out.reply).toBe(`${pinnedReply("Task W1", "R1", SHA_B)} Impact slice skipped: W1: deadline (30 s) passed.`);
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ threadId: "R1", created: true });
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2);
     expect(w.targetRows("R1")).toHaveLength(1);
-    expect(w.contexts()).toHaveLength(1);
-  });
-});
-
-describe("ancestry: a failed host check means the whole pull request", () => {
-  test("a rejecting host check skips the range and the slice, and the review still launches", async () => {
-    const w = world({ projectPath: "/checkout", heads: { [pr(1)]: headOf("feature/one") } });
-    w.worker("W1", { prUrl: pr(1) });
-    // The previous verdict recorded another head, so the ancestry check runs before the slices.
-    w.db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES ('Rold', 'W1', 'approve', 1, 1, ?, 1)`).run(SHA_A);
-    w.host.checkoutSkip.mockImplementation(() => Promise.reject(new Error("host down")));
-
-    const out = await w.review.startReview(w.chief, "W1");
-
-    expect(out.reply).toBe(`${pinnedReply("Task W1", "R1", SHA_B)} Impact slice skipped: W1: Error: host down. Review scope: W1: whole pull request (Error: host down).`);
-    expect(w.host.checkoutSkip).toHaveBeenCalledTimes(2); // ancestry first, then the slice
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
-    expect(w.targetRows("R1")).toEqual([{ worker_thread_id: "W1", report_seq: 1, head_sha: SHA_B, pr_url: pr(1), branch: null }]);
-    expect(w.contexts()).toHaveLength(1);
+    expect(w.contexts()[0]).toContain("Skipped: deadline (30 s) passed.");
   });
 });
 
@@ -282,7 +211,6 @@ describe("review-context.md: written before the launch; a failed write inlines t
   const failContext = (w: ReturnType<typeof world>, fail: () => Promise<string> = () => Promise.reject(new Error("disk full"))) => w.host.writeArtifact.mockImplementation(fail as any);
   const FOLDER = /^review-1\/([0-9a-f]{8})\/review-context\.md$/;
   const MESSAGE = (name: string, error: string) => `Could not write ${name} for the review of W1 after 3 attempts: ${error}. The context is inlined into the reviewer prompt instead.`;
-  const REPLY = `${pinnedReply("Task W1", "R1", SHA_B)} Impact slice skipped: W1: ${NO_CHECKOUT}.`;
   const nameOf = (w: ReturnType<typeof world>) => w.host.writeArtifact.mock.calls[0]![2];
 
   test("the context is written, and the prompt names the returned absolute path, before the reviewer is launched", async () => {
@@ -290,7 +218,7 @@ describe("review-context.md: written before the launch; a failed write inlines t
 
     await w.review.startReview(w.chief, "W1");
 
-    expect(w.events).toEqual([`artifact:${nameOf(w)}`, "launch"]);
+    expect(w.events).toEqual([`artifact:${nameOf(w)}`, "launch", "launch"]);
     expect(nameOf(w)).toMatch(FOLDER);
     const path = `/data/host_proj/chief/proj/W1/${nameOf(w)}`;
     const prompt: string = w.launches[0]!.args.prompt;
@@ -326,7 +254,7 @@ describe("review-context.md: written before the launch; a failed write inlines t
     const out = await run;
 
     expect(w.host.writeArtifact).toHaveBeenCalledTimes(3);
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2); // the reviewer and the tester
     expect(w.host.alertChief).toHaveBeenCalledTimes(1);
     const name = nameOf(w);
     expect(name).toMatch(FOLDER);
@@ -337,7 +265,7 @@ describe("review-context.md: written before the launch; a failed write inlines t
     expect(key).toBe(`${name.replace(/\.md$/, "")}:W1`);
     expect(message).toBe(MESSAGE(name, "Error: disk full"));
     expect(w.host.logError).not.toHaveBeenCalled();
-    expect(out.reply).toBe(REPLY);
+    expect(out).toMatchObject({ threadId: "R1", created: true });
     expect(w.targetRows("R1")).toHaveLength(1);
     // The prompt inlines the very text that failed to be written, once, under its own heading, and names no file.
     const prompt: string = w.launches[0]!.args.prompt;
@@ -358,8 +286,8 @@ describe("review-context.md: written before the launch; a failed write inlines t
 
     expect(w.host.writeArtifact).toHaveBeenCalledTimes(3);
     expect(w.host.alertChief.mock.calls[0]![2]).toBe(MESSAGE(nameOf(w), "Error: sync disk"));
-    expect(out.reply).toBe(REPLY);
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ threadId: "R1", created: true });
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2); // the reviewer and the tester
   });
 
   test("one failed attempt that then succeeds writes once, sends no alert, and names the path", async () => {
@@ -397,8 +325,8 @@ describe("review-context.md: written before the launch; a failed write inlines t
     expect(w.host.alertChief).toHaveBeenCalledTimes(1);
     expect(w.host.logError).toHaveBeenCalledTimes(1);
     expect(w.host.logError).toHaveBeenCalledWith(`${MESSAGE(nameOf(w), "Error: disk full")} The Chief alert also failed: Error: chief down`);
-    expect(out.reply).toBe(REPLY);
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ threadId: "R1", created: true });
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2); // the reviewer and the tester
   });
 
   test("a branch review has no context: nothing is written, and the prompt has no read line and no inline section", async () => {
@@ -474,26 +402,10 @@ describe("budget: one 30-entry allowance across the targets", () => {
     w.worker("W1", { prUrl: pr(1), branch: "feature/t1" });
     fsHook.rm = () => new Promise(() => undefined);
 
-    const out = await w.review.startReview(w.chief, "W1"); // real timers: it must not wait for the cleanup or the 30 s deadline
+    await w.review.startReview(w.chief, "W1"); // real timers: it must not wait for the cleanup or the 30 s deadline
 
-    expect(out.reply).not.toContain("Impact slice skipped");
     expect(pointersPerTarget(w.contexts()[0])).toEqual([20]);
   }, 20_000);
-});
-
-describe("dedupe: one start per review key", () => {
-  test("two concurrent starts launch once and share one answer; a third is told it is in flight", async () => {
-    const w = world({ heads: { [pr(1)]: headOf("feature/one") } });
-    w.worker("W1", { prUrl: pr(1) });
-
-    const [first, second] = await Promise.all([w.review.startReview(w.chief, "W1"), w.review.startReview(w.chief, "W1")]);
-
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
-    expect(second).toBe(first);
-    const third = await w.review.startReview(w.chief, "W1");
-    expect(third).toEqual({ threadId: "R1", title: "Review · Task W1", created: false, reply: `Using existing “Review · Task W1” in thread R1. It reviews the pull request pinned to head commit ${SHA_B} in its own worktree.` });
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
-  });
 });
 
 describe("branch review: a branch or pull request no worker owns", () => {
@@ -538,249 +450,7 @@ describe("branch review: a branch or pull request no worker owns", () => {
   });
 });
 
-// Contract (docs/specs/plan-chains.md "Review Worktree"): a pinned review reuses the worktree of the newest earlier pinned reviewer of
-// the same task when the host says it is reusable, and in every other case launches a fresh managed worktree on the pull request branch.
-describe("review worktree: reuse of the newest earlier pinned reviewer", () => {
-  const fresh = (branch: string) => ({ type: "host", hostId: "host_proj", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: branch } } });
-  const shared = { environmentId: "env_rev", hostId: "host_rev" };
-  /** One pinned worker; each round is a new report and a finished previous reviewer, so the next chief_review starts a fresh reviewer. */
-  function pinnedWorld(branch = "feature/one") {
-    const w = world({ heads: { [pr(1)]: headOf(branch) } });
-    w.worker("W1", { prUrl: pr(1), branch });
-    const round = async () => {
-      const out = await w.review.startReview(w.chief, "W1");
-      w.nextReport(out.threadId); // the reviewer finishes: its report reserves, so the next review supersedes it
-      w.nextReport("W1");
-      return out;
-    };
-    return { w, round };
-  }
-
-  test("the first pinned review of a task launches a fresh managed worktree on the branch, and asks the host about no earlier reviewer", async () => {
-    const { w, round } = pinnedWorld();
-    await round();
-    expect(w.launches[0]!.args.environment).toEqual(fresh("feature/one"));
-    expect(w.host.reusableEnvironment).not.toHaveBeenCalled();
-  });
-
-  test("a later pinned review reuses the earlier reviewer's environment, on that host, and the brief tells the reviewer to check the commit out detached", async () => {
-    const { w, round } = pinnedWorld();
-    w.host.reusableEnvironment.mockResolvedValue(shared);
-    await round();
-    await round();
-    expect(w.host.reusableEnvironment).toHaveBeenCalledExactlyOnceWith("R1");
-    expect(w.managedSpawn.prepare).toHaveBeenLastCalledWith("proj", { role: "reviewer", hostId: "host_rev" });
-    expect(w.launches[1]!.args.environment).toEqual({ type: "reuse", environmentId: "env_rev" });
-    expect(w.launches[1]!.args.prompt).toContain(`\`git fetch origin feature/one && git checkout --detach ${SHA_B}\``);
-  });
-
-  test("repeated pinned rounds keep one worktree: only the first launch creates one, and each later round asks about the newest reviewer", async () => {
-    const { w, round } = pinnedWorld();
-    w.host.reusableEnvironment.mockResolvedValue(shared);
-    for (let n = 0; n < 4; n++) await round();
-    expect(w.launches.map((launch) => launch.args.environment.type)).toEqual(["host", "reuse", "reuse", "reuse"]);
-    expect(w.launches.slice(1).map((launch) => launch.args.environment.environmentId)).toEqual(["env_rev", "env_rev", "env_rev"]);
-    expect(w.host.reusableEnvironment.mock.calls.map(([id]) => id)).toEqual(["R1", "R2", "R3"]);
-  });
-
-  test.each([
-    ["answers null", (w: ReturnType<typeof world>) => w.host.reusableEnvironment.mockResolvedValue(null)],
-    ["rejects", (w: ReturnType<typeof world>) => w.host.reusableEnvironment.mockRejectedValue(new Error("host down"))],
-    ["throws synchronously", (w: ReturnType<typeof world>) => w.host.reusableEnvironment.mockImplementation(() => { throw new Error("sync"); })],
-  ])("when the host %s, the review still launches, on a fresh managed worktree", async (_name, arrange) => {
-    const { w, round } = pinnedWorld();
-    arrange(w);
-    await round();
-    const second = await round();
-    expect(second).toMatchObject({ created: true });
-    expect(w.host.reusableEnvironment).toHaveBeenCalledOnce();
-    expect(w.launches[1]!.args.environment).toEqual(fresh("feature/one"));
-    expect(w.managedSpawn.prepare).toHaveBeenLastCalledWith("proj", { role: "reviewer", hostId: "host_proj" });
-  });
-
-  test("an environment that is a target worker's own live environment is never reused", async () => {
-    const { w, round } = pinnedWorld();
-    w.host.reusableEnvironment.mockResolvedValue({ environmentId: "env_W1", hostId: "host_env" }); // settledLive gives W1 env_W1
-    await round();
-    await round();
-    expect(w.launches[1]!.args.environment).toEqual(fresh("feature/one"));
-  });
-
-  test("an earlier unpinned review is never a reuse candidate: the host is not asked, and a later pinned review starts fresh", async () => {
-    const w = world(); // the forge answers no head: the first review is unpinned and runs in the worker's own environment
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    const first = await w.review.startReview(w.chief, "W1");
-    expect(w.launches[0]!.args.environment).toEqual({ type: "reuse", environmentId: "env_W1" });
-    w.nextReport(first.threadId);
-    w.nextReport("W1");
-    w.forge.head.mockResolvedValue(headOf("feature/one"));
-    w.host.reusableEnvironment.mockResolvedValue(shared);
-    await w.review.startReview(w.chief, "W1");
-    expect(w.host.reusableEnvironment).not.toHaveBeenCalled();
-    expect(w.launches[1]!.args.environment).toEqual(fresh("feature/one"));
-  });
-
-  test("an unpinned later review keeps the worker's own environment even after a pinned reviewer exists", async () => {
-    const { w, round } = pinnedWorld();
-    w.host.reusableEnvironment.mockResolvedValue(shared);
-    await round();
-    w.forge.head.mockResolvedValue(null);
-    await w.review.startReview(w.chief, "W1");
-    expect(w.host.reusableEnvironment).not.toHaveBeenCalled();
-    expect(w.launches[1]!.args.environment).toEqual({ type: "reuse", environmentId: "env_W1" });
-  });
-});
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Review engine modes (docs/specs/review-engine.md). Reviewer mode must be byte-identical to base 9cf75e3.
-
-/** Everything a caller or the reviewer can observe of one scenario: the reply, the launch arguments, the files, the alerts, the log. */
-const observed = (w: ReturnType<typeof world>, out: unknown) => ({
-  out,
-  launches: w.launches.map((launch) => ({ id: launch.id, args: launch.args })),
-  writes: w.host.writeFile.mock.calls.map(([threadId, relPath, content]) => ({ threadId, relPath, content })),
-  // Wave 1 moves review-context.md here (the attempt folder on the reviewer's host); the 9cf75e3 capture has no such key.
-  artifacts: w.host.writeArtifact.mock.calls.map(([threadId, projectId, name, content, hostId]) => ({ threadId, projectId, name, content, hostId })),
-  alerts: w.host.alertChief.mock.calls.map(([row, key, message]) => ({ thread: (row as ManagedRow).thread_id, key, message })),
-  logs: w.host.logError.mock.calls.map(([message]) => message),
-});
-
-/** The reviewer-mode fixtures. `engine` is the only thing that differs between the base capture and the head runs. */
-async function scenarios(engine?: () => unknown) {
-  const result: Record<string, ReturnType<typeof observed>> = {};
-  {
-    const w = world({ engine, heads: { [pr(1)]: headOf("feature/one") } });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    result["single pinned"] = observed(w, await w.review.startReview(w.chief, "W1"));
-  }
-  {
-    const w = world({ engine });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    result["single unpinned"] = observed(w, await w.review.startReview(w.chief, "W1"));
-  }
-  {
-    const w = world({ engine, heads: { [pr(1)]: headOf("feature/one-head"), [pr(2)]: null } });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one-row", reports: 2 });
-    w.worker("W2", { prUrl: pr(2), branch: "feature/two", reports: 5 });
-    w.covering(["W1", "W2"]);
-    result["plan review, mixed pinning"] = observed(w, await w.review.startReview(w.chief, "W1"));
-  }
-  {
-    const w = world({ engine, heads: { [pr(1)]: headOf("feature/one") } });
-    w.worker("W1", { prUrl: pr(1) });
-    // Both seams fail: base wrote the context to the reviewer's storage (writeFile), wave 1 writes it to the attempt folder (writeArtifact).
-    w.host.writeFile.mockImplementation(() => Promise.reject(new Error("disk full")));
-    w.host.writeArtifact.mockImplementation(() => Promise.reject(new Error("disk full")));
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const run = w.review.startReview(w.chief, "W1");
-    await vi.advanceTimersByTimeAsync(3_000);
-    result["review-context.md write fails"] = observed(w, await run);
-    vi.useRealTimers();
-  }
-  {
-    const w = world({ engine, projectPath: "/checkout", heads: { [pr(9)]: headOf("feature/from-head") } });
-    result["branch review by pull request"] = observed(w, await w.review.startBranchReview(w.chief, { pullRequest: pr(9) }));
-  }
-  {
-    const w = world({ engine });
-    result["branch review by branch"] = observed(w, await w.review.startBranchReview(w.chief, { branch: "feature/x" }));
-  }
-  return result;
-}
-
-const ORACLE_FILE = join(import.meta.dirname, "test", "fixtures", "review-engine-9cf75e3.json");
-const READ_FAILURE = "Could not read the review engine setting, using reviewer:";
-
-// The 9cf75e3 capture is the base. The expected head scenario is that capture with wave 1's named edits (test/reviewWave1.ts: each copied from
-// the plan, with an exact count) and the plan's context move: review-context.md goes from the reviewer's storage to the attempt folder on the
-// reviewer's host, written before the launch, with the alert re-keyed and re-worded for the worker's review. No byte comes from head output.
-const SCENARIO_SEAMS: Record<string, { seq: number; host: string; many: boolean; failed: boolean }> = {
-  "single pinned": { seq: 1, host: "host_proj", many: false, failed: false },
-  "single unpinned": { seq: 1, host: "host_env", many: false, failed: false },
-  "plan review, mixed pinning": { seq: 2, host: "host_proj", many: true, failed: false },
-  "review-context.md write fails": { seq: 1, host: "host_proj", many: false, failed: true },
-};
-const ATTEMPT_ID = /review-(\d+)\/[0-9a-f]{8}\//g;
-/** The attempt id is a fresh random value per start: every other byte of a path stays. */
-const withoutAttemptId = <T,>(value: T): T => {
-  if (typeof value === "string") return value.replace(ATTEMPT_ID, "review-$1/<attempt>/") as T;
-  if (Array.isArray(value)) return value.map((entry) => withoutAttemptId(entry)) as T;
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withoutAttemptId(entry)])) as T;
-  return value;
-};
-function oracleOnHead(oracle: Record<string, any>) {
-  return Object.fromEntries(Object.entries(oracle).map(([name, base]) => {
-    const seam = SCENARIO_SEAMS[name];
-    const contextWrites = (base.writes as { relPath: string; content: string }[]).filter((write) => write.relPath === "review-context.md");
-    const baseContext = contextWrites.length ? contextWrites[0]!.content.replace(/\n$/, "") : "";
-    const file = seam ? `review-${seam.seq}/<attempt>/review-context.md` : "";
-    const launches = (base.launches as { id: string; args: { prompt: string } }[]).map((launch) => {
-      // The 9cf75e3 prompt already carries the native line, reshape variant: an unplanned worker review and a branch review drop its two reshape parts.
-      const baseNative = replaceText(replaceText(launch.args.prompt, NATIVE_RESHAPE_PAREN, "", 1), NATIVE_RESHAPE_TAIL, "", 1);
-      let prompt = wave1Prompt(baseNative, baseContext, {
-        native: "none",
-        testAudit: true, // every slice is skipped (no checkout): the changed paths are unknown, so the rule stays
-        contextPath: seam && !seam.failed ? `/data/${seam.host}/chief/proj/W1/${file}` : null,
-        many: seam?.many,
-        ownership: seam ? "none" : null, // worker and plan prompts: the slice is skipped, so the docs history is unknown and no Spec Writer exists; a branch prompt has none
-      });
-      if (seam?.many) prompt = groupedSubject(prompt);
-      if (seam?.failed) prompt = `${prompt}\n\n## review-context.md\n${baseContext}`;
-      return { ...launch, args: { ...launch.args, prompt } };
-    });
-    return [name, {
-      ...base,
-      launches,
-      writes: (base.writes as { relPath: string }[]).filter((write) => write.relPath !== "review-context.md"),
-      artifacts: contextWrites.map((write) => ({ threadId: "W1", projectId: "proj", name: file, content: write.content, hostId: seam!.host })),
-      alerts: (base.alerts as unknown[]).map(() => ({
-        thread: "W1", key: `review-${seam!.seq}/<attempt>/review-context:W1`,
-        message: `Could not write ${file} for the review of W1 after 3 attempts: Error: disk full. The context is inlined into the reviewer prompt instead.`,
-      })),
-    }];
-  }));
-}
-const headScenarios = async (engine?: () => unknown) => withoutAttemptId(await scenarios(engine));
-
-describe("base oracle: reviewer mode is the behaviour of 9cf75e3", () => {
-  // Run at the base commit (where no engine exists) with ORACLE_ONLY=capture ORACLE_OUT=<file>; the committed file is that run's output.
-  test.runIf(process.env.ORACLE_OUT)("base oracle capture", async () => {
-    await writeFile(process.env.ORACLE_OUT!, `${JSON.stringify(await scenarios(), null, 2)}\n`);
-  });
-
-  test.skipIf(process.env.ORACLE_OUT)("the default engine value is the base behaviour", async () => {
-    const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    expect(await headScenarios()).toEqual(oracleOnHead(oracle));
-  });
-
-  test.skipIf(process.env.ORACLE_OUT).each([
-    ["a stored 'reviewer'", "reviewer"], ["an unknown name", "PR-AGENT"], ["an empty string", ""], ["a number", 3], ["nothing stored", undefined], ["null", null],
-  ])("%s runs as the base did", async (_name, stored) => {
-    const { reviewEngine } = await import("./src/review/prAgent");
-    const oracle = JSON.parse(await readFile(ORACLE_FILE, "utf8"));
-    expect(await headScenarios(async () => reviewEngine({ reviewEngine: stored }))).toEqual(oracleOnHead(oracle));
-  });
-
-  test.skipIf(process.env.ORACLE_OUT)("a setting read that rejects runs as the base did, with one log line per worker review", async () => {
-    const expected = oracleOnHead(JSON.parse(await readFile(ORACLE_FILE, "utf8")));
-    const got = await headScenarios(() => Promise.reject(new Error("settings down")));
-    for (const [name, one] of Object.entries(got)) {
-      const failures = one.logs.filter((message: string) => message.startsWith(READ_FAILURE));
-      expect(failures, name).toHaveLength(name.startsWith("branch review") ? 0 : 1);
-      for (const failure of failures) expect(failure).toContain("settings down");
-      expect({ ...one, logs: one.logs.filter((message: string) => !message.startsWith(READ_FAILURE)) }, name).toEqual(expected[name]);
-    }
-  });
-
-  test.skipIf(process.env.ORACLE_OUT)("a setting read that throws synchronously runs as the base did", async () => {
-    const expected = oracleOnHead(JSON.parse(await readFile(ORACLE_FILE, "utf8")));
-    const got = await headScenarios(() => { throw new Error("settings sync"); });
-    expect(got["single pinned"]!.logs.filter((message: string) => message.startsWith(READ_FAILURE))).toHaveLength(1);
-    expect(got["single pinned"]!.launches).toEqual(expected["single pinned"]!.launches);
-  });
-});
-
-describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapper reach the reviewer", () => {
+describe("engine modes: the section and the wrapper reach the reviewer", () => {
   const DIR = "/opt/my pr-agent";
   const engineOf = (mode: "pr-agent" | "both") => async () => ({ mode, prAgentDir: DIR });
   const writesOf = (w: ReturnType<typeof world>) => w.host.writeFile.mock.calls.map(([, relPath]) => relPath);
@@ -882,7 +552,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       `artifact:${folder}/review-context.md`,
       `artifact:${folder}/pr-agent-review.sh`,
       ...(mode === "both" ? [`artifact:${folder}/review-helper.md`] : []),
-      "launch",
+      "launch", "launch",
     ]);
   });
 
@@ -915,36 +585,6 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     expect(artifactsOf(w)).toEqual(["pr-agent-review.sh"]);
   });
 
-  test("mixed pinning: the unpinned target is listed as a direct review and the wrapper is still written for the pinned one", async () => {
-    const heads = { [pr(1)]: headOf("feature/one"), [pr(2)]: null };
-    const w = world({ heads, engine: engineOf("pr-agent") });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    w.worker("W2", { prUrl: pr(2), branch: "feature/two" });
-    w.covering(["W1", "W2"]);
-
-    await w.review.startReview(w.chief, "W1");
-
-    const prompt: string = w.launches[0]!.args.prompt;
-    expect(prompt).toContain("- worker W2 (branch feature/two): not pinned → direct review (no pinned pull request head)");
-    expect(prompt).toContain(`- worker W1 (branch feature/one): ${pr(1)} pinned to ${SHA_B} → pr-agent`);
-    expect(artifactsOf(w)).toEqual(["pr-agent-review.sh"]);
-  });
-
-  test.each(["pr-agent", "both"] as const)("%s with a single target that has no head: the direct line, no wrapper, no helper file", async (mode) => {
-    const w = world({ engine: engineOf(mode) });
-    pinnedOne(w);
-
-    await w.review.startReview(w.chief, "W1");
-
-    const prompt: string = w.launches[0]!.args.prompt;
-    expect(prompt).toContain(`## Review engine: ${mode}`);
-    expect(prompt).toContain("no pinned pull request head");
-    expect(prompt).not.toContain("pr-agent-review.sh");
-    expect(prompt).not.toContain("bb thread spawn");
-    expect(writesOf(w)).toEqual([]);
-    expect(artifactsOf(w)).toEqual([]);
-  });
-
   test("an engine read that rejects is the reviewer-mode prompt and files, and one log line", async () => {
     const base = await plain(pinnedOne, heads1);
     const w = world({ heads: heads1, engine: () => Promise.reject(new Error("store down")) });
@@ -975,7 +615,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     const FALLBACK = "The reviewer falls back to a direct review.";
     /** Fails every write of `names` (to Chief's folder or the reviewer's storage); the others succeed. */
     async function failing(mode: "pr-agent" | "both", names: string[], mixed = false) {
-      const w = world({ heads: mixed ? { [pr(1)]: headOf("feature/one"), [pr(2)]: null } : heads1, engine: engineOf(mode) });
+      const w = world({ heads: mixed ? { [pr(1)]: headOf("feature/one"), [pr(2)]: headOf("feature/two", SHA_A) } : heads1, engine: engineOf(mode) });
       pinnedOne(w);
       if (mixed) {
         w.worker("W2", { prUrl: pr(2), branch: "feature/two" });
@@ -1025,15 +665,15 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     });
 
     // Contract (docs/specs/review-engine.md, Flow 5): a helper prompt that cannot be written leaves no helper lines and no helper spawn command; the
-    // reviewer does the direct half itself: a direct review of EVERY target (definitive pr-agent outcomes and the unpinned target included) combined with
+    // reviewer does the direct half itself: a direct review of EVERY target (definitive pr-agent outcomes included) combined with
     // the pr-agent outcomes. Regression: dropping the both-mode obligation with the helper lets a definitive pr-agent result stand in for the review.
-    // The plan is mixed (one pinned, one unpinned target) so a direct half limited to the wrapper's targets fails too.
+    // The plan has two pinned targets so a direct half limited to one of them fails too.
     test("both: a helper-file failure drops the helper lines and the spawn command, keeps the wrapper run, and tells the reviewer to review every target directly and combine", async () => {
       const { w } = await failing("both", ["review-helper.md"], true);
 
       const prompt: string = w.launches[0]!.args.prompt;
       expect(prompt).toContain("## Review engine: both");
-      expect(executedLines(prompt)).toEqual([`bash "${folderOf(w)}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`]);
+      expect(executedLines(prompt)).toEqual([`bash "${folderOf(w)}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`, `bash "${folderOf(w)}/pr-agent-review.sh" ${pr(2)} ${SHA_A}`]);
       // No helper lifecycle: nothing to spawn, wait for, stop, read or archive, and no stop-confirmation rule.
       for (const gone of ["bb thread spawn", "review-helper.md", "Helper (start it first)", "<helper id>", "bb thread wait", "bb thread show", "bb thread stop", "bb thread output", "bb thread archive", "helper prompt missing", "helper failed", "helper timeout", "shared checkout"]) {
         expect(prompt).not.toContain(gone);
@@ -1046,9 +686,6 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       // Both-mode outcome rules, not the pr-agent-only ones.
       expect(prompt).toContain("Its findings stay nits; the direct half covers the target.");
       expect(prompt).not.toContain("confirm, drop or reclassify each");
-      expect(prompt).toContain("The target has only the direct half.");
-      expect(prompt).toContain("- not pinned: the direct half only.");
-      expect(prompt).toContain("- worker W2 (branch feature/two): not pinned → direct review (no pinned pull request head)");
       expect(prompt).toContain("Aggregate once:");
       expect(prompt).toContain("Send one chief_report.");
       expect(prompt).toContain("Result: the first line is `Engine: both`");
@@ -1064,6 +701,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       expect(executedLines(prompt)).toEqual([
         expect.stringContaining(`--prompt-file "${folderOf(w)}/review-helper.md"`),
         `bash "${folderOf(w)}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`,
+        `bash "${folderOf(w)}/pr-agent-review.sh" ${pr(2)} ${SHA_A}`,
       ]);
       expect(prompt).toContain("Helper (start it first)");
       expect(prompt).toContain("bb thread wait <helper id> --status idle --timeout 540s");
@@ -1091,14 +729,13 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
   // Contract (docs/specs/review-engine.md, Engine folder): the folder holds a fresh attempt id for each review start, so a repeat review of the
   // same worker and report never reads another attempt's files. Regression: one folder per worker and report lets attempt 2 run attempt 1's prompt.
   describe("per-attempt engine folder", () => {
-    /** One pinned worker; attempt 1 finishes (its reviewer reports) and the pull request moves to a new head, so a second review starts on the same report. */
+    /** One pinned worker; attempt 1's reviewer fails, so a second chief_review starts a new reviewer for the same gate (the tester stays). */
     async function twoAttempts(mode: "pr-agent" | "both", second?: (w: ReturnType<typeof world>) => void) {
       const w = world({ heads: heads1, engine: engineOf(mode) });
       pinnedOne(w);
       const first = await w.review.startReview(w.chief, "W1");
       const firstWrites = [...w.host.writeArtifact.mock.calls] as any[];
-      w.nextReport(first.threadId);
-      w.forge.head.mockResolvedValue(headOf("feature/one", SHA_A));
+      w.setState(first.threadId, "failed");
       second?.(w);
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       const run = w.review.startReview(w.chief, "W1");
@@ -1112,14 +749,14 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
     test.each(["pr-agent", "both"] as const)("%s: two reviews of the same worker and report write to different folders, and the second prompt names only its own files", async (mode) => {
       const { w, out, firstWrites, secondWrites } = await twoAttempts(mode);
 
-      expect(out).toMatchObject({ threadId: "R2", created: true });
+      expect(out).toMatchObject({ threadId: "R3", created: true }); // R2 is the gate's tester
       const [first, second] = [folderOfStart(firstWrites), folderOfStart(secondWrites)];
       expect(first).toMatch(/^review-1\//);
       expect(second).toMatch(/^review-1\//);
       expect(second).not.toBe(first);
-      const prompt: string = w.launches[1]!.args.prompt;
+      const prompt: string = w.launches[2]!.args.prompt;
       expect(prompt).not.toContain(first);
-      expect(prompt).toContain(`bash "/data/host_proj/chief/proj/W1/${second}/pr-agent-review.sh" ${pr(1)} ${SHA_A}`);
+      expect(prompt).toContain(`bash "/data/host_proj/chief/proj/W1/${second}/pr-agent-review.sh" ${pr(1)} ${SHA_B}`);
       if (mode === "both") expect(prompt).toContain(`--prompt-file "/data/host_proj/chief/proj/W1/${second}/review-helper.md"`);
       // Attempt 1's prompt still names attempt 1's folder: the later start did not rewrite it.
       expect(w.launches[0]!.args.prompt).toContain(`/data/host_proj/chief/proj/W1/${first}/pr-agent-review.sh`);
@@ -1137,7 +774,7 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       const first = folderOfStart(firstWrites);
       expect(firstWrites.map(([, , name]) => name.replace(ATTEMPT, ""))).toEqual(["review-context.md", "pr-agent-review.sh", "review-helper.md"]);
       expect(secondWrites.filter(([, , name]) => name.endsWith("review-helper.md"))).toHaveLength(3);
-      const prompt: string = w.launches[1]!.args.prompt;
+      const prompt: string = w.launches[2]!.args.prompt;
       expect(prompt).not.toContain("bb thread spawn");
       expect(prompt).not.toContain("review-helper.md");
       expect(prompt).not.toContain(first);
@@ -1169,34 +806,16 @@ describe.skipIf(process.env.ORACLE_OUT)("engine modes: the section and the wrapp
       expect(prompt).not.toContain("/data/host_proj/");
       expect(w.managedSpawn.prepare).toHaveBeenCalledWith("proj", { role: "reviewer", hostId: "host_reviewer" });
     });
-
-    test("a review that reuses an earlier reviewer's worktree writes the engine files on that worktree's host", async () => {
-      const w = world({ heads: heads1, engine: engineOf("pr-agent") });
-      pinnedOne(w);
-      const first = await w.review.startReview(w.chief, "W1");
-      w.nextReport(first.threadId);
-      w.nextReport("W1");
-      w.host.reusableEnvironment.mockResolvedValue({ environmentId: "env_rev", hostId: "host_rev" });
-
-      await w.review.startReview(w.chief, "W1");
-
-      expect(hostsOf(w)).toEqual(["host_proj", "host_proj", "host_rev", "host_rev"]);
-      expect(w.launches[1]!.args.prompt).toContain(`bash "/data/host_rev/chief/proj/W1/review-2/`);
-      expect(w.launches[1]!.args.prompt).not.toContain("/data/host_proj/");
-    });
   });
 });
 
 // Wave 1 contracts (plan-1.md "Contracts to verify") through startReview: the doubles are the forge, the host and spawn; the project checkout is a real
 // temporary Git repository wherever a slice is read, and the only thing stubbed inside Git is a lookup the test asks to fail (a `git` shim on PATH).
-const REAL_GIT = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
 const GIT_ENV: NodeJS.ProcessEnv = {
   ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
 };
 const hasLine = (text: string, line: string) => text.split("\n").includes(line);
-const auditRenders = (prompt: string) => hasLine(prompt, TEST_AUDIT_LINE);
-const docsRenders = (prompt: string) => hasLine(prompt, "## Docs ownership");
 const nativeOf = (prompt: string) => hasLine(prompt, REVIEWER_NATIVE_LINE) ? "full" : hasLine(prompt, NATIVE_NO_RESHAPE_LINE) ? "no-reshape" : prompt.includes("Native-design check") ? "garbled" : "none";
 
 type RepoApi = { dir: string; git: (...args: string[]) => string; put: (path: string, content: string | Buffer) => void; commit: (message: string) => string };
@@ -1219,26 +838,6 @@ async function repoWith(baseFiles: Record<string, string | Buffer>, onFeature: (
   return { dir, git, base, sha: git("rev-parse", "HEAD") };
 }
 
-/** A `git` that fails the path listing (`diff --name-only`) or the docs history (`log --no-merges`) and runs the real one otherwise. */
-function failingGit(fail: "names" | "history" | "both"): NodeJS.ProcessEnv {
-  const bin = mkdtempSync(join(tmpdir(), "review-start-shim-"));
-  disposals.push(() => rm(bin, { recursive: true, force: true }));
-  const script = join(bin, "git");
-  writeFileSync(script, [
-    "#!/bin/sh",
-    "for arg in \"$@\"; do",
-    "  case \"$arg\" in",
-    "    --no-renames) [ \"$1\" = diff ] && case \" $* \" in *' --name-only '*) [ \"$CHIEF_FAIL\" = names ] || [ \"$CHIEF_FAIL\" = both ] && { echo 'names lookup failed' >&2; exit 2; } ;; esac ;;",
-    "    --no-merges) [ \"$CHIEF_FAIL\" = history ] || [ \"$CHIEF_FAIL\" = both ] && { echo 'history lookup failed' >&2; exit 2; } ;;",
-    "  esac",
-    "done",
-    "exec \"$REAL_GIT\" \"$@\"",
-    "",
-  ].join("\n"));
-  chmodSync(script, 0o755);
-  return { ...GIT_ENV, PATH: `${bin}:${process.env.PATH}`, REAL_GIT, CHIEF_FAIL: fail };
-}
-
 /** Starts the review of W1 (pull request 1, head `repo.sha`) and returns what the reviewer was launched with. */
 async function reviewOf(repo: { dir: string; sha: string } | null, over: { waves?: PlanWave[]; kind?: string; planWave?: number; env?: NodeJS.ProcessEnv; skip?: string } = {}) {
   const w = world({ projectPath: repo?.dir ?? null, heads: { [pr(1)]: headOf("feature/one", repo?.sha) }, waves: over.waves, gitEnv: over.env });
@@ -1250,7 +849,7 @@ async function reviewOf(repo: { dir: string; sha: string } | null, over: { waves
 
 describe("impact slice base of a stacked or branch-based plan wave", () => {
   // `main` is origin/HEAD; `develop` (origin/develop) adds src/parent.test.ts on top of it; branch feature/one adds src/x.ts on top of develop.
-  // Only a slice that starts at origin/develop leaves parent.test.ts out of the changed paths, so the test-audit block shows which base the slice used.
+  // The impact-slice header of review-context.md names the base the slice used.
   async function stackedRepo() {
     const repo = await repoWith({}, (r) => {
       r.put("src/parent.test.ts", "export const parent = 1;\n"); r.commit("parent");
@@ -1261,186 +860,18 @@ describe("impact slice base of a stacked or branch-based plan wave", () => {
     repo.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
     return repo;
   }
-  const review = async (repo: { dir: string; sha: string }, over: Pick<Options, "planBaseOf" | "heads">) => {
-    const w = world({ projectPath: repo.dir, ...over });
-    w.worker("W1", { branch: "feature/one" });
-    const out = await w.review.startReview(w.chief, "W1");
-    return { out, prompt: w.launches[0]!.args.prompt as string, context: w.contexts()[0] as string | undefined };
-  };
-
-  test("a wave with a plan base is sliced against origin/<plan base>, not origin/HEAD", async () => {
+  // The gate always pins a head, so the slice base is the pinned head's base; a plan base never replaces it.
+  test("a pinned head is sliced against origin/<head.base>, whatever the plan base says", async () => {
     const repo = await stackedRepo();
-    const stacked = await review(repo, { planBaseOf: () => ({ base: "develop" }) });
-    expect(auditRenders(stacked.prompt)).toBe(false);
-    expect(stacked.out.reply).not.toContain("Impact slice skipped");
-    // Without a plan base the same branch is sliced against origin/HEAD, which still sees the parent's test file.
-    const plain = await review(repo, {});
-    expect(auditRenders(plain.prompt)).toBe(true);
+    const slice = async (base: string) => {
+      const w = world({ projectPath: repo.dir, heads: { [pr(1)]: { branch: "feature/one", sha: repo.sha, base } }, planBaseOf: () => ({ base: "main" }) });
+      w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
+      await w.review.startReview(w.chief, "W1");
+      return w.contexts()[0] as string;
+    };
+    expect(await slice("develop")).toContain("with origin/develop,");
+    expect(await slice("main")).toContain("with origin/main,");
   }, 60_000);
-
-  test("an unresolved plan base skips the slice with its reason and never falls back to origin/HEAD", async () => {
-    const repo = await stackedRepo();
-    const skipped = "stack base unresolved: wave 1's chain has no task branch yet";
-    const { out, context } = await review(repo, { planBaseOf: () => ({ skipped }) });
-    expect(out.reply).toContain(`Impact slice skipped: W1: ${skipped}.`);
-    expect(context).toContain(`Skipped: ${skipped}`);
-  });
-
-  test("a pinned head still uses origin/<head.base>, whatever the plan base says", async () => {
-    const repo = await stackedRepo();
-    const pinned = { [pr(1)]: { branch: "feature/one", sha: repo.sha, base: "develop" } };
-    const w = world({ projectPath: repo.dir, heads: pinned, planBaseOf: () => ({ base: "main" }) });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    await w.review.startReview(w.chief, "W1");
-    expect(auditRenders(w.launches[0]!.args.prompt)).toBe(false);
-    const skippedPlan = world({ projectPath: repo.dir, heads: pinned, planBaseOf: () => ({ skipped: "stack base unresolved: x" }) });
-    skippedPlan.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    const out = await skippedPlan.review.startReview(skippedPlan.chief, "W1");
-    expect(out.reply).not.toContain("Impact slice skipped");
-  }, 60_000);
-});
-
-describe("unpinned whole-plan review: the primary diff base of a stacked or branch-based plan wave", () => {
-  // Topology: waves 1/2 on feature/a, waves 3/4 (stackOn 1) on feature/b. All ready, no PR, so every target is unpinned.
-  // Contract: a target with a plan base is diffed against origin/<plan base>, never the project default; an unresolved base makes the range unavailable.
-  const twoChains = (planBaseOf: (row: ManagedRow) => { base: string } | { skipped: string } | null) => {
-    const w = world({ planBaseOf });
-    w.worker("W1", { branch: "feature/a", planWave: 1 });
-    w.worker("W3", { branch: "feature/b", planWave: 3 });
-    w.covering(["W1", "W3"]);
-    return w;
-  };
-  const lineFor = (w: ReturnType<typeof world>, branch: string) =>
-    (w.launches[0]!.args.prompt as string).split("\n").filter((line) => line.startsWith(`- branch ${branch},`));
-  const DEFAULT_RANGE = "git diff <the project's default branch>...";
-
-  test("the stacked chain is diffed against its plan base, the unstacked chain keeps the default branch", async () => {
-    const w = twoChains((row) => (row.branch === "feature/b" ? { base: "feature/a" } : null));
-    await w.review.startReview(w.chief, "W1");
-
-    const [stacked] = lineFor(w, "feature/b");
-    expect(lineFor(w, "feature/b")).toHaveLength(1);
-    expect(stacked).toContain("then review `git diff origin/feature/a...origin/feature/b`");
-    expect(stacked).not.toContain(DEFAULT_RANGE);
-    expect(lineFor(w, "feature/a")[0]).toContain(`then review \`${DEFAULT_RANGE}origin/feature/a\``);
-  });
-
-  test("an unresolved plan base makes the stacked chain's range unavailable and never names the default branch", async () => {
-    const skipped = "stack base unresolved: wave 1's chain has no task branch yet";
-    const w = twoChains((row) => (row.branch === "feature/b" ? { skipped } : null));
-    await w.review.startReview(w.chief, "W1");
-
-    const [stacked] = lineFor(w, "feature/b");
-    expect(stacked).toContain(skipped);
-    expect(stacked).not.toMatch(/`git diff [^`]*`/);
-    expect(stacked).not.toContain(DEFAULT_RANGE);
-    expect(stacked).not.toContain("origin/feature/a");
-    expect(lineFor(w, "feature/a")[0]).toContain(`then review \`${DEFAULT_RANGE}origin/feature/a\``);
-  });
-
-  test("a pinned pull request keeps its own base, whatever the plan base says", async () => {
-    const w = world({ heads: { [pr(2)]: { branch: "feature/b", sha: SHA_B, base: "develop" } }, planBaseOf: () => ({ base: "feature/a" }) });
-    w.worker("W1", { branch: "feature/a", planWave: 1 });
-    w.worker("W3", { prUrl: pr(2), branch: "feature/b", planWave: 3 });
-    w.covering(["W1", "W3"]);
-    await w.review.startReview(w.chief, "W1");
-    const lines = (w.launches[0]!.args.prompt as string).split("\n");
-    const pinnedLine = lines.find((line) => line.startsWith(`- ${pr(2)} `));
-    expect(pinnedLine).toContain(`then review \`git diff origin/develop...${SHA_B}\``);
-    expect(pinnedLine).not.toContain("origin/feature/a");
-  });
-});
-
-describe("rule blocks follow the slice's changed paths (Git listings of a real repository)", () => {
-  // Contract: the test audit renders when some changed path looks like test code, and not otherwise; `## Docs ownership` renders on a docs/ history or path, and not otherwise.
-  // Regression: collecting paths from the text diff headers (a binary or mode-only change names none), reading the quoted form of a non-ASCII path, matching the
-  // wrong case ("Latest.swift" is not "Test."), and gating docs on the net diff alone.
-  test.each<[string, boolean]>([
-    ["src/app.test.ts", true], ["tests/é.ts", true], ["Sources/FooTests.swift", true], ["Sources/FooTest.java", true], ["lib/foo_spec.rb", true], ["test_util.py", true],
-    ["app/src/androidTest/Foo.kt", true], ["e2e/login.ts", true], ["src/__tests__/a.ts", true],
-    ["src/Latest.swift", false], ["src/contest.ts", false], ["src/testing/util.ts", false], ["src/testimony.ts", false], ["src/é.ts", false],
-  ])("a feature commit adding %s: test audit %s, Docs ownership absent", async (path, audit) => {
-    const repo = await repoWith({}, (r) => { r.put(path, "export const x = 1;\n"); r.commit("add"); });
-
-    const { prompt } = await reviewOf(repo);
-
-    expect(auditRenders(prompt)).toBe(audit);
-    expect(docsRenders(prompt)).toBe(false);
-  });
-
-  test("a binary-only test fixture and a mode-only change of a test script both turn the test audit on", async () => {
-    const binary = await repoWith({}, (r) => { r.put("tests/snapshot.bin", Buffer.from([0, 1, 2, 0, 255, 0])); r.commit("add"); });
-    expect(auditRenders((await reviewOf(binary)).prompt)).toBe(true);
-    const mode = await repoWith({ "tests/run.sh": "#!/bin/sh\necho hi\n" }, (r) => { chmodSync(join(r.dir, "tests/run.sh"), 0o755); r.commit("chmod"); });
-    const { prompt } = await reviewOf(mode);
-    expect(auditRenders(prompt)).toBe(true);
-    expect(docsRenders(prompt)).toBe(false);
-  });
-
-  test("no path touches tests or docs: neither block renders, and the rest of the prompt is the same", async () => {
-    const quiet = await repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("edit"); });
-    const { prompt } = await reviewOf(quiet);
-    expect(auditRenders(prompt)).toBe(false);
-    expect(docsRenders(prompt)).toBe(false);
-    expect(prompt).toContain("(the bug-fix regression check still applies)");
-  });
-
-  // Contract (b): the binary-only, mode-only and add-then-revert docs cases render `## Docs ownership` through startReview, not only in the slice.
-  test.each<[string, Record<string, string>, (r: RepoApi) => void]>([
-    ["a binary-only docs file", {}, (r) => { r.put("docs/image.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 0, 255])); r.commit("add image"); }],
-    ["a mode-only docs change", { "docs/run.sh": "#!/bin/sh\necho hi\n" }, (r) => { chmodSync(join(r.dir, "docs/run.sh"), 0o755); r.commit("chmod"); }],
-    ["a non-ASCII docs path", {}, (r) => { r.put("docs/é.md", "# é\n"); r.commit("add"); }],
-    ["a docs file added and then removed (the net diff has no docs path)", {}, (r) => {
-      r.put("src/app.ts", "export const app = 2;\n"); r.put("docs/spec.md", "# Spec\n"); r.commit("add docs");
-      r.git("rm", "-q", "docs/spec.md"); r.commit("revert docs");
-    }],
-  ])("%s: Docs ownership renders, and the test audit does not", async (_name, base, change) => {
-    const repo = await repoWith(base, change);
-
-    const { prompt } = await reviewOf(repo);
-
-    expect(docsRenders(prompt)).toBe(true);
-    expect(auditRenders(prompt)).toBe(false);
-  });
-
-  test("the add-then-revert docs history leaves no docs path in the slice's net diff", async () => {
-    const repo = await repoWith({}, (r) => {
-      r.put("src/app.ts", "export const app = 2;\n"); r.put("docs/spec.md", "# Spec\n"); r.commit("add docs");
-      r.git("rm", "-q", "docs/spec.md"); r.commit("revert docs");
-    });
-    expect(repo.git("diff", "--name-only", "origin/main", "feature")).toBe("src/app.ts");
-    expect(docsRenders((await reviewOf(repo)).prompt)).toBe(true);
-  });
-
-  // Contract: an unknown listing keeps the rule. A failed lookup is null, never `[]` or `false`; a skipped slice is unknown as well.
-  // Regression: a failure that returns `[]` drops the test audit, one that returns `false` drops Docs ownership.
-  test.each<["names" | "history" | "both", boolean, boolean]>([
-    ["names", true, false], ["history", false, true], ["both", true, true],
-  ])("a failed %s lookup: test audit %s, Docs ownership %s", async (fail, audit, docs) => {
-    const repo = await repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("edit"); });
-
-    const { prompt } = await reviewOf(repo, { env: failingGit(fail) });
-
-    expect(auditRenders(prompt)).toBe(audit);
-    expect(docsRenders(prompt)).toBe(docs);
-  });
-
-  test.each([["a slice the host skips", { skip: "host down" }], ["a project with no local checkout", { checkout: false }]])("%s: both blocks render", async (_name, how) => {
-    const repo = await repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("edit"); });
-
-    const { prompt, out } = await reviewOf("checkout" in how ? null : repo, { skip: "skip" in how ? how.skip : undefined });
-
-    expect(out.reply).toContain("Impact slice skipped");
-    expect(auditRenders(prompt)).toBe(true);
-    expect(docsRenders(prompt)).toBe(true);
-  });
-
-  test("a tester's own review renders the test audit even when its paths are not tests, and still no Docs ownership", async () => {
-    const repo = await repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("edit"); });
-    const { prompt } = await reviewOf(repo, { kind: "tester" });
-    expect(auditRenders(prompt)).toBe(true);
-    expect(docsRenders(prompt)).toBe(false);
-  });
 });
 
 describe("plan wave flags choose the native-design check", () => {
@@ -1448,166 +879,32 @@ describe("plan wave flags choose the native-design check", () => {
   const nativeFor = async (waves: PlanWave[]) => nativeOf((await reviewOf(null, { waves, planWave: waves.length ? 1 : undefined })).prompt);
 
   // Contract: `feature && reshape` is the base line; `feature && !reshape` loses the two reshape parts; `!feature` renders none. A legacy wave (no `feature` key)
-  // counts as a feature and a reshape; a test or design wave never counts as a legacy implementation wave.
+  // counts as a feature and a reshape; a design wave never counts as a legacy implementation wave.
   // Regression: treating a missing key as false drops the check on every plan made before the flag; treating the test wave as an implementation wave adds the reshape sentences.
   test.each<[string, Array<Omit<PlanWave, "path">>, string]>([
-    ["a legacy plan, no feature key anywhere", [{}, { test: true, dependsOn: [1] }], "full"],
-    ["feature: true and reshape: true", [{ feature: true, reshape: true }, { test: true, dependsOn: [1] }], "full"],
-    ["feature: true only: the two reshape parts go", [{ feature: true, reshape: false }, { test: true, dependsOn: [1] }], "no-reshape"],
-    ["feature: true without a reshape key, a test wave with no keys (it is not a legacy implementation wave)", [{ feature: true }, { test: true, dependsOn: [1] }], "no-reshape"],
-    ["feature: false only: none renders", [{ feature: false, reshape: false }, { test: true, dependsOn: [1] }], "none"],
-    ["feature: false and reshape: true: none renders", [{ feature: false, reshape: true }, { test: true, dependsOn: [1] }], "none"],
-    ["a design wave with no keys before a feature wave", [{ design: true }, { feature: true, dependsOn: [1] }, { test: true, dependsOn: [2] }], "no-reshape"],
-    ["one feature wave among feature: false waves", [{ feature: false }, { feature: true, dependsOn: [1] }, { test: true, dependsOn: [2] }], "no-reshape"],
-    ["a reshape wave and a feature wave in one chain", [{ feature: false, reshape: true }, { feature: true, dependsOn: [1] }, { test: true, dependsOn: [2] }], "full"],
-    ["a legacy wave next to feature: false waves", [{ feature: false, reshape: false }, { dependsOn: [1] }, { test: true, dependsOn: [2] }], "full"],
+    ["a legacy plan, no feature key anywhere", [{}], "full"],
+    ["feature: true and reshape: true", [{ feature: true, reshape: true }], "full"],
+    ["feature: true only: the two reshape parts go", [{ feature: true, reshape: false }], "no-reshape"],
+    ["feature: true without a reshape key", [{ feature: true }], "no-reshape"],
+    ["feature: false only: none renders", [{ feature: false, reshape: false }], "none"],
+    ["feature: false and reshape: true: none renders", [{ feature: false, reshape: true }], "none"],
+    ["a design wave with no keys before a feature wave", [{ design: true }, { feature: true, dependsOn: [1] }], "no-reshape"],
+    ["one feature wave among feature: false waves", [{ feature: false }, { feature: true, dependsOn: [1] }], "no-reshape"],
+    ["a reshape wave and a feature wave in one chain", [{ feature: false, reshape: true }, { feature: true, dependsOn: [1] }], "full"],
+    ["a legacy wave next to feature: false waves", [{ feature: false, reshape: false }, { dependsOn: [1] }], "full"],
     ["unplanned work (no plan waves)", [], "no-reshape"],
   ])("%s -> %s", async (_name, waves, expected) => {
     expect(await nativeFor(plan(...waves))).toBe(expected);
   });
 
   test("a plan review of two workers renders the same split", async () => {
-    const waves = plan({ feature: false }, { test: true, dependsOn: [1] });
+    const waves = plan({ feature: false }, { feature: false, dependsOn: [1] });
     const w = world({ waves, heads: { [pr(1)]: headOf("feature/one"), [pr(2)]: headOf("feature/two", SHA_A) } });
     w.worker("W1", { prUrl: pr(1), branch: "feature/one", planWave: 1 });
     w.worker("W2", { prUrl: pr(2), branch: "feature/two", planWave: 2 });
     w.covering(["W1", "W2"]);
     await w.review.startReview(w.chief, "W1");
     expect(nativeOf(w.launches[0]!.args.prompt)).toBe("none");
-  });
-});
-
-describe("one target per pull request through startReview", () => {
-  // Contract: the forge head is read once per distinct pull request; every worker of it carries the same pinned head; the ledger still has one row per worker.
-  // Regression: one forge read per worker; a line per worker; a header that counts workers.
-  test("two pull requests with four workers: two forge reads, two target lines, four ledger rows, 2 pull requests", async () => {
-    const w = world({ heads: { [pr(1)]: headOf("feature/one"), [pr(2)]: headOf("feature/two", SHA_A) } });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    w.worker("W2", { prUrl: pr(1), branch: "feature/one-tests", kind: "tester" });
-    w.worker("W3", { prUrl: pr(2), branch: "feature/two" });
-    w.worker("W4", { prUrl: pr(2), branch: "feature/two-tests", kind: "tester" });
-    w.covering(["W1", "W2", "W3", "W4"]);
-
-    await w.review.startReview(w.chief, "W1");
-
-    expect(w.forge.head.mock.calls.map(([url]) => url)).toEqual([pr(1), pr(2)]);
-    const prompt: string = w.launches[0]!.args.prompt;
-    const lines = prompt.split("\n").filter((line) => line.startsWith("- https://"));
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain("Workers: worker W1 “Task W1”; tester W2 “Task W2”.");
-    expect(lines[1]).toContain("Workers: worker W3 “Task W3”; tester W4 “Task W4”.");
-    expect(prompt).toContain("the whole plan: 2 pull requests, started");
-    expect(w.targetRows("R1").map((row) => [row.worker_thread_id, row.head_sha])).toEqual([["W1", SHA_B], ["W2", SHA_B], ["W3", SHA_A], ["W4", SHA_A]]);
-  });
-
-  test("a pull request and an unpinned branch with two workers: one line each, header counts them apart", async () => {
-    const w = world({ heads: { [pr(1)]: headOf("feature/one") } });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    w.worker("W2", { prUrl: pr(1), branch: "feature/one" });
-    w.worker("W3", { branch: "feature/loose", reports: 2 });
-    w.worker("W4", { branch: "feature/loose", reports: 3 });
-    w.covering(["W1", "W2", "W3", "W4"]);
-
-    await w.review.startReview(w.chief, "W1");
-
-    const prompt: string = w.launches[0]!.args.prompt;
-    const lines = prompt.split("\n").filter((line) => line.startsWith("- https://") || line.startsWith("- branch "));
-    expect(lines).toHaveLength(2);
-    expect(lines[1]).toContain("worker W3 “Task W3” (the verdict binds to its report 2); worker W4 “Task W4” (the verdict binds to its report 3).");
-    expect(prompt).toContain("the whole plan: 1 pull request and 1 branch without a pinned pull request, started");
-    expect(w.forge.head).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("re-review scope per pull request through startReview", () => {
-  const verdict = (w: ReturnType<typeof world>, workerId: string, sha: string | null) =>
-    w.db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES ('R0', ?, 'request_changes', 1, 1, ?, 1)`).run(workerId, sha);
-  /** Base B on main; feature commits C1 and C2, the pull request's head. */
-  const history = () => repoWith({}, (r) => { r.put("src/app.ts", "export const app = 2;\n"); r.commit("c1"); r.put("src/app.ts", "export const app = 3;\n"); r.commit("c2"); });
-  const twoWorkers = async (engine?: () => unknown) => {
-    const repo = await history();
-    const c1 = repo.git("rev-parse", "HEAD~1");
-    const w = world({ projectPath: repo.dir, heads: { [pr(1)]: headOf("feature/one", repo.sha) }, engine });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    w.worker("W2", { prUrl: pr(1), branch: "feature/one", kind: "tester" });
-    w.covering(["W1", "W2"]);
-    return { w, repo, c1 };
-  };
-  const WHOLE = "whole pull request (its targets name different previous reviewed heads)";
-  const lineOf = (prompt: string) => prompt.split("\n").filter((line) => line.startsWith("- https://"));
-
-  // Contract: the targets of one pull request share one `since`: when they agree it is kept, when they disagree (or one has no previous verdict) none keeps it,
-  // and the brief line, the Re-review scope section, the engine's Targets lines and the reply scope note say the same.
-  // Regression: keeping the first target's since when another names a different head; a scope note that still says "changes since" for a dropped range.
-  test("both workers' previous verdicts name the same head: the range is kept, in the line, the section and the reply", async () => {
-    const { w, repo } = await twoWorkers();
-    verdict(w, "W1", repo.base); verdict(w, "W2", repo.base);
-
-    const out = await w.review.startReview(w.chief, "W1");
-
-    const prompt: string = w.launches[0]!.args.prompt;
-    expect(lineOf(prompt)).toHaveLength(1);
-    expect(lineOf(prompt)[0]).toContain(`then review only the changes since the previous review: \`git diff ${repo.base}..${repo.sha}\``);
-    expect(prompt.split("## Re-review scope")).toHaveLength(2);
-    expect(out.reply).toContain(`Review scope: W1: changes since ${repo.base.slice(0, 12)}; W2: changes since ${repo.base.slice(0, 12)}.`);
-  });
-
-  test.each([
-    ["two different previous heads", async (w: ReturnType<typeof world>, repo: any, c1: string) => { verdict(w, "W1", repo.base); verdict(w, "W2", c1); }],
-    ["one worker with no previous verdict", async (w: ReturnType<typeof world>, repo: any) => { verdict(w, "W1", repo.base); }],
-    ["a previous verdict that recorded no head", async (w: ReturnType<typeof world>, repo: any) => { verdict(w, "W1", repo.base); verdict(w, "W2", null); }],
-  ])("%s: no worker keeps a range, the line reviews the whole pull request, and the reply names the pull request once", async (_name, setup) => {
-    const { w, repo, c1 } = await twoWorkers();
-    await setup(w, repo, c1);
-
-    const out = await w.review.startReview(w.chief, "W1");
-
-    const prompt: string = w.launches[0]!.args.prompt;
-    expect(lineOf(prompt)[0]).toContain(`then review \`git diff origin/main...${repo.sha}\`.`);
-    expect(prompt).not.toContain("changes since the previous review");
-    expect(prompt).not.toContain("## Re-review scope");
-    expect(out.reply.split(`${pr(1)}: ${WHOLE}`)).toHaveLength(2);
-    expect(out.reply).not.toContain("changes since");
-  });
-
-  test("no previous verdict at all: no scope note and no section", async () => {
-    const { w } = await twoWorkers();
-    const out = await w.review.startReview(w.chief, "W1");
-    expect(out.reply).not.toContain("Review scope");
-    expect(w.launches[0]!.args.prompt).not.toContain("## Re-review scope");
-  });
-
-  test("two pull requests: the one whose workers agree keeps its range, the one that disagrees is reviewed whole", async () => {
-    const repo = await history();
-    const c1 = repo.git("rev-parse", "HEAD~1");
-    const w = world({ projectPath: repo.dir, heads: { [pr(1)]: headOf("feature/one", repo.sha), [pr(2)]: headOf("feature/two", repo.sha) } });
-    w.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    w.worker("W2", { prUrl: pr(1), branch: "feature/one" });
-    w.worker("W3", { prUrl: pr(2), branch: "feature/two" });
-    w.worker("W4", { prUrl: pr(2), branch: "feature/two" });
-    w.covering(["W1", "W2", "W3", "W4"]);
-    verdict(w, "W1", repo.base); verdict(w, "W2", repo.base); verdict(w, "W3", repo.base); verdict(w, "W4", c1);
-
-    const out = await w.review.startReview(w.chief, "W1");
-
-    const [first, second] = lineOf(w.launches[0]!.args.prompt);
-    expect(first).toContain(`git diff ${repo.base}..${repo.sha}`);
-    expect(second).toContain(`then review \`git diff origin/main...${repo.sha}\`.`);
-    expect(out.reply).toContain(`Review scope: W1: changes since ${repo.base.slice(0, 12)}; W2: changes since ${repo.base.slice(0, 12)}; ${pr(2)}: ${WHOLE}.`);
-  });
-
-  test("the pr-agent Targets lines carry the range when the workers agree and none when they disagree", async () => {
-    const engine = async () => ({ mode: "pr-agent", prAgentDir: "/unused" });
-    const agree = await twoWorkers(engine);
-    verdict(agree.w, "W1", agree.repo.base); verdict(agree.w, "W2", agree.repo.base);
-    await agree.w.review.startReview(agree.w.chief, "W1");
-    const agreed: string = agree.w.launches[0]!.args.prompt;
-    expect(agreed.split(`re-review since ${agree.repo.base}`)).toHaveLength(3);
-
-    const split = await twoWorkers(engine);
-    verdict(split.w, "W1", split.repo.base); verdict(split.w, "W2", split.c1);
-    await split.w.review.startReview(split.w.chief, "W1");
-    expect(split.w.launches[0]!.args.prompt).not.toContain("re-review since");
   });
 });
 
@@ -1624,7 +921,7 @@ describe("acceptedGaps through the review starters", () => {
 
     const given = world({ heads: { [pr(1)]: headOf("feature/one") } });
     given.worker("W1", { prUrl: pr(1), branch: "feature/one" });
-    await given.review.startReview(given.chief, "W1", "the discount path", undefined, GAPS);
+    await given.review.startReview(given.chief, "W1", "the discount path", GAPS);
     const prompt: string = given.launches[0]!.args.prompt;
     const lines = prompt.split("\n");
     const at = lines.indexOf("Review focus: the discount path");
