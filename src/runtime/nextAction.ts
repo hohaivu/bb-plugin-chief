@@ -19,12 +19,13 @@ const REVIEW_IDLE_POLL_MS = 2_000;
 const DESIGN_REVIEW_REFUSAL = "Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.";
 
 export function createNextAction(ctx: Ctx) {
-  const { bb, db, ledger, onSpecChain, planWavesFor, progress, reviewTargetsFor, schedule, settings, specWave, specWriters, store } = ctx;
-  /** Wave n of a plan is a spec wave: the sentence saying its default call spawns its Spec Writer, else "". */
-  function specFirstLine(planThreadId: string | null, waves: PlanWave[], n: number): string {
-    return planThreadId && specWave(waves, n)
-      ? ` Wave ${n} is marked spec: true: in this same turn also delegate its Spec Writer — chief_delegate (planThreadId: ${planThreadId}, wave: ${n}, kind: spec-writer) — which works in its own worktree beside the worker and folds its docs/ commits onto the branch. To go without one, record why: chief_skip_specs (planThreadId: ${planThreadId}, wave: ${n}, reason).`
-      : "";
+  const { bb, db, ledger, onSpecChain, planWavesFor, progress, reviewTargetsFor, schedule, settings, specWriters, store } = ctx;
+  /** The plan's Spec Writer entries still owed: delegate the one missing writer or wait for a delegated one; the review gate waits for it. */
+  function writersLine(planThreadId: string | null, pending: { wave: number; writer?: ManagedRow | null }[]): string {
+    return pending.map(({ wave, writer }) => writer
+      ? `wave ${wave}'s Spec Writer ${writer.thread_id} (${writer.state}) is not ready yet.`
+      : `Every wave is ready: delegate the plan's one Spec Writer now — chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, kind: spec-writer) — which covers the Spec delta of every spec: true wave in its own side worktree and folds docs/ onto the branch; or go without it: chief_skip_specs (planThreadId: ${planThreadId}, reason).`).join(" ")
+      + " The review gate waits for its ready report (the Tester derives tests from the committed docs).";
   }
 
   /** On a spec-bearing chain, the routes for a wrong spec and for a Spec delta that cannot be built. */
@@ -49,11 +50,11 @@ export function createNextAction(ctx: Ctx) {
       case "restacked":
         return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Wave ${block.next} was already restacked as ${block.successor.thread_id}; start the plan's one review from the latest chain-tip worker once every wave is ready.`;
       case "betweenWaves":
-        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}).${specFirstLine(worker.plan_thread_id, block.waves, block.next)}`;
+        return `Wave ${worker.plan_wave} of ${block.waves.length}: no review runs between waves. Delegate wave ${block.next}: ${block.waves[block.next - 1]!.path} — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${block.next}, replaces: ${worker.thread_id}).`;
       case "sideWriter":
         return `${worker.thread_id} is a Spec Writer: it never starts a review. The plan's one review starts from an implementation chain tip (chief_review) once every wave and every Spec Writer is ready.`;
       case "writers":
-        return `One review covers the whole plan once every Spec Writer is ready; ${block.writers.map(({ wave, writer }) => writer ? `wave ${wave}'s ${writer.thread_id} (${writer.state})` : `wave ${wave}'s Spec Writer is not delegated yet — chief_delegate (planThreadId: ${worker.plan_thread_id}, wave: ${wave}, kind: spec-writer), or record why not with chief_skip_specs`).join(", ")} ${block.writers.length > 1 ? "are" : "is"} not ready. Wait for their ready reports, then start the review.`;
+        return `One review covers the whole plan once the plan's Spec Writer is ready. ${writersLine(worker.plan_thread_id, block.writers)}`;
       case "unready":
         return `The review gate opens only on ready work; ${block.rows.map((row) => `${row.thread_id} (${row.state})`).join(", ")} ${block.rows.length > 1 ? "have" : "has"} no ready report. Wait for the ready report, or chief_continue (threadId: ${block.rows[0]!.thread_id}) to finish it, then start the review.`;
       case "pending":
@@ -88,17 +89,17 @@ export function createNextAction(ctx: Ctx) {
     if (!step) return null;
     switch (step.kind) {
       case "designNext":
-        return `Design wave ${row.plan_wave} of ${step.waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, first record it: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words); then delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}); ${specWave(step.waves, step.next) ? `it is a spec wave, so name the approved artboards in the missions of its worker and its Spec Writer.${specFirstLine(row.plan_thread_id, step.waves, step.next)}` : "it runs as a worker, so name the approved artboards in its mission."} On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Never chief_review a design wave, and do not review between waves.`;
+        return `Design wave ${row.plan_wave} of ${step.waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, first record it: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words); then delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}); name the approved artboards in its mission. On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Never chief_review a design wave, and do not review between waves.`;
       case "designDone":
         return `Design wave ${row.plan_wave} of ${step.waves.length} is ready and nothing builds on it: its artboards need the owner's approval. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words), then chief_complete (threadId: ${row.thread_id}). Never chief_review it.`;
       case "restack":
         return `Wave ${row.plan_wave} of ${step.waves.length} is ready after its fix. Wave ${step.next} is stacked on it and still builds on the old head: once this worker is idle, restack it — chief_delegate (replaces: ${step.successor.thread_id}), with a mission to rebase ${step.successor.branch ?? `wave ${step.next}'s branch`} onto ${row.branch ?? "this branch"} and fix what the rebase breaks; the review's findings are attached automatically. Do not review between waves.`;
       case "nextWave":
-        return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}).${specFirstLine(row.plan_thread_id, step.waves, step.next)} Do not review between waves.`;
+        return `Wave ${row.plan_wave} of ${step.waves.length} is ready. Once it is idle, delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}). Do not review between waves.`;
       case "unplannedWriter":
         return `Spec Writer ${row.thread_id} committed the docs. Once it is idle, delegate the worker to implement against them: chief_delegate (replaces: ${row.thread_id}, kind: worker${row.unplanned_reason ? `, unplannedReason: ${row.unplanned_reason}` : ""}). Do not review yet.`;
       case "waitWriters":
-        return `Wave ${row.plan_wave} of ${step.waves.length} is ready; the Spec Writer of ${step.pending.map(({ wave, writer }) => writer ? `wave ${wave} (${writer.thread_id}, ${writer.state})` : `wave ${wave} (not delegated)`).join(", ")} is not ready yet. Wait for its ready report: the Tester derives its tests from the committed docs, and the one review waits too. Do not delegate the next wave or review yet.`;
+        return `Wave ${row.plan_wave} of ${step.waves.length} is ready; ${writersLine(row.plan_thread_id, step.pending)} Do not review yet.`;
       case "unplanned":
         return gateStartLine(row.thread_id);
       case "review":
@@ -155,7 +156,12 @@ export function createNextAction(ctx: Ctx) {
           : `Fix run ${decision.fixer.thread_id} reports a wrong test: ${clip(decision.fixer.blocker ?? "", 200)}. Read its evidence (bb chief inspect ${decision.fixer.thread_id}). If it holds, delegate the gate's one corrector: chief_delegate (replaces: ${decision.fixer.thread_id}, kind: tester); otherwise escalate to the user.`;
       }
       case "escalate": return `The review gate cannot pass on its own: ${decision.why}. Escalate to the user.`;
-      case "pass": return `The review gate passed. Complete ${ids.length > 1 ? "each target" : "it"}: ${ids.filter((id) => store.get(id)?.state !== "complete").map((id) => `chief_complete (threadId: ${id})`).join("; ")}; each marks its pull request ready.`;
+      case "pass": {
+        // An implementation-lane Spec Writer that replaced a target completes on this pass too.
+        const writers = store.all().filter((other) => other.role === "worker" && isWriter(other.kind) && !schedule.sideLane(other) && !terminal(other.state)
+          && ledger.taskChain(other.thread_id).some((id) => ids.includes(id))).map((other) => other.thread_id);
+        return `The review gate passed. Complete ${ids.length > 1 ? "each target" : "it"}: ${[...ids.filter((id) => store.get(id)?.state !== "complete"), ...writers].map((id) => `chief_complete (threadId: ${id})`).join("; ")}; each marks its pull request ready.`;
+      }
     }
   }
 
@@ -252,9 +258,9 @@ export function createNextAction(ctx: Ctx) {
       const waitingLine = waiting.length ? ` Waves ${waiting.join(", ")} are stacked and start once their parent wave is ready.` : "";
       if (!undelegated.length) return waiting.length ? waitingLine.trim() : null;
       if (heads.length === 1) {
-        return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${row.thread_id}, wave: 1), then chief_delegate (planThreadId: ${row.thread_id}, wave: 1).${specFirstLine(row.thread_id, waves, 1)} The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
+        return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${row.thread_id}, wave: 1), then chief_delegate (planThreadId: ${row.thread_id}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
       }
-      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${row.thread_id}, wave: N), then chief_delegate (planThreadId: ${row.thread_id}, wave: N), all in this turn. Each of these is an independent chain head and gets its own task title, branch, PR and worktree from its plan base (chief_forge_init derives it; omit base); its later waves continue that chain with replaces: the chain's latest worker, never a worker of another chain.${undelegated.map((n) => specFirstLine(row.thread_id, waves, n)).join("")} The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
+      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${row.thread_id}, wave: N), then chief_delegate (planThreadId: ${row.thread_id}, wave: N), all in this turn. Each of these is an independent chain head and gets its own task title, branch, PR and worktree from its plan base (chief_forge_init derives it; omit base); its later waves continue that chain with replaces: the chain's latest worker, never a worker of another chain. The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
     }
     if (row.role === "worker") return workerReadyNextStep(row, forAlert);
     if (row.role === "advisor") {
@@ -323,6 +329,6 @@ export function createNextAction(ctx: Ctx) {
     git: { env: forgeEnv },
     engine: async () => reviewEngine(await settings.get()),
   });
-  return { busyRejection, gateLine, gateOf, gateStartLine, nextAction, planAdvisors, planReviewRefusal, revisionsOf, specFirstLine, startBranchReview, startReview, waitIdleAfterReport, waveWaitLine, workerReadyNextStep };
+  return { busyRejection, gateLine, gateOf, gateStartLine, nextAction, planAdvisors, planReviewRefusal, revisionsOf, startBranchReview, startReview, waitIdleAfterReport, waveWaitLine, workerReadyNextStep };
 }
 

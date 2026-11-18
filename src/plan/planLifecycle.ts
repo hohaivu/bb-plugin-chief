@@ -45,7 +45,7 @@ export interface Admission {
   sideChain?: { branch: string; prUrl: string | null };
 }
 
-export type SpecWaiver = "waive" | "already-waived" | "already-waived-delegated";
+export type SpecWaiver = "waive" | "already-waived";
 
 /** One module owns who may run which plan wave next: role, Spec Writer and tester hand-off order, and the spec waiver.
  * It answers admission with data and throws the refusal sentence when an action is not allowed. Advice (what to call next) stays
@@ -56,7 +56,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
   ledger: { taskChain(workerThreadId: string): string[] },
   reviewRefusal: (planner: Row) => string | null,
 ) {
-  const { planWavesFor, waveWorkers, specWriters, writersAt, latestWorker, specWave, specChain, writerPending, latestWriter, chainOwner, laneFor, sideLane, planBase } = schedule;
+  const { planWavesFor, waveWorkers, specWriters, writersAt, latestWorker, specWave, planWriterWave, pendingWaves, specChain, writerPending, latestWriter, chainOwner, laneFor, sideLane, planBase } = schedule;
 
   /** Admits or refuses one chief_delegate. kind is the one the caller named (undefined: not named), resolvedKind the one
    * resolveDelegation gave; branch is the one the caller named. */
@@ -131,6 +131,12 @@ export function createPlanLifecycle<Row extends PlanRow>(
           throw new Error(`Wave ${wave} is design-only: it changes no repository files. Route its docs need to wave ${next ?? "<its successor>"}: put it in that wave's Spec Writer mission when the wave is spec: true, else chief_delegate (planThreadId: ${planThreadId}, wave: ${next ?? "<its successor>"}, replaces: ${nextOwner?.thread_id ?? "<that wave's chain owner>"}, kind: spec-writer) once its worker has reported.`);
         }
         if (lane === "side") {
+          if (!prior) {
+            const anchor = planWriterWave(waves);
+            if (wave !== anchor) throw new Error(`A plan has one Spec Writer: it runs on wave ${anchor} once every wave is ready and covers the Spec delta of every spec: true wave — chief_delegate (planThreadId: ${planThreadId}, wave: ${anchor}, kind: spec-writer).`);
+            const pending = pendingWaves(planThreadId, waves);
+            if (pending.length) throw new Error(`The plan's Spec Writer starts once every wave is ready; wave(s) ${pending.join(", ")} of ${waves.length} are not ready yet.`);
+          }
           const live = specWriters(planThreadId, wave).filter((row) => !["complete", "archived", "deleted"].includes(row.state) && row.thread_id !== prior?.thread_id);
           if (live.length) throw new Error(`Wave ${wave}'s Spec Writer ${live[0]!.thread_id} is still live: fix its docs with chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, replaces: ${live[0]!.thread_id}, kind: spec-writer).`);
         } else if (!(owner && prior?.thread_id === owner.thread_id && prior.plan_wave === wave)) {
@@ -155,12 +161,8 @@ export function createPlanLifecycle<Row extends PlanRow>(
       if (prior?.plan_thread_id === planThreadId && prior.pr_url && request.prUrl && request.prUrl !== prior.pr_url) {
         throw new Error(`replaces: ${prior.thread_id} carries pull request ${prior.pr_url}; pass no prUrl or the same one. A plan chain has one pull request.`);
       }
-      // A first side-lane writer starts no chain: it needs the chain's branch, and its predecessor as ready as the wave's worker needs.
+      // A first side-lane writer starts no chain: it needs the chain's branch.
       if (lane === "side" && !prior) {
-        const ready = parent === null || waveRows.length > 0 || (!!owner && isSettled(owner));
-        if (!ready) {
-          throw new Error(`Wave ${wave} builds on wave ${parent}, which has not reported ready: its Spec Writer starts once the chain's worker is ready (${owner ? `${owner.thread_id} is ${owner.state}` : "no worker has started the chain"}).`);
-        }
         if (owner) {
           if (request.branch && request.branch !== owner.branch) throw new Error(`branch ${request.branch} is not the chain's branch ${owner.branch} (worker ${owner.thread_id}); a Spec Writer folds onto the chain's one branch.`);
           sideChain = { branch: owner.branch!, prUrl: owner.pr_url };
@@ -183,7 +185,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
         if (!request.branch) throw new Error(`Wave ${wave} stacks on ${pb.base}: run chief_forge_init (planThreadId: ${planThreadId}, wave: ${wave}) and pass its branch.`);
         stackBase = pb.base;
       }
-      if (lane === "side") baseline = !!scheduled.baseline;
+      if (lane === "side") baseline = wave === planWriterWave(waves) ? waves.some((entry, i) => specWave(waves, i + 1) && !!entry.baseline) : !!scheduled.baseline;
       if (kind === "tester") {
         for (let n: number | null = wave; n !== null; n = parentOf(waves, n)) {
           if (waves[n - 1]!.spec && waves[n - 1]!.baseline && !waves[n - 1]!.specsSkipped) baseline = true;
@@ -200,9 +202,11 @@ export function createPlanLifecycle<Row extends PlanRow>(
       }
       planFirst = specWave(waves, wave) && (kind === "worker" || kind === "designer");
       if (kind === "tester" || isWriter(kind)) {
-        for (const n of chainOf(waves, wave)) {
+        // The side-lane writer covers every wave of the plan, contracts excluded; others read their chain.
+        const sources = lane === "side" ? waves.flatMap((entry, i) => entry.absent ? [] : [i + 1]) : chainOf(waves, wave);
+        for (const n of sources) {
           const entry = waves[n - 1]!;
-          specSources.push(`Wave ${n} of ${waves.length}: ${entry.path}`, ...(entry.contracts && isWriter(kind) && n === wave ? [clip(entry.contracts, 3_000)] : []));
+          specSources.push(`Wave ${n} of ${waves.length}: ${entry.path}`, ...(entry.contracts && isWriter(kind) && lane !== "side" && n === wave ? [clip(entry.contracts, 3_000)] : []));
           if (entry.design) {
             const designer = latestWorker(planThreadId, n);
             specSources.push(`Approved design: wave ${n}'s artboards, owner's approval “${designer?.owner_approval ?? "none recorded"}”, designer report ${designer?.report_path ?? "none"}`);
@@ -231,18 +235,19 @@ export function createPlanLifecycle<Row extends PlanRow>(
     return { kind, planPath, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, specSources, specDocs: isWriter(kind) ? [] : specDocs, baseline, specWave: planFirst, lane, sideChain };
   }
 
-  /** chief_skip_specs's admission. The wave must be a spec implementation wave (specsSkipped stays in, so a repeat is idempotent);
-   * "waive" means record it, the other two mean it already is (and whether a worker was delegated on it since). */
-  function waiveSpecs(planThreadId: string, wave: number): { outcome: SpecWaiver; parent: number | null } {
+  /** chief_skip_specs's admission, plan level: "waive" lists every spec wave with no Spec Writer row to record the reason on;
+   * "already-waived" means a previous call did. Refused once the plan's Spec Writer was delegated. */
+  function waiveSpecs(planThreadId: string): { outcome: SpecWaiver; waves: number[] } {
     const waves = planWavesFor(planThreadId);
-    const scheduled = waves[wave - 1];
-    if (!scheduled?.spec || scheduled.design) throw new Error(`Wave ${wave} of planner ${planThreadId} is not a spec: true implementation wave.`);
-    const parent = parentOf(waves, wave);
-    const latest = latestWorker(planThreadId, wave);
-    const writer = writersAt(planThreadId, wave)[0];
-    if (scheduled.specsSkipped) return { outcome: latest ? "already-waived-delegated" : "already-waived", parent };
-    if (writer) throw new Error(`Wave ${wave} already has Spec Writer ${writer.thread_id}: chief_skip_specs only bypasses a Spec Writer that was never delegated on the wave. Fix its docs with chief_delegate (replaces: ${writer.thread_id}, kind: spec-writer), or re-plan with a fresh chief_plan.`);
-    return { outcome: "waive", parent };
+    // A plan-level bypass already ran: a retained legacy writer may now be the computed anchor, so check this first.
+    if (waves.some((wave) => wave.specsSkipped)) return { outcome: "already-waived", waves: [] };
+    const anchor = planWriterWave(waves);
+    if (anchor === null) {
+      throw new Error(`Planner ${planThreadId} has no spec: true implementation wave.`);
+    }
+    const writer = writersAt(planThreadId, anchor)[0];
+    if (writer) throw new Error(`The plan's Spec Writer ${writer.thread_id} was already delegated: chief_skip_specs only bypasses a Spec Writer that was never delegated. Fix its docs with chief_delegate (replaces: ${writer.thread_id}, kind: spec-writer), or re-plan with a fresh chief_plan.`);
+    return { outcome: "waive", waves: waves.flatMap((_, i) => specWave(waves, i + 1) && !writersAt(planThreadId, i + 1).length ? [i + 1] : []) };
   }
 
   return { admitDelegation, waiveSpecs };

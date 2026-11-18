@@ -267,7 +267,7 @@ The review gate is the one review of a plan. It gives one verdict and one test r
 ### Opening and refusals
 
 - `chief_review (workerThreadId: W)` opens the gate, or joins it. A call with both sides live names them and starts nothing, except one advisory re-review. Reason: a retry must not start a second reviewer or tester.
-- The call refuses while the readiness rules of the plan refuse the wave. Those rules cover design waves, pending Spec Writers and restacks.
+- The call refuses while the readiness rules of the plan refuse the wave. Those rules cover design waves, the plan's Spec Writer while it is missing or not settled, legacy Spec Writers that are not settled, and restacks.
 - For unplanned work, the call refuses while the worker, or the task's newest Spec Writer, is not settled. Settled means ready, idle after a ready report, or complete, as in Pending writer in [plan-chains.md](plan-chains.md). Reason: the gate waits so that it never pins a revision before the worker and its newest Spec Writer finish publishing it.
 - The call refuses when the builder tree is dirty. It also refuses when the pinned commit does not contain the builder HEAD. Reason: the review must see the code that the builder has, and the Spec Writer fold may be ahead of it.
 - A refusal names the target and the recovery. The recovery is `chief_continue` of the worker to commit and push, or `chief_forge_init`. Reason: a refusal must say what Chief does next.
@@ -300,6 +300,7 @@ The review gate is the one review of a plan. It gives one verdict and one test r
 - A pass stamps `cleanup_approved_at` on the target and on the gate actors. Reason: cleanup needs proof of a pass.
 - `skipReview` completes a row without the gate. It never stamps `cleanup_approved_at`. Reason: a skipped review is not a pass.
 - `override` completes a row without the gate. It never stamps `cleanup_approved_at`. The note reads `Completed without the review gate: <reason>`. Reason: an override is Chief's decision, not a review result.
+- An implementation-lane Spec Writer completes when its `replaces:` chain reaches a gate target whose gate passed. The gate's pass line names it. It needs no hand-off worker and no override. Reason: the existing passed gate covers this repair path, and an unnecessary hand-off worker would have no gate.
 
 ### Gate decision
 

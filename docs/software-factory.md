@@ -6,7 +6,7 @@ This page shows how Chief turns one owner request into a merged pull request. Th
 
 ## Chart
 
-> **Note.** The waves of one chain run one after another on one branch, each worker continuing the last through `replaces:`. A Spec Writer runs beside the worker of its wave in a side worktree and folds `docs/` onto the same branch. Separate chains (separate branches and pull requests, started with `dependsOn: []`) can run in parallel.
+> **Note.** The waves of one chain run one after another on one branch, each worker continuing the last through `replaces:`. The plan's one Spec Writer runs once, after every wave is ready, in a side worktree, and folds `docs/` onto the same branch. Separate chains (separate branches and pull requests, started with `dependsOn: []`) can run in parallel.
 
 A solid arrow is a tool call or a push. A dashed arrow is a `chief_report` that the plugin turns into a lifecycle alert for Chief, or an owner message. Every managed thread reports to Chief only. Threads never message each other. The one exception is the pull-only plan log (`chief_log`), which carries no alert.
 
@@ -59,19 +59,17 @@ sequenceDiagram
   end
 
   loop each wave of the chain, later waves use replaces:
-    par wave marked spec: true
-      Chief->>Worker: chief_delegate, one worker for this wave
-      Chief->>SpecWriter: chief_delegate kind spec-writer
-    and
-      Worker->>Forge: git push to task branch
-      Worker-->>Chief: report (ready, or blocked with a split)
-    and
-      SpecWriter->>Forge: fold docs/ fast-forward only
-      SpecWriter-->>Chief: report (ready)
-    end
+    Chief->>Worker: chief_delegate, one worker for this wave
+    Worker->>Forge: git push to task branch
+    Worker-->>Chief: report (ready, or blocked with a split)
     Note over Chief,Worker: no review between waves. A blocked report leads to a new chief_plan for the rest
   end
-  Note over Chief,SpecWriter: the tester and the review wait for every Spec Writer
+  opt a plan with spec: true waves, once after the last wave is ready
+    Chief->>SpecWriter: chief_delegate kind spec-writer, the plan's one Spec Writer
+    SpecWriter->>Forge: fold docs/ fast-forward only
+    SpecWriter-->>Chief: report (ready)
+  end
+  Note over Chief,SpecWriter: the review waits for the plan's Spec Writer
   Note over Chief,Worker: for a big feature the planner adds one optional reshape wave after the last feature wave. It is an ordinary worker wave in this loop
 
   Chief->>Reviewer: chief_review, one gate for the whole plan
@@ -159,12 +157,12 @@ flowchart LR
 
 ## Roles inside a plan chain
 
-A plan chain has one branch, one pull request and one implementation worktree. Each Spec Writer has a side worktree. Worker kinds come from `workerKindSchema` in `src/core/roles.ts`. Planner, Advisor, Researcher and Reviewer are thread roles.
+A plan chain has one branch, one pull request and one implementation worktree. The plan's one Spec Writer has a side worktree. Worker kinds come from `workerKindSchema` in `src/core/roles.ts`. Planner, Advisor, Researcher and Reviewer are thread roles.
 
 | Role | Kind or thread role | Job | Waived by |
 | --- | --- | --- | --- |
 | Designer | `kind: "designer"` | Decides or implements how the UI looks. In a plan it draws artboards in its own design-only wave, before the wave that builds the UI. | n/a |
-| Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs in parallel with the worker of a `spec: true` wave, in its own worktree. Folds `docs/` onto the chain branch. Writes from the plan's Spec delta and reads code only to check names. | `chief_skip_specs` |
+| Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs once, after every wave of the plan is ready, in its own worktree, and covers the `## Spec delta` of every `spec: true` wave. Folds `docs/` onto the chain branch. Writes from the plan's Spec delta and reads code only to check names. | `chief_skip_specs` |
 | Worker | `kind: "worker"` | Implements one wave. It never writes tests. A reshape wave is also a worker. | n/a |
 | Tester | `kind: "tester"` | Writes and runs the tests of the plan in the review gate. A corrector repairs a wrong test. | n/a |
 | Reviewer | thread role `reviewer` | Reports a `verdict` of `approve` or `request_changes`. It never edits. | `skipReview` |

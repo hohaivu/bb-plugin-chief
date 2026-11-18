@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
-import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
+import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withBoth } from "./test/specWriterHelpers";
 import { type State, delegateWave, forgeAnswers, openGate, plan, planWaves, readyIdle, rowOf, spawnOf, tool, workerOn } from "./test/testerHelpers";
 import { disposeAll, planFile, reviewContextOf, setup, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -26,7 +26,7 @@ describe("Spec Writer role", () => {
     await delegateWave(state, chiefThreadId, planThreadId, waveNo, extra);
     return { id: workerOn(state, planThreadId, waveNo).thread_id as string, prompt: state.spawned.at(-1).prompt as string };
   };
-  /** Two spec waves run to the end: each wave's worker and its side-lane Spec Writer, every row ready and idle. */
+  /** Two waves run to the end, then the plan's one Spec Writer on the last spec wave: every row ready and idle. */
   async function mixedChain(state: State, waves: object[]) {
     const { chief, planner } = await specPlan(state, waves, true);
     const go = async (waveNo: number, extra: object) => {
@@ -35,12 +35,11 @@ describe("Spec Writer role", () => {
       return row;
     };
     const w1Worker = await go(1, { branch: CHAIN, prUrl: CHAIN_PR });
-    const w1Writer = await go(1, { kind: "spec-writer", branch: CHAIN, prUrl: CHAIN_PR });
     const w2Worker = await go(2, { replaces: w1Worker.id });
-    const w2Writer = await go(2, { kind: "spec-writer" });
-    return { chief, planner, w1Writer, w1Worker, w2Writer, w2Worker };
+    const writer = await go(2, { kind: "spec-writer" });
+    return { chief, planner, w1Worker, w2Worker, writer };
   }
-  const WRITER_BASELINE = "- Baseline: this wave's plan has a `## Spec baseline` heading.";
+  const WRITER_BASELINE = "- Baseline: a spec wave's plan file has a `## Spec baseline` heading.";
 
   // Contract (bypass): a wave Chief bypassed with chief_skip_specs is listed with its reason under `## Bypassed Spec Writer steps` in review-context, and its
   // review renders no spec gate. Regression: the bypass is dropped from the context, or a bypassed wave keeps the blocking docs list.
@@ -94,102 +93,59 @@ describe("Spec Writer role", () => {
     const state = await setup();
     const { chief, planner } = await specPlan(state);
     const worker = await hop(state, chief.threadId, planner.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+    await readyIdle(state, worker.id);
+    const seen = [worker.prompt, lastAlert(state)];
     const writer = await hop(state, chief.threadId, planner.threadId, 1, { kind: "spec-writer", branch: CHAIN, prUrl: CHAIN_PR });
-    const seen = [worker.prompt, writer.prompt];
+    seen.push(writer.prompt);
     await readyIdle(state, writer.id);
     seen.push(lastAlert(state), await roster(state, chief.threadId));
-    await readyIdle(state, worker.id);
-    seen.push(lastAlert(state));
     const review = await reviewPrompt(state, chief.threadId, worker.id);
     seen.push(review.prompt, review.context);
     for (const text of seen) expect(text).not.toMatch(/baseline/i);
     expect(gateOf(review.prompt)).toHaveLength(6);
   });
 
-  // Contract (mixed chain, existing-only first): wave 1's Spec Writer and worker prompts carry no baseline although wave 2 has one; wave 2's Spec Writer has the
-  // Baseline line, its worker does not. Regression: an unconditional line; a flag read from any wave of the chain; a worker that gets the Spec Writer line.
-  test("a baseline on wave 2 reaches wave 2's Spec Writer, not wave 1's prompts or wave 2's worker", async () => {
+  // plan-chains.md: the plan's one Spec Writer gets the Baseline line when any unbypassed spec wave of the plan has a `## Spec baseline`,
+  // on its own chain or another; no worker ever gets it. Regression: the flag is read from the writer's own wave only (a baseline on an
+  // earlier wave or another chain is lost), or leaks into a worker prompt or a plan with no baseline.
+  test.each<[string, object[], boolean]>([
+    ["on the writer's wave", [specImpl(1), baseImpl(2)], true],
+    ["on an earlier wave", [baseImpl(1), specImpl(2)], true],
+    ["on another chain", [baseImpl(1), specImpl(2, { dependsOn: [] })], true],
+    ["on no wave", [specImpl(1), specImpl(2)], false],
+  ])("the plan's Spec Writer gets the Baseline line for a baseline %s; no worker does", async (_label, waves, expected) => {
     const state = await setup();
-    const chain = await mixedChain(state, [specImpl(1), baseImpl(2)]);
-    expect(chain.w1Writer.prompt).not.toContain(WRITER_BASELINE);
-    expect(chain.w1Worker.prompt).not.toContain(WRITER_BASELINE);
-    expect(chain.w2Writer.prompt).toContain(WRITER_BASELINE);
-    expect(chain.w2Worker.prompt).not.toMatch(/baseline/i);
+    const { chief, planner } = await specPlan(state, waves, true);
+    const independent = (waves[1] as any).dependsOn?.length === 0;
+    const w1 = await hop(state, chief.threadId, planner.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+    await readyIdle(state, w1.id);
+    const w2 = await hop(state, chief.threadId, planner.threadId, 2, independent ? { branch: "feature/b", prUrl: PR_B } : { replaces: w1.id });
+    await readyIdle(state, w2.id);
+    const writer = await hop(state, chief.threadId, planner.threadId, 2, { kind: "spec-writer" });
+    expect(writer.prompt.includes(WRITER_BASELINE)).toBe(expected);
+    for (const row of [w1, w2]) expect(row.prompt).not.toMatch(/baseline/i);
   });
 
-  // Contract (mixed chain, wave-1 isolation): wave 1's prompts of a chain whose wave 2 has a baseline equal those of the same chain with none.
-  // Regression: a Spec Writer or worker flag read from any wave of the chain.
-  test("wave 1's prompts of a chain whose wave 2 has a baseline equal those of a chain with no baseline", async () => {
-    const prompts = async (waves: object[]) => {
-      const state = await setup();
-      const chain = await mixedChain(state, waves);
-      return [chain.w1Writer.prompt, chain.w1Worker.prompt].map((prompt) => prompt.replaceAll(state.storageRoot, "<storage>"));
-    };
-    const withBaseline = await prompts([specImpl(1), baseImpl(2)]);
-    expect(withBaseline).toEqual(await prompts([specImpl(1), specImpl(2)]));
-    expect(withBaseline[0]).not.toMatch(/baseline/i);
-  });
-
-  // Contract (mixed chain, reversed order): wave 1 has the baseline, wave 2 does not: wave 2's Spec Writer gets no line.
-  // Regression: a Spec Writer that reads its ancestors' flag.
-  test("a baseline on wave 1 reaches wave 1's Spec Writer, not wave 2's", async () => {
-    const state = await setup();
-    const chain = await mixedChain(state, [baseImpl(1), specImpl(2)]);
-    expect(chain.w1Writer.prompt).toContain(WRITER_BASELINE);
-    for (const row of [chain.w1Worker, chain.w2Writer, chain.w2Worker]) expect(row.prompt).not.toMatch(/baseline/i);
-  });
-
-  // Contract (isolation): a baseline wave on another chain gives the other chain's Spec Writer no line, and its own chain still gets it.
-  // Regression: a flag read from any wave of the plan.
-  test("a baseline on another chain reaches only that chain's Spec Writer", async () => {
-    const state = await setup();
-    const { chief, planner } = await specPlan(state, [specImpl(1), baseImpl(2, { dependsOn: [] })], true);
-    const go = async (waveNo: number, extra: object) => {
-      const row = await hop(state, chief.threadId, planner.threadId, waveNo, extra);
-      await readyIdle(state, row.id);
-      return row;
-    };
-    await go(2, { branch: "feature/b", prUrl: PR_B });
-    const bWriter = await go(2, { kind: "spec-writer", branch: "feature/b", prUrl: PR_B });
-    await go(1, { branch: "feature/a", prUrl: CHAIN_PR });
-    const aWriter = await go(1, { kind: "spec-writer", branch: "feature/a", prUrl: CHAIN_PR });
-    expect(bWriter.prompt).toContain(WRITER_BASELINE);
-    expect(aWriter.prompt).not.toMatch(/baseline/i);
-  });
-
-  // Contract (bypass): a baseline wave with chief_skip_specs sets no baseline line and does not count in the reviewer's spec waves, while the unbypassed spec wave
-  // that follows still renders the gate, without item (6). Regression: a flag read from a bypassed wave; item (6) read from every wave instead of the reviewed ones.
-  test("a bypassed baseline wave gives no baseline line and the reviewer no item (6)", async () => {
+  // Contract (bypass): chief_skip_specs on a plan with a baseline wave starts no Spec Writer; no worker prompt carries a baseline and the review has no
+  // spec gate. Regression: a flag read from a bypassed wave.
+  test("a bypassed baseline plan gives no baseline line and the reviewer no spec gate", async () => {
     const state = await setup();
     const { chief, planner } = await specPlan(state, [baseImpl(1), specImpl(2)], true);
     await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
-    const go = async (waveNo: number, extra: object) => {
-      const row = await hop(state, chief.threadId, planner.threadId, waveNo, extra);
-      await readyIdle(state, row.id);
-      return row;
-    };
-    const w1 = await go(1, { branch: CHAIN, prUrl: CHAIN_PR });
-    const w2Worker = await go(2, { replaces: w1.id });
-    const w2Writer = await go(2, { kind: "spec-writer" });
-    expect(rowOf(state, w1.id).kind).toBeNull();
-    for (const row of [w1, w2Writer, w2Worker]) expect(row.prompt).not.toMatch(/baseline/i);
-    const gate = gateOf((await reviewPrompt(state, chief.threadId, w2Worker.id)).prompt);
-    expect(numbers(gate)).toEqual(["(1)", "(2)", "(3)", "(4)", "(5)", "Con"]);
+    const w1 = await hop(state, chief.threadId, planner.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+    await readyIdle(state, w1.id);
+    const w2 = await hop(state, chief.threadId, planner.threadId, 2, { replaces: w1.id });
+    await readyIdle(state, w2.id);
+    for (const row of [w1, w2]) expect(row.prompt).not.toMatch(/baseline/i);
+    const { prompt } = await reviewPrompt(state, chief.threadId, w2.id);
+    expect(prompt).not.toContain("Block only on:\n(1)");
   });
 
-  // Contract (repairs): a Spec Writer that replaces the worker of a baseline wave gets no Baseline line; a retry of a writer that has not handed off gets it.
-  // Regression: the flag is set after the worker ran (the repair gets the line); the retry loses the line.
-  test("a Spec Writer repair after the worker gets no baseline line, a retry before the worker does", async () => {
-    const afterWorker = await setup();
-    const first = await withWriter(afterWorker, [baseImpl(1)]);
-    await readyIdle(afterWorker, first.writer);
-    const worker = await swap(afterWorker, first.chief, first.planner.threadId, 1, first.writer, "worker");
-    await readyIdle(afterWorker, worker);
-    await swap(afterWorker, first.chief, first.planner.threadId, 1, worker, "spec-writer");
-    expect(afterWorker.spawned.at(-1).prompt).not.toMatch(/baseline/i);
-
+  // Contract (repairs): a retry of the plan's blocked side-lane Spec Writer keeps the Baseline line.
+  // Regression: the retry loses the line.
+  test("a retry of the plan's Spec Writer keeps the baseline line", async () => {
     const retry = await setup();
-    const stalled = await withWriter(retry, [baseImpl(1)]);
+    const stalled = await withBoth(retry, [baseImpl(1)]);
     expect(retry.spawned.at(-1).prompt).toContain(WRITER_BASELINE);
     await putWriter(retry, stalled.chief.threadId, stalled.writer, "blocked");
     await swap(retry, stalled.chief, stalled.planner.threadId, 1, stalled.writer, "spec-writer");
@@ -202,7 +158,7 @@ describe("Spec Writer role", () => {
     const prompts: string[] = [];
     for (const bare of [false, true]) {
       const state = await setup();
-      const { chief, planner, writer } = await withWriter(state, [baseImpl(1)]);
+      const { chief, planner, writer } = await withBoth(state, [baseImpl(1)]);
       await putWriter(state, chief.threadId, writer, "blocked");
       if (bare) await tool(state, "chief_delegate", { title: "Wave 1", mission: "Do the wave.", replaces: writer, kind: "spec-writer" }, chief.threadId);
       else await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: writer, kind: "spec-writer" });
@@ -219,8 +175,11 @@ describe("Spec Writer role", () => {
     ["a fresh plain plan replacing a baseline plan's writer", [baseImpl(1)], [specImpl(1)], false],
   ])("cross-plan recovery reads the fresh plan's flag: %s", async (_label, oldWaves, freshWaves, expected) => {
     const state = await setup();
-    const old = await withWriter(state, oldWaves, { branch: "feature/a" });
+    const old = await withBoth(state, oldWaves, { branch: CHAIN });
     await putWriter(state, old.chief.threadId, old.writer, "blocked");
+    // The old plan's worker stops holding the branch (forced, as putWriter does, then the row cache reloads).
+    state.db.prepare(`UPDATE managed_threads SET state='complete' WHERE thread_id=?`).run(old.worker);
+    await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, old.chief.threadId);
     const fresh = await plan(state, old.chief.threadId, freshWaves);
     await delegateWave(state, old.chief.threadId, fresh.threadId, 1, { replaces: old.writer, kind: "spec-writer" });
     expect((state.spawned.at(-1).prompt as string).includes(WRITER_BASELINE)).toBe(expected);
@@ -249,6 +208,7 @@ describe("Spec Writer role", () => {
     await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, chief.threadId);
     expect(storedWave(state, planner.threadId)).not.toHaveProperty("baseline");
     const worker = await hop(state, chief.threadId, planner.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+    await readyIdle(state, worker.id);
     const writer = await hop(state, chief.threadId, planner.threadId, 1, { kind: "spec-writer", branch: CHAIN, prUrl: CHAIN_PR });
     for (const row of [writer, worker]) expect(row.prompt).not.toMatch(/baseline/i);
   });

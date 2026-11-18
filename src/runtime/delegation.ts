@@ -344,7 +344,7 @@ export function createDelegation(ctx: Ctx) {
         throw new Error(`Wave ${implementsDesign} is design-only and wave ${wave} implements it: the owner must approve its artboards first. ${designer ? `Show the user the artboards from ${designer.thread_id}'s report, then record their decision with chief_owner_approval (workerThreadId: ${designer.thread_id}) and repeat this call.` : `No worker has delegated wave ${implementsDesign} yet.`}`);
       }
     }
-    // One task branch carries one implementation-lane worker plus one side-lane Spec Writer per spec wave of the same plan:
+    // One task branch carries one implementation-lane worker plus the plan's side-lane Spec Writer:
     // a second worktree cannot check out a branch another one already holds, and the spawn would fail with a raw git error.
     const holder = branch
       ? store.all().find((row) => row.role === "worker" && !terminal(row.state)
@@ -373,13 +373,13 @@ export function createDelegation(ctx: Ctx) {
     const ruledOut = prior ? chainFails(prior.thread_id) : [];
     let structured: ReportFinding[] | undefined;
     try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
-    // A same-plan side-lane docs repair carries every known docs item of the waves its writer owns, and the prior writer's blocker.
-    const docsWork = isWriter(kind) && lane === "side" && prior && planThreadId !== undefined && prior.plan_thread_id === planThreadId && wave !== undefined ? [
+    // A side-lane writer (first or same-plan repair) carries every known docs item of the waves it owns, and a blocked prior writer's blocker.
+    const docsWork = isWriter(kind) && lane === "side" && planThreadId !== undefined && wave !== undefined && (!prior || prior.plan_thread_id === planThreadId) ? [
       ...schedule.ownedWorkers(planThreadId, wave).flatMap((row) => {
         const text = sectionOf(row.result ?? "", "docs needed")?.trim();
         return text && !/^none\.?$/i.test(text) ? [{ id: row.thread_id, kind: row.kind ?? "worker", wave: row.plan_wave, text }] : [];
       }),
-      ...(prior.blocker && prior.last_report_state === "blocked" ? [{ id: prior.thread_id, kind: "spec-writer", wave: prior.plan_wave, blocker: true, text: prior.blocker }] : []),
+      ...(prior?.blocker && prior.last_report_state === "blocked" ? [{ id: prior.thread_id, kind: "spec-writer", wave: prior.plan_wave, blocker: true, text: prior.blocker }] : []),
     ] : [];
     const { prompt, reviewerBrief, docsWorkFile } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
