@@ -19,9 +19,15 @@ describe("cross-plan writer recovery P -> Q", () => {
   async function recovered(w: World) {
     const { state, chief } = w;
     const planP = await plan(state, chief.threadId, [specImpl(1)]);
+    // The plan's Spec Writer starts once every wave is ready: P's worker readies first, then stops holding branch task (forced; the row cache reloads).
+    await delegateWave(state, chief.threadId, planP.threadId, 1, { branch: "task" });
+    const pWorker = workerOn(state, planP.threadId, 1).thread_id as string;
+    await readyIdle(state, pWorker);
     await delegateWave(state, chief.threadId, planP.threadId, 1, { kind: "spec-writer", branch: "task" });
     const s = writerOn(state, planP.threadId, 1).thread_id as string;
     await putWriter(state, chief.threadId, s, "blocked");
+    state.db.prepare("UPDATE managed_threads SET state='complete' WHERE thread_id=?").run(pWorker);
+    await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, chief.threadId);
     const planQ = await plan(state, chief.threadId, [specImpl(1)]);
     await delegateWave(state, chief.threadId, planQ.threadId, 1, { replaces: s, kind: "spec-writer" });
     const t = writerOn(state, planQ.threadId, 1).thread_id as string;

@@ -14,6 +14,8 @@ import { briefMatrix } from "./test/briefMatrix";
 // Fixture test/fixtures/briefs-base-a5d01fe.json was rendered at a5d01fe306e898c97d2108e6ab8d497632dea1b6, in a separate `git archive` extract
 // of that commit, by running briefMatrix() (test/briefMatrix.ts) through that commit's own workerBrief: for each cell, `full` is the sha256 of
 // JSON.stringify({ prompt, brief, reviewerBrief }), `reviewer` the sha256 of JSON.stringify(reviewerBrief); tester cells also with evidenceOnly true.
+// Re-pinned `full` hashes: a5d01fe render plus exactly the named edits listed in evidenceOnlyBrief.test.ts (tester Ready line, #253; the spec-wave worker and
+// designer line; the Spec Writer WRITER_EDITS and side-lane SIDE_EDITS), checked offline over every cell before re-hashing; `reviewer` hashes are unchanged.
 const base = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "briefs-base-a5d01fe.json"), "utf8")) as { cells: Record<string, { full: string; reviewer: string }> };
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const PATH = "/data/chief/heavy/chief-heavy-0123456789ab.sh";
