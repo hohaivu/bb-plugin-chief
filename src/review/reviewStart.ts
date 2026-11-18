@@ -559,7 +559,6 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         };
       }
       const projectDir = await host.projectPath(worker.project_id);
-      const notes: string[] = [];
       if (!gate) {
         const pinned: GateTarget[] = [];
         for (const target of targets) {
@@ -569,8 +568,8 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
           const head = await pinHead(target, projectDir);
           // The builder's own checkout must be committed and pushed: the pin holds its HEAD (a Spec Writer fold may be ahead).
           const builderDir = live.environmentId ? await host.localPath(live.environmentId) : null;
-          if (!builderDir) notes.push(`${target.thread_id}: its checkout is not on the plugin server, so its clean tree and push were not checked`);
-          else await builderCheck(target, builderDir, head.sha, head.branch);
+          if (!builderDir) throw new Error(`Worker ${target.thread_id}'s checkout is not on the plugin server, so its clean tree and pushed HEAD cannot be proved and the gate cannot pin it. Have it commit and push on its host (chief_continue (threadId: ${target.thread_id})), or move its checkout to this host, then call chief_review again.`);
+          await builderCheck(target, builderDir, head.sha, head.branch);
           pinned.push({ threadId: target.thread_id, reportSeq: target.report_seq, branch: head.branch, prUrl: target.pr_url, headSha: head.sha, base: head.base });
         }
         store.batch(() => store.openGate({ gateKey, projectId: worker.project_id, chiefThreadId: caller.thread_id, planThreadId: worker.plan_thread_id, targets: pinned, now: Date.now() }));
@@ -589,10 +588,9 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const failures = [reviewerRun.status === "rejected" ? `reviewer: ${String(reviewerRun.reason)}` : null, testerRun.status === "rejected" ? `tester: ${String(testerRun.reason)}` : null].filter(Boolean);
       if (failures.length) throw new Error(`Review gate ${gateKey}${started.length ? ` started ${started.join(" and ")} but` : ""} could not start ${failures.join("; ")}. Call chief_review again to start only the missing side.`);
       const shown = reviewer ?? { id: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)?.title ?? "" };
-      const note = notes.length ? ` Not checked: ${notes.join("; ")}.` : "";
       return {
         threadId: shown.id, title: shown.title, created: !!reviewer,
-        reply: `Review gate ${gateKey} pinned ${gate.targets.map((target) => `${target.threadId} at ${target.headSha.slice(0, 12)}`).join(", ")}. Started ${started.join(" and ")}.${note}`,
+        reply: `Review gate ${gateKey} pinned ${gate.targets.map((target) => `${target.threadId} at ${target.headSha.slice(0, 12)}`).join(", ")}. Started ${started.join(" and ")}.`,
       };
     });
   }

@@ -9,6 +9,7 @@ import type { ReviewGate } from "../db/threadStore";
 import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
 import { clip } from "../core/text";
+import { prMerged } from "../forge/forge";
 import { z } from "zod";
 import { consultParams, delegateParams, logParams, planParams } from "../tools/shapes";
 import { BUSY_STATUSES, MAX_NUDGE_LENGTH } from "./constants";
@@ -208,6 +209,12 @@ export function createDelegation(ctx: Ctx) {
       if (params.branch && params.branch !== prior.branch) throw new Error(`replaces: ${prior.thread_id} carries branch ${prior.branch}; pass no --branch or the same one.`);
     }
     const fix = prior ? fixAdmission(prior, params.kind) : null;
+    if (fix?.run === "chat") {
+      // A chat fix lands on the PR, so the forge must say it is still open and unmerged; merged, closed, missing or unknown refuses.
+      const url = prior!.pr_url ?? store.gateFor(prior!.thread_id)?.targets.find((target) => target.threadId === prior!.thread_id)?.prUrl;
+      const pr = url ? await prMerged(url, await ctx.projectPath(projectId)) : null;
+      if (!pr?.open || pr.merged) throw new Error(`A chat fix for ${prior!.thread_id} needs its pull request open and unmerged, but ${url ? `the forge reports ${url} ${pr ? (pr.merged ? "merged" : "closed") : "unknown"}` : "it has no pull request"}. Start new work with chief_delegate (no replaces:), or retry when the forge answers.`);
+    }
     // An open review gate pinned its targets: fixes go through the gate's fix run, and its one tester is the gate's.
     const gate = prior ? store.gateFor(prior.thread_id) : params.planThreadId ? store.gate(`plan:${params.planThreadId}`) : undefined;
     if (!fix && gate?.targets.some((target) => store.get(target.threadId)?.state !== "complete")) {

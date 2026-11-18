@@ -50,37 +50,13 @@ export function findingLines(list: ReportFinding[], severity: ReportFinding["sev
     .map((entry) => `- ${entry.file}${entry.line ? `:${entry.line}` : ""} — ${entry.message}${entry.fix ? ` (fix: ${entry.fix})` : ""}`);
 }
 
-/** Per line: whether it is fenced code (opener, interior and closer). A fence closes only on the same marker, at least as long as the opener, with nothing but whitespace after it; an unclosed fence runs to the end. */
-function fencedLines(lines: string[]): boolean[] {
-  let open: { marker: string; length: number } | null = null;
-  return lines.map((line) => {
-    if (!open) {
-      const opener = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
-      if (!opener || (opener[1]![0] === "`" && opener[2]!.includes("`"))) return false;
-      open = { marker: opener[1]![0]!, length: opener[1]!.length };
-      return true;
-    }
-    const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(line);
-    if (closer && closer[1]![0] === open.marker && closer[1]!.length >= open.length) open = null;
-    return true;
-  });
-}
-
 /** The untrimmed text under the first heading named `name` (any level), up to the next heading of the same or higher level. Undefined without the heading. */
-export function sectionOf(body: string, name: string, skipFenced = false): string | undefined {
-  // With skipFenced, fenced lines are blanked for matching only (same length, so indices still fit `body`); contractsOf keeps the plain scan.
-  let scan = body;
-  if (skipFenced) {
-    const parts = body.split(/(\r?\n)/);
-    const text = parts.filter((_, i) => i % 2 === 0);
-    const fenced = fencedLines(text);
-    scan = parts.map((part, i) => (i % 2 || !fenced[i / 2] ? part : " ".repeat(part.length))).join("");
-  }
-  const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(scan);
+export function sectionOf(body: string, name: string): string | undefined {
+  const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(body);
   if (!heading) return undefined;
   const start = heading.index + heading[0].length;
-  const skip = /^\r?\n/.exec(scan.slice(start))?.[0].length ?? 0;
-  const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(scan.slice(start + skip));
+  const skip = /^\r?\n/.exec(body.slice(start))?.[0].length ?? 0;
+  const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(body.slice(start + skip));
   return body.slice(start + skip, end ? start + skip + end.index : undefined);
 }
 
