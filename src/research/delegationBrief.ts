@@ -143,17 +143,24 @@ const deviationsLine = "- Your ready result must contain a `## Deviations from p
 
 const DOCS_WORK_MAX = 4_000;
 
-/** The repair's docs work list: whole items while the section stays within DOCS_WORK_MAX, then a pointer to every remaining source. */
+/** The repair's docs work list: whole items while the section stays within DOCS_WORK_MAX, then one overflow line with the count and every
+ * remaining source id; when even the ids cannot fit, the line points to the complete list instead. */
 function docsWorkSection(wave: number | undefined, items: { id: string; text: string }[]): string[] {
-  const build = (shown: number) => [
-    "", `## Docs work list (wave ${wave})`,
-    ...items.slice(0, shown).map((item) => `${item.id} ${item.text}`),
-    ...(shown < items.length ? [`${items.length - shown} more items not shown. Read each \`## Docs needed\` in full: ${items.slice(shown).map((item) => `bb chief inspect ${item.id}`).join("; ")}.`] : []),
-    "Fix every item that still holds, together with the Spec delta and the docs findings your mission assigns, then fold once (section 10). List an item already true in the docs at your HEAD under `## Already done`, and one that does not hold under `## Disputed findings`.",
-  ];
-  let shown = items.length;
-  while (shown > 0 && build(shown).join("\n").length > DOCS_WORK_MAX) shown--;
-  return build(shown);
+  const build = (shown: number, manifest: boolean) => {
+    const rest = items.length - shown;
+    return [
+      "", `## Docs work list (wave ${wave})`,
+      ...items.slice(0, shown).map((item) => `${item.id} ${item.text}`),
+      ...(rest <= 0 ? [] : [manifest
+        ? `${rest} more items not shown, too many ids to list. Run \`bb chief status\` for every worker and tester thread of this chain, then read each \`## Docs needed\` in full with bb chief inspect <id>.`
+        : `${rest} more items not shown. Read each \`## Docs needed\` in full with bb chief inspect <id>: ${items.slice(shown).map((item) => item.id).join(" ")}.`]),
+      "Fix every item that still holds, together with the Spec delta and the docs findings your mission assigns, then fold once (section 10). List an item already true in the docs at your HEAD under `## Already done`, and one that does not hold under `## Disputed findings`.",
+    ];
+  };
+  for (let shown = items.length; shown > 0; shown--) {
+    for (const manifest of [false, true]) if (build(shown, manifest).join("\n").length <= DOCS_WORK_MAX) return build(shown, manifest);
+  }
+  return build(0, items.length > 0 && build(0, false).join("\n").length > DOCS_WORK_MAX);
 }
 
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */

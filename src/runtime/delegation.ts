@@ -246,7 +246,7 @@ export function createDelegation(ctx: Ctx) {
         const text = sectionOf(row.result ?? "", "docs needed")?.trim();
         return text && !/^none\.?$/i.test(text) ? [{ id: row.thread_id, text: `(wave ${row.plan_wave}): ${text}` }] : [];
       }),
-      ...(prior.blocker && (prior.state === "blocked" || prior.last_report_state === "blocked") ? [{ id: prior.thread_id, text: `(blocker): ${prior.blocker}` }] : []),
+      ...(prior.blocker && prior.last_report_state === "blocked" ? [{ id: prior.thread_id, text: `(blocker): ${prior.blocker}` }] : []),
     ] : [];
     const { prompt, reviewerBrief } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
