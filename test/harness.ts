@@ -149,7 +149,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
     pluginId: options.pluginId ?? "chief",
     agentSkillIds: AGENT_SKILL_IDS,
     sdk: {
-      system: options.system ?? { usageLimits: async (args: any) => options.usageLimits?.(args) ?? {} },
+      system: options.system ?? { usageLimits: async (args: any) => options.usageLimits?.(args) ?? {}, config: async () => ({ primaryHostId: "host_1" }) },
       threadSections: {
         list: async () => section ? [section] : [],
         create: async ({ name }: { name: string }) => section = { id: "sec_chief", name, createdAt: 1, updatedAt: 1 },
@@ -191,7 +191,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
       },
       environments: {
         get: async ({ environmentId }: { environmentId: string }) => ({
-          id: environmentId, hostId: "host_1", workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
+          id: environmentId, hostId: "host_1", path: `/repo/builder/${environmentId}`, workspaceProvisionType: environmentId.startsWith("env_worker") ? "managed-worktree" : null,
         }),
         status: async ({ mergeBaseBranch }: { mergeBaseBranch?: string }) => envStatus(mergeBaseBranch),
         archiveThreads: async ({ environmentId }: { environmentId: string }) => {

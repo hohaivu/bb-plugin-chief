@@ -25,7 +25,7 @@ async function inFix(world: GateWorld) {
 async function inWrongTest(world: GateWorld) {
   const gated = await inFix(world);
   const fix = await world.delegateTo({ replaces: gated.tester, kind: "worker" });
-  await world.block(fix.threadId, "The test contradicts the plan.");
+  await world.block(fix.threadId, "totals.test.ts:12 contradicts the plan.");
   return { ...gated, fix: fix.threadId };
 }
 

@@ -1,4 +1,4 @@
-import { PLAN_FIXTURE, execFileMock, ghHead, setup, start, status, wave } from "./harness";
+import { PLAN_FIXTURE, execFileMock, HEAD_SHA, ghHead, setup, start, status, wave } from "./harness";
 
 export type State = Awaited<ReturnType<typeof setup>>;
 export const ctxOf = (state: State, chiefThreadId: string) => ({ threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
@@ -83,7 +83,7 @@ export const forgeAnswers = (prs: Record<string, string> = { [PR_URL]: "feature/
     // The forge reads a pull request URL as its number plus --repo, so the number picks the pull request.
     const url = file === "gh" && args[0] === "pr" && args[1] === "view" ? Object.keys(prs).find((key) => key.endsWith(`/pull/${args[2]}`)) : undefined;
     const branch = url ? prs[url] : undefined;
-    return Promise.resolve({ stdout: branch ? ghHead(branch) : "", stderr: "" });
+    return Promise.resolve({ stdout: branch ? args.includes("state,headRefOid") ? JSON.stringify({ state: "OPEN", headRefOid: HEAD_SHA }) : ghHead(branch) : "", stderr: "" });
   });
 export type Gate = { gate_key: string; reviewer_thread_id: string; tester_thread_id: string; fixer_thread_id: string | null; corrector_thread_id: string | null; targets: string };
 /** The review gate that pinned `threadId`. */

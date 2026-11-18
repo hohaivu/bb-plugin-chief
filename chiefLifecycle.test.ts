@@ -480,7 +480,7 @@ describe("Chief backend", () => {
       try {
         await expect(state.harness.behavior.callAgentTool(
           "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
-        )).rejects.toThrow("is active; wait until it is idle before starting a review");
+        )).rejects.toThrow("The review gate opens only on ready work");
       } finally {
         vi.useRealTimers();
       }

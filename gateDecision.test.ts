@@ -140,12 +140,12 @@ describe("gateDecision: docs findings go to a Spec Writer repair, never to a fix
   const docsReviewer = () => reviewerRow({ verdict: "request_changes" }, [finding("docs/specs/review.md")]);
 
   // The Spec Writers of the gate are gate targets (the gate opens once every implementation wave and every Spec Writer is ready); the repair goes to the latest.
-  test("a docs finding with no repair created after the verdict is docsRepair on the latest Spec Writer of the gate", () => {
+  test("a docs finding with no repair created after the verdict escalates when the gate has several Spec Writers", () => {
     const older = writerRow("SW1", { created_at: 10 });
     const latest = writerRow("SW2", { created_at: 20 });
     const gate = gateOf({ targets: [TARGET, { ...TARGET, threadId: "SW1" }, { ...TARGET, threadId: "SW2" }] });
     const decision = decide([docsReviewer(), testerRow()], { gate, writers: [older, latest] });
-    expect(decision).toMatchObject({ kind: "docsRepair", writer: expect.objectContaining({ thread_id: "SW2" }) });
+    expect(decision).toMatchObject({ kind: "escalate", why: expect.stringMatching(/2 Spec Writers \(SW1, SW2\).*owning writer/) });
   });
 
   test("a docs finding with no Spec Writer on the branch escalates", () => {
@@ -215,7 +215,7 @@ describe("gateDecision: the fix run (rule 5)", () => {
   });
 
   test("a blocked fix run is wrongTest, naming it (corrector or escalate)", () => {
-    const decision = withFixer(fixerRow({ state: "blocked", tests_passed: null }));
+    const decision = withFixer(fixerRow({ state: "blocked", tests_passed: null, blocker: "totals.test.ts:12 contradicts the plan." }));
     expect(decision).toMatchObject({ kind: "wrongTest", fixer: expect.objectContaining({ thread_id: "FX" }) });
   });
 

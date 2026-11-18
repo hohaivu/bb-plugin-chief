@@ -46,7 +46,7 @@ export function world({ realPlan = false, projectPath = null, heads = {}, engine
     prepare: vi.fn(async (_projectId: string, _pick: unknown) => ({ execution: {}, sectionId: "section" })),
     launch: vi.fn(async (_prepared: unknown, args: any, row: any, inTransaction?: (threadId: string) => void) => {
       const id = `R${++launched}`;
-      events.push("launch");
+      events.push(`launch:${row.role === "reviewer" ? "reviewer" : row.kind}`);
       launches.push({ id, args, row });
       db.transaction(() => {
         store.insert({ ...row, threadId: id, projectId: args.projectId, parentThreadId: row.chiefThreadId, title: args.title, state: "starting", status: "idle" });
@@ -60,7 +60,7 @@ export function world({ realPlan = false, projectPath = null, heads = {}, engine
   const host = {
     settledLive: vi.fn(async (row: ManagedRow) => ({ status: "idle", deletedAt: null, archivedAt: null, environmentId: `env_${row.thread_id}` }) as any),
     projectPath: vi.fn(async (_projectId: string) => projectPath),
-    localPath: vi.fn(async (_environmentId: string): Promise<string | null> => null),
+    localPath: vi.fn(async (environmentId: string): Promise<string | null> => `/repo/builder/${environmentId}`),
     heavyPath: vi.fn(async (_hostId: string): Promise<string | null> => null),
     projectHost: vi.fn(async (_projectId: string) => "host_proj"),
     environmentHost: vi.fn(async (_environmentId: string) => "host_env" as string | null),

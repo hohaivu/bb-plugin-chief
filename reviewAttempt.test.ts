@@ -13,10 +13,11 @@ describe("tester role", () => {
     // lookup, and the gate launches with the skip reason in review-context.md. Regression: a host lookup without a deadline holds the call forever (no reviewer).
     test("review attempt: a pending host lookup skips the impact slice, and chief_review still launches the gate", async () => {
       const PR = "https://github.com/acme/shop/pull/8";
-      let held = false;
+      let holdProjectLookup = false;
+      let configReads = 0;
       const state = await setup({
         projectPath: "/oracle/checkout",
-        system: { usageLimits: async () => ({}), config: () => held ? new Promise(() => {}) : Promise.resolve({ primaryHostId: "host_1" }) },
+        system: { usageLimits: async () => ({}), config: () => holdProjectLookup && configReads++ > 0 ? new Promise(() => {}) : Promise.resolve({ primaryHostId: "host_1" }) },
       });
       execFileMock.mockImplementation(async (file: string, args: string[]) => {
         if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: HEAD_SHA, baseRefName: "main" }), stderr: "" };
@@ -26,7 +27,7 @@ describe("tester role", () => {
       await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", branch: "feature/x", prUrl: PR }, chief);
       const w1 = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker'`).get() as any).thread_id as string;
       await readyIdle(state, w1);
-      held = true;
+      holdProjectLookup = true;
       vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
       try {
         let settled = false;
