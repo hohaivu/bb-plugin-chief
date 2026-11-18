@@ -70,7 +70,7 @@ export const NO_DEVIATIONS = "\n\n## Deviations from plan\nNone";
 // #159: every chain of a plan ends in a test wave (test: true), which defaults to depending on the wave before it.
 // Plan files are artifacts of the data dir: <dataDir>/chief/<project>/<planner>/plan-<n>.md.
 export const planFile = (state: { storageRoot: string }, plannerThreadId: string, n: number) => join(state.storageRoot, "chief", "proj_1", plannerThreadId, `plan-${n}.md`);
-export const TEST_WAVE = (n: number, dependsOn?: number[]) => ({ body: wave(n, "Write the tests."), test: true, ...(dependsOn ? { dependsOn } : {}) });
+export const TEST_WAVE = (n: number, dependsOn?: number[]) => ({ body: wave(n, "Write the tests.") + "\n\n## Test files\n- x.test.ts", test: true, ...(dependsOn ? { dependsOn } : {}) });
 
 export function configurationContext(threadId: string, projectId = "proj_1", name = projectId === "proj_1" ? "Asha" : "Second"): PluginAgentConfigurationContext {
   return {
