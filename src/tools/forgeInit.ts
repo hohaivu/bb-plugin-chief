@@ -39,6 +39,7 @@ export function registerForgeInitTool(ctx: Ctx) {
       }
       let body = params.body;
       let stacked = false;
+      let designMarker: string | undefined;
       // Sections the pull request alone must carry for the reviewer; each is clipped so the body stays bounded.
       const briefSections = [
         ...(mission ? ["## Mission", clip(mission, FORGE_BRIEF_SECTION_MAX)] : []),
@@ -77,12 +78,25 @@ export function registerForgeInitTool(ctx: Ctx) {
           params.base = pb.base;
           stacked = true;
         }
+        // The approved design rides in full from its write-once snapshot (never design.md); a binding failure refuses before the script runs.
+        const researcher = planner.research_thread_id ? store.get(planner.research_thread_id) : undefined;
+        if (planner.research_thread_id && !researcher) throw new Error(`Researcher ${planner.research_thread_id} of plan ${planThreadId} is no longer recorded; run chief_forge_init again after checking it.`);
+        const design = researcher ? await ctx.approvedDesign(researcher, caller.project_id) : undefined;
+        // Plain text without < or >: glab's JSON escapes those, so a grep on the marker still matches.
+        designMarker = researcher ? `chief-design ${researcher.thread_id} r${researcher.report_seq}` : undefined;
         body = [
           params.body ?? `Tracking work for ${params.title}.`,
           ...(briefSections.length ? ["", ...briefSections] : []),
           "", `<details><summary>Plan — chain of waves ${chain.join(", ")} of ${waves.length} (planner ${planThreadId})</summary>`,
           "", clip(planner.result ?? "", 1_500),
           "</details>",
+          ...(design ? [
+            "", `<details><summary>Design — approved by the user (researcher ${researcher!.thread_id})</summary>`,
+            `<!-- ${designMarker} -->`,
+            "", sanitizeForge(design.designText),
+            "", `Fact report: ${design.factsPath}`,
+            "</details>",
+          ] : []),
           ...chain.flatMap((n) => [
             "", `<details><summary>Wave ${n} of ${waves.length} — ${rawWaves[n - 1]!.title ?? "no description"}</summary>`,
             "", "### Contracts to verify", clip(rawWaves[n - 1]!.contracts ?? "None listed.", 2_000),
@@ -106,11 +120,12 @@ export function registerForgeInitTool(ctx: Ctx) {
           ].join("\n")),
         };
       };
-      const first = forgeInitScript({ ...params, body, ...planIssue() });
+      const first = forgeInitScript({ ...params, body, designMarker, ...planIssue() });
       const { branch } = first;
       let script = first.script;
       const cwd = await ctx.projectPath(caller.project_id);
       let failure: string | null = null;
+      let designMissing: string | null = null;
       if (cwd) {
         // ponytail: a remote-host project whose path also exists on the server would run against the wrong checkout; unlikely.
         try {
@@ -123,7 +138,7 @@ export function registerForgeInitTool(ctx: Ctx) {
             })) as Record<string, string> };
           };
           const run = ctx.state.forgeRuns.then(async () => {
-            script = forgeInitScript({ ...params, body, ...planIssue() }).script;
+            script = forgeInitScript({ ...params, body, designMarker, ...planIssue() }).script;
             const out = await execFileAsync("sh", ["-c", script], {
               cwd, timeout: FORGE_SCRIPT_TIMEOUT_MS,
               env: { ...process.env, PATH: serverPath() },
@@ -137,13 +152,15 @@ export function registerForgeInitTool(ctx: Ctx) {
           });
           ctx.state.forgeRuns = run.catch(() => undefined);
           const { line, values } = parse((await run).stdout);
-          if (line && values.branch && values.forge) {
+          if (line && values.pr_url && values.design === "missing") designMissing = values.pr_url;
+          else if (line && values.branch && values.forge) {
             return `The forge pre-flight already ran in the project checkout: branch=${values.branch} base=${values.base ?? ""} issue_url=${values.issue_url ?? ""} pr_url=${values.pr_url ?? ""}. Pass branch, issueUrl and prUrl to chief_delegate, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, not a failure. Do not run anything yourself.`;
           }
           failure = !line ? "no CHIEF_FORGE line" : !values.branch ? "the branch was not cut" : "no gh or glab found on the server";
         } catch (error) {
           failure = String(error);
         }
+        if (designMissing) throw new Error(`The pull request ${designMissing} lacks the approved design block; run chief_forge_init again.`);
         failure = clip(failure, 200);
         bb.log.warn(`Server-side forge pre-flight fell back to Chief: ${failure}`);
       }
@@ -151,7 +168,7 @@ export function registerForgeInitTool(ctx: Ctx) {
         ...(failure ? [`Running it on the server did not finish (${failure}), so run it yourself.`] : []),
         "Run this from the project checkout, verbatim. Every value is already substituted and quoted, every forge step is best-effort, and your own checkout never moves:",
         "", "```sh", script, "```", "",
-        `The last line is CHIEF_FORGE branch=… base=… issue_url=… pr_url=…. Pass those to chief_delegate as branch, issueUrl and prUrl, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, and an empty branch means the cut failed, so ${stacked ? "the stacked base branch could not be cut: rerun chief_forge_init, and do not delegate without a branch" : "delegate without one and the worktree uses the project default"}. Neither is a failure to report as one. The branch will be ${branch}.`,
+        `The last line is CHIEF_FORGE branch=… base=… issue_url=… pr_url=…. Pass those to chief_delegate as branch, issueUrl and prUrl, omitting whatever came back empty — an empty issue_url usually means the repository has issues disabled, and an empty branch means the cut failed, so ${stacked ? "the stacked base branch could not be cut: rerun chief_forge_init, and do not delegate without a branch" : "delegate without one and the worktree uses the project default"}. Neither is a failure to report as one. The branch will be ${branch}.${designMarker ? " If it ends design=missing, the pull request lacks the approved design block: run chief_forge_init again." : ""}`,
       ].join("\n");
     },
   });}

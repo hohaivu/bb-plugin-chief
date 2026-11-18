@@ -161,6 +161,15 @@ lifecycle alert, so Chief ends its turn instead of polling. A report starts with
 and has `## Confirmed` and `## Unconfirmed` sections; a failed or stopped helper is named, and the
 result is marked partial.
 
+`design: true` adds a design discussion: the researcher asks the user its open questions in its own
+thread (AskUserQuestion, through Claude Code or bb's ask-user-question plugin) and reports a
+`design.md` the user approved. `design: false` reports facts only, for evidence checks. With
+planning on, Chief then calls `chief_plan` with `researchThreadId` (`bb chief plan
+--research-thread thr_id`): Chief binds write-once snapshots of the design and the fact report, the
+planner gets them as its brief, and `chief_forge_init` puts the full design in the pull request
+body. There is no user review of the plan. While research is on, a plan without a design passes
+`undesignedReason` (`--undesigned-reason "…"`).
+
 Planners do not get `chief_research`; the chief-role-read-only skill tells them how to spawn their
 own read-only helper threads. Reviewers, workers and advisors never get it. The server refuses a
 call from any of them. Settings has one **Researcher** switch, on by default; while it is off,

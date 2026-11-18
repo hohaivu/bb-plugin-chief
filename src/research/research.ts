@@ -84,7 +84,7 @@ export function researcherNextLine(row: ManagedRow, planning: boolean): string |
   if (row.state === "active") return "Progress only: the researcher restarted research; nothing to do. End your turn.";
   if (row.state === "ready") {
     return planning
-      ? "The user approved the design (the Design: line above). Plan it: chief_plan with the Design: path and the fact report in context."
+      ? `The user approved the design (the Design: line above). Next: chief_plan with researchThreadId: ${id} and a one-line mission; no user plan review.`
       : "The user approved the design (the Design: line above). Delegate it: chief_delegate with the Design: path and the fact report in context.";
   }
   return null;

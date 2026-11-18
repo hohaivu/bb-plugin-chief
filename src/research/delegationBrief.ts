@@ -458,6 +458,10 @@ export type PlannerBriefInput = {
   title: string; chiefThreadId: string; mission: string; context?: string;
   /** An open branch the planner's worktree is based on; chain heads of its plan stack on it. */
   branch?: string;
+  /** The user-approved design snapshots (chief_plan researchThreadId, or inherited by a revision). */
+  design?: { researcherThreadId: string; designPath: string; factsPath: string };
+  /** Why this plan skipped the design discussion. */
+  undesignedReason?: string;
   /** Set for chief_plan revises: the plan its one advisor review sent back, and that advice. */
   revision?: {
     plannerThreadId: string;
@@ -472,12 +476,19 @@ export type PlannerBriefInput = {
 
 /** A planner's prompt: the problem and the plan contract. */
 export function plannerBrief(input: PlannerBriefInput): string {
-  const { title, chiefThreadId, mission, context, revision, branch } = input;
+  const { title, chiefThreadId, mission, context, revision, branch, design, undesignedReason } = input;
+  const contextLines = [...(context ? [context] : []), ...(undesignedReason ? [`Design discussion skipped: ${undesignedReason}`] : [])];
   return [
     `You are the managed planner for “${title}”. Report to Chief thread ${chiefThreadId}.`,
     ...(branch ? [branchLine(branch), `Chain heads of this plan stack on ${branch}: chief_forge_init bases their branches and pull requests on it.`] : []),
+    ...(design ? [
+      "", "## Approved design",
+      `The user approved this design in researcher ${design.researcherThreadId}. It is your brief; the title and mission only route the task. Read the design and the fact report in full. Its resolved decisions are settled: do not reopen them. Follow its patterns. Every wave that depends on a fact under the fact report's \`## Unconfirmed\` gets a \`## Depends on unconfirmed facts\` heading naming each fact.`,
+      `- Design: ${design.designPath}`,
+      `- Fact report: ${design.factsPath}`,
+    ] : []),
     "", "## Problem", mission,
-    ...(context ? ["", "## Context", context] : []),
+    ...(contextLines.length ? ["", "## Context", ...contextLines] : []),
     ...(revision ? [
       "", "## Plan to revise",
       `Planner ${revision.plannerThreadId} wrote this plan and its one advisor review (${revision.advisorThreadId}) sent it back. Read every plan file and the advisor's report in full:`,
