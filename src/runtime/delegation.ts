@@ -3,7 +3,7 @@ import { MAX_CARRIED_FAILS, sectionOf } from "../report/reportIntake";
 import { isWriter } from "../plan/waveSchedule";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
-import { isReady, isWriter } from "../plan/waveSchedule";
+import { isReady } from "../plan/waveSchedule";
 import type { ReviewGate } from "../db/threadStore";
 import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";

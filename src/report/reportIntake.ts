@@ -112,19 +112,6 @@ export function receiptOf(result: string | null): { text: string; testedCommit: 
   return testedCommit && hasCommand && line("Coverage:").test(text) && line("Gaps:").test(text) ? { text, testedCommit } : null;
 }
 
-/** Markdown list items at the section's shallowest indentation (tab = 4 spaces); wrapped lines, deeper items and fenced code are not counted. */
-function topLevelItems(section: string): number {
-  const lines = section.split(/\r?\n/);
-  const fenced = fencedLines(lines);
-  const indents: number[] = [];
-  lines.forEach((line, i) => {
-    const item = !fenced[i] && /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+\S/.exec(line);
-    if (item) indents.push(item[1]!.replace(/\t/g, "    ").length);
-  });
-  const top = Math.min(...indents);
-  return indents.filter((indent) => indent === top).length;
-}
-
 /** Whether a spec wave body has a `## Spec baseline` heading (any level). Read at intake only. */
 export function hasSpecBaseline(body: string): boolean {
   return /^[ \t]*#{1,6}[ \t]+spec baseline\b/im.test(body);
@@ -312,8 +299,7 @@ export function checkPlan(plan: string | unknown[]): string[] {
       ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string." : ""}`);
   }
   bodies.forEach((body, index) => {
-    // A test wave's heading must exist outside fenced code, the same slice its count reads.
-    if (body !== undefined && !(tests[index] ? sectionOf(body, "contracts to verify", true)?.trim() : contractsOf(body))) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
+    if (body !== undefined && !contractsOf(body)) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
   });
   // A design wave is a chain tip when no later wave could build on it; a later wave whose dependsOn is not an array might, so it blocks the check.
   designs.forEach((design, index) => {
@@ -340,23 +326,6 @@ export function checkPlan(plan: string | unknown[]): string[] {
     if (parent === undefined || parent === null) return;
     if (taken.has(parent)) errors.push(`plan wave ${index + 1} and another wave both build on wave ${parent}; waves form chains only, so mark one of them dependsOn [] or chain it after the other.`);
     taken.add(parent);
-  });
-  // A small test wave keeps a tester session short; the bound runs here only, at planner intake.
-  bodies.forEach((body, index) => {
-    if (body === undefined || !tests[index]) return;
-    const n = index + 1;
-    const contracts = sectionOf(body, "contracts to verify", true);
-    if (contracts !== undefined) {
-      const count = topLevelItems(contracts);
-      if (!count && contracts.trim()) errors.push(`plan wave ${n} is a test wave whose "## Contracts to verify" has no Markdown list item; write each contract as a list item (-, *, +, 1. or 1)).`);
-      else if (count > MAX_TEST_CONTRACTS) errors.push(`plan wave ${n} is a test wave with ${count} contracts; max ${MAX_TEST_CONTRACTS}. Split the implementation into more chains (dependsOn [] or stackOn k), each ending with its own test wave.`);
-    }
-    const files = sectionOf(body, "test files", true);
-    if (files === undefined) errors.push(`plan wave ${n} is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max ${MAX_TEST_FILES}).`);
-    else {
-      const count = topLevelItems(files);
-      if (!count || count > MAX_TEST_FILES) errors.push(`plan wave ${n} is a test wave listing ${count} test files under "## Test files"; list 1 to ${MAX_TEST_FILES}. Split the implementation into more chains, each ending with its own test wave.`);
-    }
   });
   return errors;
 }
