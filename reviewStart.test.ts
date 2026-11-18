@@ -9,6 +9,10 @@ import { REVIEWER_NATIVE_LINE } from "./test/harness";
 import { NATIVE_NO_RESHAPE_LINE } from "./test/reviewWave1";
 import type { PinnedHead } from "./src/review/reviewStart";
 import type { PlanWave } from "./src/plan/waveSchedule";
+import * as sdkTesting from "@get-bb/plugin-sdk/testing";
+import { provideSdk } from "./test/sdk";
+
+provideSdk(sdkTesting);
 
 // Contract: the Review attempt module (reviewStart.ts) at its own interface. Its faults, its frozen identity and its
 // whole-review budget are owned here; the broad reply/brief matrix stays in server.test.ts "review attempt oracle".

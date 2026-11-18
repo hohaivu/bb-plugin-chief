@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { disposals, headOf, pr, SHA_A, SHA_B, world } from "./test/reviewWorld";
 import { createWaveSchedule, type PlanWave } from "./src/plan/waveSchedule";
+import * as sdkTesting from "@get-bb/plugin-sdk/testing";
+import { provideSdk } from "./test/sdk";
+
+provideSdk(sdkTesting);
 
 // Contract (plan-4 steps A, B, E; plan-5 step 2): chief_review opens ONE review gate per plan (`plan:<planner>`), pins every target's head once,
 // then starts one reviewer and one tester, each in its own fresh worktree. A second call starts nothing; only a missing or failed side is

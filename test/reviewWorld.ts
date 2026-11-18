@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { sdk } from "./sdk";
 import { MIGRATIONS } from "../src/db/migrations";
 import type { ManagedRow } from "../src/types";
 import { createReviewLedger } from "../src/review/reviewLedger";
@@ -30,7 +30,7 @@ export type Options = { realPlan?: boolean; projectPath?: string | null; heads?:
 
 /** A standalone review attempt over real SQLite and the real ThreadStore; only the host, the forge and spawn are doubles. */
 export function world({ realPlan = false, projectPath = null, heads = {}, engine, waves = [], gitEnv, planBaseOf }: Options = {}) {
-  const { bb, harness } = createFakePluginHost({ pluginId: `review-start-${++worlds}` });
+  const { bb, harness } = sdk.createFakePluginHost({ pluginId: `review-start-${++worlds}` });
   disposals.push(() => harness.lifecycle.dispose());
   const db = bb.storage.database();
   bb.storage.migrate(db, MIGRATIONS);
