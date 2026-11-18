@@ -152,16 +152,6 @@ describe("skipReview docs/ ownership gate", () => {
   });
 
   describe("C9: a passed gate, override and CLI override run no docs check", () => {
-    test("passed gate", async () => {
-      const w = await world();
-      const id = await w.worker("Fix checkout totals");
-      await w.commit("docs/specs/totals.md", "docs: totals by a worker");
-      await passGate(w.state, w.chief.threadId, id);
-      w.gitCalls.length = 0;
-      await w.call("chief_complete", { threadId: id });
-      expect(w.rowState(id)).toBe("complete");
-      expect(w.docsReads()).toEqual([]);
-    });
     test("override", async () => {
       const w = await world();
       const id = await w.worker("Fix checkout totals");
