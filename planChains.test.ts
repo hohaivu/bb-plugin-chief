@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { READY, type State, ctxOf, delegateWave, plan, readyIdle, report, rowOf, tool, workerOn } from "./test/testerHelpers";
-import { TEST_WAVE, approvePlan, disposeAll, setup, start, status, wave } from "./test/harness";
+import { READY, type State, ctxOf, delegateWave, followRoute, plan, readyIdle, readyImpl, refusal, report, rerunRoute, review, reviewed, reviewerCount, rowOf, setLive, tick, tool, workerOn } from "./test/testerHelpers";
+import { COMPLETE_RESULT, CUT_RESULT, NORMAL_MODE, TESTED } from "./test/receiptFixtures";
+import { TEST_WAVE, approvePlan, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -246,5 +247,117 @@ describe("tester role", () => {
         expect(alert).toContain(`Wave 3 is stacked on this chain: run chief_forge_init (planThreadId: ${planner.threadId}, wave: 3), then chief_delegate (planThreadId: ${planner.threadId}, wave: 3).`);
       });
     });
+  });
+});
+
+// Contracts (docs/specs/plan-chains.md "Retest Debt"): the tester route of a retest hand-off (the review refusal and the fix's ready alert) offers an evidence-only
+// rerun only when the newest READY tester of the chain has a complete receipt, naming that tester and its Tested commit; otherwise it says normal Tester mode.
+// Debt discharge is unchanged: a ready tester of either mode created after the fix pays, a blocked one does not.
+// Regression: a legacy, cut or older receipt offers evidence mode (a partial packet could pass the debt gate); the option names the wrong tester; a blocked
+// evidence tester pays the debt or is not named as `replaces`.
+describe("retest receipt option", () => {
+  const WAIVER = (fix: string) => ` To review without the rerun, record why: chief_review (workerThreadId: ${fix}, retestSkipped: "<reason>") — it waives every rerun listed here.`;
+  const OPTION = (tester: string, args: string) => ` Its prior tester ${tester} has a complete receipt (Tested commit ${TESTED}): if no test needs to change, rerun evidence-only instead — chief_delegate (${args}, kind: tester, evidenceOnly: true) with \`Expected head: <branch tip after the fix and any intended fold>\` in the mission.`;
+  const argsOf = (planner: { threadId: string }, replaces: string) => `planThreadId: ${planner.threadId}, wave: 2, replaces: ${replaces}`;
+
+  /** Plan [impl, test]: wave 2 testers T1, T2, ... each replace the one before and report `results`; a review rejects the last, and a worker fix F is ready and idle: F owes a rerun. */
+  async function rejectedChain(state: State, results: string[]) {
+    const ctx = await readyImpl(state);
+    const ids: string[] = [];
+    for (const [index, result] of results.entries()) {
+      await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ids.at(-1) ?? ctx.impl, ...(index ? { kind: "tester" } : {}) });
+      ids.push(workerOn(state, ctx.planner.threadId, 2).thread_id as string);
+      await readyIdle(state, ids.at(-1)!, result);
+    }
+    await reviewed(state, ctx.chief.threadId, ids.at(-1)!, "request_changes");
+    await tick();
+    await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ids.at(-1), kind: "worker" });
+    const fix = workerOn(state, ctx.planner.threadId, 2).thread_id as string;
+    await readyIdle(state, fix);
+    await tick();
+    return { ...ctx, ids, fix };
+  }
+
+  // The newest ready tester decides; an older complete receipt is never used when the newest has none.
+  test.each<[string, string[], number | null]>([
+    ["a complete receipt", [COMPLETE_RESULT], 0],
+    ["a legacy report (no receipt)", [READY], null],
+    ["a cut receipt", [CUT_RESULT], null],
+    ["a legacy newest tester over an older complete receipt", [COMPLETE_RESULT, READY], null],
+    ["a complete newest tester over an older legacy report", [READY, COMPLETE_RESULT], 1],
+  ])("retest refusal and ready alert with %s", async (_label, results, owner) => {
+    const state = await setup();
+    const { planner, chief, ids, fix } = await rejectedChain(state, results);
+    const args = argsOf(planner, fix);
+    const offered = owner === null ? NORMAL_MODE : OPTION(ids[owner]!, args);
+    const route = `rerun the tests — ${rerunRoute(planner, 2, fix)}.${offered}${WAIVER(fix)}`;
+    expect(await refusal(review(state, chief, fix))).toBe(`Review refused: ${fix} changed code after the review's rejection and no tester started after it has reported ready: ${route}`);
+    // The fix's own ready alert renders the same debt line.
+    const alerts = state.sent.map((sent) => String(sent.input[0].text));
+    expect(alerts.some((text) => text.includes(`A code fix after the review's rejection owes a tester rerun before the next review. ${fix} changed code after the review's rejection and no tester started after it has reported ready: ${route}`))).toBe(true);
+    if (owner === null) expect(alerts.at(-1)).not.toContain("evidenceOnly: true");
+  });
+
+  // Contract (pre-review advisory): a worker fix on a test wave after the tests ran gets the same option, built from the fix's own `replaces:` call.
+  test.each<[string, string, boolean]>([["a complete receipt", COMPLETE_RESULT, true], ["a cut receipt", CUT_RESULT, false]])("retest ready alert of a worker fix on a test wave with %s", async (_label, result, offered) => {
+    const state = await setup();
+    const { chief, planner, impl } = await readyImpl(state);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
+    const tester = workerOn(state, planner.threadId, 2).thread_id as string;
+    await readyIdle(state, tester, result);
+    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "worker" });
+    const fix = workerOn(state, planner.threadId, 2).thread_id as string;
+    await readyIdle(state, fix);
+    const option = offered ? OPTION(tester, `replaces: ${fix}`) : NORMAL_MODE;
+    expect(state.sent.at(-1).input[0].text).toContain(`A worker changed code on test wave 2 after the tests ran: rerun them — chief_delegate (replaces: ${fix}, kind: tester) — then review.${option} If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${planner.threadId}, wave: 2, reason) or start the review: chief_review (workerThreadId: ${fix}).`);
+  });
+
+  // Debt through the real chief_delegate (unplanned chain: the planned review refusal puts the unready-wave refusal before the retest one): the advertised evidence
+  // call is admitted; a blocked evidence tester pays nothing and the route then names it as `replaces` (the receipt option still names the last READY tester);
+  // a fresh normal tester replacing it that reports ready pays.
+  test("retest debt: a blocked evidence tester keeps it owed and is named as replaces; a fresh normal tester that reports ready pays it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const work = (await delegate(state, chief.threadId, "Fix totals")).threadId;
+    await readyIdle(state, work, "Done");
+    const first = (await delegate(state, chief.threadId, "Test", { replaces: work, kind: "tester" })).threadId;
+    await readyIdle(state, first, COMPLETE_RESULT);
+    await reviewed(state, chief.threadId, first, "request_changes");
+    await tick();
+    const fix = (await delegate(state, chief.threadId, "Fix", { replaces: first, kind: "worker" })).threadId;
+    await readyIdle(state, fix, "Fixed");
+    await tick();
+
+    const owedFirst = await refusal(review(state, chief, fix));
+    const call = [...owedFirst.matchAll(/chief_delegate \(([^)]*)\)/g)].map((match) => match[1]);
+    expect(call[1]).toBe(`replaces: ${fix}, kind: tester, evidenceOnly: true`);
+    expect(owedFirst).toContain(`rerun the tests — chief_delegate (replaces: ${fix}, kind: tester).${OPTION(first, `replaces: ${fix}`)}`);
+    await tool(state, "chief_delegate", { title: "Evidence rerun", mission: "Rerun the suites. Expected head: 1111111aaaa", replaces: fix, kind: "tester", evidenceOnly: true }, chief.threadId);
+    const evidence = (state.db.prepare(`SELECT thread_id FROM managed_threads ORDER BY rowid DESC LIMIT 1`).get() as { thread_id: string }).thread_id;
+    expect(state.spawned.at(-1).prompt).toContain("## Evidence work");
+    await report(state, evidence, { state: "blocked", result: "HEAD is not Expected head", blocker: "Pin mismatch", recommendation: "Replace with a normal tester" });
+    setLive(state, evidence, "idle");
+
+    const owed = await refusal(review(state, chief, fix));
+    expect(owed).toContain(`rerun the tests — chief_delegate (replaces: ${evidence}, kind: tester). Or, if ${evidence}'s blocked report shows a product bug, fix it first — chief_delegate (replaces: ${evidence}, kind: worker).${OPTION(first, `replaces: ${evidence}`)}`);
+    expect(await reviewerCount(state)).toBe(1);
+
+    const normal = await followRoute(state, chief.threadId, owed, 0);
+    expect(normal.params).toEqual({ replaces: evidence, kind: "tester" });
+    expect(state.spawned.at(-1).prompt).toContain("## Test work");
+    await readyIdle(state, normal.thread, "Tested");
+    await review(state, chief, normal.thread);
+    expect(await reviewerCount(state)).toBe(2);
+  });
+
+  test("retest debt: a ready evidence tester created after the fix pays it", async () => {
+    const state = await setup();
+    const { chief, planner, fix } = await rejectedChain(state, [COMPLETE_RESULT]);
+    await tool(state, "chief_delegate", { title: "Evidence rerun", mission: "Rerun the suites. Expected head: 1111111aaaa", planThreadId: planner.threadId, wave: 2, replaces: fix, kind: "tester", evidenceOnly: true }, chief.threadId);
+    const evidence = workerOn(state, planner.threadId, 2).thread_id as string;
+    expect(rowOf(state, evidence)).toMatchObject({ kind: "tester", replaces_thread_id: fix });
+    await readyIdle(state, evidence, COMPLETE_RESULT);
+    await review(state, chief, evidence);
+    expect(await reviewerCount(state)).toBe(2);
   });
 });

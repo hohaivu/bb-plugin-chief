@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createReportIntake, type ReportIntakeAdapters } from "./src/report/reportIntake";
+import { createReportIntake, receiptOf, type ReportIntakeAdapters } from "./src/report/reportIntake";
 import { createReviewLedger } from "./src/review/reviewLedger";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow, ReportParams } from "./src/types";
@@ -520,5 +520,50 @@ describe("in-batch writes by role", () => {
     const batch = w.log.slice(w.log.indexOf("batch:start"), w.log.indexOf("batch:end"));
     expect(batch.at(-1)).toBe("appendPlanLog");
     expect(batch.indexOf("writeAlert report:1:pending-1")).toBeLessThan(batch.indexOf("appendPlanLog"));
+  });
+});
+
+// Contract (docs/specs/plan-chains.md "Brief Contents"): a receipt is the `## Receipt` section at the end of a tester's ready result. It is complete
+// only with a `Tested commit: <7-40 hex>` line, a command line, `Coverage:` and `Gaps:` lines, a last non-blank line `Receipt end.`, and at most 3,000
+// characters. The end line proves the stored text was not cut. Regression: a cut or oversized receipt parses as complete and a rerun tester treats a
+// partial command list as its inputs.
+describe("receiptOf", () => {
+  const COMMAND = "plugin | ./node_modules/.bin/vitest run a.test.ts | 0 | 0 | a 3 passed";
+  const lines = (...overrides: Array<[string, string | null]>) => {
+    const base = ["Tested commit: abc1234", COMMAND, "Coverage: contract A -> a.test.ts \"a\"", "Gaps: None", "Receipt end."];
+    return base.flatMap((line) => { const hit = overrides.find(([prefix]) => line.startsWith(prefix)); return hit ? (hit[1] === null ? [] : [hit[1]]) : [line]; });
+  };
+  const result = (body: string[], tail = "") => `Done.\n\n## Receipt\n${body.join("\n")}\n${tail}`;
+
+  test("a complete receipt parses to its trimmed section and Tested commit; a full 40-character commit is kept", () => {
+    const parsed = receiptOf(result(lines(), "\n\n"));
+    expect(parsed).toEqual({ text: lines().join("\n"), testedCommit: "abc1234" });
+    const full = "a".repeat(40);
+    expect(receiptOf(result(lines(["Tested commit", `Tested commit: ${full}`])))?.testedCommit).toBe(full);
+  });
+
+  test.each<[string, string | null]>([
+    ["no result", null],
+    ["no Receipt section", "Done.\n\n## Summary\nAll green."],
+    ["a receipt cut before Receipt end.", result(lines(["Receipt end.", null]))],
+    ["text after Receipt end. in the section", result(lines(), "Notes after the end line.")],
+    ["no Coverage line", result(lines(["Coverage:", null]))],
+    ["no Gaps line", result(lines(["Gaps:", null]))],
+    ["no Tested commit line", result(lines(["Tested commit", null]))],
+    ["a Tested commit that is not 7-40 hex characters", result(lines(["Tested commit", "Tested commit: abc12"]))],
+    ["no command line", result(lines([COMMAND.slice(0, 6), null]))],
+  ])("%s is not a complete receipt", (_label, input) => {
+    expect(receiptOf(input)).toBeNull();
+  });
+
+  test("the 3,000-character bound is inclusive: 3,000 parses, 3,001 does not, and nothing is clipped", () => {
+    const sized = (length: number) => {
+      const fixed = lines(["Gaps:", "Gaps: "]).join("\n").length;
+      return result(lines(["Gaps:", `Gaps: ${"g".repeat(length - fixed)}`]));
+    };
+    const at = receiptOf(sized(3_000));
+    expect(at?.text).toHaveLength(3_000);
+    expect(at?.text.endsWith("Receipt end.")).toBe(true);
+    expect(receiptOf(sized(3_001))).toBeNull();
   });
 });
