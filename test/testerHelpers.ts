@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import { checkPlan } from "../src/report/reportIntake";
-import { PLAN_FIXTURE, TEST_WAVE, approvePlan, delegate, setup, start, status, wave } from "./harness";
+import { PLAN_FIXTURE, TEST_FILES, TEST_WAVE, approvePlan, delegate, setup, start, status, wave } from "./harness";
 
 export type State = Awaited<ReturnType<typeof setup>>;
 export const ctxOf = (state: State, chiefThreadId: string) => ({ threadId: chiefThreadId, projectId: state.live.get(chiefThreadId)!.projectId });
@@ -34,7 +34,7 @@ export const planWaves = (state: State, planThreadId: string) =>
 // non-head tip whose parent is neither design nor test, and no wave is both. Regression: dropping any one rule
 // (e.g. the tip check) lets a plan without a test wave through; the table pins each rule's own refusal.
 // Existing checkPlan cases only cover plans without test waves, so none exercises these rules.
-export const planWave = (n: number, extra: object = {}) => ({ body: n === 1 ? PLAN_FIXTURE : wave(n), ...extra });
+export const planWave = (n: number, extra: object = {}) => ({ body: n === 1 ? PLAN_FIXTURE : wave(n, (extra as { test?: unknown }).test === true ? `Write the tests.\n\n${TEST_FILES}` : undefined), ...extra });
 /** Chief reviews `targetId`; its reviewer reports `verdict`. Returns the alert Chief received. */
 export async function reviewed(state: State, chiefThreadId: string, targetId: string, verdict: "approve" | "request_changes", extra: object = {}) {
   await tool(state, "chief_review", { workerThreadId: targetId, ...extra }, chiefThreadId);
