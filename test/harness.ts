@@ -324,7 +324,6 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   }
   await (options.module ?? plugin)(bb);
   disposals.push(() => harness.lifecycle.dispose());
-
   async function supervisorCycle() {
     const service = harness.behavior.runService("supervisor");
     await new Promise((resolve) => setTimeout(resolve, 15));
