@@ -561,3 +561,59 @@ describe("sectionOf", () => {
     expect(contractsOf(body)).toBe(expected);
   });
 });
+
+// Contract (plan-1 "testsPassed on tester and fix reports"; docs/specs/report-intake.md): testsPassed belongs only to the review gate's tester,
+// its corrector and a fix run, on a ready report. A gate tester's, a corrector's and a fix run's ready report must carry it, and a fix
+// run's must carry true. A gate tester that is blocked needs none. The accepted value lands in managed_threads.tests_passed (1 or 0).
+// Regression: a tester that omits it passes the gate unseen; a worker or reviewer sets it; a fix run ships red tests; the value is dropped.
+describe("testsPassed acceptance", () => {
+  const READY: ReportParams = { state: "ready", result: "Ran the suite.", testsPassed: true };
+  const BLOCKED: ReportParams = { state: "blocked", result: "Cannot run.", blocker: "No test runner installed.", recommendation: "Install one and rerun." };
+
+  /** A gate on plan:p1 over worker w1, with a tester, a corrector and a fix worker row, and a plain worker and a reviewer beside them. */
+  function gated() {
+    const w = world();
+    w.seed("p1", "planner");
+    w.seed("w1", "worker", { planThreadId: "p1", planWave: 1 });
+    w.seed("t1", "worker", { kind: "tester" });
+    w.seed("c1", "worker", { kind: "worker" });
+    w.seed("f1", "worker", { kind: "worker" });
+    w.seed("plain", "worker");
+    w.seed("r1", "reviewer", { workerThreadId: "w1" });
+    w.store.batch(() => {
+      w.store.openGate({ gateKey: "plan:p1", projectId: "proj", chiefThreadId: "chief1", planThreadId: "p1", targets: [{ threadId: "w1", reportSeq: 1, branch: "b", prUrl: null, headSha: "abc", base: "main" }], now: 1 });
+      w.store.setGateActor("plan:p1", "reviewer_thread_id", "r1");
+      w.store.setGateActor("plan:p1", "tester_thread_id", "t1");
+      w.store.setGateActor("plan:p1", "corrector_thread_id", "c1");
+      w.store.setFixRun("f1", "gate");
+    });
+    return w;
+  }
+
+  test.each([
+    ["a gate tester's ready report without it", "t1", { ...READY, testsPassed: undefined }, /testsPassed is missing/],
+    ["a corrector's ready report without it", "c1", { ...READY, testsPassed: undefined }, /testsPassed is missing/],
+    ["a fix run's ready report without it", "f1", { ...READY, testsPassed: undefined }, /testsPassed is missing/],
+    ["a fix run's ready report with testsPassed: false", "f1", { ...READY, testsPassed: false }, /A fix run reports ready only with testsPassed: true/],
+    ["a plain worker's report carrying it", "plain", READY, /testsPassed is only for the review gate's tester, its corrector and a fix run/],
+    ["a gate reviewer's report carrying it", "r1", { ...APPROVE, testsPassed: true }, /testsPassed is only for the review gate's tester/],
+    ["a gate tester's blocked report carrying it", "t1", { ...BLOCKED, testsPassed: false }, /testsPassed is only for a ready report/],
+  ] as [string, string, ReportParams, RegExp][])("%s is refused and writes nothing", async (_name, id, params, message) => {
+    const w = gated();
+    await expect(w.intake.report(id, params, "proj")).rejects.toThrow(message);
+    expect(w.rowOf(id).tests_passed).toBeNull();
+    expect(w.rowOf(id).report_seq).toBe(0);
+  });
+
+  test.each([
+    ["a gate tester's passing ready report", "t1", READY, 1],
+    ["a gate tester's failing ready report", "t1", { ...READY, testsPassed: false }, 0],
+    ["a corrector's ready report", "c1", READY, 1],
+    ["a fix run's passing ready report", "f1", READY, 1],
+    ["a gate tester's blocked report without it", "t1", BLOCKED, null],
+  ] as [string, string, ReportParams, number | null][])("%s is accepted and stored in tests_passed", async (_name, id, params, stored) => {
+    const w = gated();
+    await expect(w.intake.report(id, params, "proj")).resolves.toBe(true);
+    expect(w.rowOf(id).tests_passed).toBe(stored);
+  });
+});
