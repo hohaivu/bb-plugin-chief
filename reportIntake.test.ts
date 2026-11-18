@@ -645,6 +645,9 @@ describe("sectionOf", () => {
     ["leading and trailing blank lines are trimmed", "## Contracts to verify\n\n\n  - a  \n\n## Next", "- a"],
     ["a heading with no text is undefined", "## Contracts to verify\n   \n## Next", undefined],
     ["a missing heading is undefined", "# Wave 1\nWork", undefined],
+    ["CRLF line endings keep their separators inside the trimmed text", "## Contracts to verify\r\n- a\r\n- b\r\n### Sub\r\n- c\r\n## Next\r\n- d", "- a\r\n- b\r\n### Sub\r\n- c"],
+    ["CRLF: a fenced heading still ends the section (legacy scan)", "## Contracts to verify\r\n- a\r\n```\r\n## Example\r\n```\r\n- b", "- a\r\n```"],
+    ["a fence holding mixed markers is not skipped (legacy scan)", "## Contracts to verify\n- a\n```\n~~~\n## Example\n```\n- b", "- a\n```\n~~~"],
   ])("contractsOf: %s", (_name, body, expected) => {
     expect(contractsOf(body)).toBe(expected);
   });
@@ -722,6 +725,63 @@ describe("test wave bound", () => {
 
   test("contractsOf still stops at a fenced heading, as before the fence rule", () => {
     expect(contractsOf("## Contracts to verify\n- a\n```\n## Example\n```\n- b")).toBe("- a\n```");
+  });
+
+  // One fence rule for admission extraction and counting (docs/specs/report-intake.md, Fence rule): a fence closes only on the same marker,
+  // at least as long as its opener, with only whitespace after it. Regression: a tilde line inside a backtick fence toggled the scanner out of
+  // the fence, so the fake `## Example` ended the section and intake counted 1 item where 9 (or 6 files) were listed.
+  // Each case holds one real item, the fence (a fake heading and a fake item inside), then more real items after the real close.
+  describe("one fence rule at planner intake", () => {
+    const kinds = [
+      { name: "Contracts", max: 8, over: tooMany, wave: (list: string) => wave2(list), item: (i: number) => `- c${i}` },
+      { name: "Test files", max: 5, over: tooManyFiles, wave: (list: string) => wave2(items(1), list), item: (i: number) => `- f${i}.test.ts` },
+    ];
+    const blocks: [string, string][] = [
+      ["a backtick fence holding a tilde line", "```\n~~~\n## Example\n- fake\n```"],
+      ["a four-backtick fence holding a three-backtick line", "````\n```\n## Example\n- fake\n````"],
+      ["a backtick fence holding a same-marker line with a suffix", "```\n``` x\n## Example\n- fake\n```"],
+      ["a tilde fence holding a backtick line", "~~~\n```\n## Example\n- fake\n~~~"],
+      ["a five-tilde fence holding a four-tilde line", "~~~~~\n~~~~\n## Example\n- fake\n~~~~~"],
+      ["a fence closed by a longer backtick run", "```\n## Example\n- fake\n`````"],
+      ["a fence closed by a longer tilde run", "~~~\n## Example\n- fake\n~~~~~~"],
+      ["a fence closer with trailing whitespace", "```\n## Example\n- fake\n```  \t"],
+      ["an indented fence", "  ```\n  ~~~\n  ## Example\n  - fake\n  ```"],
+    ];
+    const cases = kinds.flatMap((kind) => blocks.map(([name, block]) => [kind.name, name, block, kind] as const));
+
+    test.each(cases)("%s: %s then one more than the limit is refused", async (_kind, _name, block, kind) => {
+      await expect(submit([IMPL, kind.wave(`${kind.item(0)}\n${block}\n${items(kind.max, (i) => kind.item(i + 1))}`)])).rejects.toThrow(refusal(kind.over(kind.max + 1)));
+    });
+
+    test.each(cases)("%s: %s then exactly the limit is accepted", async (_kind, _name, block, kind) => {
+      await expect(submit([IMPL, kind.wave(`${kind.item(0)}\n${block}\n${items(kind.max - 1, (i) => kind.item(i + 1))}`)])).resolves.toBeDefined();
+    });
+
+    test("CRLF line endings follow the same rule", async () => {
+      const body = wave2(`- c0\n${blocks[0]![1]}\n${items(8)}`).body.replace(/\n/g, "\r\n");
+      await expect(submit([IMPL, { body, test: true }])).rejects.toThrow(refusal(tooMany(9)));
+    });
+
+    test("an unclosed fence hides the rest of the Contracts section", async () => {
+      await expect(submit([IMPL, wave2(`- c0\n\`\`\`\n${items(8)}`)])).resolves.toBeDefined();
+    });
+
+    // A fenced copy of a heading is not the section: the real heading after it is, and a heading only inside a fence is missing.
+    test.each([
+      ["Contracts", "```\n~~~\n## Contracts to verify\n- fake\n```", (fake: string) => `# Tests\n\n## Test files\n- a.test.ts\n\n${fake}\n\n## Contracts to verify\n${items(9)}`, tooMany(9)],
+      ["Test files", "```\n~~~\n## Test files\n- fake\n```", (fake: string) => `# Tests\n\n${fake}\n\n## Test files\n${items(6, (i) => `- f${i}.test.ts`)}\n\n## Contracts to verify\n- c0`, tooManyFiles(6)],
+    ])("a fake %s start before the real start is ignored", async (_name, fake, body, line) => {
+      await expect(submit([IMPL, { body: body(fake), test: true }])).rejects.toThrow(refusal(line));
+    });
+
+    const missingContracts = 'plan wave 2 lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.';
+    const missingFiles = 'plan wave 2 is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max 5).';
+    test.each([
+      ["Contracts", "# Tests\n\n## Test files\n- a.test.ts\n\n```\n~~~\n## Contracts to verify\n- a\n```", missingContracts],
+      ["Test files", "# Tests\n\n## Contracts to verify\n- a\n\n```\n~~~\n## Test files\n- a.test.ts\n```", missingFiles],
+    ])("a %s heading that exists only inside a fence is missing, with that one line", async (_name, body, line) => {
+      await expect(submit([IMPL, { body, test: true }])).rejects.toThrow(refusal(line));
+    });
   });
 
   test("test files count by the same rules", () => {

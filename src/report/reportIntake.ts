@@ -50,17 +50,32 @@ export function findingLines(list: ReportFinding[], severity: ReportFinding["sev
     .map((entry) => `- ${entry.file}${entry.line ? `:${entry.line}` : ""} — ${entry.message}${entry.fix ? ` (fix: ${entry.fix})` : ""}`);
 }
 
+/** Per line: whether it is fenced code (opener, interior and closer). A fence closes only on the same marker, at least as long as the opener, with nothing but whitespace after it; an unclosed fence runs to the end. */
+function fencedLines(lines: string[]): boolean[] {
+  let open: { marker: string; length: number } | null = null;
+  return lines.map((line) => {
+    if (!open) {
+      const opener = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
+      if (!opener || (opener[1]![0] === "`" && opener[2]!.includes("`"))) return false;
+      open = { marker: opener[1]![0]!, length: opener[1]!.length };
+      return true;
+    }
+    const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(line);
+    if (closer && closer[1]![0] === open.marker && closer[1]!.length >= open.length) open = null;
+    return true;
+  });
+}
+
 /** The untrimmed text under the first heading named `name` (any level), up to the next heading of the same or higher level. Undefined without the heading. */
 export function sectionOf(body: string, name: string, skipFenced = false): string | undefined {
-  // With skipFenced, headings inside fenced code are blanked for matching only (same length, so indices still fit `body`); contractsOf keeps the plain scan.
-  let fenced = false;
-  const scan = skipFenced
-    ? body.split(/(\r?\n)/).map((line, i) => {
-      if (i % 2) return line;
-      if (/^(```|~~~)/.test(line.trim())) { fenced = !fenced; return " ".repeat(line.length); }
-      return fenced ? " ".repeat(line.length) : line;
-    }).join("")
-    : body;
+  // With skipFenced, fenced lines are blanked for matching only (same length, so indices still fit `body`); contractsOf keeps the plain scan.
+  let scan = body;
+  if (skipFenced) {
+    const parts = body.split(/(\r?\n)/);
+    const text = parts.filter((_, i) => i % 2 === 0);
+    const fenced = fencedLines(text);
+    scan = parts.map((part, i) => (i % 2 || !fenced[i / 2] ? part : " ".repeat(part.length))).join("");
+  }
   const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(scan);
   if (!heading) return undefined;
   const start = heading.index + heading[0].length;
@@ -99,13 +114,13 @@ export function receiptOf(result: string | null): { text: string; testedCommit: 
 
 /** Markdown list items at the section's shallowest indentation (tab = 4 spaces); wrapped lines, deeper items and fenced code are not counted. */
 function topLevelItems(section: string): number {
+  const lines = section.split(/\r?\n/);
+  const fenced = fencedLines(lines);
   const indents: number[] = [];
-  let fenced = false;
-  for (const line of section.split(/\r?\n/)) {
-    if (/^(```|~~~)/.test(line.trim())) { fenced = !fenced; continue; }
-    const item = !fenced && /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+\S/.exec(line);
+  lines.forEach((line, i) => {
+    const item = !fenced[i] && /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+\S/.exec(line);
     if (item) indents.push(item[1]!.replace(/\t/g, "    ").length);
-  }
+  });
   const top = Math.min(...indents);
   return indents.filter((indent) => indent === top).length;
 }
@@ -303,7 +318,8 @@ export function checkPlan(plan: string | unknown[]): string[] {
       ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string." : ""}`);
   }
   bodies.forEach((body, index) => {
-    if (body !== undefined && !contractsOf(body)) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
+    // A test wave's heading must exist outside fenced code, the same slice its count reads.
+    if (body !== undefined && !(tests[index] ? sectionOf(body, "contracts to verify", true)?.trim() : contractsOf(body))) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
   });
   // A design wave is a chain tip when no later wave could build on it; a later wave whose dependsOn is not an array might, so it blocks the check.
   designs.forEach((design, index) => {

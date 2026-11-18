@@ -20,6 +20,7 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 - **Implementation wave**: a plan wave that is neither `design: true` nor `test: true`.
 - **Test wave**: a plan wave with `test: true`. Its parent is an implementation wave.
 - **Top-level item**: a Markdown list item at the smallest list indentation of its section. Deeper items are not top-level items.
+- **Fence**: a fenced code block. The Fence rule section defines its opening and closing lines.
 
 ## Ownership and Entry Points
 
@@ -203,13 +204,25 @@ Each contract carries its reason.
 
 ### Section helper
 
-`sectionOf` reads one Markdown section of a plan body. The plan checks and `contractsOf` both use it.
+`sectionOf` reads one Markdown section of a plan body. It has two scans.
 
-- `sectionOf` matches the first heading of any level from 1 to 6 whose text starts with the name. It ignores case and leading spaces or tabs. Reason: `contractsOf` already matched these headings, and its output must not change for any body.
-- `sectionOf` returns the text after the heading line up to the next heading of the same or a higher level, or to the end. Reason: a deeper heading stays in the section, so a nested `###` does not cut a contract list.
-- `sectionOf` does not trim the text. The first content line keeps its indentation. Reason: the top-level item count reads list indentation.
-- `sectionOf` returns undefined when no heading matches. Reason: the plan check reports a missing heading with its own error, and an empty section returns an empty string, so the two cases stay apart.
-- `contractsOf(body)` returns the trimmed `sectionOf` text for `Contracts to verify`, or undefined when that text is empty. Its output is unchanged for every body. Reason: existing callers keep their output.
+- The legacy scan is `sectionOf(body, name)`. It has no fence rule, so a heading inside a fenced code block still counts as a heading. `contractsOf` uses this scan. Reason: `contractsOf` output is stored and must not change for any body.
+- The admission scan is `sectionOf(body, name, skipFenced)` with `skipFenced` set to true. It applies the Fence rule below. The plan checks use this scan for the test-wave bound and its presence checks. Reason: a heading in example text must neither end a section nor satisfy a missing one.
+- Both scans match the first heading of any level from 1 to 6 whose text starts with the name. They ignore case and leading spaces or tabs. Reason: `contractsOf` already matched these headings, and its output must not change for any body.
+- Both scans return the text after the heading line up to the next heading of the same or a higher level, or to the end. Reason: a deeper heading stays in the section, so a nested `###` does not cut a contract list.
+- Both scans do not trim the text. The first content line keeps its indentation. Reason: the top-level item count reads list indentation.
+- Both scans return undefined when no heading matches. Reason: the plan check reports a missing heading with its own error, and an empty section returns an empty string, so the two cases stay apart.
+- `contractsOf(body)` returns the trimmed legacy text for `Contracts to verify`, or undefined when that text is empty. Reason: existing callers keep their output.
+
+### Fence rule
+
+The admission scan uses this rule. A fence is a fenced code block.
+
+- A fence opens on a line that starts, after leading spaces or tabs, with three or more backticks or three or more tildes. Reason: this is the Markdown fence form.
+- A backtick fence's opening line has no backtick after the markers. Reason: the Markdown rule for backtick fences, so an inline code span does not open a fence.
+- A fence closes on a line that repeats the opener's marker, uses at least as many markers as the opener, and has only spaces or tabs after the markers. Reason: a closer must match its opener, and a longer fence can hold a shorter one.
+- A line with the other marker, or with fewer markers than the opener, is text inside the fence. Reason: example text can contain fence lines.
+- An unclosed fence runs to the end of the file. Reason: the Markdown rule for an unclosed fence.
 
 ### Plan test-wave bound
 
@@ -220,6 +233,7 @@ Each contract carries its reason.
 - A test wave with contract text and no list item is refused. Reason: the bound counts list items, so plain text has no count.
 - A test wave without a `## Test files` heading is refused. Reason: the list names the test files the tester adds or changes, so a wave without it has no file scope.
 - A test wave without a Contracts heading gets only the missing-heading error. Reason: that error already refuses the wave, so the bound adds no second line and existing error text stays byte-identical.
+- A heading inside a fenced code block never satisfies the Contracts or Test files presence check of a test wave. Reason: the presence check reads the admission scan, so a fenced-only heading is treated as missing.
 - Implementation and design waves have no bound. Reason: the bound limits tester work only.
 
 Counting rules:
@@ -227,7 +241,8 @@ Counting rules:
 - Top level is the smallest indentation among the list items of the section. A tab counts as 4 spaces.
 - Supported markers are `-`, `*`, `+`, `N.` and `N)`. A checkbox (`[ ]` or `[x]`) belongs to its item.
 - Wrapped lines, deeper items and fenced code blocks are not counted. Reason: one top-level item stands for one contract or one test file.
-- Headings inside fenced code blocks are not section boundaries, in either section. A fenced `## Example` does not end the section. Reason: a fenced heading is example text, so ending the section there would hide the items after it.
+- Under the admission scan, headings inside fenced code blocks are not section boundaries, in either section. A fenced `## Example` does not end the section. Reason: a fenced heading is example text, so ending the section there would hide the items after it.
+- The legacy scan of `contractsOf` does not apply this rule. Reason: its output is stored and must not change.
 - A section with no list item counts 0.
 
 Invariants:
