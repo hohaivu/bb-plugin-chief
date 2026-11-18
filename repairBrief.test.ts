@@ -17,7 +17,7 @@ const targetLine = (id: string) => `- ${id}: branch ${BRANCH}, ${PR_URL}, pinned
 
 /** A one-wave plan whose worker is ready on a pull request, with the review gate open on it. */
 async function gated(state: State) {
-  forgeAnswers();
+  forgeAnswers(undefined, "OPEN");
   const chief = await start(state);
   const planner = await plan(state, chief.threadId);
   await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: BRANCH, prUrl: PR_URL });

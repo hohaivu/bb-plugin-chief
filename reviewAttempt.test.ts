@@ -14,9 +14,10 @@ describe("tester role", () => {
     test("review attempt: a pending host lookup skips the impact slice, and chief_review still launches the gate", async () => {
       const PR = "https://github.com/acme/shop/pull/8";
       let held = false;
+      let lookups = 0;
       const state = await setup({
         projectPath: "/oracle/checkout",
-        system: { usageLimits: async () => ({}), config: () => held ? new Promise(() => {}) : Promise.resolve({ primaryHostId: "host_1" }) },
+        system: { usageLimits: async () => ({}), config: () => held && ++lookups === 2 ? new Promise(() => {}) : Promise.resolve({ primaryHostId: "host_1" }) },
       });
       execFileMock.mockImplementation(async (file: string, args: string[]) => {
         if (file === "gh" && args[0] === "pr" && args[1] === "view") return { stdout: JSON.stringify({ headRefName: "feature/x", headRefOid: HEAD_SHA, baseRefName: "main" }), stderr: "" };

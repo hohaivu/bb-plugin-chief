@@ -33,8 +33,8 @@ describe("Chief backend", () => {
     expect(state.spawned[0]).toMatchObject({ providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" });
     expect(state.spawned[1]).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
     // The reviewer has no selection of its own and stays on the BB default; the tester is a worker and takes the worker's pick.
-    expect(state.spawned[2]).not.toHaveProperty("providerId");
-    expect(state.spawned[3]).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
+    expect(state.spawned.find((spawn) => spawn.pluginMetadata?.role === "reviewer")).not.toHaveProperty("providerId");
+    expect(state.spawned.slice(2).find((spawn) => spawn.pluginMetadata?.role === "worker")).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
   });
 
   test("falls back to the BB default when a picked model left the machine's catalog", async () => {
