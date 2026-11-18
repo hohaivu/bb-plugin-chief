@@ -9,7 +9,7 @@ A plan ran one review per round. Each rejection needed a retest, a reject streak
 - One gate per plan, or per unplanned task, holds one reviewer and one tester. Both run in parallel on pinned heads.
 - A gate `fix` admits one fresh fix worker. It replaces the gate tester and must make the tests pass.
 - A blocked fix run with wrong-test evidence admits at most one corrector tester. A corrector that is not green escalates.
-- The gate never starts a second review. A chat-requested change gets a fresh fix run on the unmerged pull request, with no review.
+- The gate never starts a second review. *Amended: one advisory re-review may start after a green fix run, see [advisory re-review](2026-11-18-advisory-re-review.md).* A chat-requested change gets a fresh fix run on the unmerged pull request, with no review.
 
 ## Consequence
 
