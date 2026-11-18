@@ -58,7 +58,7 @@ export const planParams = delegateShape.pick({ title: true, mission: true, conte
 }).transform(titled((v) => v.mission));
 
 export const consultParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
-  planThreadId: z.string().trim().min(1).describe("A planner whose multi-wave or complex plan needs its one read-only advisor review before chief_forge_init or chief_delegate."),
+  planThreadId: z.string().trim().min(1).describe("A planner whose open plan you want one read-only advisor review of before chief_forge_init or chief_delegate."),
   branch: z.string().trim().min(1).max(300).optional().describe("An open branch (for example a stacked pull request's head) to read instead of the project default: the thread runs in a fresh worktree based on it."),
 }).transform(titled((v) => v.mission));
 

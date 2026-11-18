@@ -499,7 +499,6 @@ export function plannerBrief(input: PlannerBriefInput): string {
       "- Keep the parts no finding touches. Fix every blocking finding.",
       "- List each finding you reject under a `## Disputed findings` heading, with your evidence.",
       "- If the advisor named a decision, resolve it from the context above, or report blocked with it.",
-      "- Do not set `complex`: your plan goes straight to delegation with no second review.",
     ] : []),
     "", "## Working contract",
     loadLine(managedSkills("planner", undefined)),

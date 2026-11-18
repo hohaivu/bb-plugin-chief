@@ -116,9 +116,6 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id" | "r
   if (row.role === "advisor" && row.plan_thread_id && ready && !params.verdict) {
     errors.push("verdict is missing; a plan review's ready report requires verdict: approve or request_changes.");
   }
-  if (params.complex !== undefined && (row.role !== "planner" || !ready)) {
-    errors.push(`complex is only for a planner's ready report (role is ${row.role}, state is "${params.state}"); remove it.`);
-  }
   if (row.role === "worker" && row.plan_thread_id && ready
     && !/^[ \t]*#{1,6}[ \t]+deviations from plan/im.test(params.result ?? "")) {
     errors.push('result lacks a "## Deviations from plan" Markdown heading; a plan worker\'s ready report must list each departure from the plan and why, or "None".');
@@ -538,7 +535,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         if (params.state === "ready" && verdict === "request_changes") event?.("plan_review_changes", row);
       }
       if (plannerReady && scheduledWaves) {
-        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
+        store.setPlanReview(threadId, null);
         const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }

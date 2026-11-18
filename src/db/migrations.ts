@@ -381,7 +381,7 @@ export const MIGRATIONS = [
     FORGE_COMMENTS_TABLE,
     // Planner row only: the tracking issue shared by every wave of its plan.
     `ALTER TABLE managed_threads ADD COLUMN plan_issue_url TEXT`,
-    // Planner row only: its one advisor review — NULL (none needed), 'required', 'approved' or 'changes'.
+    // Planner row only: plan review — NULL (no review), 'required' (an advisor Chief started is running or ended without advice), 'approved' or 'changes'.
     `ALTER TABLE managed_threads ADD COLUMN plan_review TEXT`,
     // Legacy: one row per gate thread of the removed review gate; no longer written or read.
     `CREATE TABLE IF NOT EXISTS gate_threads (thread_id TEXT PRIMARY KEY, environment_id TEXT, chief_thread_id TEXT, worker_thread_id TEXT NOT NULL, created_at INTEGER NOT NULL, thread_deleted INTEGER NOT NULL DEFAULT 0, delete_attempts INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0)`,

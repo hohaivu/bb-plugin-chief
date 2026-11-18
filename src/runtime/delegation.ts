@@ -155,14 +155,14 @@ export function createDelegation(ctx: Ctx) {
     return startPlanConsult(params, params.planThreadId, chief.thread_id, projectId);
   }
 
-  /** chief_consult planThreadId: the plan's one read-only advisor review, in the project's own checkout. */
+  /** chief_consult planThreadId: an optional read-only advisor review of a plan, in the project's own checkout. */
   async function startPlanConsult(params: z.infer<typeof consultParams>, plannerId: string, chiefThreadId: string, projectId: string) {
     const planner = store.get(plannerId);
     if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId) || !planner.plan_waves || planner.state === "complete") {
       throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
     }
-    if (planner.plan_review !== "required") {
-      if (!planner.plan_review) throw new Error(`Only a plan with more than one implementation wave (design waves do not count), or a complex plan, gets an advisor review; ${plannerId} does not (a revision never does): delegate it.`);
+    if (planner.replaces_thread_id) throw new Error(`${plannerId} is a revision; a revision gets no review: delegate its waves.`);
+    if (planner.plan_review && planner.plan_review !== "required") {
       const { decider } = ctx.planAdvisors(plannerId);
       throw new Error(`Plan ${plannerId} already had its one review (${decider?.thread_id ?? "?"}): ${ctx.planReviewRefusal(planner) ?? ctx.nextAction(planner) ?? "delegate its waves."}`);
     }
@@ -181,6 +181,8 @@ export function createDelegation(ctx: Ctx) {
     const thread = await ctx.managedSpawn.launch(prepared,
       { projectId, environment: await readerEnvironment(projectId, branch), title, prompt },
       { role: "advisor", chiefThreadId, planThreadId: plannerId, ...(branch ? { branch } : {}) });
+    // Set after the launch: a failed launch leaves no gate.
+    store.setPlanReview(plannerId, "required");
     return { threadId: thread.id, title, projectId };
   }
   function delegate(params: z.infer<typeof delegateParams>, callerThreadId?: string | null) {
