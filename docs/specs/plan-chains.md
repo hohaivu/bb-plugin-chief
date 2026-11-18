@@ -455,7 +455,9 @@ A slot limits how many heavy commands run at once on one computer. The slot wrap
 - A usage error exits 2 and runs nothing. Reason: an unknown pool must never run a command.
 - A failure in heavy preparation logs a warning. The brief then has no `## Heavy commands`. Reason: heavy preparation must never block a delegation.
 - Spec Writers get no `## Heavy commands` and no wrapper fence. Reason: they run no builds or tests.
-- A brief with `## Heavy commands` has a wrapper fence under the Verify command. The fence wraps the exact verify command, and the agent fills in `<pool>`. The plugin never chooses the pool from the command text. Reason: the plugin cannot know what a command does.
+- A wrapper fence appears under the Verify command only when the brief renders a Verify block. Reason: the fence belongs to the Verify block and follows its existing conditions.
+- The fence wraps the exact verify command, and the agent fills in `<pool>`. The plugin never chooses the pool from the command text. Reason: the plugin cannot know what a command does.
+- The `## Heavy commands` section still appears for every worker, designer, and tester brief, with or without a Verify block. Reason: those agents still run builds and tests through the wrapper.
 - A published script is never removed or rewritten. Its file name carries the first 12 hex characters of its content hash. Reason: a running brief keeps a script that exists.
 - `artifactDir` keeps its paths and fallbacks. Heavy preparation reads the data directory through the same lookup. Reason: artifacts and heavy files must share one data root.
 
