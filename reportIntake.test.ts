@@ -555,23 +555,46 @@ describe("receiptOf", () => {
     ["a Coverage line with four pipe fields and no command row", result(lines([COMMAND.slice(0, 6), null], ["Coverage:", "Coverage: API | UI | CLI | Docs"]))],
     ["only pipes in the command row", result(lines([COMMAND.slice(0, 6), "| | | |"]))],
     ["a blank command row", result(lines([COMMAND.slice(0, 6), "   "]))],
-    ["a command row with four pipe fields that name no exit status", result(lines([COMMAND.slice(0, 6), "plugin | npm test | pass | pass"]))],
-    ["a command row without a cwd", result(lines([COMMAND.slice(0, 6), "| npm test | 0 | 0"]))],
-    ["a command row without a command", result(lines([COMMAND.slice(0, 6), "plugin |  | 0 | 0"]))],
+    ["a command row with five pipe fields that name no exit status", result(lines([COMMAND.slice(0, 6), "plugin | npm test | pass | pass | 5 passed"]))],
+    ["a four-field row with no pass counts field", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 0"]))],
+    ["a four-field row with a trailing pipe and an empty counts field", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 0 |"]))],
+    ["a counts field of only whitespace", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 0 |    "]))],
+    ["a command row without a cwd", result(lines([COMMAND.slice(0, 6), "| npm test | 0 | 0 | 5 passed"]))],
+    ["a cwd of only whitespace", result(lines([COMMAND.slice(0, 6), "   | npm test | 0 | 0 | 5 passed"]))],
+    ["a command row without a command: the empty field must not shift the exits right", result(lines([COMMAND.slice(0, 6), "plugin | | 0 | 0 | 0"]))],
+    ["a command of only whitespace", result(lines([COMMAND.slice(0, 6), "plugin |    | 0 | 0 | 5 passed"]))],
+    ["a command that starts with a bare pipe", result(lines([COMMAND.slice(0, 6), "plugin | | npm test | 0 | 0 | 5 passed"]))],
+    ["a command row of five pipes and no text", result(lines([COMMAND.slice(0, 6), "| | | | |"]))],
     ["a command row without the actual exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0"]))],
-    ["a command row with an exit status above 255", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 300"]))],
+    ["a command row with an empty required exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test |  | 0 | 5 passed"]))],
+    ["an actual exit of 256", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 256 | 5 passed"]))],
+    ["a required exit of 256", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 256 | 0 | 5 passed"]))],
+    ["a negative exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | -1 | 5 passed"]))],
+    ["a fractional exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0.5 | 0 | 5 passed"]))],
   ])("%s is not a complete receipt", (_label, input) => {
     expect(receiptOf(input)).toBeNull();
   });
 
-  // A command row is `cwd | command | required exit | actual exit`; the counts column is optional and a command may itself contain `|`.
+  // A command row is `cwd | command | required exit | actual exit | counts`: all five fields, exits 0-255, and only the command may contain `|`.
   test.each([
-    ["the four-field row", "plugin | npm test | 0 | 0"],
-    ["a row that records a failing actual exit", "plugin | npm test | 0 | 1"],
-    ["a command that contains a pipe", "plugin | npm test | tee run.log | 0 | 0"],
+    ["a nonzero actual exit", "plugin | npm test | 0 | 1 | 1 failed"],
+    ["the highest exit status, 255, in both exit fields", "plugin | npm test | 255 | 255 | 5 passed"],
+    ["a required nonzero exit that the run met", "plugin | npm test | 2 | 2 | 1 failed"],
+    ["a command that contains a pipe", "plugin | npm test | tee run.log | 0 | 0 | 5 passed"],
+    ["a command that contains ||", "plugin | cd pkg || exit 1 | 0 | 0 | 5 passed"],
+    ["a command that holds a quoted pipe", "plugin | vitest run -t \"a|b\" | 0 | 0 | 5 passed"],
+    ["a command that ends with a pipe symbol inside quotes", "plugin | echo 'x|' | 0 | 0 | 5 passed"],
     ["a bulleted row", "- plugin | npm test | 0 | 0 | 5 passed"],
-  ])("%s is a complete command row", (_label, row) => {
-    expect(receiptOf(result(lines([COMMAND.slice(0, 6), row])))?.testedCommit).toBe("abc1234");
+    ["a counts field of free text", "plugin | npm test | 0 | 0 | a 3 passed, b 2 passed"],
+    ["no spaces around the pipes", "plugin|npm test|0|0|5 passed"],
+  ])("%s is a complete command row and the receipt text is kept exactly", (_label, row) => {
+    const body = lines([COMMAND.slice(0, 6), row]);
+    expect(receiptOf(result(body))).toEqual({ text: body.join("\n"), testedCommit: "abc1234" });
+  });
+
+  test("a command that contains pipes keeps its spacing and quoting in the retained text", () => {
+    const row = "plugin | npm  test -- -t \"a|b\"  |  tee  run.log || true | 0 | 0 | 5 passed";
+    expect(receiptOf(result(lines([COMMAND.slice(0, 6), row])))?.text.split("\n")[1]).toBe(row);
   });
 
   test("metadata pipes in Coverage do not stand in for the command row when a real one is present", () => {

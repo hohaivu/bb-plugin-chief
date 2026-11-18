@@ -11,7 +11,7 @@ import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, d
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { inPlaceLine } from "./test/blockedAlerts";
-import { COMPLETE_RESULT, CUT_RESULT, METADATA_ONLY_RESULT, MISSING_FIELDS_RESULT, NORMAL_MODE, PIPES_ONLY_RESULT, RECEIPT_BODY, withReceipt } from "./test/receiptFixtures";
+import { BLANK_COMMAND_RESULT, COMPLETE_RESULT, CUT_RESULT, FOUR_FIELD_RESULT, METADATA_ONLY_RESULT, MISSING_FIELDS_RESULT, NORMAL_MODE, PIPED_BODY, PIPED_RESULT, PIPES_ONLY_RESULT, RECEIPT_BODY, withReceipt } from "./test/receiptFixtures";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -1224,6 +1224,14 @@ describe("prior receipt", () => {
     expect(prompt).not.toContain(REUSE);
   });
 
+  // A command with a real pipe, `||` and a quoted pipe is a valid row: the receipt arrives intact, in normal and in evidence-only mode, over an older complete one.
+  test("a valid receipt whose command holds pipes arrives intact in the normal and the evidence-only brief", async () => {
+    const state = await setup();
+    const { ids, next } = await chain(state, [COMPLETE_RESULT, PIPED_RESULT]);
+    expect(sectionOf(await next(), `Prior receipt (${ids[1]})`)).toBe(`${PIPED_BODY}\n${REUSE}`);
+    expect(sectionOf(await next({ evidenceOnly: true }), `Prior receipt (${ids[1]})`)).toBe(`${PIPED_BODY}\nIts commands are your commands and its Tested commit is Last tested, unless your mission names others.`);
+  });
+
   // The newest READY tester decides: a legacy or cut report there gives the pointer even when an older tester has a complete receipt; a newer tester
   // that is not ready is skipped; a complete newest receipt wins over a legacy older one. Delegation succeeds in every case.
   test.each<[string, Array<string | typeof BLOCKED>, number, boolean]>([
@@ -1232,6 +1240,10 @@ describe("prior receipt", () => {
     ["a receipt whose only pipes are Coverage metadata", [METADATA_ONLY_RESULT], 0, false],
     ["a receipt whose command row is pipes only", [PIPES_ONLY_RESULT], 0, false],
     ["a receipt whose command row lacks its exit statuses", [MISSING_FIELDS_RESULT], 0, false],
+    ["a receipt whose command row has four fields and no pass counts", [FOUR_FIELD_RESULT], 0, false],
+    ["a receipt whose command row has no command (`| | 0 | 0 | 0`)", [BLANK_COMMAND_RESULT], 0, false],
+    ["a four-field newest tester over an older complete receipt", [COMPLETE_RESULT, FOUR_FIELD_RESULT], 1, false],
+    ["a blank-command newest tester over an older complete receipt", [COMPLETE_RESULT, BLANK_COMMAND_RESULT], 1, false],
     ["a metadata-only newest tester over an older complete receipt", [COMPLETE_RESULT, METADATA_ONLY_RESULT], 1, false],
     ["a legacy newest tester over an older complete receipt", [COMPLETE_RESULT, READY], 1, false],
     ["a cut newest tester over an older complete receipt", [COMPLETE_RESULT, CUT_RESULT], 1, false],
