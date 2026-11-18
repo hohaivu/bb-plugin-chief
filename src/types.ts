@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "./reportLimits";
+import { LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "./reportLimits";
 import { modelRoleSchema, roleSchema, type Role } from "./core/roles";
 
 /** reasoningLevel is a plain string like the SDK's own: providers may define levels beyond `reasoningSchema`, which only guards tool input. */
@@ -113,7 +113,7 @@ export const waveShape = z.object({
     "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
   ),
   test: z.boolean().optional().describe(
-    "true for a test wave: a tester writes and runs the tests for its parent wave on that wave's branch. Every chain ends with one; its parent is an implementation wave (neither design nor test).",
+    `true for a test wave: a tester writes and runs the tests for its parent wave on that wave's branch. Every chain ends with one; its parent is an implementation wave (neither design nor test). A test wave lists at most ${MAX_TEST_CONTRACTS} contracts and a \`## Test files\` list of 1 to ${MAX_TEST_FILES} test files.`,
   ),
   spec: z.boolean().optional().describe(
     "true only on an implementation wave that changes documented behaviour: a Spec Writer runs in parallel with its worker and commits docs/ from the wave's `## Spec delta`. Never on a test or design wave.",
@@ -151,7 +151,7 @@ export const reportParams = z.object({
     z.string().trim(),
     z.array(waveShape),
   ]).optional().describe(
-    `Ready only. A planner's ready report requires this: an array of 2 to ${MAX_WAVES} {body, dependsOn, stackOn?, design?, test?, spec?, feature?, reshape?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; test: true marks a test wave, and every chain ends with one; spec: true marks an implementation wave whose ## Spec delta a Spec Writer turns into docs/ in parallel with its worker; feature: true marks an implementation wave that adds new behaviour; reshape: true marks a big feature's reshape wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
+    `Ready only. A planner's ready report requires this: an array of 2 to ${MAX_WAVES} {body, dependsOn, stackOn?, design?, test?, spec?, feature?, reshape?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; test: true marks a test wave, and every chain ends with one (a test wave lists at most ${MAX_TEST_CONTRACTS} contracts and a \`## Test files\` list of 1 to ${MAX_TEST_FILES} test files); spec: true marks an implementation wave whose ## Spec delta a Spec Writer turns into docs/ in parallel with its worker; feature: true marks an implementation wave that adds new behaviour; reshape: true marks a big feature's reshape wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
   ),
   blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
   recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),

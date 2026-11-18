@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createReportIntake, type ReportIntakeAdapters } from "./src/report/reportIntake";
+import { checkPlan, contractsOf, createReportIntake, sectionOf, type ReportIntakeAdapters } from "./src/report/reportIntake";
 import { createReviewLedger } from "./src/review/reviewLedger";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow, ReportParams } from "./src/types";
@@ -306,7 +306,7 @@ describe("await order by role", () => {
 
 const PLAN = [
   { body: "# Plan\n\n## Contracts to verify\n- Totals stay non-negative\n\n## What we're NOT doing\n- x" },
-  { body: "# Tests\n\n## Contracts to verify\n- Totals tested", test: true },
+  { body: "# Tests\n\n## Test files\n- totals.test.ts\n\n## Contracts to verify\n- Totals tested", test: true },
 ];
 
 // Contract (plan 3, contract 11): an accepted planner report hands its plan files, and a reviewer verdict its verdict file, to the
@@ -520,5 +520,181 @@ describe("in-batch writes by role", () => {
     const batch = w.log.slice(w.log.indexOf("batch:start"), w.log.indexOf("batch:end"));
     expect(batch.at(-1)).toBe("appendPlanLog");
     expect(batch.indexOf("writeAlert report:1:pending-1")).toBeLessThan(batch.indexOf("appendPlanLog"));
+  });
+});
+
+// Contract (docs/specs/report-intake.md, Section helper): sectionOf returns the untrimmed text under the first heading whose text
+// starts with the name, up to the next heading of the same or a higher level; undefined without the heading. contractsOf is its trimmed form.
+// Regression: trimming the section hides an indented first item from the count; stopping at a lower-level heading drops nested contracts.
+describe("sectionOf", () => {
+  test.each([
+    ["keeps the first content line's indentation", "## Contracts to verify\n  - Indented item\n- First top-level item\n## Automated Verification\n- x", "  - Indented item\n- First top-level item\n"],
+    ["stops at a heading of the same level", "## Contracts to verify\n- a\n## Other\n- b", "- a\n"],
+    ["stops at a heading of a higher level", "## Contracts to verify\n- a\n# Top\n- b", "- a\n"],
+    ["keeps text under lower-level headings", "## Contracts to verify\n- a\n### Detail\n- b\n## Other\n- c", "- a\n### Detail\n- b\n"],
+    ["runs to the end without a later heading", "## Contracts to verify\n- a\n- b", "- a\n- b"],
+    ["accepts any heading level, any case and leading whitespace", "\t#### CONTRACTS TO VERIFY (wave 2)\n- a", "- a"],
+    ["takes the first matching heading", "## Contracts to verify\n- first\n## Contracts to verify\n- second", "- first\n"],
+    ["is empty, not undefined, for a heading with no text", "## Contracts to verify\n## Other", ""],
+  ])("%s", (_name, body, expected) => {
+    expect(sectionOf(body, "contracts to verify")).toBe(expected);
+  });
+
+  test.each([
+    ["no matching heading", "## Other\n- a"],
+    ["bold text instead of a heading", "**Contracts to verify**\n- a"],
+    ["a name that only continues the word", "## Contracts to verifying\n- a"],
+    ["no space after the hashes", "##Contracts to verify\n- a"],
+  ])("is undefined for %s", (_name, body) => {
+    expect(sectionOf(body, "contracts to verify")).toBeUndefined();
+  });
+
+  test.each([
+    ["nested and lower-level headings stay inside", "# Contracts to verify\n- a\n## Sub\n- b\n# Next\n- c", "- a\n## Sub\n- b"],
+    ["leading and trailing blank lines are trimmed", "## Contracts to verify\n\n\n  - a  \n\n## Next", "- a"],
+    ["a heading with no text is undefined", "## Contracts to verify\n   \n## Next", undefined],
+    ["a missing heading is undefined", "# Wave 1\nWork", undefined],
+    ["CRLF line endings keep their separators inside the trimmed text", "## Contracts to verify\r\n- a\r\n- b\r\n### Sub\r\n- c\r\n## Next\r\n- d", "- a\r\n- b\r\n### Sub\r\n- c"],
+    ["CRLF: a fenced heading still ends the section (legacy scan)", "## Contracts to verify\r\n- a\r\n```\r\n## Example\r\n```\r\n- b", "- a\r\n```"],
+    ["a fence holding mixed markers is not skipped (legacy scan)", "## Contracts to verify\n- a\n```\n~~~\n## Example\n```\n- b", "- a\n```\n~~~"],
+  ])("contractsOf: %s", (_name, body, expected) => {
+    expect(contractsOf(body)).toBe(expected);
+  });
+});
+
+// Contract (docs/specs/report-intake.md, Plan test-wave bound): a test wave's Contracts section holds 1 to 8 top-level list items and its
+// Test files section 1 to 5; the bound runs at planner ready-report intake; implementation waves are never bounded.
+// Regression: no bound lets a 20-contract test wave start a long tester session; a trimmed count reads an indented first item as top level;
+// counting wrapped lines, nested items, fenced code or checkbox text miscounts the wave.
+describe("test wave bound", () => {
+  const items = (n: number, line = (i: number) => `- contract ${i}`) => Array.from({ length: n }, (_, i) => line(i)).join("\n");
+  const IMPL = { body: "# Impl\n\n## Contracts to verify\n- Totals stay non-negative\n\n## What we're NOT doing\n- x" };
+  const wave2 = (contracts: string, files: string | null = items(1, () => "- a.test.ts")) =>
+    ({ body: `# Tests\n\n${files === null ? "" : `## Test files\n${files}\n\n`}## Contracts to verify\n${contracts}`, test: true });
+  const refusal = (...lines: string[]) => new Error(`chief_report was not saved; fix all of these and call it once more:\n${lines.map((line) => `- ${line}`).join("\n")}`);
+  const submit = (plan: unknown[]) => {
+    const w = world();
+    w.seed("p1", "planner");
+    return w.intake.report("p1", { state: "ready", plan, result: "Planned." } as ReportParams, "proj");
+  };
+  const tooMany = (count: number) => `plan wave 2 is a test wave with ${count} contracts; max 8. Split the implementation into more chains (dependsOn [] or stackOn k), each ending with its own test wave.`;
+  const tooManyFiles = (count: number) => `plan wave 2 is a test wave listing ${count} test files under "## Test files"; list 1 to 5. Split the implementation into more chains, each ending with its own test wave.`;
+
+  test("a test wave with 8 contracts and 5 test files is accepted at planner intake", async () => {
+    await expect(submit([IMPL, wave2(items(8), items(5, (i) => `- f${i}.test.ts`))])).resolves.toBeDefined();
+  });
+
+  test.each([
+    ["9 contracts", wave2(items(9)), tooMany(9)],
+    ["6 test files", wave2(items(1), items(6, (i) => `- f${i}.test.ts`)), tooManyFiles(6)],
+    ["0 test files", wave2(items(1), ""), tooManyFiles(0)],
+    ["no Test files heading", wave2(items(1), null), 'plan wave 2 is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max 5).'],
+    ["contract text without a list item", wave2("Everything works."), 'plan wave 2 is a test wave whose "## Contracts to verify" has no Markdown list item; write each contract as a list item (-, *, +, 1. or 1)).'],
+  ])("planner intake refuses %s with that one line", async (_name, testWave, line) => {
+    await expect(submit([IMPL, testWave])).rejects.toThrow(refusal(line));
+  });
+
+  test("a test wave with no Contracts heading gets only the missing-heading error", async () => {
+    await expect(submit([IMPL, { body: "# Tests\n\n## Test files\n- a.test.ts", test: true }])).rejects.toThrow(refusal(
+      'plan wave 2 lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.'));
+  });
+
+  test("an implementation wave with 9 contracts is accepted", async () => {
+    await expect(submit([{ body: `${IMPL.body.split("\n\n## What")[0]}\n${items(8)}\n\n## What we're NOT doing\n- x` }, wave2(items(2))])).resolves.toBeDefined();
+  });
+
+  // Each case holds 9 counted items plus lines the rules say are not counted, so the error names exactly 9.
+  test.each([
+    ["an indented first item", `  - indented first\n${items(9)}`],
+    ["wrapped lines", items(9, (i) => `- contract ${i}\n  wraps onto a second line`)],
+    ["deeper items", items(9, (i) => `- contract ${i}\n  - detail ${i}`)],
+    ["fenced code with list lines", `${items(9)}\n\`\`\`\n- fake 1\n- fake 2\n\`\`\`\n~~~\n- fake 3\n~~~`],
+    ["checkbox items", items(9, (i) => i % 2 ? `- [x] contract ${i}` : `- [ ] contract ${i}`)],
+    ["every supported marker", [...items(5, (i) => ["- a", "* b", "+ c", "1. d", "2) e"][i]!).split("\n"), "- f", "* g", "+ h", "10. i"].join("\n")],
+    ["tab and four-space indentation as one level", items(9, (i) => i % 2 ? `    - contract ${i}` : `\t- contract ${i}`)],
+  ])("contracts count %s as 9", async (_name, contracts) => {
+    expect(checkPlan([IMPL, wave2(contracts)])).toEqual([tooMany(9)]);
+  });
+
+  // A heading inside a fence is not a section boundary: the item before the fence and the items after it are one list.
+  test("a fenced heading inside the Contracts list does not end it", async () => {
+    const fence = "```\n## Example\n- fake\n```";
+    await expect(submit([IMPL, wave2(`- first\n${fence}\n${items(8)}`)])).rejects.toThrow(refusal(tooMany(9)));
+  });
+
+  test("a fenced heading inside the Test files list does not end it", async () => {
+    const fence = "```\n## Example\n- fake\n```";
+    await expect(submit([IMPL, wave2(items(1), `- first.test.ts\n${fence}\n${items(5, (i) => `- f${i}.test.ts`)}`)])).rejects.toThrow(refusal(tooManyFiles(6)));
+  });
+
+  test("a fenced copy of the heading name does not start the section", () => {
+    const fenced = "```\n## Contracts to verify\n- fake\n```";
+    expect(checkPlan([IMPL, { body: `# Tests\n\n## Test files\n- a.test.ts\n\n${fenced}\n\n## Contracts to verify\n${items(9)}`, test: true }])).toEqual([tooMany(9)]);
+  });
+
+  test("contractsOf still stops at a fenced heading, as before the fence rule", () => {
+    expect(contractsOf("## Contracts to verify\n- a\n```\n## Example\n```\n- b")).toBe("- a\n```");
+  });
+
+  // One fence rule for admission extraction and counting (docs/specs/report-intake.md, Fence rule): a fence closes only on the same marker,
+  // at least as long as its opener, with only whitespace after it. Regression: a tilde line inside a backtick fence toggled the scanner out of
+  // the fence, so the fake `## Example` ended the section and intake counted 1 item where 9 (or 6 files) were listed.
+  // Each case holds one real item, the fence (a fake heading and a fake item inside), then more real items after the real close.
+  describe("one fence rule at planner intake", () => {
+    const kinds = [
+      { name: "Contracts", max: 8, over: tooMany, wave: (list: string) => wave2(list), item: (i: number) => `- c${i}` },
+      { name: "Test files", max: 5, over: tooManyFiles, wave: (list: string) => wave2(items(1), list), item: (i: number) => `- f${i}.test.ts` },
+    ];
+    const blocks: [string, string][] = [
+      ["a backtick fence holding a tilde line", "```\n~~~\n## Example\n- fake\n```"],
+      ["a four-backtick fence holding a three-backtick line", "````\n```\n## Example\n- fake\n````"],
+      ["a backtick fence holding a same-marker line with a suffix", "```\n``` x\n## Example\n- fake\n```"],
+      ["a tilde fence holding a backtick line", "~~~\n```\n## Example\n- fake\n~~~"],
+      ["a five-tilde fence holding a four-tilde line", "~~~~~\n~~~~\n## Example\n- fake\n~~~~~"],
+      ["a fence closed by a longer backtick run", "```\n## Example\n- fake\n`````"],
+      ["a fence closed by a longer tilde run", "~~~\n## Example\n- fake\n~~~~~~"],
+      ["a fence closer with trailing whitespace", "```\n## Example\n- fake\n```  \t"],
+      ["an indented fence", "  ```\n  ~~~\n  ## Example\n  - fake\n  ```"],
+    ];
+    const cases = kinds.flatMap((kind) => blocks.map(([name, block]) => [kind.name, name, block, kind] as const));
+
+    test.each(cases)("%s: %s then one more than the limit is refused", async (_kind, _name, block, kind) => {
+      await expect(submit([IMPL, kind.wave(`${kind.item(0)}\n${block}\n${items(kind.max, (i) => kind.item(i + 1))}`)])).rejects.toThrow(refusal(kind.over(kind.max + 1)));
+    });
+
+    test.each(cases)("%s: %s then exactly the limit is accepted", async (_kind, _name, block, kind) => {
+      await expect(submit([IMPL, kind.wave(`${kind.item(0)}\n${block}\n${items(kind.max - 1, (i) => kind.item(i + 1))}`)])).resolves.toBeDefined();
+    });
+
+    test("CRLF line endings follow the same rule", async () => {
+      const body = wave2(`- c0\n${blocks[0]![1]}\n${items(8)}`).body.replace(/\n/g, "\r\n");
+      await expect(submit([IMPL, { body, test: true }])).rejects.toThrow(refusal(tooMany(9)));
+    });
+
+    test("an unclosed fence hides the rest of the Contracts section", async () => {
+      await expect(submit([IMPL, wave2(`- c0\n\`\`\`\n${items(8)}`)])).resolves.toBeDefined();
+    });
+
+    // A fenced copy of a heading is not the section: the real heading after it is, and a heading only inside a fence is missing.
+    test.each([
+      ["Contracts", "```\n~~~\n## Contracts to verify\n- fake\n```", (fake: string) => `# Tests\n\n## Test files\n- a.test.ts\n\n${fake}\n\n## Contracts to verify\n${items(9)}`, tooMany(9)],
+      ["Test files", "```\n~~~\n## Test files\n- fake\n```", (fake: string) => `# Tests\n\n${fake}\n\n## Test files\n${items(6, (i) => `- f${i}.test.ts`)}\n\n## Contracts to verify\n- c0`, tooManyFiles(6)],
+    ])("a fake %s start before the real start is ignored", async (_name, fake, body, line) => {
+      await expect(submit([IMPL, { body: body(fake), test: true }])).rejects.toThrow(refusal(line));
+    });
+
+    const missingContracts = 'plan wave 2 lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.';
+    const missingFiles = 'plan wave 2 is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max 5).';
+    test.each([
+      ["Contracts", "# Tests\n\n## Test files\n- a.test.ts\n\n```\n~~~\n## Contracts to verify\n- a\n```", missingContracts],
+      ["Test files", "# Tests\n\n## Contracts to verify\n- a\n\n```\n~~~\n## Test files\n- a.test.ts\n```", missingFiles],
+    ])("a %s heading that exists only inside a fence is missing, with that one line", async (_name, body, line) => {
+      await expect(submit([IMPL, { body, test: true }])).rejects.toThrow(refusal(line));
+    });
+  });
+
+  test("test files count by the same rules", () => {
+    const files = items(6, (i) => `- [ ] f${i}.test.ts\n  - note\n  wrapped`);
+    expect(checkPlan([IMPL, wave2(items(1), `\`\`\`\n- fake\n\`\`\`\n${files}`)])).toEqual([tooManyFiles(6)]);
   });
 });
