@@ -26,7 +26,6 @@ describe("a passed gate completes the target", () => {
   test("red tests, then a fix run that ends green: the worker completes", async () => {
     const world = await gateWorld();
     const { worker, reviewer, tester } = await world.gated();
-    world.unholdBranch(worker.threadId);
     await world.verdict(reviewer, "approve");
     await world.testReport(tester, false);
     const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
@@ -38,7 +37,6 @@ describe("a passed gate completes the target", () => {
   test("a fix run that is blocked on a wrong test, then a corrector that ends green: the worker completes", async () => {
     const world = await gateWorld();
     const { worker, reviewer, tester } = await world.gated();
-    world.unholdBranch(worker.threadId);
     await world.verdict(reviewer, "approve");
     await world.testReport(tester, false);
     const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
@@ -94,7 +92,6 @@ describe("a gate that has not passed refuses completion with its next step", () 
   test("a fix run's ready report without testsPassed is refused at intake, and so is testsPassed: false", async () => {
     const world = await gateWorld();
     const { worker, reviewer, tester } = await world.gated();
-    world.unholdBranch(worker.threadId);
     await world.verdict(reviewer, "approve");
     await world.testReport(tester, false);
     const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
@@ -108,7 +105,6 @@ describe("a gate that has not passed refuses completion with its next step", () 
     for (const ending of ["red", "blocked"] as const) {
       const world = await gateWorld();
       const { worker, reviewer, tester } = await world.gated();
-      world.unholdBranch(worker.threadId);
       await world.verdict(reviewer, "approve");
       await world.testReport(tester, false);
       const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
@@ -223,7 +219,6 @@ describe("cleanup approval", () => {
   test("a fix run's pass stamps the worker, the reviewer and the fix run; the replaced tester is eligible through its replacement", async () => {
     const world = await gateWorld({ cleanup: true });
     const { worker, reviewer, tester } = await world.gated();
-    world.unholdBranch(worker.threadId);
     await world.verdict(reviewer, "approve");
     await world.testReport(tester, false);
     const fix = await world.delegateTo({ replaces: tester, kind: "worker" });

@@ -17,7 +17,6 @@ const refused = (world: GateWorld, params: object) => world.refusal(world.delega
 /** A gate in `fix`: the reviewer approved and the tester's tests are red. */
 async function inFix(world: GateWorld) {
   const gated = await world.gated();
-  world.unholdBranch(gated.worker.threadId);
   await world.verdict(gated.reviewer, "approve");
   await world.testReport(gated.tester, false);
   return gated;
@@ -79,10 +78,7 @@ describe("the gate's one fix run", () => {
     }
   });
 
-  // PRODUCT DEFECT (src/runtime/delegation.ts, the `holder` check): the gate's pinned target is still active while the gate is open and holds the
-  // branch, so the documented fix run is refused. Every other test here nulls the target's branch to get past it. When the defect is fixed this test
-  // fails ("expected to fail"): drop `.fails`, and drop unholdBranch from the helpers.
-  test.fails("the gate's fix run is admitted while its target is still active on the same branch", async () => {
+  test("the gate's fix run is admitted while its target is still active on the same branch", async () => {
     const world = await gateWorld();
     const gated = await world.gated();
     await world.verdict(gated.reviewer, "approve");
@@ -123,9 +119,7 @@ describe("the gate's one corrector", () => {
     expect(world.gate().corrector_thread_id).toBe(corrector.threadId);
   });
 
-  // PRODUCT DEFECT (src/runtime/delegation.ts fixAdmission): F is complete once its corrector replaced it, so the "already had its corrector" branch
-  // (guarded by prior.state !== "complete") never runs; the refusal tells Chief to delegate a worker replacing F, which is itself refused. Drop `.fails` when fixed.
-  test.fails("a second corrector's refusal says the gate already had its corrector", async () => {
+  test("a second corrector's refusal says the gate already had its corrector", async () => {
     const world = await gateWorld();
     const { fix } = await inWrongTest(world);
     const corrector = await world.delegateTo({ replaces: fix, kind: "tester" });
@@ -193,7 +187,6 @@ describe("a chat fix: a change after completion", () => {
   /** A worker whose gate passed on a fix run's green report (so the gate's findings exist), complete, PR open. */
   async function completed(world: GateWorld) {
     const gated = await world.gated("Fix checkout totals", { prUrl: PR });
-    world.unholdBranch(gated.worker.threadId);
     await world.verdict(gated.reviewer, "request_changes");
     await world.testReport(gated.tester, true);
     const fix = await world.delegateTo({ replaces: gated.tester, kind: "worker" });

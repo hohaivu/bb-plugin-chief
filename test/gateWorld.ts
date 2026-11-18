@@ -96,10 +96,6 @@ export async function gateWorld(options: { /** cleanupApproved setting: true sta
     /** A blocked report. */
     block: (threadId: string, result = "The test setup is wrong.") => call("chief_report", { state: "blocked", result, blocker: result, recommendation: "Reroute it." }, asThread(threadId)),
     complete: (threadId: string, extra: object = {}) => call("chief_complete", { threadId, ...extra }),
-    /** PRODUCT DEFECT workaround (see gateRepair.test.ts "the gate's fix run is admitted while its target is still active"): chief_delegate refuses a gate's
-     * fix run because the still-active target holds the branch. Nulling the target's branch lets the fix-run tests reach their own contract.
-     * It is a direct row write: the row cache reloads on the next write, so call it before the next report. */
-    unholdBranch: (workerThreadId: string) => { state.db.prepare("UPDATE managed_threads SET branch=NULL WHERE thread_id=?").run(workerThreadId); },
     /** chief_delegate of a repair (a fix run, corrector, chat fix, docs repair); threadId is the row it created. */
     async delegateTo(params: object) {
       const text = await call("chief_delegate", { title: "Repair", mission: "Repair it.", ...params }) as string;
