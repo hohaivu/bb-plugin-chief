@@ -182,7 +182,7 @@ describe("tool-call stability", () => {
   ];
   const titleTools: [string, string, (line: string) => string, (source: string, title?: string, planThreadId?: string) => object][] = [
     ["chief_delegate", "worker thread", (line) => line, (mission, title) => ({ mission, unplannedReason: "Bounded test fixture", ...(title ? { title } : {}) })],
-    ["chief_plan", "Plan ·", (line) => `Plan · ${line}`, (mission, title) => ({ mission, ...(title ? { title } : {}) })],
+    ["chief_plan", "Plan ·", (line) => `Plan · ${line}`, (mission, title) => ({ mission, undesignedReason: "small fix", ...(title ? { title } : {}) })],
     ["chief_consult", "Consult ·", (line) => `Consult · ${line}`, (mission, title, planThreadId) => ({ mission, planThreadId, ...(title ? { title } : {}) })],
     ["chief_spawn", "Chief ·", (line) => `Chief · Asha · ${line}`, (request, title) => ({ request, context: "Goal and evidence", ...(title ? { title } : {}) })],
   ];
@@ -210,7 +210,7 @@ describe("tool-call stability", () => {
   // Contract: title default on the CLI path, for delegate, plan and consult (spawn has no CLI command).
   test.each([
     ["delegate", ["--unplanned-reason", "Bounded test fixture"], (line: string) => line],
-    ["plan", [], (line: string) => `Plan · ${line}`],
+    ["plan", ["--undesigned-reason", "small fix"], (line: string) => `Plan · ${line}`],
     ["consult", [], (line: string) => `Consult · ${line}`],
   ])("CLI %s without --title defaults it from the mission's first line", async (command, extra, expected) => {
     // One state per call: a plan gets its one advisor review, so a second consult on the same plan is refused.

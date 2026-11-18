@@ -196,7 +196,18 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(configured.instructions).toContain("well-specified");
-    expect(configured.instructions).toContain("chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
+    expect(configured.instructions).toContain("Order: chief_research (design: true; skipped only with chief_plan undesignedReason: your reason) → the user approves the design in the researcher thread → chief_plan (researchThreadId; no user plan review) (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
+  });
+
+  test("with research off the planner order line is the one without a design step", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ plannerEnabled: true });
+    await state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
+    const chief = await start(state);
+    const { instructions } = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    expect(instructions).toContain("Order: chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
+    expect(instructions).not.toContain("undesignedReason");
+    expect(instructions).not.toContain("chief_research");
   });
 
   test("keeps planning off when the setting is turned off", async () => {
@@ -219,7 +230,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     await state.harness.behavior.callAgentTool("chief_plan", {
-      title: "Plan · X", mission: "Propose how to fix totals",
+      title: "Plan · X", mission: "Propose how to fix totals", undesignedReason: "small fix",
     }, { threadId: chief.threadId, projectId: "proj_1" });
     expect(state.spawned.at(-1)?.title).toBe("Plan · X");
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
@@ -237,7 +248,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const plan = await state.harness.behavior.callAgentTool("chief_plan", {
-      title: "Rework checkout", mission: "Propose how to fix totals",
+      title: "Rework checkout", mission: "Propose how to fix totals", undesignedReason: "small fix",
     }, { threadId: chief.threadId, projectId: "proj_1" });
 
     const spawned = state.spawned.at(-1);
