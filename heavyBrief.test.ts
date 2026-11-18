@@ -23,12 +23,19 @@ const others = cells.filter(([, input]) => input.kind !== "spec-writer");
 const section = (text: string, heading: string) => text.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0];
 
 describe("without a wrapper path", () => {
-  test("every cell of the matrix renders the bytes of a5d01fe, whether heavyPath is omitted or null", () => {
+  test("every cell but the evidence-only tester renders the bytes of a5d01fe, whether heavyPath is omitted or null", () => {
     expect(cells).toHaveLength(Object.keys(base.cells).length);
-    for (const [label, input] of cells) {
+    for (const [label, input] of cells.filter(([label]) => !label.endsWith("evidenceOnly"))) {
       expect(sha(workerBrief(input)), label).toBe(base.cells[label]!.full);
       expect(sha(workerBrief({ ...input, heavyPath: null })), `${label} null`).toBe(base.cells[label]!.full);
     }
+  });
+
+  // The evidence-only brief is rewritten on purpose (docs/specs/plan-chains.md "Evidence-Only Tester Brief"), so a5d01fe no longer pins its bytes; only the heavyPath contract is kept.
+  test("an evidence-only tester renders the same bytes whether heavyPath is omitted or null", () => {
+    const evidence = cells.filter(([label]) => label.endsWith("evidenceOnly"));
+    expect(evidence).toHaveLength(64);
+    for (const [label, input] of evidence) expect(sha(workerBrief({ ...input, heavyPath: null })), label).toBe(sha(workerBrief(input)));
   });
 });
 
