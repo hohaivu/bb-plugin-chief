@@ -100,9 +100,9 @@ export const CHAIN_B_PR = "https://github.com/o/r/pull/8";
 /** The `## Docs needed` text each row reports (undefined: the row reports none). */
 export type DocsNotes = Partial<Record<"w1" | "w2" | "w3" | "t4" | "w5" | "t6" | "s1", string>>;
 /** One plan, two chains whose Spec deltas name the same docs path. Chain A: wave 1 (spec), wave 2 (plain), wave 3 (spec), wave 4 (test).
- * Chain B: wave 5 (spec), wave 6 (test). Every row reported ready and idle except chain B's writer when `blockB` is set (it reports blocked last, idle).
+ * Chain B: wave 5 (spec), wave 6 (test). Every row reported ready and idle except chain B's writer when `blockB` is set (it reports blocked last, idle; a string is its blocker text).
  * Wave 1's writer s1 owns waves 1-2, wave 3's s3 owns 3-4, wave 5's s5 owns 5-6. */
-export async function docsChains(state: State, notes: DocsNotes = {}, blockB = false) {
+export async function docsChains(state: State, notes: DocsNotes = {}, blockB: boolean | string = false) {
   const waves = [specImpl(1), { body: wave(2) + NOT_DOING }, specImpl(3), TEST_WAVE(4), specImpl(5, { dependsOn: [] }), TEST_WAVE(6)];
   const { chief, planner } = await specPlan(state, waves);
   const P = planner.threadId;
@@ -131,7 +131,7 @@ export async function docsChains(state: State, notes: DocsNotes = {}, blockB = f
   await done(s5);
   const t6 = await swap(state, chief, P, 6, w5, "tester");
   await done(t6, notes.t6);
-  if (blockB) await report(state, s5, { state: "blocked", result: "Cannot write the delta", blocker: "Delta names no domain", recommendation: "Re-plan" });
+  if (blockB) await report(state, s5, { state: "blocked", result: "Cannot write the delta", blocker: typeof blockB === "string" ? blockB : "Delta names no domain", recommendation: "Re-plan" });
   return { chief, planner, P, s1, s3, s5, w1, w2, w3, t4, w5, t6, firstWriterPrompt };
 }
 /** The prompt of the thread the last chief_delegate spawned. */
