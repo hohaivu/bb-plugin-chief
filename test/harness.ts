@@ -104,6 +104,8 @@ export async function setup(options: { /** projects.get rejects these ids, as th
   onTabsGet?: (ctx: { threadId: string; call: number; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => Promise<void> | void,
   /** Runs in every threads.getPluginMetadata before it answers: a hook may hold the spawn-recovery lookup open while a launch lands. */
   onPluginMetadata?: (threadId: string) => Promise<void> | void,
+  /** With heavyFiles: runs in every files.read before it reads the file; a hook may throw, as the host does on a transient read failure. */
+  onFileRead?: (path: string) => Promise<void> | void,
   /** Runs in every threads.storageLocation before it answers: a hook may throw `HTTP 409: ...` as bb does while a new environment provisions. */
   onStorageLocation?: (threadId: string) => Promise<void> | void,
   /** Spawned thread ids are `thr_` plus ten zero-padded digits (14 characters, as real ids), not `thr_<n>`: length-bounded outputs depend on it. */
@@ -179,7 +181,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
           await writeFile(path, content);
           return {};
         },
-        ...(options.heavyFiles ? { read: async ({ path }: { path: string }) => ({ content: await readFile(path, "utf8") }) } : {}),
+        ...(options.heavyFiles ? { read: async ({ path }: { path: string }) => { await options.onFileRead?.(path); return { content: await readFile(path, "utf8") }; } } : {}),
         // The real host refuses an existing destination (no overwrite flag); node rename would silently replace it.
         move: async ({ sourcePath, destinationPath }: { sourcePath: string; destinationPath: string }) => {
           if (await access(destinationPath).then(() => true, () => false)) throw new Error(`HTTP 502: Destination already exists: ${destinationPath}`);
