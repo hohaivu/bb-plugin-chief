@@ -23,7 +23,11 @@ export interface ProgressRow {
   regression: number | null;
   findings: string | null;
   tests_passed: number | null;
+  blocker: string | null;
 }
+
+/** A blocked fix run's wrong-test evidence: its blocker names a test file and line (review-engine.md: file and line, contradicted text, command output). */
+export const wrongTestEvidence = (blocker: string | null | undefined) => /\S+\.(test|spec)\.[cm]?[jt]sx?:\d+/.test(blocker ?? "");
 
 /** What the review gate asks for next. First match wins (gateDecision). */
 export type GateDecision<Row> =
@@ -62,9 +66,12 @@ export function gateDecision<Row extends ProgressRow>(input: {
   // Docs findings go only to a Spec Writer repair created after the verdict.
   const findings = (reviewer!.findings ? JSON.parse(reviewer!.findings) as ReportFinding[] : []).filter((entry) => entry.severity === "blocking");
   const docsFindings = findings.filter((entry) => entry.file.startsWith("docs/"));
-  const repairs = input.verdictAt === null ? [] : input.writers.filter((writer) => writer.created_at > input.verdictAt!);
-  const repair = repairs.at(-1);
-  const docsSettled = !docsFindings.length || (!!repair && isSettled(repair));
+  // The current repairs: those delegated after the verdict that no later repair replaced.
+  const repairs = (input.verdictAt === null ? [] : input.writers.filter((writer) => writer.created_at > input.verdictAt!))
+    .filter((writer, _, all) => !all.some((other) => other.replaces_thread_id === writer.thread_id));
+  // Every repair delegated after the verdict must settle; the newest live one is the one waited on.
+  const repair = repairs.find((writer) => !isSettled(writer) && !input.terminal(writer.state)) ?? repairs.at(-1);
+  const docsSettled = !docsFindings.length || (!!repairs.length && repairs.every(isSettled));
   const docsWait = !!docsFindings.length && !!repair && !isSettled(repair) && !input.terminal(repair.state);
   const done = (fixRow: Row) => isReady(fixRow) || fixRow.state === "complete";
   const corrector = actor(gate.corrector_thread_id);
@@ -76,7 +83,9 @@ export function gateDecision<Row extends ProgressRow>(input: {
   }
   const fixer = actor(gate.fixer_thread_id);
   if (fixer) {
-    if (fixer.state === "blocked") return { kind: "wrongTest", fixer };
+    if (fixer.state === "blocked") return wrongTestEvidence(fixer.blocker)
+      ? { kind: "wrongTest", fixer }
+      : { kind: "escalate", why: `fix run ${fixer.thread_id} is blocked without wrong-test evidence (a test file:line, the contradicted plan or docs text, the command output): answer its blocker with chief_continue (threadId: ${fixer.thread_id}), or escalate` };
     if (fixer.state === "failed") return { kind: "escalate", why: `fix worker ${fixer.thread_id} failed: chief_continue (threadId: ${fixer.thread_id}) it, or escalate` };
     if (!done(fixer)) return { kind: "wait", who: [fixer] };
     if (fixer.tests_passed === 1 && docsSettled) return { kind: "pass" };
@@ -87,7 +96,10 @@ export function gateDecision<Row extends ProgressRow>(input: {
   if (!fixer && (tester!.tests_passed !== 1 || codeFindings)) return { kind: "fix", redTests: tester!.tests_passed !== 1, codeFindings };
   if (docsSettled) return { kind: "pass" };
   if (docsWait) return { kind: "wait", who: [repair!] };
-  const writer = gate.targets.map((target) => row(target.threadId)).filter((target): target is Row => !!target && isWriter(target.kind)).at(-1);
+  const gateWriters = gate.targets.map((target) => row(target.threadId)).filter((target): target is Row => !!target && isWriter(target.kind));
+  // A finding names no owner, so only a one-writer gate assigns its docs findings safely; several writers need Chief's assignment.
+  if (gateWriters.length > 1 && !repairs.length) return { kind: "escalate", why: `the review found docs findings and the gate has ${gateWriters.length} Spec Writers (${gateWriters.map((writer) => writer.thread_id).join(", ")}); assign each finding to its owning writer: chief_delegate (replaces: <that writer>, kind: spec-writer) with only its findings, once per owning writer` };
+  const writer = gateWriters[0];
   return writer ? { kind: "docsRepair", writer } : { kind: "escalate", why: `the review found docs findings and no side-lane Spec Writer of this gate can repair them` };
 }
 
@@ -139,10 +151,16 @@ export function createPlanProgress<Row extends ProgressRow>(
     | { kind: "betweenWaves"; waves: PlanWave[]; next: number }
     | { kind: "sideWriter" }
     | { kind: "pending"; waves: PlanWave[]; pending: number[] }
-    | { kind: "writers"; waves: PlanWave[]; writers: { wave: number; writer: Row | undefined }[] } {
+    | { kind: "writers"; waves: PlanWave[]; writers: { wave: number; writer: Row | undefined }[] }
+    | { kind: "unready"; rows: Row[] } {
     if (isDesignWave(worker)) return { kind: "design" };
     const waves = planWavesFor(worker.plan_thread_id);
-    if (!waves.length || worker.plan_wave == null) return null;
+    if (!waves.length || worker.plan_wave == null) {
+      // An unplanned task: the worker needs a ready report, and so does the task's newest Spec Writer.
+      const writer = ledger.taskChain(worker.thread_id).map((id) => rows().get(id)).find((row) => !!row && isWriter(row.kind));
+      const unready = [worker, ...(writer && writer !== worker ? [writer] : [])].filter((row) => !isSettled(row));
+      return unready.length ? { kind: "unready", rows: unready } : null;
+    }
     const planThreadId = worker.plan_thread_id!;
     // A side-lane Spec Writer is one of the plan's review targets; the one review starts from an implementation chain tip.
     if (sideLane(worker)) {

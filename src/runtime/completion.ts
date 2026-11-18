@@ -49,7 +49,10 @@ export function createCompletion(ctx: Ctx) {
     } else return skipped("no task branch");
     const found = await docsCommits({ cwd: path, env: forgeEnv(), deadlineMs: 20_000, head });
     if ("skipped" in found) return skipped(found.skipped);
-    const allowed = new Set(taskWriters(row, ledger.taskChain(row.thread_id)).map((writer) => writer.thread_id));
+    const chain = ledger.taskChain(row.thread_id);
+    // A chat fix is unplanned: its provenance is the newest non-chat row it replaces (the original plan's target), whose writers stay authorized.
+    const origin = row.fix_run === "chat" ? chain.map((id) => store.get(id)).find((other) => !!other && other.fix_run !== "chat") : undefined;
+    const allowed = new Set([...taskWriters(row, chain), ...(origin ? taskWriters(origin, ledger.taskChain(origin.thread_id)) : [])].map((writer) => writer.thread_id));
     const offending = found.commits.filter((commit) => !commit.writer || !commit.writer.split(",").some((id) => allowed.has(id.trim())));
     if (!offending.length) return null;
     const owner = row.plan_thread_id && row.plan_wave != null ? chainOwner(row.plan_thread_id, planWavesFor(row.plan_thread_id), row.plan_wave) : undefined;

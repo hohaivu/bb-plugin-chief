@@ -1,6 +1,7 @@
 import { DOCS_WORK_FILE, advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
 import { MAX_CARRIED_FAILS, sectionOf } from "../report/reportIntake";
 import { isWriter } from "../plan/waveSchedule";
+import { wrongTestEvidence } from "../plan/planProgress";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
 import { isReady } from "../plan/waveSchedule";
@@ -164,7 +165,7 @@ export function createDelegation(ctx: Ctx) {
     if (gate && prior.state !== "complete" && gate.fixer_thread_id === prior.thread_id) {
       if (kind !== "tester") throw new Error(escalate(prior.thread_id));
       if (gate.corrector_thread_id) throw new Error(`Review gate ${gate.gate_key} already had its corrector (${gate.corrector_thread_id}): escalate to the user.`);
-      if (prior.last_report_state !== "blocked") throw new Error(`A corrector replaces fix run ${prior.thread_id} only after it reports blocked with wrong-test evidence; it is ${prior.state}.`);
+      if (prior.last_report_state !== "blocked" || !wrongTestEvidence(prior.blocker)) throw new Error(`A corrector replaces fix run ${prior.thread_id} only after it reports blocked with wrong-test evidence; it is ${prior.state}${prior.last_report_state === "blocked" ? " and its blocker names no test file:line" : ""}. Answer its blocker with chief_continue (threadId: ${prior.thread_id}), or escalate.`);
       return { run: "corrector", gate };
     }
     if (gate && gate.fixer_thread_id === prior.thread_id && gate.corrector_thread_id && kind === "tester") throw new Error(`Review gate ${gate.gate_key} already had its corrector (${gate.corrector_thread_id}): escalate to the user.`);

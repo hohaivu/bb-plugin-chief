@@ -3,8 +3,6 @@ export const SUMMARY_MAX = 800;
 export const MAX_PLAN_LENGTH = 64_000;
 // ponytail: arbitrary cap so a runaway plan can't schedule an unbounded worker chain.
 export const MAX_WAVES = 8;
-export const MAX_TEST_CONTRACTS = 8;
-export const MAX_TEST_FILES = 5;
 export const MAX_REPORT_FAILS = 5;
 export const MAX_FINDINGS = 40;
 export const REPORT_TEXT_MAX = 4_000;

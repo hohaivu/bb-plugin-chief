@@ -576,11 +576,18 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         store.batch(() => store.openGate({ gateKey, projectId: worker.project_id, chiefThreadId: caller.thread_id, planThreadId: worker.plan_thread_id, targets: pinned, now: Date.now() }));
         gate = store.gate(gateKey)!;
       }
+      // Each missing side starts independently and persists on success, so a retry starts only the side that failed.
+      const open = gate;
+      const [reviewerRun, testerRun] = await Promise.allSettled([
+        down(open.reviewer_thread_id) ? launchReviewer(open, worker, focus, acceptedGaps, projectDir) : Promise.resolve(null),
+        down(open.tester_thread_id) ? launchTester(open, worker) : Promise.resolve(null),
+      ]);
+      const reviewer = reviewerRun.status === "fulfilled" ? reviewerRun.value : null;
       const started: string[] = [];
-      let reviewer: { id: string; title: string } | null = null;
-      if (down(gate.reviewer_thread_id)) reviewer = await launchReviewer(gate, worker, focus, acceptedGaps, projectDir);
       if (reviewer) started.push(`reviewer ${reviewer.id}`);
-      if (down(gate.tester_thread_id)) started.push(`tester ${await launchTester(gate, worker)}`);
+      if (testerRun.status === "fulfilled" && testerRun.value) started.push(`tester ${testerRun.value}`);
+      const failures = [reviewerRun.status === "rejected" ? `reviewer: ${String(reviewerRun.reason)}` : null, testerRun.status === "rejected" ? `tester: ${String(testerRun.reason)}` : null].filter(Boolean);
+      if (failures.length) throw new Error(`Review gate ${gateKey}${started.length ? ` started ${started.join(" and ")} but` : ""} could not start ${failures.join("; ")}. Call chief_review again to start only the missing side.`);
       const shown = reviewer ?? { id: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)?.title ?? "" };
       const note = notes.length ? ` Not checked: ${notes.join("; ")}.` : "";
       return {

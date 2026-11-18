@@ -95,7 +95,7 @@ of [`skills/chief/SKILL.md`](skills/chief/SKILL.md).
 
 Settings → **Plan before delegating** (on by default). With it on, Chief gains `chief_plan`: it sends
 one unit of work to a read-only planner that reads the project's own checkout on a plain prompt, with
-no provider plan mode and no approval prompt, and splits the work into 2 to 8 waves (always an array: at least one implementation wave; no test waves, since the gate's tester writes the tests), each
+no provider plan mode and no approval prompt, and splits the work into one wave (a string) or an array of 1 to 8 waves (at least one implementation wave; no test waves, since the gate's tester writes the tests; design-only waves count toward the eight-wave limit but not toward the advisor threshold), each
 a self-contained plan for one worker. It submits those waves through `chief_report`'s
 `plan` field, and the plugin saves each one to the shared artifact folder `<BB data dir>/chief/<projectId>/<threadId>/` (falling back to the thread's own storage when the data dir is unknown) as `plan-1.md … plan-N.md` (or
 `plan.md` for the legacy string form) and persists the schedule. Reports and verdicts go to the same folder.
