@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
 import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withWriter } from "./test/specWriterHelpers";
 import { type State, ctxOf, delegateWave, plan, planWave, planWaves, readyIdle, report, reviewed, rowOf, setLive, tool, wavePaths, workerOn } from "./test/testerHelpers";
-import { DESIGN_CHECKLIST_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, start, status, wave, withReviewerLine, withoutAlertMarker } from "./test/harness";
+import { DESIGN_CHECKLIST_LINE, PLAN_FIXTURE, RESHAPE_CHECKLIST_LINE, TEST_FILES, TEST_WAVE, TEST_WAVE_CHECKLIST_LINE, approvePlan, delegate, disposeAll, planFile, replaceText, reviewContextOf, setup, start, status, wave, withReviewerLine, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { DOCS_RULE_OLD, dropDocsLines } from "./test/docsOwnership";
@@ -223,7 +223,7 @@ describe("tester role", () => {
       await delegate(state, chief.threadId, "Tests", { replaces: unplanned.threadId, kind: "tester" });
       out["tester, unplanned"] = last();
       const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE },
-        { body: wave(2, "Write the tests.\n\n## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative"), test: true }]);
+        { body: wave(2, `Write the tests.\n\n${TEST_FILES}\n\n## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative`), test: true }]);
       await delegateWave(state, chief.threadId, planner.threadId, 1, { verifyCommand: "npx vitest run server.test.ts -t totals" });
       out["worker, planned"] = last();
       const impl = workerOn(state, planner.threadId, 1).thread_id as string;

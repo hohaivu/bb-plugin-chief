@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { reviewBrief, type ReviewBriefInput } from "./src/review/reviewStart";
-import { PLAN_FIXTURE, delegate, disposeAll, replaceText, setup, reviewContextOf, snapshotText, start, status, wave } from "./test/harness";
+import { PLAN_FIXTURE, TEST_FILES, delegate, disposeAll, replaceText, setup, reviewContextOf, snapshotText, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { wave1Prompt } from "./test/reviewWave1";
@@ -25,7 +25,7 @@ describe("waived test waves, reviewer waivers and the branch push line", () => {
   const stateOf = (state: State, id: string) => (state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(id) as { state: string }).state;
   const READY = "Done\n\n## Deviations from plan\nNone";
   const BLOCKED = { state: "blocked", result: "Tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" };
-  const testWave = (n: number) => `# Wave ${n}\nRun the tests.\n\n## Contracts to verify\n- TESTWAVE${n} suite stays green`;
+  const testWave = (n: number) => `# Wave ${n}\nRun the tests.\n\n${TEST_FILES}\n\n## Contracts to verify\n- TESTWAVE${n} suite stays green`;
 
   async function planOf(state: State, chiefId: string, waves: { body: string; dependsOn?: number[]; test?: boolean }[]) {
     await state.harness.behavior.setSettings({ plannerEnabled: true });

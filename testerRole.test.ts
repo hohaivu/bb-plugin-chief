@@ -11,7 +11,7 @@ import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, d
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { inPlaceLine } from "./test/blockedAlerts";
-import { COMPLETE_RESULT, CUT_RESULT, NORMAL_MODE, RECEIPT_BODY, withReceipt } from "./test/receiptFixtures";
+import { COMPLETE_RESULT, CUT_RESULT, METADATA_ONLY_RESULT, MISSING_FIELDS_RESULT, NORMAL_MODE, PIPES_ONLY_RESULT, RECEIPT_BODY, withReceipt } from "./test/receiptFixtures";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -1229,6 +1229,10 @@ describe("prior receipt", () => {
   test.each<[string, Array<string | typeof BLOCKED>, number, boolean]>([
     ["a legacy report (no receipt)", [READY], 0, false],
     ["a cut receipt", [CUT_RESULT], 0, false],
+    ["a receipt whose only pipes are Coverage metadata", [METADATA_ONLY_RESULT], 0, false],
+    ["a receipt whose command row is pipes only", [PIPES_ONLY_RESULT], 0, false],
+    ["a receipt whose command row lacks its exit statuses", [MISSING_FIELDS_RESULT], 0, false],
+    ["a metadata-only newest tester over an older complete receipt", [COMPLETE_RESULT, METADATA_ONLY_RESULT], 1, false],
     ["a legacy newest tester over an older complete receipt", [COMPLETE_RESULT, READY], 1, false],
     ["a cut newest tester over an older complete receipt", [COMPLETE_RESULT, CUT_RESULT], 1, false],
     ["a blocked newest tester over a ready complete one", [COMPLETE_RESULT, BLOCKED], 0, true],

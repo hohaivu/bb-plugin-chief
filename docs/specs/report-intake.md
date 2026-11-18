@@ -205,10 +205,10 @@ Each contract carries its reason.
 
 `sectionOf` reads one Markdown section of a plan body. The plan checks and `contractsOf` both use it.
 
-- `sectionOf` matches the first heading of any level from 1 to 6 whose text starts with the name. It ignores case and leading spaces or tabs. Reason: not stated in the code.
-- `sectionOf` returns the text after the heading line up to the next heading of the same or a higher level, or to the end. Reason: not stated in the code.
+- `sectionOf` matches the first heading of any level from 1 to 6 whose text starts with the name. It ignores case and leading spaces or tabs. Reason: `contractsOf` already matched these headings, and its output must not change for any body.
+- `sectionOf` returns the text after the heading line up to the next heading of the same or a higher level, or to the end. Reason: a deeper heading stays in the section, so a nested `###` does not cut a contract list.
 - `sectionOf` does not trim the text. The first content line keeps its indentation. Reason: the top-level item count reads list indentation.
-- `sectionOf` returns undefined when no heading matches. Reason: not stated in the code.
+- `sectionOf` returns undefined when no heading matches. Reason: the plan check reports a missing heading with its own error, and an empty section returns an empty string, so the two cases stay apart.
 - `contractsOf(body)` returns the trimmed `sectionOf` text for `Contracts to verify`, or undefined when that text is empty. Its output is unchanged for every body. Reason: existing callers keep their output.
 
 ### Plan test-wave bound
@@ -216,10 +216,10 @@ Each contract carries its reason.
 `checkPlan` bounds the size of each test wave. It does not bound implementation waves.
 
 - A test wave's `## Contracts to verify` holds 1 to 8 top-level list items. Reason: a small test wave keeps a tester session short, because each call re-reads the growing context.
-- A test wave's `## Test files` holds 1 to 5 top-level list items. Reason: the same as the contract bound.
+- A test wave's `## Test files` holds 1 to 5 top-level list items. Reason: a short file list keeps the tester session short, as the contract bound does.
 - A test wave with contract text and no list item is refused. Reason: the bound counts list items, so plain text has no count.
-- A test wave without a `## Test files` heading is refused. Reason: the file bound counts the items under that heading.
-- A test wave without a Contracts heading gets only the missing-heading error. Reason: not stated in the code.
+- A test wave without a `## Test files` heading is refused. Reason: the list names the test files the tester adds or changes, so a wave without it has no file scope.
+- A test wave without a Contracts heading gets only the missing-heading error. Reason: that error already refuses the wave, so the bound adds no second line and existing error text stays byte-identical.
 - Implementation and design waves have no bound. Reason: the bound limits tester work only.
 
 Counting rules:
@@ -227,6 +227,7 @@ Counting rules:
 - Top level is the smallest indentation among the list items of the section. A tab counts as 4 spaces.
 - Supported markers are `-`, `*`, `+`, `N.` and `N)`. A checkbox (`[ ]` or `[x]`) belongs to its item.
 - Wrapped lines, deeper items and fenced code blocks are not counted. Reason: one top-level item stands for one contract or one test file.
+- Headings inside fenced code blocks are not section boundaries, in either section. A fenced `## Example` does not end the section. Reason: a fenced heading is example text, so ending the section there would hide the items after it.
 - A section with no list item counts 0.
 
 Invariants:
@@ -235,7 +236,7 @@ Invariants:
 
 Trade-offs:
 
-- A contract list in an unsupported marker style, such as `•`, is refused when no supported item exists. When supported and unsupported items are mixed, the unsupported items are not counted. Reason: not stated in the code.
+- A contract list in an unsupported marker style, such as `•`, is refused when no supported item exists. When supported and unsupported items are mixed, the unsupported items are not counted. Reason: `•` is not Markdown list syntax, so counting it would need a marker rule that Markdown does not define.
 
 ## Out of Scope
 

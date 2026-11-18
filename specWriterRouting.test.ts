@@ -4,7 +4,7 @@ import { MIGRATIONS } from "./src/db/migrations";
 import { checkPlan } from "./src/report/reportIntake";
 import { CHAIN, CHAIN_B, CHAIN_PR, NOT_DOING, SPEC_DELTA, type WriterState, delegateWriter, docsChains, docsWorkList, lastPrompt, fullChain, lastAlert, ownerOn, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withBoth, withWorker, withWriter, writerOn } from "./test/specWriterHelpers";
 import { READY, type State, ctxOf, delegateWave, followRoute, plan, planWave, planWaves, readyIdle, refusal, report, reviewerCount, rerunRoute, review, reviewed, rowOf, setLive, tick, tool, workerOn } from "./test/testerHelpers";
-import { TEST_WAVE, approvePlan, delegate, disposals, disposeAll, latestReviewContext, legacyWave, planFile, setup, start, status, wave } from "./test/harness";
+import { TEST_FILES, TEST_WAVE, approvePlan, delegate, disposals, disposeAll, latestReviewContext, legacyWave, planFile, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { inPlaceLine } from "./test/blockedAlerts";
@@ -114,7 +114,7 @@ describe("tester role", () => {
     // existed; the strings were captured by running checkPlan at the pre-wave-1 commit 783efcb on these inputs.
     // Regression: the spec branch reorders or rewords an old plan's errors, so a planner's retry loop sees new text.
     test("checkPlan returns byte-identical errors for plans that do not use spec", () => {
-      const W = (n: number, extra: object = {}) => ({ body: `# Wave ${n}\nx\n\n## Contracts to verify\n- c${n}\n\n## Test files\n- x.test.ts\n\n## What we're NOT doing\n- x`, ...extra });
+      const W = (n: number, extra: object = {}) => ({ body: `# Wave ${n}\nx\n\n## Contracts to verify\n- c${n}\n\n## What we're NOT doing\n- x\n\n${TEST_FILES}`, ...extra });
       expect(checkPlan([W(1), W(2, { test: "yes" })])).toEqual([
         "plan wave 2 test is \"yes\" (string); allowed true or false. Send a boolean, or drop test.",
         "plan wave 2 ends a chain but is not test: true; follow it with a test wave (test: true, dependsOn [2]) that tests it.",

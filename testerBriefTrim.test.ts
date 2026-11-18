@@ -3,7 +3,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { type WorkerBriefInput, workerBrief } from "./src/research/delegationBrief";
 import { SPEC_WRITER_BOUNDARY, TESTER_BOUNDARY, WORKER_BOUNDARY } from "./test/docsOwnership";
 import { NOT_DOING, SPEC_DELTA, fullChain } from "./test/specWriterHelpers";
-import { PLAN_FIXTURE, TEST_WAVE, delegate, disposeAll, setup, start } from "./test/harness";
+import { PLAN_FIXTURE, TEST_FILES, TEST_WAVE, delegate, disposeAll, setup, start } from "./test/harness";
 import { plan, readyIdle, workerOn } from "./test/testerHelpers";
 import { provideSdk } from "./test/sdk";
 
@@ -25,6 +25,8 @@ const count = (text: string, needle: string) => text.split(needle).length - 1;
 const lines = (text: string, line: string) => text.split("\n").filter((entry) => entry === line).length;
 const section = (text: string, heading: string) => text.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0];
 const planned = { wave: 2, waveTotal: 2, planContextLine: "Plan file (wave 2 of 2): /plans/plan-2.md" };
+// A test wave lists at most 8 contracts at planner intake, so its 5,000 characters come as 8 wide items.
+const wideContracts = (tag: string) => Array.from({ length: 8 }, (_, i) => `- ${tag} item ${i} ${"x".repeat(620)}`).join("\n");
 const contractList = (tag: string, size: number) => Array.from({ length: Math.ceil(size / 19) }, (_, i) => `- ${tag} item ${String(i).padStart(4, "0")} holds`).join("\n");
 
 describe("empty sections", () => {
@@ -244,7 +246,7 @@ describe("tester working contract", () => {
 });
 
 describe("chief_delegate: planned chain with 5,000-character contract lists", () => {
-  const long = (n: number) => `# Wave ${n}\nBuild the totals.\n\n${n === 1 ? `${SPEC_DELTA}\n\n` : ""}## Contracts to verify\n${contractList(`W${n}`, 5_000)}${NOT_DOING}`;
+  const long = (n: number) => `# Wave ${n}\nBuild the totals.\n\n${n === 1 ? `${SPEC_DELTA}\n\n` : `${TEST_FILES}\n\n`}## Contracts to verify\n${n === 1 ? contractList("W1", 5_000) : wideContracts("W2")}${NOT_DOING}`;
   const chainPrompts = async () => {
     const state = await setup();
     await fullChain(state, [{ body: long(1), spec: true }, { body: long(2), test: true }]);
