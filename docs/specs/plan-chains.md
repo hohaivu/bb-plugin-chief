@@ -279,7 +279,8 @@ An evidence-only tester runs the commands that the mission names, or the command
 - A `None` section is skipped. Reason: it holds no docs item.
 - The section lists the prior writer's blocker only when its last report was blocked. Reason: an open blocker is docs work that the repair must fix.
 - The section holds whole items within 4,000 characters. Reason: a cut item loses its meaning.
-- When items remain, the overflow line names the count and every remaining source thread id. Reason: no item is dropped without a pointer.
+- The section shows the longest whole-item prefix that leaves room, within 4,000 characters, for the exact omitted count and every omitted source thread id. The prefix may be empty. Reason: inline items let the writer fix them without a file read.
+- When no prefix leaves that room, the section shows the exact omitted count and the path of one file in `$BB_THREAD_STORAGE`. The file holds the full work list. It has every collected worker, designer and tester `## Docs needed` item of the owned waves. It also has the prior writer's blocker when its last report was blocked. Reason: no item is dropped without a way to recover it.
 - A repair with no items gets no section. Reason: an empty section adds only noise.
 - A first writer, an implementation-lane or unplanned repair, a writer adopted by a new plan, and every non-writer kind get no section. Reason: only a same-plan side-lane repair owns the docs of its owned waves.
 - The writer fixes each item that still holds, then folds once. Reason: one repair replaces separate fix and fold writers.
