@@ -29,12 +29,10 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Pending writer**: a spec wave that has no Spec Writer row, or whose latest Spec Writer row is not ready, not idle after a ready report, and not complete.
 - **Legacy plan**: an earlier plan where each wave received an independent branch.
 - **Legacy wave**: a stored wave without a `feature` key. Its review keeps the native-design check and the reshape sentences.
-- **Pinned review**: a review round bound to a specific pull request commit SHA.
-- **Unpinned review**: a review round without a readable commit SHA.
+- **Pinned review**: a review whose targets are bound to a specific pull request commit SHA. See [review-engine.md](review-engine.md).
+- **Unpinned review**: a review whose targets have no readable commit SHA.
 - **Cleanup claim**: a persistent record in `cleanup_environment_claims` that assigns an environment action to one thread.
 - **Merge proof**: the forge answer that a pull request is merged. Cleanup needs it before it archives a row that has a pull request.
-- **Repair target**: a worker thread that a reviewer covers. An open target is a repair target with work still open.
-- **Loose target**: an open target that is not in a legacy stack.
 - **Spec Writers of this task**: the Spec Writers in the `replaces:` chain of a task row, plus the side-lane writers on the waves of its chain. `taskWriters` returns them.
 - **Evidence-only tester**: a Tester that Chief delegates with `evidenceOnly: true`. It runs commands that already exist, compares the results, writes no test, and makes no commit.
 - **Heavy command**: a build, a test run, or a simulator, emulator or device run that a worker, designer or tester starts.
@@ -48,9 +46,9 @@ Seven modules own the plan chains domain:
 1. `src/plan/waveSchedule.ts` owns graph traversal, wave relationships, wave absence, the lane predicate `sideLane`, `writerPending`, and the plan base of a chain head (`planBase`).
 2. `src/plan/planLifecycle.ts` owns delegation admission, role progression, and waivers.
 3. `src/runtime/delegation.ts` owns `startWorker`, which launches workers and Spec Writers. `src/tools/forgeInit.ts` owns forge initialization. `src/runtime/cleanup.ts` owns cleanup steps and the merge cache. `src/forge/cleanup.ts` owns `taskPullRequests`.
-4. `src/plan/planProgress.ts` owns progress checks, review readiness, the release route to the tester, legacy restack rules, and the repair decision after a reviewer verdict.
+4. `src/plan/planProgress.ts` owns progress checks, review readiness, legacy restack rules, and `gateDecision`.
 5. `src/runtime/nextAction.ts` and `src/runtime/completion.ts` own the text of the next call and the completion rules. `src/runtime/host.ts` (`chiefCoreRules`) owns the core rule that sends follow-up work to a fresh worker, with its one in-place exception.
-6. `src/research/delegationBrief.ts` owns the worker brief. `src/review/reviewStart.ts` owns review launch preparation, brief generation, and environment reuse.
+6. `src/research/delegationBrief.ts` owns the worker brief. `src/review/reviewStart.ts` owns review launch preparation and brief generation.
 7. `src/review/reviewLedger.ts` owns reviewer tracking, coverage checks, and historical task chain queries.
 
 Callers interact with these entry points:
@@ -71,14 +69,8 @@ Callers interact with these entry points:
 - `chief_forge_init(params)`: initializes the forge repository branch, pull request, and issue.
 - `startWorker(params)`: prepares and launches a worker thread in an environment.
 - `restackOf(worker, waves)`: determines whether a legacy wave requires a restack.
-- `reviewAdvice(reviewer)`: returns null, or one advice of kind approve, fix, consult, or stop.
-  - The advice names the layout: whole plan, single managed worker, or unowned branch.
-  - The advice lists the open targets, the legacy stack groups in wave order, and the loose targets.
-  - For each target, the advice states whether it is a tester branch and whether it sits on a spec-bearing chain.
-  - A tester branch is a tester row.
 - `newestVerdictAt(threadIds)`: returns the newest reviewer verdict and its time for a set of worker threads.
 - `onSpecChain(row)`: returns true for a plan chain with a Spec Writer on an unbypassed spec wave. It also returns true for an unplanned task chain that holds a Spec Writer.
-- `reusableEnvironment(threadId)`: returns the environment of an earlier reviewer if it is available for reuse.
 - `cleanupStep(job, eligible)`: executes lifecycle cleanup transitions and records environment claims.
 - `publishHeavy(hostId, slots)`: writes the host `slots` file and publishes the slot wrapper. It returns the script path.
 - `heavySlotCount(values)`: maps the `heavySlots` setting to a slot count from 1 to 8.
@@ -96,7 +88,7 @@ A plan chain follows this lifecycle:
 6. Chief calls `chief_delegate` for the next wave using `replaces:` referencing the chain owner.
 7. The server assigns the existing worker environment, task branch, and pull request.
 8. Later waves in the chain repeat this replacement sequence.
-9. Chief starts the review gate with `chief_review` after every wave and Spec Writer reports ready. See [review-engine.md](review-engine.md).
+9. Chief starts the review gate once, with `chief_review`, after the last wave and every Spec Writer reports ready. See [review-engine.md](review-engine.md).
 
 A spec wave adds a Spec Writer that runs in parallel with the wave worker:
 
@@ -110,7 +102,7 @@ A spec wave adds a Spec Writer that runs in parallel with the wave worker:
    4. Check that the diff `U..HEAD` lists only `docs/` paths.
    5. Push `HEAD` to the task branch with a plain push. A rejected push sets `B` to this attempt's `U` and repeats the steps from the fetch.
 5. The Spec Writer records Fold base and Fold head, or `Fold: none`.
-6. `chief_review` refuses to start while a Spec Writer of the chain is not ready. Once every writer reports ready, the review gate starts its tester.
+6. `chief_review` refuses to start while a Spec Writer of the chain is not ready. Once every writer reports ready, the review gate starts its reviewer and its tester.
 
 Independent chains run in parallel:
 
@@ -119,13 +111,7 @@ Independent chains run in parallel:
 3. Each chain head receives an independent branch, pull request, and worker environment.
 4. Each chain proceeds through its waves independently.
 
-Reviewers reuse pinned worktrees across review rounds:
-
-1. Chief starts a pinned review for a completed task.
-2. The server searches for the newest earlier pinned reviewer across target task chains.
-3. The server reuses that reviewer worktree when the environment is reusable and distinct from any live target worker environment.
-4. The reviewer brief instructs the reviewer to checkout the pinned commit detached.
-5. The server creates a fresh managed worktree when no eligible earlier reviewer exists.
+Reviewers never reuse a worktree. Each gate review gets a fresh managed worktree on the pinned commit. See [review-engine.md](review-engine.md) under Reviewer and tester.
 
 Shared worktree cleanup coordinates action ownership:
 
@@ -165,13 +151,15 @@ Shared worktree cleanup coordinates action ownership:
 - Launch needs a non-null base with no `waiting`. Review and completion use a non-null base whatever the readiness. Reason: launch needs the parent code, and review needs the base that the chain was cut from.
 - A stacked chain with a null base skips each check that needs a base, and never reads origin/HEAD. Reason: the default branch lacks the changes of the parent wave, so its diff gives a wrong scope.
 - The server never restacks a stacked chain and never retargets its pull request. Reason: a restack rewrites the history of started work. GitHub retargets a pull request only when its base branch is deleted.
+- Without a pinned head, the impact slice of a stacked or branch-based plan wave compares against `origin/<plan base>`. When the plan base is unresolved, the slice is skipped. Reason: a stacked chain builds on its parent branch, so only that base gives its own scope.
 
 ### Chain Admission and Delegation
 
 - `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
 - `admitDelegation` names `replaces: <chain owner>` when it rejects a non-head wave without a replacement target. Reason: callers must know the latest implementation thread to continue the chain.
 - `admitDelegation` rejects an implementation delegation without `replaces:` when any wave in the chain already has an implementation-lane row. Reason: started chains must not allocate duplicate workers or environments.
-- `admitDelegation` refuses `kind: tester` while a review gate is open, unless `evidenceOnly` is true. Reason: the gate starts its own tester.
+- `admitDelegation` refuses `kind: tester` while a review gate is open, unless `evidenceOnly` is true or the call is the corrector of the gate's fix run. Reason: the gate starts its own tester.
+- While a review gate is open, `admitDelegation` admits only the gate's fix run (`kind: worker`, replacing the gate tester). Reason: one writable owner holds the gate at a time. See [review-engine.md](review-engine.md) under Fix Run and Corrector.
 - A later implementation wave is admitted while a Spec Writer is pending. Reason: Spec Writers never gate implementation waves.
 - `admitDelegation` rejects a replacement target from another chain of the same plan. Reason: independent chains must not inherit foreign branches or environments.
 - `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
@@ -245,7 +233,7 @@ An evidence-only tester runs the commands that the mission names, or the command
 - `planProgress` returns a `waitWriters` step when the parent implementation row reports ready while a writer is pending. It returns the exact `chief_review` call when the last writer reports ready. Reason: Chief must not call a step that admission rejects.
 - A ready report and an idle thread after a ready report count the same for both triggers. Reason: the thread convention is the same in every ready check.
 - The plan review is rejected while a spec wave has a pending writer. Reason: the review must see the folded docs.
-- A side-lane Spec Writer is a separate review target. `fixRound` never puts it in a legacy stack. It always lists the writer as a loose target. Reason: the writer shares the task branch, so it is not a stacked branch.
+- A side-lane Spec Writer is a separate review target. It never joins a legacy stack. Reason: the writer shares the task branch, so it is not a stacked branch.
 - A side-lane Spec Writer completes with a covering approve, `skipReview`, or `override`. An implementation-lane `spec-writer` keeps the rejection. Reason: a side writer has its own report and fold head.
 - `chief_skip_specs` is rejected after the wave has any `spec-writer` row. It works while only the worker exists. Reason: it only bypasses a Spec Writer that Chief never delegated.
 - A spec waiver waives the planned Spec delta only. It does not block an incidental docs correction. Reason: a waiver and a docs repair are different decisions.
@@ -384,18 +372,6 @@ A tester brief has these rules:
 - `chief_forge_init` refuses a stacked head while its plan base waits or is unresolved. Its text names the reason and offers no explicit base. Reason: an explicit base never bypasses the readiness rule.
 - On a plan wave without a plan base, and on unplanned work, `chief_forge_init` keeps a free explicit `base`. Reason: only a stacked or branch-based chain fixes its base.
 
-### Review Worktree
-
-- `startReview` launches a fresh managed worktree on the pull request branch for the first pinned review of a task. Reason: a new review requires an isolated worktree checkout.
-- `startReview` reuses the newest earlier pinned reviewer worktree for a later pinned review of the same task when that reviewer is eligible. Reason: worktree reuse saves disk space and checkout time across review rounds.
-- `reusableEnvironment` returns an environment only when the earlier reviewer thread is live, not archived, not active, and has an existing worktree. Reason: reviews must not disrupt active threads or touch deleted environments.
-- `startReview` never reuses an environment that matches the live environment identifier of any review target worker. Reason: a reviewer must not mutate or lock the workspace of an active target worker.
-- The reviewer brief instructs the reviewer to checkout the pinned commit detached. Reason: detached checkouts avoid local branch divergence during review.
-- `startReview` launches a fresh managed worktree when `reusableEnvironment` returns null, rejects, or times out. Reason: review launches must continue without failure when reuse cannot complete safely.
-- `startReview` uses the live environment of the worker for an unpinned review. Reason: unpinned reviews run directly in the environment of the worker.
-- `startReview` never selects an unpinned review environment for later reviewer reuse. Reason: unpinned reviews record no pinned commit SHA and belong to workers.
-- Without a pinned head, the impact slice of a stacked or branch-based plan wave compares against `origin/<plan base>`. When the plan base is unresolved, the slice is skipped. Reason: a stacked chain builds on its parent branch, so only that base gives its own scope.
-
 ### Shared Worktree Cleanup
 
 - `cleanupStep` records an action claim in `cleanup_environment_claims` before deleting branches or issuing teardown alerts. Reason: atomic claims elect exactly one owner for each shared worktree action.
@@ -429,7 +405,6 @@ A tester brief has these rules:
 ### Legacy Restack Handling
 
 - `src/plan/planProgress.ts` evaluates restack requirements only for legacy plans where waves have distinct branches. Reason: new chains share a single branch and never require branch restacking.
-- `src/runtime/nextAction.ts` words restack instructions only for the legacy stacks that `reviewAdvice` returns. It never groups targets itself. Reason: historical plan graphs in SQLite require backward compatibility.
 - The server never instructs new chain workers to restack branches. Reason: all waves in a new chain commit directly to the shared branch.
 
 ### Baseline Graph and Schedule Operations
@@ -482,12 +457,6 @@ Known limits:
 - Exactly one cleanup job owns each action for a shared environment in `cleanup_environment_claims`. Reason: primary key constraints prevent duplicate claim owners.
 - A reviewer worktree never hosts review execution on the live environment of an active target worker. Reason: concurrent reviewer execution inside a worker workspace causes file collisions.
 - `test/fixtures/legacy-wave-graph-bf73de5.json` decisions remain identical to base commit results. Reason: legacy plan verification contracts require strict regression avoidance.
-- Reviewer advice is not permission. Reason: advice is plan-wide wording, and permission is per task.
-- `reviewAdvice` takes its rung from the `reject_streak` that the reviewer carries, through `ledger.rung`. Reason: one carried streak gives one answer for the alert, Pending, and the action panel.
-- `ledger.replacement` keeps permission for a `replaces:`. It decides from task history, consult timing, and user approval. Reason: permission depends on the task, not on the plan.
-- A satisfied consult still shows consult advice. `chief_delegate` decides whether the `replaces:` proceeds. Reason: advice stays plan-wide wording.
-- `src/runtime/nextAction.ts` `nextAction` formats the result of `reviewAdvice` and makes no repair decision of its own. Reason: one module reads plan state and reviewer state together, and the server only writes sentences.
-- The report alert, `chief_roster` Pending, and the action panel read the same `reviewAdvice` answer. Reason: the three surfaces must never give different advice.
 - The task branch and pull request of a stacked or branch-based chain are based on its plan base. They never start from `origin/HEAD`, `main`, or `master`. Reason: the pull request must show only the changes of its own chain.
 - A plan with no `stackOn` and a planner with no branch behaves as before. Reason: existing plans must not change.
 - A row with a pull request is archived, and its branch deleted, only after merge proof for each such pull request. Missing or failed forge evidence keeps the row. Reason: until merge the task stays live, so a chat-requested fix can continue it.
@@ -498,3 +467,4 @@ Known limits:
 - [Only a Spec Writer changes docs](../decisions/2026-11-10-docs-owned-by-spec-writer.md)
 - [Stacked chains use a stackOn field](../decisions/2026-11-14-stacked-chains-stackon.md)
 - [Heavy commands run through a host slot wrapper](../decisions/2026-11-18-heavy-slots-host-capacity.md)
+- [One review gate per plan](../decisions/2026-11-18-single-review-gate.md)
