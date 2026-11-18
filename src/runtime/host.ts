@@ -29,7 +29,7 @@ function researchChiefInstructions(planning: boolean) {
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
 const ROSTER_CHIEF_INSTRUCTIONS =
-  "Call chief_roster at the start of every turn and after any compaction: its Pending block is the work list. Track todos only with its `todo` field (never Memory files, TodoWrite or Task tools). When work a todo tracks is finished, close that todo in the same turn: todo { id, state: \"done\" }. Leave todos tagged with another Chief or no owner unless the user asks.";
+  "Call chief_roster at the start of every turn, and again after any compaction: its Pending block is the work list. Track todos only with its `todo` field (never Memory files, TodoWrite or Task tools). When work a todo tracks is finished, close that todo in the same turn: todo { id, state: \"done\" }. Leave other Chiefs' and unowned todos unless the user asks.";
 
 /** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
 const WAIT_CHIEF_INSTRUCTIONS =
