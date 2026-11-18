@@ -552,8 +552,31 @@ describe("receiptOf", () => {
     ["no Tested commit line", result(lines(["Tested commit", null]))],
     ["a Tested commit that is not 7-40 hex characters", result(lines(["Tested commit", "Tested commit: abc12"]))],
     ["no command line", result(lines([COMMAND.slice(0, 6), null]))],
+    ["a Coverage line with four pipe fields and no command row", result(lines([COMMAND.slice(0, 6), null], ["Coverage:", "Coverage: API | UI | CLI | Docs"]))],
+    ["only pipes in the command row", result(lines([COMMAND.slice(0, 6), "| | | |"]))],
+    ["a blank command row", result(lines([COMMAND.slice(0, 6), "   "]))],
+    ["a command row with four pipe fields that name no exit status", result(lines([COMMAND.slice(0, 6), "plugin | npm test | pass | pass"]))],
+    ["a command row without a cwd", result(lines([COMMAND.slice(0, 6), "| npm test | 0 | 0"]))],
+    ["a command row without a command", result(lines([COMMAND.slice(0, 6), "plugin |  | 0 | 0"]))],
+    ["a command row without the actual exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0"]))],
+    ["a command row with an exit status above 255", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 300"]))],
   ])("%s is not a complete receipt", (_label, input) => {
     expect(receiptOf(input)).toBeNull();
+  });
+
+  // A command row is `cwd | command | required exit | actual exit`; the counts column is optional and a command may itself contain `|`.
+  test.each([
+    ["the four-field row", "plugin | npm test | 0 | 0"],
+    ["a row that records a failing actual exit", "plugin | npm test | 0 | 1"],
+    ["a command that contains a pipe", "plugin | npm test | tee run.log | 0 | 0"],
+    ["a bulleted row", "- plugin | npm test | 0 | 0 | 5 passed"],
+  ])("%s is a complete command row", (_label, row) => {
+    expect(receiptOf(result(lines([COMMAND.slice(0, 6), row])))?.testedCommit).toBe("abc1234");
+  });
+
+  test("metadata pipes in Coverage do not stand in for the command row when a real one is present", () => {
+    const body = lines(["Coverage:", "Coverage: API | UI | CLI | Docs"]);
+    expect(receiptOf(result(body))?.text).toBe(body.join("\n"));
   });
 
   test("the 3,000-character bound is inclusive: 3,000 parses, 3,001 does not, and nothing is clipped", () => {
