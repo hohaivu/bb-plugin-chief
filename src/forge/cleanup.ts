@@ -15,6 +15,7 @@ export interface CleanupRow {
   replaces_thread_id: string | null;
   plan_waves: string | null;
   cleanup_approved_at: number | null;
+  pr_url: string | null;
 }
 
 /** The ids of the complete rows whose whole task was approved: the stamped workers, the workers they replaced, and the
@@ -62,6 +63,36 @@ export function cleanupEligible(rows: CleanupRow[], targets: (reviewerId: string
     return false; // chief, researcher
   };
   return new Set(rows.filter((row) => qualifies(row.thread_id)).map((row) => row.thread_id));
+}
+
+/** The pull request URLs that decide whether `row` may be cleaned up, through the links `cleanupEligible` follows: a worker's own
+ * and its successors'; a reviewer's covered targets' (the recorded URL, else the target row's chain); an advisor's worker or plan;
+ * a planner's wave workers'. Empty means the task has no pull request. */
+export function taskPullRequests(row: CleanupRow, rows: CleanupRow[], targets: (reviewerId: string) => { worker_thread_id: string; pr_url: string | null }[]): Set<string> {
+  const urls = new Set<string>();
+  const seen = new Set<string>();
+  const same = (other: CleanupRow) => other.chief_thread_id === row.chief_thread_id && other.project_id === row.project_id;
+  const byId = new Map(rows.map((other) => [other.thread_id, other]));
+  const linked = (id: string | null) => { const other = id ? byId.get(id) : undefined; return other && same(other) ? other : undefined; };
+  const visit = (current: CleanupRow | undefined) => {
+    if (!current || seen.has(current.thread_id)) return;
+    seen.add(current.thread_id);
+    if (current.pr_url) urls.add(current.pr_url);
+    if (current.role === "worker") {
+      for (const other of rows) if (other.role === "worker" && other.replaces_thread_id === current.thread_id && same(other)) visit(other);
+    } else if (current.role === "reviewer") {
+      for (const target of targets(current.thread_id)) {
+        if (target.pr_url) urls.add(target.pr_url);
+        else visit(linked(target.worker_thread_id));
+      }
+    } else if (current.role === "advisor") {
+      visit(linked(current.plan_thread_id ?? current.worker_thread_id));
+    } else if (current.role === "planner") {
+      for (const other of rows) if (other.role === "worker" && other.plan_thread_id === current.thread_id && same(other)) visit(other);
+    }
+  };
+  visit(row);
+  return urls;
 }
 
 /** The branch name when it is a bb worktree branch (`bb/<slug>-thr_<id>`) of a thread `owns` accepts, else null. */
