@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
-import { PLAN_FIXTURE, TEST_WAVE, delegate, disposeAll, execFileMock, setup, start, status } from "./test/harness";
+import { PLAN_FIXTURE, delegate, disposeAll, execFileMock, setup, start, status } from "./test/harness";
 import { planWave, report, rowOf, tool } from "./test/testerHelpers";
 import { provideSdk } from "./test/sdk";
 
@@ -91,7 +91,7 @@ describe("approved design binding", () => {
     expect(second).toContain(snap.facts);
 
     const original = plannerRows(state).at(-1)!.thread_id;
-    await report(state, original, { state: "ready", result: "Waves written.", plan: [planWave(1), planWave(2), TEST_WAVE(3)] });
+    await report(state, original, { state: "ready", result: "Waves written.", plan: [planWave(1), planWave(2)] });
     await tool(state, "chief_consult", { planThreadId: original, title: "Plan", mission: "Review this plan" }, chief);
     const advisor = (await status(state)).threads.filter((row: { role: string }) => row.role === "advisor").at(-1)!;
     await report(state, advisor.threadId, { state: "ready", result: "Split the waves differently.", verdict: "request_changes" });
@@ -143,7 +143,7 @@ describe("approved design binding", () => {
     await planWith(state, chief, researcher);
     const snap = snapshotsOf(state, researcher);
     const original = plannerRows(state).at(-1)!.thread_id;
-    await report(state, original, { state: "ready", result: "Waves written.", plan: [planWave(1), planWave(2), TEST_WAVE(3)] });
+    await report(state, original, { state: "ready", result: "Waves written.", plan: [planWave(1), planWave(2)] });
     await tool(state, "chief_consult", { planThreadId: original, title: "Plan", mission: "Review this plan" }, chief);
     const advisor = (await status(state)).threads.filter((row: { role: string }) => row.role === "advisor").at(-1)!;
     await report(state, advisor.threadId, { state: "ready", result: "Split the waves differently.", verdict: "request_changes" });
@@ -245,7 +245,7 @@ describe("approved design binding", () => {
   describe("chief_forge_init", () => {
     /** The plan's one chain head: forge_init on wave 1 returns the script text (no project path), whose BODY holds the pull request body. */
     async function forgeBody(ctx: Awaited<ReturnType<typeof approved>>, planner: string) {
-      await report(ctx.state, planner, { state: "ready", result: "Waves written.", plan: [planWave(1), TEST_WAVE(2)] });
+      await report(ctx.state, planner, { state: "ready", result: "Waves written.", plan: [planWave(1), planWave(2)] });
       return tool(ctx.state, "chief_forge_init", { title: "Wave 1 work", planThreadId: planner, wave: 1 }, ctx.chief) as Promise<string>;
     }
 
@@ -276,7 +276,7 @@ describe("approved design binding", () => {
       const chief = await start(state);
       await state.harness.behavior.callAgentTool("chief_plan", { title: "Sessions", mission: "Plan it", undesignedReason: "small fix" }, { threadId: chief.threadId, projectId: "proj_1" });
       const planner = plannerRows(state).at(-1)!.thread_id;
-      await report(state, planner, { state: "ready", result: "Waves written.", plan: [{ body: PLAN_FIXTURE }, TEST_WAVE(2)] });
+      await report(state, planner, { state: "ready", result: "Waves written.", plan: [{ body: PLAN_FIXTURE }, { body: "# Wave 2\n\n## Contracts to verify\n- Wave 2 keeps its invariant" }] });
       const script = await tool(state, "chief_forge_init", { title: "Wave 1 work", planThreadId: planner, wave: 1 }, chief.threadId) as string;
       const body = `Tracking work for Wave 1 work.\n\n<details><summary>Plan — chain of waves 1, 2 of 2 (planner ${planner})</summary>\n\nWaves written.\n</details>\n\n<details><summary>Wave 1 of 2 — Plan</summary>\n\n### Contracts to verify\n- Totals stay non-negative\n</details>\n\n<details><summary>Wave 2 of 2 — Wave 2</summary>\n\n### Contracts to verify\n- Wave 2 keeps its invariant\n</details>`;
       expect(script).toContain(`\nBODY='${body}'\n`);
