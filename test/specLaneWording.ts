@@ -6,7 +6,7 @@ type Json = unknown;
 const REWORDED: [string, string, RegExp, RegExp][] = [
   ["chief_delegate", "description", /side worktree/, /one worktree:/],
   ["chief_delegate", "inputSchema.properties.kind.description", /explicit kind/, /defaults to spec-writer on its first hand-off/],
-  ["chief_complete", "description", /covering approve/, /is never completed/],
+  ["chief_complete", "description", /review gate passed/, /is never completed/],
   ["chief_complete", "inputSchema.properties.skipReview.description", /implementation-lane Spec Writer/, /Refused, like override, for a Spec Writer/],
   ["chief_skip_specs", "description", /once a Spec Writer was delegated on it/, /its worker runs first/],
   ["chief_report", "inputSchema.properties.plan.anyOf.1.items.properties.spec.description", /in parallel with its worker/, /before its worker/],
@@ -39,7 +39,7 @@ export function acceptPlanningLine(nowText: string, wasText: string) {
   return lines.join("\n");
 }
 /** Chief's core rules (host.ts) were trimmed so a linked Chief's rules end inside the SDK cut. Each trim is one exact edit of the base line, so any other byte on the line still fails. */
-const TEST_DOCS_LINE = "- Tests, docs: only a tester writes or runs tests (a plan's test wave, or chief_delegate replaces: the worker, kind: tester); only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).";
+const TEST_DOCS_LINE = "- Tests, docs: workers never write or edit tests and run tests only in a fix run their brief names; the gate's tester writes the tests; only a Spec Writer changes docs/, on every wave and unplanned work (chief skill).";
 /** The `- Fresh worker:` core rule as of 01163a8, the text every frozen tool-config baseline from 6534bea on holds. */
 export const FRESH_WORKER_BASE_LINE = "- Fresh worker: a worker that has reported is never reused. All follow-up (unmet criteria, requested changes, next wave, rebase, restack, push, new task) goes to a fresh worker, tests to a fresh tester, via chief_delegate replaces: (same worktree, branch, PR; so is a plan chain's next wave); review and complete the successor.";
 /** The one authorized replacement for that line: a side-lane docs repair gets a fresh worktree, and a blocked worker with an environment blocker is answered in place. */
@@ -69,14 +69,10 @@ export function assertSpecLaneWording(catalog: Record<string, any>) {
     if (typeof text !== "string" || !has.test(text) || lacks.test(text)) throw new Error(`${tool}.${path}: must match ${has} and not ${lacks}`);
   }
 }
-/** The retest-debt feature adds chief_review's optional retestSkipped and a sentence of its description. Asserted on the head tool, then base text and schema win. */
-export function acceptRetestDelta(now: any, was: any, name: string) {
+/** The review gate removed retest debt: chief_review carries no retestSkipped any more, so the tool matches the base. Mutates nothing. */
+export function acceptRetestDelta(now: any, _was: any, name: string) {
   if (name !== "chief_review") return;
-  const property = now.inputSchema.properties.retestSkipped;
-  if (!property || !/waives every rerun/.test(property.description) || (now.inputSchema.required ?? []).includes("retestSkipped")) throw new Error("chief_review.retestSkipped: must be an optional field that waives every rerun");
-  if (!/retestSkipped \(reason\) waives every listed rerun/.test(now.description) || /retestSkipped/.test(was.description)) throw new Error("chief_review.description: must name retestSkipped, and the base must not");
-  delete now.inputSchema.properties.retestSkipped;
-  now.description = was.description;
+  if ("retestSkipped" in now.inputSchema.properties || /retestSkipped/.test(now.description)) throw new Error("chief_review: retestSkipped is removed with the retest debt");
 }
 
 // #214: chief_delegate gains the optional boolean evidenceOnly, with this exact description (src/tools/shapes.ts). The one authorized delta, asserted exactly and then removed.
