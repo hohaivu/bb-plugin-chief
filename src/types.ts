@@ -160,6 +160,7 @@ export const reportParams = z.object({
   testsPassed: z.boolean().optional().describe(
     "Ready only, review-gate tester only (required there): true when every test you ran passed on every branch head you pushed, false when any failed (list them under ## Failing tests). Every other role leaves this unset.",
   ),
+  waitingOnUser: z.boolean().optional().describe("Design researcher only, with state active or blocked: true while your design questions wait on the user."),
 });
 
 export type ReportParams = z.infer<typeof reportParams>;
@@ -248,6 +249,11 @@ export interface ManagedRow {
   coordinator_thread_id: string | null;
   /** Worker row only: 1/0 for planning on/off at delegation; null for rows from before the column. */
   planner_on: number | null;
+  /** Researcher row: 1 for design mode; NULL or 0 is light. */
+  research_design: number | null;
+  research_thread_id: string | null;
+  /** Design researcher: 1 while its design questions wait on the user. */
+  waiting_on_user: number;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */
   fails: string | null;
   findings: string | null;

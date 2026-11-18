@@ -23,7 +23,7 @@ const PLANNER_CHIEF_INSTRUCTIONS =
 
 /** Chief-only cue for when to reach for chief_research; sent while research is on. */
 function researchChiefInstructions(planning: boolean) {
-  return `chief_research is optional. A call starts a researcher thread that works alone or with read-only helper threads; end your turn and wait for its report alert. Use it for a broad multi-file scan or independent questions, or to check doubtful worker or reviewer evidence. When a report is partial or failed, do not rerun the same question: send the open question to ${planning ? "chief_plan" : "chief_consult"}, or the doubtful evidence to chief_review.`;
+  return `chief_research is optional. A call starts a researcher thread that sends ticket-blind questions to read-only helper threads; end your turn and wait for its report alert. For features and multi-file work, call it with design: true and the ticket as \`question\` before ${planning ? "chief_plan" : "chief_delegate"}. Use design: false to check doubtful worker or reviewer evidence. While a design discussion waits on the user, tell the user once in one line and stay quiet. When a report is partial or failed, do not rerun the same question: send the open question to ${planning ? "chief_plan" : "chief_consult"}, or the doubtful evidence to chief_review.`;
 }
 
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
