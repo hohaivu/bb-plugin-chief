@@ -48,7 +48,7 @@ const plan = (state: State, chief: string, extra: object) => tool(state, "chief_
 describe("chief_research design flag", () => {
   test("design is required", async () => {
     const { state, chief } = await newState();
-    await expect(state.raw.callAgentTool("chief_research", { question: "Who calls this?" }, { threadId: chief, projectId: "proj_1" })).rejects.toThrow(/design/);
+    await expect(tool(state, "chief_research", { question: "Who calls this?" }, chief)).rejects.toThrow(/design/);
     expect(await researcherIds(state)).toEqual([]);
   });
 
@@ -185,7 +185,7 @@ describe("design researcher alerts", () => {
 describe("chief_plan design inputs", () => {
   test("with research on, a new plan needs researchThreadId or undesignedReason, and nothing starts without one", async () => {
     const { state, chief } = await newState();
-    await expect(state.raw.callAgentTool("chief_plan", { title: "Add CSV export", mission: "Plan it" }, { threadId: chief, projectId: "proj_1" }))
+    await expect(plan(state, chief, {}))
       .rejects.toThrow(/chief_plan needs researchThreadId .* or undesignedReason/);
     expect(spawnedPlanners(state)).toEqual([]);
   });
@@ -194,7 +194,7 @@ describe("chief_plan design inputs", () => {
     const { state, chief } = await newState();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     await state.harness.behavior.callRpc("setResearchSettings", { enabled: false } as never);
-    await state.raw.callAgentTool("chief_plan", { title: "Add CSV export", mission: "Plan it" }, { threadId: chief, projectId: "proj_1" });
+    await plan(state, chief, {});
     expect(spawnedPlanners(state)).toHaveLength(1);
   });
 
