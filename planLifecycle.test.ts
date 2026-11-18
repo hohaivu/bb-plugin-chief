@@ -402,9 +402,11 @@ describe("waiveSpecs", () => {
     }
   });
 
-  test("a spec wave with no worker yet is waived, with its parent", () => {
-    const { lifecycle } = world({ [P]: specPlan });
-    expect(lifecycle.waiveSpecs(P, 2)).toEqual({ outcome: "waive", parent: 1 });
+  test("a plan waiver selects spec waves across chains without waiving an existing legacy writer", () => {
+    const waves: PlanWave[] = [...specPlan, { path: "anchor", spec: true, dependsOn: [] }];
+    expect(world({ [P]: waves }).lifecycle.waiveSpecs(P)).toEqual({ outcome: "waive", waves: [2, 5] });
+    const legacy = world({ [P]: waves }, [{ id: "sw", plan: P, wave: 2, kind: "spec-writer" }]);
+    expect(legacy.lifecycle.waiveSpecs(P)).toEqual({ outcome: "waive", waves: [5] });
   });
 
   test("a spec wave that already has a Spec Writer row is refused, and one that only has its worker is waived", () => {
