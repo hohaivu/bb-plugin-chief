@@ -1,7 +1,8 @@
 import { type ManagedRow } from "../types";
 import { type ThreadInsert } from "../db/threadStore";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { heavyScript } from "../research/heavySlots";
 import type { Ctx } from "./context";
 
   export type ThreadInput = ThreadInsert<ManagedRow["role"], ManagedRow["state"]>;
@@ -25,25 +26,34 @@ export function createArtifacts(ctx: Ctx) {
     }
     return paths;
   }
+  /** The host's BB data dir (cached per process: a moved dir needs a plugin reload), or null with the reason it is unknown. */
+  async function hostDataDir(hostId: string): Promise<{ dir: string | null; reason: string }> {
+    let reason = "its thread storage root is unknown";
+    const cached = ctx.state.dataDirs.get(hostId);
+    if (cached) return { dir: cached, reason };
+    const dataDir = await bb.sdk.hosts.get({ hostId }).then((host) => host.threadStorageRootPath ? dirname(host.threadStorageRootPath) : null)
+      .catch((error) => { reason = `reading it failed: ${String(error)}`; return null; });
+    if (dataDir) ctx.state.dataDirs.set(hostId, dataDir);
+    return { dir: dataDir, reason }; // this call's own lookup: another call's cache fill never turns its failure into success
+  }
   async function artifactDir(threadId: string, projectId: string, onHost?: string) {
     // A named host skips storageLocation, which answers HTTP 409 while a new environment provisions.
     const location = onHost ? null : await bb.sdk.threads.storageLocation({ threadId });
     const hostId = onHost ?? location!.hostId;
-    if (!ctx.state.dataDirs.has(hostId)) {
-      // ponytail: per-process cache; a moved BB data dir needs a plugin reload
-      let reason = "its thread storage root is unknown";
-      const dataDir = await bb.sdk.hosts.get({ hostId }).then((host) => host.threadStorageRootPath ? dirname(host.threadStorageRootPath) : null)
-        .catch((error) => { reason = `reading it failed: ${String(error)}`; return null; });
-      if (dataDir) ctx.state.dataDirs.set(hostId, dataDir);
-      else if (onHost) throw new Error(`Host ${hostId}'s BB data dir is unavailable (${reason})`); // the thread's storage root is on another host
-      else {
-        bb.log.warn(`Host ${hostId}'s BB data dir is unavailable (${reason}); writing Chief artifacts to thread storage instead.`);
-        // Recorded before the path is used, so a thread's storage that holds evidence is never cleared; if this throws, so does the artifact write.
-        db.prepare(`INSERT OR IGNORE INTO artifact_fallbacks (thread_id, at) VALUES (?, ?)`).run(threadId, Date.now());
-        return { hostId, dir: location!.storageRootPath };
-      }
+    const { dir: dataDir, reason } = await hostDataDir(hostId);
+    if (!dataDir) {
+      if (onHost) throw new Error(`Host ${hostId}'s BB data dir is unavailable (${reason})`); // the thread's storage root is on another host
+      bb.log.warn(`Host ${hostId}'s BB data dir is unavailable (${reason}); writing Chief artifacts to thread storage instead.`);
+      // Recorded before the path is used, so a thread's storage that holds evidence is never cleared; if this throws, so does the artifact write.
+      db.prepare(`INSERT OR IGNORE INTO artifact_fallbacks (thread_id, at) VALUES (?, ?)`).run(threadId, Date.now());
+      return { hostId, dir: location!.storageRootPath };
     }
-    return { hostId, dir: join(ctx.state.dataDirs.get(hostId)!, "chief", projectId, threadId) };
+    return { hostId, dir: join(dataDir, "chief", projectId, threadId) };
+  }
+
+  async function readFile(hostId: string, path: string) {
+    const file = await bb.sdk.files.read({ hostId, path });
+    return typeof file === "string" ? file : (file as { content?: string }).content ?? "";
   }
 
   /** Writes one of Chief's artifacts to its shared folder and returns the absolute path. */
@@ -81,13 +91,39 @@ export function createArtifacts(ctx: Ctx) {
     return path;
   }
 
+  /** Prepares the host-wide heavy-command slots under <BB data dir>/chief/heavy/ and returns the wrapper's path. Writes the capacity
+   * file `slots` when its text differs. The wrapper is immutable: an existing path is never removed or rewritten, a different
+   * file there throws. Throws when the data dir is unknown. */
+  async function publishHeavy(hostId: string, slots: number) {
+    const { dir: dataDir, reason } = await hostDataDir(hostId);
+    if (!dataDir) throw new Error(`Host ${hostId}'s BB data dir is unavailable (${reason})`);
+    const heavy = join(dataDir, "chief", "heavy");
+    const read = (path: string) => readFile(hostId, path).catch(() => null);
+    if ((await read(join(heavy, "slots"))) !== `${slots}\n`) await atomicWrite(hostId, join(heavy, "slots"), `${slots}\n`);
+    const content = heavyScript();
+    const path = join(heavy, `chief-heavy-${createHash("sha256").update(content).digest("hex").slice(0, 12)}.sh`);
+    const existing = await read(path);
+    if (existing === content) return path;
+    if (existing !== null) throw new Error(`${path} exists with other content; not overwriting it`);
+    const tmp = `${path}.tmp-${randomUUID()}`;
+    try {
+      await bb.sdk.files.write({ hostId, path: tmp, content, createParents: true });
+      await bb.sdk.files.move({ hostId, sourcePath: tmp, destinationPath: path });
+    } catch (error) {
+      await bb.sdk.files.remove({ hostId, path: tmp }).catch(() => undefined);
+      // shortcut: the host's message text is how we detect an existing destination (a concurrent publish of the same script); see atomicWrite.
+      if (/already exists/i.test(String((error as Error)?.message ?? error)) && (await read(path)) === content) return path;
+      throw error;
+    }
+    return path;
+  }
+
   /** The artifact's path and text, or null when it is missing or unreadable. Never throws. */
   async function readArtifact(threadId: string, projectId: string, name: string) {
     try {
       const { hostId, dir } = await artifactDir(threadId, projectId);
       const path = join(dir, name);
-      const file = await bb.sdk.files.read({ hostId, path });
-      return { path, text: typeof file === "string" ? file : (file as { content?: string }).content ?? "" };
+      return { path, text: await readFile(hostId, path) };
     } catch {
       return null;
     }
@@ -150,6 +186,6 @@ export function createArtifacts(ctx: Ctx) {
     }
     for (const row of rows) void persistBrief(row.thread_id, row.project_id, row.prompt);
   }
-  return { persistBrief, resumeBriefs, readArtifact, writeArtifact, writePlan, writeStorageFile };
+  return { persistBrief, resumeBriefs, readArtifact, writeArtifact, writePlan, writeStorageFile, publishHeavy };
 }
 

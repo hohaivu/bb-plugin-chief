@@ -3,6 +3,7 @@ import { ADVISE_ONLY, READ_ONLY, managedSkills, type WorkerKind } from "../core/
 import { isWriter } from "../plan/waveSchedule";
 import type { FailEntry } from "../types";
 import { bullets, clip, clipMiddle } from "../core/text";
+import { quote } from "../forge/forge";
 
 // The delegation split, like reviewBrief in reviewStart.ts: resolve what a replaces: successor inherits, and render
 // the worker, planner and advisor prompts. Pure: startWorker, startPlan and startConsult gather the inputs
@@ -128,6 +129,8 @@ export type WorkerBriefInput = {
   evidenceOnly?: boolean;
   /** Tester with a replaces: the chain's newest ready tester and its parsed receipt (null: missing or incomplete). Optional: older callers omit it. */
   receipt?: { tester: { thread_id: string; report_path: string | null }; receipt: { text: string } | null };
+  /** The published slot wrapper's path; set, every kind but a Spec Writer gets `## Heavy commands`. Optional: older callers omit it. */
+  heavyPath?: string | null;
 };
 
 /** The first Working contract item of a worker or planner brief: the plugin only offers a thread its skills, so the brief orders the load.
@@ -140,7 +143,7 @@ const deviationsLine = "- Your ready result must contain a `## Deviations from p
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, receipt } = input;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, receipt, heavyPath = null } = input;
   const tester = kind === "tester";
   const evidence = evidenceOnly && tester;
   const specWriter = isWriter(kind);
@@ -163,6 +166,10 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   // The reviewer gets the same sections, with a long mission or context clipped —
   // it judges against the criteria and constraints, which stay in full.
   const reviewerBrief = render(clip(params.mission, 1_500), context && clipMiddle(context, 1_500));
+  // A code span keeps the shell text literal; its backtick run is one longer than any run inside, padded with spaces.
+  const span = (text: string) => ((ticks) => `${ticks} ${text} ${ticks}`)("`".repeat(Math.max(1, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1))));
+  // A fence longer than any backtick run in the text, so a ``` line in it cannot close it.
+  const fenced = (text: string) => ((fence) => [`${fence}sh`, text, fence])("`".repeat(Math.max(3, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1))));
   const prompt = [
     `You are the managed ${evidence ? "tester" : "worker"} for “${title}”. Report to Chief thread ${chiefThreadId}.`,
     "", brief,
@@ -231,14 +238,21 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(verifyCommand !== null && !specWriter && !evidence ? [
       "", "## Verify command",
-      // Fence longer than any backtick run so a ``` line in the command cannot close it.
-      ...((fence) => [`${fence}sh`, verifyCommand, fence])("`".repeat(Math.max(3, ...(verifyCommand.match(/`+/g) ?? []).map((r) => r.length + 1)))),
+      ...fenced(verifyCommand),
       ...(tester ? [
         "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure at your Base commit is present before your test edits, not proof it predates the feature. List it without changing product code. It does not waive an explicit exit-0 receipt. Any other failure in product code follows the product-code rule in `## Test work`. If this command runs the whole test suite, run it only when your mission or your plan file's `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".",
       ] : [
         "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
         "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
       ]),
+      ...(heavyPath ? [
+        "Run it once through the slot wrapper; that run counts as running this exact command. Pool: sim if it boots or drives a simulator, emulator or device; test if it runs tests; else build:",
+        ...fenced(`bash ${quote(heavyPath)} <pool> -- sh -c ${quote(verifyCommand)}`),
+      ] : []),
+    ] : []),
+    ...(heavyPath && !specWriter ? [
+      "", "## Heavy commands",
+      `Slot wrapper: ${span(`bash ${quote(heavyPath)} <sim|test|build> -- <command>`)}. Run every build and test command through it in the foreground, choosing the pool as your role skill says.`,
     ] : []),
     ...(evidence ? (branch ? ["", "## Git workflow", `Before you read any file, on a clean tree run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`; if either fails, report blocked.`] : []) : branch || issueUrl || prUrl ? [
       "", "## Git workflow",
