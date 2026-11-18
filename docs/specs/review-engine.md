@@ -9,7 +9,9 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 - **Engine**: the setting `reviewEngine`. Its values are `reviewer`, `pr-agent`, and `both`.
 - **Target**: one worker that a review covers. A target is pinned when the gate reads its head commit: the pull request head, else the branch head on origin. Otherwise it is not pinned.
 - **Target line**: one line of a plan review subject. It covers one pull request (pinned targets) or one branch (unpinned targets), and names every worker of that group.
-- **Review gate**: the one review of a plan (or of an unplanned task). It holds one reviewer and one tester, and its targets stay pinned. See Review Gate.
+- **Review gate**: the one review of a plan (or of an unplanned task). It holds one reviewer and one tester, and its targets stay pinned. Its fix run and corrector join it when needed. See Review Gate.
+- **Fix run**: the one fresh worker that a gate admits after a `fix` decision. It replaces the gate tester and makes the failing tests pass.
+- **Corrector**: the one tester that a gate admits after a blocked fix run with wrong-test evidence. It replaces the fix run.
 - **Gate decision**: the state that `gateDecision` returns for a gate: start, restart, wait, fix, docsRepair, wrongTest, escalate or pass.
 - **Accepted gap**: a verification gap that Chief accepted before the review and passed in `acceptedGaps`.
 - **Outcome**: the one result an engine gives for a target: definitive, needs_review, failure, or not pinned.
@@ -276,8 +278,8 @@ The review gate is the one review of a plan. It gives one verdict and one test r
 
 ### Delegation while the gate is open
 
-- A gate target cannot be replaced with `replaces:` while the gate is open. The refusal names the gate fix worker. Reason: fixes go through the gate, so a second row must not take over the pinned target.
-- `chief_delegate` refuses `kind: tester` while the gate is open, unless the call has `evidenceOnly: true`. Reason: the gate already starts its tester.
+- A gate target cannot be replaced with `replaces:` while the gate is open, except by the gate's fix run. The refusal names the gate fix worker. Reason: fixes go through the gate, so a second row must not take over the pinned target.
+- `chief_delegate` refuses `kind: tester` while the gate is open, unless the call has `evidenceOnly: true` or it is the corrector. Reason: the gate already starts its tester.
 
 ### Completion
 
@@ -295,18 +297,45 @@ The review gate is the one review of a plan. It gives one verdict and one test r
 | --- | --- | --- | --- |
 | 1 | No gate exists. | `start` | `chief_review (workerThreadId: W)`, when the readiness rules pass. Otherwise the existing block. |
 | 2 | The reviewer or tester is missing, failed or blocked. | `restart` | `chief_review (workerThreadId: W)` again starts only that side. A blocked tester names its environment blocker. |
-| 3 | The reviewer or tester is busy. | `wait` | Names the busy side. |
-| 4 | Both sides reported, and the tester has `testsPassed` false, or a code finding exists. | `fix` | Names the fix route of the gate. |
+| 3 | The reviewer, tester, fix run or corrector is busy. | `wait` | Names the busy side. |
+| 4 | No fix run exists, both sides reported, and the tester has `testsPassed` false, or a code finding exists. | `fix` | `chief_delegate (replaces: <gate tester>, kind: worker)`, once. |
 | 5 | Docs findings exist, and no Spec Writer repair was created after the verdict and is ready. | `docsRepair` | `chief_delegate (replaces: <that branch's latest side-lane Spec Writer>, kind: spec-writer)`. When no such writer exists, `escalate`. |
-| 6 | A fix run is blocked on a wrong test. | `wrongTest` | Names the test and the escalation route. |
-| 7 | Otherwise. | `pass` | Completion is allowed. |
+| 6 | A fix run is blocked on a wrong test, and no corrector exists. | `wrongTest` | `chief_delegate (replaces: <fix run>, kind: tester)`, once. |
+| 7 | The corrector is red or blocked, or the fix run is blocked on a wrong test after a corrector exists. | `escalate` | Names the test and the owner. |
+| 8 | Otherwise. | `pass` | Completion is allowed. |
 
 Rules:
 
 - A target whose current report number differs from its pinned number gives `escalate`. The text names the target and says that it changed after the gate pinned it. Reason: the verdict no longer covers the target.
 - A docs finding routes only to a Spec Writer repair or to escalation. Reason: only a Spec Writer changes docs.
-- A `pass` needs the tester `testsPassed` true, and every docs finding settled. An approve, or a `request_changes` whose only blocking findings are docs, can pass when those docs are settled. Reason: the decision reads the test result and the docs state together.
+- A `docsRepair` is refused while the fix run or the corrector is busy. Reason: one writable owner holds the gate at a time.
+- A `pass` needs `testsPassed` true on the tester, or on the fix run when one exists, and every docs finding settled. An approve, or a `request_changes` whose only blocking findings are docs, can pass when those docs are settled. Reason: the decision reads the test result and the docs state together.
+- A ready fix run with `testsPassed` true settles the tester result and the code findings of the gate. Reason: the fix run ran the tests on the fixed code, so the old findings no longer decide.
 - A fix run that fails gives `chief_continue` of that run, or `escalate`. Reason: a failed run keeps its evidence, and a fresh row would lose it.
+
+### Fix Run and Corrector
+
+A `fix` decision admits one fix run. A blocked fix run with wrong-test evidence admits one corrector. No other repair route exists.
+
+- The fix run is a fresh `kind: worker` that replaces the gate tester. `chief_delegate` admits it only when `gateDecision` is `fix`, and only once. The admission requires the explicit `kind`, and `replaces:` without `kind` is refused. Reason: the kind decides the lane, and an implicit kind can start the wrong row.
+- The fix run reuses the gate tester's environment, branch and pull request. Reason: the fix commit goes on the same branch as the tests.
+- A second fix run is refused. Its text reads: `The gate already had its fix run (F): escalate to the user.`
+- The fix run brief names the gate's reviewer verdict file and findings, even when the reviewer row is complete. It also names the tester report and its `## Failing tests`. Reason: the fix run needs the same evidence as the gate.
+- The fix run never writes, edits, skips or deletes a test, fixture or test config. It never changes `docs/`. Reason: only the tester writes tests, and only a Spec Writer changes docs.
+- The fix run reports ready only with `testsPassed` true. Reason: the decision reads this value, and a missing value must not count as a pass.
+- The fix run reports blocked only with wrong-test evidence: the test file and line, the plan or docs text that it contradicts, and the command output. Reason: product code is fixed in the run, and only a wrong test leaves the run.
+- A blocked fix run admits one corrector: `chief_delegate (replaces: <fix run>, kind: tester)`. The corrector runs when the fix run is blocked on a wrong test and no corrector exists. It fixes only the named tests, then reruns the gate's failing commands. It reports `testsPassed`.
+- The corrector's `testsPassed` true gives `pass`. A red or blocked corrector gives `escalate`. A second fix worker is never admitted. Reason: the goal allows one fix run and at most one corrector.
+
+### Chat Fix
+
+A change that the owner asks for after completion gets a chat fix. It gets no review.
+
+- A chat fix is a fresh `kind: worker` that replaces a completed gate target or a completed fix run. It is admitted only while that row's pull request is not merged.
+- The chat fix runs with `fix_run='chat'`. It reuses that row's environment, and its brief tells it to fetch and fast-forward to the origin branch before it edits.
+- The chat fix gets no old findings. Its mission is the chat request.
+- The chat fix completes on its own green run: `ready`, `testsPassed` true, and a passing `docsGate`. It stamps `cleanup_approved_at` when cleanup is active.
+- The chat fix is refused once the pull request is merged and cleaned up. Reason: cleanup deletes the branch that the fix needs.
 
 ## Contracts and Invariants
 
@@ -332,6 +361,7 @@ Rules:
 | `docsHistory` is true when some non-merge commit in `<merge-base>..<sha>` touches docs/, a reverted change included. A failed lookup gives `null`, never `false`. | The ownership rule is per commit. |
 | Unknown paths or unknown docs history keep `## Docs ownership`. | A failed lookup never removes a rule. |
 | The engine changes no ledger, verdict storage, approve gate, or lesson rule. The engine appears only in the result text. | The engine is a way to form a verdict, not a new owner. |
+| One writable owner holds a gate at a time: the gate tester, then the fix run, then the corrector. A docs repair runs only while none of them is busy. | Two writers on one checkout can overwrite each other's commits. |
 
 ## Related Decisions
 

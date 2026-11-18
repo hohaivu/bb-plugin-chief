@@ -86,7 +86,7 @@ The transaction runs these steps in order:
 2. An advisor ready or blocked report marks the row advised. When the advisor has a plan thread, the first advice resolves the plan review. `approved` means a ready report with verdict `approve`. Any other advice means `changes`.
 3. A planner ready report with a plan sets the plan review. The review is `required` when the row has no `replaces_thread_id`, and either the plan has more than one implementation wave or `complex` is true. Otherwise the review is null. A design wave never counts, because it is a fixed companion wave (a Designer's artboards) and not extra implementation scope. When the planner replaces a planner with review `changes`, the replaced planner completes.
 4. An advisor or reviewer ready report with a `lesson` inserts one `chief_lessons` row. The row holds the project, the text, the reporting thread, the reviewed worker, the time, and the role. The row has the status `proposed`, so no prompt contains it until Chief accepts it. `observability.md` describes the lesson lifecycle.
-5. `ledger.recordVerdict` no longer changes `reject_streak`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head. A ready gate tester report stores its `testsPassed` in `tests_passed`.
+5. `ledger.recordVerdict` no longer changes `reject_streak`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head. A ready report of a gate tester, fix run, or corrector stores its `testsPassed` in `tests_passed`.
 6. A reviewer ready report with a verdict enqueues forge comments (one for each covered pull request). A worker blocked report enqueues one blocked comment. `forge-comments.md` describes them.
 7. When the row has a Chief, the code writes the pending alert. It has the title, the state, and the report number. It adds up to 300 characters of `summary` or `result`. The last line is `The full alert could not be built; run chief_inspect <id>.`
 8. A worker in a plan with `fails` appends one `FAIL` entry for each fail to the plan log.
@@ -100,7 +100,9 @@ The transaction runs these steps in order:
 | Worker or reviewer with `fails` | The merged `fails` JSON. A report without `fails` keeps the stored value. |
 | Reviewer | `findings` JSON. Every reviewer report replaces it. A report without findings clears it. |
 | Ready with `regression` true and verdict `request_changes` | `regression` is 1. |
-| Ready gate tester | `tests_passed` from `testsPassed`. `checkReport` refuses a gate tester's ready report without `testsPassed`, and refuses `testsPassed` on any other row. |
+| Ready gate tester or corrector | `tests_passed` from `testsPassed`. `checkReport` refuses the ready report without `testsPassed`. A corrector's `false` makes the gate escalate. |
+| Ready fix run | `tests_passed` from `testsPassed`. `checkReport` refuses the ready report unless `testsPassed` is `true`, and the refusal says to keep fixing or report blocked with wrong-test evidence. |
+| Any other row | `checkReport` refuses `testsPassed`. |
 
 ### Alert and file rules
 
