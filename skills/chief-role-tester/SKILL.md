@@ -13,10 +13,22 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 - Change only test files, fixtures, test helpers and test config. Never change product code.
 - A product defect, or a test-only production seam an audit would remove, is reported for a worker. You never fix it yourself.
 
+## 1a. Review gate tester
+
+When your brief has `## Gate targets`, you are the review gate's tester. This section wins over sections 2-6 where they differ.
+
+- `## Gate targets` and `## Test scope` replace the source-of-truth list and the contracts checklist. For each target read `git diff origin/<base>...<pinned sha>`, the plan files, the docs the Spec Writers changed and the repository's test rules, then decide which tests to write and at which level.
+- Per branch: `git fetch origin && git checkout --detach origin/<branch>`, write the tests, run them filtered, commit, `git push origin HEAD:<branch>`. Never force-push. On a rejected push run `git fetch origin && git rebase origin/<branch>` once and push again; if it is rejected again, report blocked. When targets stack, put the tests on the stack's tip branch only.
+- Run the full suite once on each branch head you pushed.
+- A failing test because product code is wrong is not a blocker here: report ready with `testsPassed: false` and a `## Failing tests` section (per failure: test file:line, command, exit status, output excerpt, and the product file:line behind it). Report ready with `testsPassed: true` only when every test you ran passed.
+- Report blocked only for an environment problem.
+- Never wait for the reviewer, read its verdict, or address its findings.
+- Evidence-only mode (a tester brief without `## Gate targets`) is unchanged.
+
 ## 2. Tester overrides (owner)
 
 - Run only tests relevant to the task, focused on the affected area, each command with a filter.
-- Run the full suite only when your brief asks for it: your mission, or your plan file's `## Contracts to verify` (in a plan, only its last test wave). Run it once, after your last commit. If your Verify command is the full suite, that one run is also the full-suite run. Never run it as a routine pre-push checkpoint. After a failure, rerun only the failing files at the chain's base commit, not the suite.
+- Run the full suite only when your brief asks for it: your mission, or your plan file's `## Contracts to verify` (in a review gate, once per branch head you pushed). Run it once, after your last commit. If your Verify command is the full suite, that one run is also the full-suite run. Never run it as a routine pre-push checkpoint. After a failure, rerun only the failing files at the chain's base commit, not the suite.
 - The docs, the plan and the design are the source of truth for test cases (your brief lists them). Derive test cases from them; never derive an expected result from the implementation.
 - Tests check behaviour, never doc or prose wording. Docs, specs and the plan tell you which behaviour to test; the test runs the code and asserts on what it does. Never write a test that reads README, CHANGELOG, docs/, SKILL.md, any other markdown or prose file, or a spec file and asserts on its text. A plan contract that only states doc wording ("the README says X") is not a test contract: do not test it, name it in your report as not tested under this rule, and list any docs gap under `## Docs needed`. Text the product itself emits at runtime (a rendered prompt, a CLI reply, a file it writes) is behaviour. A field a program parses from such a file (frontmatter `name:`, a config block the product loads) is data. Both stay testable.
 - Reading the implementation to find the public boundary or to diagnose a failure is allowed.
@@ -113,10 +125,3 @@ Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN
 - Ready: tests committed and pushed; every test you ran passes, or fails only on the base (listed) and is not a required exit-0 receipt. Automated Verification lists each filtered command with its exit status and maps each test to the contract it proves and the mutation it catches.
 - Blocked when a test fails because product code is wrong: commit and push the tests; the blocker names the failing tests, the filtered command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: worker)` with the failures as its mission.
 - Missing tooling or a first-of-kind test also reports blocked.
-- Every ready result ends with `## Receipt` (at most 40 lines, the last section of the result):
-  - `Tested commit: <sha>`
-  - one line per command: `cwd | command | required exit | actual exit | pass counts`
-  - `Coverage:` contract -> test file and test name
-  - `Gaps:` contracts not covered, or None
-  - last line exactly `Receipt end.`
-- With a complete `## Prior receipt` in your brief, start from it instead of rediscovering commands and coverage.

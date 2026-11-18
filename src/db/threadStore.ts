@@ -47,6 +47,8 @@ export interface ReportReservation {
   fails: string | null;
   /** A reviewer's findings JSON; every report replaces it (null clears). */
   findings: string | null;
+  /** A gate tester's ready testsPassed (1/0); null on every other report keeps the stored value. */
+  testsPassed: 0 | 1 | null;
   now: number;
 }
 
@@ -59,6 +61,16 @@ export interface LiveSync {
   enteringActive: boolean;
   now: number;
 }
+
+/** One pinned target of a review gate. */
+export interface GateTarget { threadId: string; reportSeq: number; branch: string; prUrl: string | null; headSha: string; base: string }
+/** A review_gates row with its targets decoded. */
+export interface ReviewGate {
+  gate_key: string; project_id: string; chief_thread_id: string; plan_thread_id: string | null; targets: GateTarget[];
+  reviewer_thread_id: string | null; tester_thread_id: string | null; fixer_thread_id: string | null; corrector_thread_id: string | null; created_at: number;
+}
+export type GateActor = "reviewer_thread_id" | "tester_thread_id" | "fixer_thread_id" | "corrector_thread_id";
+const GATE_ACTORS: GateActor[] = ["reviewer_thread_id", "tester_thread_id", "fixer_thread_id", "corrector_thread_id"];
 
 export interface ThreadStoreHooks {
   /** Runs after every reload (not after refresh); the server gates its sweep and Pending publish on it. */
@@ -73,12 +85,16 @@ const UNLINKED_OR_DEAD = `(coordinator_thread_id IS NULL OR coordinator_thread_i
 export function createThreadStore<Row extends { thread_id: string; role: string; state: string }>(db: Database, hooks: ThreadStoreHooks) {
   const allRows = db.prepare(`SELECT * FROM managed_threads ORDER BY created_at ASC, rowid ASC`);
   const load = () => new Map((allRows.all() as Row[]).map((row) => [row.thread_id, row]));
+  const allGates = db.prepare(`SELECT * FROM review_gates ORDER BY created_at ASC, rowid ASC`);
+  const loadGates = () => (allGates.all() as (Omit<ReviewGate, "targets"> & { targets: string })[]).map((gate) => ({ ...gate, targets: JSON.parse(gate.targets) as GateTarget[] }));
   let rows = load();
+  let gates = loadGates();
   let batching = 0;
 
   /** Load without onReload: completeAbsorbed runs inside the sweep, so a reload there would recurse. */
   function refresh() {
     rows = load();
+    gates = loadGates();
   }
   function reload() {
     refresh();
@@ -140,6 +156,28 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
 
   return {
     get: (threadId: string) => rows.get(threadId),
+    /** The review gate under this key, or undefined. */
+    gate: (gateKey: string) => gates.find((gate) => gate.gate_key === gateKey),
+    /** The newest gate whose targets or actor columns hold this thread, or undefined. */
+    gateFor: (threadId: string) => [...gates].reverse().find((gate) => gate.targets.some((target) => target.threadId === threadId) || GATE_ACTORS.some((column) => gate[column] === threadId)),
+    /** The thread is a gate's reviewer, tester, fixer or corrector. */
+    isGateActor: (threadId: string) => gates.some((gate) => GATE_ACTORS.some((column) => gate[column] === threadId)),
+    /** Opens a gate with its pinned targets. Batch only: the caller writes the actor ids in the same transaction. */
+    openGate(gate: { gateKey: string; projectId: string; chiefThreadId: string; planThreadId: string | null; targets: GateTarget[]; now: number }) {
+      inBatch();
+      db.prepare(`INSERT INTO review_gates (gate_key, project_id, chief_thread_id, plan_thread_id, targets, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(gate.gateKey, gate.projectId, gate.chiefThreadId, gate.planThreadId, JSON.stringify(gate.targets), gate.now);
+    },
+    /** Names a gate's actor. Batch only. */
+    setGateActor(gateKey: string, column: GateActor, threadId: string) {
+      inBatch();
+      db.prepare(`UPDATE review_gates SET ${column}=? WHERE gate_key=?`).run(threadId, gateKey);
+    },
+    /** Records a fix run's origin. Batch only. */
+    setFixRun(threadId: string, run: "gate" | "chat") {
+      inBatch();
+      db.prepare(`UPDATE managed_threads SET fix_run=? WHERE thread_id=?`).run(run, threadId);
+    },
     /** The live cache: replaced on reload, so read it again each time rather than holding it. */
     rows: () => rows,
     all: () => [...rows.values()],
@@ -244,18 +282,12 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     },
 
     /** chief_complete. A replaced result drops the summary and report file that described the old one. cleanupApprovedAt is written in the same UPDATE, so completion and cleanup eligibility never split. */
-    markComplete(args: { status: string; result: string | null; note: string | null; now: number; threadId: string; cleanupApprovedAt: number | null; reviewSkipped: string | null; testsSkipped: string | null }) {
+    markComplete(args: { status: string; result: string | null; note: string | null; now: number; threadId: string; cleanupApprovedAt: number | null; reviewSkipped: string | null }) {
       db.prepare(`UPDATE managed_threads SET state='complete', status=@status,
       result=CASE WHEN @note IS NULL THEN COALESCE(@result, result) ELSE COALESCE(@result, result, '') || @note END,
       summary=CASE WHEN @result IS NULL THEN summary END, report_path=CASE WHEN @result IS NULL THEN report_path END,
       result_rev=result_rev + (@result IS NOT NULL),
-      blocker=NULL, recommendation=NULL, active_since=NULL, cleanup_approved_at=@cleanupApprovedAt, review_skipped=@reviewSkipped, tests_skipped=@testsSkipped, updated_at=@now WHERE thread_id=@threadId`).run(args);
-      wrote();
-    },
-
-    /** chief_review retestSkipped: Chief's reason for reviewing this fix without the tester rerun it owed. */
-    setRetestSkipped(threadId: string, reason: string, now: number) {
-      db.prepare(`UPDATE managed_threads SET retest_skipped=?, updated_at=? WHERE thread_id=?`).run(reason, now, threadId);
+      blocker=NULL, recommendation=NULL, active_since=NULL, cleanup_approved_at=@cleanupApprovedAt, review_skipped=@reviewSkipped, updated_at=@now WHERE thread_id=@threadId`).run(args);
       wrote();
     },
 
@@ -276,12 +308,12 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     /** chief_report: reserves the next report_seq and stores the report's columns; returns the reserved seq and result_rev. */
     reserveReport(report: ReportReservation) {
       const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
-        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), findings=?, report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
+        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), findings=?, tests_passed = COALESCE(?, tests_passed), report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
         last_report_state=?, owner_approval=NULL, owner_approved_at=NULL,
         active_since = CASE WHEN ?='active' THEN active_since ELSE NULL END, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
         report.state, report.result, report.summary, report.blocker,
         report.recommendation, report.verdict,
-        report.planWaves, report.regression, report.fails, report.findings,
+        report.planWaves, report.regression, report.fails, report.findings, report.testsPassed,
         report.state, report.state, report.state, report.now, report.threadId,
       ) as { report_seq: number; result_rev: number };
       wrote();
@@ -297,9 +329,9 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       db.prepare(`UPDATE managed_threads SET plan_review=? WHERE thread_id=? AND (plan_review IS NULL OR plan_review='required')`).run(value, threadId);
       wrote();
     },
-    /** chief_skip_tests and chief_skip_specs: sets the given waiver reasons on one wave in plan_waves, in one write,
+    /** chief_skip_specs: sets the given waiver reason on one wave in plan_waves, in one write,
      * and touches no other field. */
-    skipWave(plannerThreadId: string, wave: number, fields: { testsSkipped?: string; specsSkipped?: string }) {
+    skipWave(plannerThreadId: string, wave: number, fields: { specsSkipped: string }) {
       db.transaction(() => {
         const row = db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(plannerThreadId) as { plan_waves: string | null } | undefined;
         const waves = JSON.parse(row?.plan_waves ?? "[]") as Record<string, unknown>[];
@@ -378,25 +410,6 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       db.prepare(`UPDATE managed_threads SET stall_alerted_cycle=?, stop_alerted_cycle=?, updated_at=? WHERE thread_id=?`)
         .run(stallCycle, stopCycle, Date.now(), threadId);
       wrote();
-    },
-
-    /** replaces: the open reviewer of the prior worker follows the fresh one. The snapshot resets too: it was tied to the
-     * prior worker's report_seq, and the fresh worker restarts its own count from 0, so a stale value here could
-     * coincidentally match a future report and wrongly suppress its review. Batch only; no reload. */
-    repointReviewer(priorThreadId: string, successorThreadId: string, now: number) {
-      inBatch();
-      db.prepare(`UPDATE managed_threads SET worker_thread_id=?, reviewed_report_seq=NULL, updated_at=? WHERE role='reviewer' AND worker_thread_id=? AND state NOT IN ('complete','archived','deleted')`).run(successorThreadId, now, priorThreadId);
-    },
-    /** A new reviewer starts from the task's carried reject streak. Batch only; no reload. */
-    setRejectStreak(reviewerThreadId: string, streak: number, now: number) {
-      inBatch();
-      db.prepare(`UPDATE managed_threads SET reject_streak=?, updated_at=? WHERE thread_id=?`).run(streak, now, reviewerThreadId);
-    },
-    /** A report's verdict: a request_changes adds one to reject_streak, an approve resets it. Batch only; no reload. */
-    bumpRejectStreak(threadId: string, verdict: string | null) {
-      inBatch();
-      db.prepare(`UPDATE managed_threads SET reject_streak = CASE WHEN ?=1 THEN reject_streak+1 WHEN ?=1 THEN 0 ELSE reject_streak END WHERE thread_id=?`)
-        .run(verdict === "request_changes" ? 1 : 0, verdict === "approve" ? 1 : 0, threadId);
     },
 
     /** A Chief that failed a turn is active again once it calls a tool. */

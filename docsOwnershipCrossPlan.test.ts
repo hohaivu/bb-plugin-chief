@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
-import { TEST_WAVE, disposeAll } from "./test/harness";
+import { disposeAll } from "./test/harness";
 import { provideSdk } from "./test/sdk";
-import { NO_TESTER, type World, git, world } from "./test/docsGateWorld";
-import { delegateWave, plan, readyIdle, refusal, rowOf, tool, workerOn } from "./test/testerHelpers";
+import { type World, git, world } from "./test/docsGateWorld";
+import { delegateWave, openGate, plan, readyIdle, refusal, rowOf, tool, workerOn } from "./test/testerHelpers";
 import { putWriter, specImpl, writerOn } from "./test/specWriterHelpers";
 import { OWNERSHIP_PARAGRAPH } from "./test/docsOwnership";
 
@@ -12,23 +12,23 @@ vi.mock("node:child_process", async () => (await import("./test/execMock")).chil
 afterEach(disposeAll);
 
 // Finding 1 of review 1 (contract C3, C4, C7; plan wave 1 "Only the Spec Writer edits docs/ everywhere"): the real cross-plan writer recovery P -> Q through the ledger.
-// Plan P's side-lane Spec Writer S is blocked; a fresh plan Q's wave 1 Spec Writer T replaces S (the freshPlan exception) on the same branch; Q's worker W and tester X follow.
-// X's replaces: chain then reaches S, a writer of ANOTHER plan. S must stay out of taskWriters (so out of the rendered `## Docs ownership`), and S's trailer must not excuse a docs/ commit
-// when X completes with skipReview. Regression: taskWriters keeps every writer in the replaces chain whatever its plan.
+// Plan P's side-lane Spec Writer S is blocked; a fresh plan Q's wave 1 Spec Writer T replaces S (the freshPlan exception) on the same branch; Q's worker W follows.
+// W's replaces: chain then reaches S, a writer of ANOTHER plan. S must stay out of taskWriters (so out of the rendered `## Docs ownership`), and S's trailer must not excuse a docs/ commit
+// when W completes with skipReview. Regression: taskWriters keeps every writer in the replaces chain whatever its plan.
 describe("cross-plan writer recovery P -> Q", () => {
   async function recovered(w: World) {
     const { state, chief } = w;
-    const planP = await plan(state, chief.threadId, [specImpl(1), TEST_WAVE(2)]);
+    const planP = await plan(state, chief.threadId, [specImpl(1)]);
     await delegateWave(state, chief.threadId, planP.threadId, 1, { kind: "spec-writer", branch: "task" });
     const s = writerOn(state, planP.threadId, 1).thread_id as string;
     await putWriter(state, chief.threadId, s, "blocked");
-    const planQ = await plan(state, chief.threadId, [specImpl(1), TEST_WAVE(2)]);
+    const planQ = await plan(state, chief.threadId, [specImpl(1)]);
     await delegateWave(state, chief.threadId, planQ.threadId, 1, { replaces: s, kind: "spec-writer" });
     const t = writerOn(state, planQ.threadId, 1).thread_id as string;
     return { s, t, planP, planQ };
   }
   /** Q's worker W continues T's task: its replaces: chain is W -> T -> S (the ledger walks replaces:; set directly, as no admitted call makes a worker replace a side-lane writer).
-   * Plan Q's test wave is skipped so that W can complete. T and W are ready and idle. */
+   * T and W are ready and idle. */
   async function ready(w: World) {
     const r = await recovered(w);
     const { state, chief } = w;
@@ -36,7 +36,6 @@ describe("cross-plan writer recovery P -> Q", () => {
     const worker = workerOn(state, r.planQ.threadId, 1).thread_id as string;
     state.db.prepare("UPDATE managed_threads SET replaces_thread_id=? WHERE thread_id=?").run(r.t, worker);
     await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, chief.threadId);
-    await tool(state, "chief_skip_tests", { planThreadId: r.planQ.threadId, wave: 2, reason: "no tests here" }, chief.threadId);
     await readyIdle(state, r.t);
     await readyIdle(state, worker);
     return { ...r, worker };
@@ -70,8 +69,8 @@ describe("cross-plan writer recovery P -> Q", () => {
   test("the review prompt's `## Docs ownership` names T and never S, though S is in T's replaces: chain", async () => {
     const w = await world();
     const { s, t, worker } = await ready(w);
-    await tool(w.state, "chief_review", { workerThreadId: worker }, w.chief.threadId);
-    const prompt = w.state.spawned.at(-1).prompt as string;
+    const gate = await openGate(w.state, w.chief.threadId, worker);
+    const prompt = w.state.spawned[Number(gate.reviewer_thread_id.slice("thr_".length)) - 1].prompt as string;
     const ownership = prompt.split("\n## Docs ownership\n")[1]!.split("\n")[0]!;
     expect(ownership).toBe(OWNERSHIP_PARAGRAPH(t));
     expect(ownership).not.toContain(s);
@@ -93,7 +92,7 @@ describe("default-base fetch failure", () => {
     const id = await w.worker("Fix checkout totals");
     await w.commit("docs/specs/totals.md", "docs: totals by a worker");
     await withoutDefaultBase(w);
-    const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change", ...NO_TESTER });
+    const reply = await w.call("chief_complete", { threadId: id, skipReview: "small change" });
     expect(reply).toContain("docs/ check skipped: could not fetch origin/main; skipReview proceeded without it.");
     expect(reply).toContain("without a review (reason recorded)");
     expect(w.rowState(id)).toBe("complete");

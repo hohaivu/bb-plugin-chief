@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { checkPlan, contractsOf, createReportIntake, receiptOf, sectionOf, type ReportIntakeAdapters } from "./src/report/reportIntake";
+import { contractsOf, createReportIntake, sectionOf, type ReportIntakeAdapters } from "./src/report/reportIntake";
 import { createReviewLedger } from "./src/review/reviewLedger";
 import { MIGRATIONS } from "./src/db/migrations";
 import type { ManagedRow, ReportParams } from "./src/types";
@@ -131,7 +131,7 @@ describe("owner order: required state commits before any optional step", () => {
     ]);
     expect(w.db.prepare(`SELECT project_id, text, source_thread_id, worker_thread_id, role FROM chief_lessons`).all())
       .toEqual([{ project_id: "proj", text: "Check the lease before release.", source_thread_id: "r1", worker_thread_id: "w1", role: "reviewer" }]);
-    expect(w.rowOf("r1")).toMatchObject({ report_seq: 1, verdict: "request_changes", reject_streak: 1, verdict_path: "/storage/r1/verdict-1.md", report_path: null });
+    expect(w.rowOf("r1")).toMatchObject({ report_seq: 1, verdict: "request_changes", verdict_path: "/storage/r1/verdict-1.md", report_path: null });
     expect(w.attached).toEqual([["r1", 1, 0, "/storage/r1/verdict-1.md", null]]);
     expect(w.delivered).toHaveLength(1);
     expect(w.delivered[0]!.key).toMatch(/^report:1:[0-9a-f]{16}$/);
@@ -143,7 +143,7 @@ describe("owner order: required state commits before any optional step", () => {
 
     await expect(w.intake.report("r1", REQUEST_CHANGES, "proj")).resolves.toBe(true);
 
-    expect(w.rowOf("r1")).toMatchObject({ report_seq: 1, state: "ready", verdict: "request_changes", reject_streak: 1, verdict_path: null });
+    expect(w.rowOf("r1")).toMatchObject({ report_seq: 1, state: "ready", verdict: "request_changes", verdict_path: null });
     expect(w.count("chief_lessons")).toBe(1);
     expect(w.count("reviewer_verdicts")).toBe(1);
     expect(w.count("fake_comments")).toBe(1);
@@ -306,7 +306,7 @@ describe("await order by role", () => {
 
 const PLAN = [
   { body: "# Plan\n\n## Contracts to verify\n- Totals stay non-negative\n\n## What we're NOT doing\n- x" },
-  { body: "# Tests\n\n## Test files\n- totals.test.ts\n\n## Contracts to verify\n- Totals tested", test: true },
+  { body: "# Wave 2\n\n## Contracts to verify\n- Totals exposed" },
 ];
 
 // Contract (plan 3, contract 11): an accepted planner report hands its plan files, and a reviewer verdict its verdict file, to the
@@ -523,97 +523,6 @@ describe("in-batch writes by role", () => {
   });
 });
 
-// Contract (docs/specs/plan-chains.md "Brief Contents"): a receipt is the `## Receipt` section at the end of a tester's ready result. It is complete
-// only with a `Tested commit: <7-40 hex>` line, a command line, `Coverage:` and `Gaps:` lines, a last non-blank line `Receipt end.`, and at most 3,000
-// characters. The end line proves the stored text was not cut. Regression: a cut or oversized receipt parses as complete and a rerun tester treats a
-// partial command list as its inputs.
-describe("receiptOf", () => {
-  const COMMAND = "plugin | ./node_modules/.bin/vitest run a.test.ts | 0 | 0 | a 3 passed";
-  const lines = (...overrides: Array<[string, string | null]>) => {
-    const base = ["Tested commit: abc1234", COMMAND, "Coverage: contract A -> a.test.ts \"a\"", "Gaps: None", "Receipt end."];
-    return base.flatMap((line) => { const hit = overrides.find(([prefix]) => line.startsWith(prefix)); return hit ? (hit[1] === null ? [] : [hit[1]]) : [line]; });
-  };
-  const result = (body: string[], tail = "") => `Done.\n\n## Receipt\n${body.join("\n")}\n${tail}`;
-
-  test("a complete receipt parses to its trimmed section and Tested commit; a full 40-character commit is kept", () => {
-    const parsed = receiptOf(result(lines(), "\n\n"));
-    expect(parsed).toEqual({ text: lines().join("\n"), testedCommit: "abc1234" });
-    const full = "a".repeat(40);
-    expect(receiptOf(result(lines(["Tested commit", `Tested commit: ${full}`])))?.testedCommit).toBe(full);
-  });
-
-  test.each<[string, string | null]>([
-    ["no result", null],
-    ["no Receipt section", "Done.\n\n## Summary\nAll green."],
-    ["a receipt cut before Receipt end.", result(lines(["Receipt end.", null]))],
-    ["text after Receipt end. in the section", result(lines(), "Notes after the end line.")],
-    ["no Coverage line", result(lines(["Coverage:", null]))],
-    ["no Gaps line", result(lines(["Gaps:", null]))],
-    ["no Tested commit line", result(lines(["Tested commit", null]))],
-    ["a Tested commit that is not 7-40 hex characters", result(lines(["Tested commit", "Tested commit: abc12"]))],
-    ["no command line", result(lines([COMMAND.slice(0, 6), null]))],
-    ["a Coverage line with four pipe fields and no command row", result(lines([COMMAND.slice(0, 6), null], ["Coverage:", "Coverage: API | UI | CLI | Docs"]))],
-    ["only pipes in the command row", result(lines([COMMAND.slice(0, 6), "| | | |"]))],
-    ["a blank command row", result(lines([COMMAND.slice(0, 6), "   "]))],
-    ["a command row with five pipe fields that name no exit status", result(lines([COMMAND.slice(0, 6), "plugin | npm test | pass | pass | 5 passed"]))],
-    ["a four-field row with no pass counts field", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 0"]))],
-    ["a four-field row with a trailing pipe and an empty counts field", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 0 |"]))],
-    ["a counts field of only whitespace", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 0 |    "]))],
-    ["a command row without a cwd", result(lines([COMMAND.slice(0, 6), "| npm test | 0 | 0 | 5 passed"]))],
-    ["a cwd of only whitespace", result(lines([COMMAND.slice(0, 6), "   | npm test | 0 | 0 | 5 passed"]))],
-    ["a command row without a command: the empty field must not shift the exits right", result(lines([COMMAND.slice(0, 6), "plugin | | 0 | 0 | 0"]))],
-    ["a command of only whitespace", result(lines([COMMAND.slice(0, 6), "plugin |    | 0 | 0 | 5 passed"]))],
-    ["a command that starts with a bare pipe", result(lines([COMMAND.slice(0, 6), "plugin | | npm test | 0 | 0 | 5 passed"]))],
-    ["a command row of five pipes and no text", result(lines([COMMAND.slice(0, 6), "| | | | |"]))],
-    ["a command row without the actual exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0"]))],
-    ["a command row with an empty required exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test |  | 0 | 5 passed"]))],
-    ["an actual exit of 256", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | 256 | 5 passed"]))],
-    ["a required exit of 256", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 256 | 0 | 5 passed"]))],
-    ["a negative exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0 | -1 | 5 passed"]))],
-    ["a fractional exit", result(lines([COMMAND.slice(0, 6), "plugin | npm test | 0.5 | 0 | 5 passed"]))],
-  ])("%s is not a complete receipt", (_label, input) => {
-    expect(receiptOf(input)).toBeNull();
-  });
-
-  // A command row is `cwd | command | required exit | actual exit | counts`: all five fields, exits 0-255, and only the command may contain `|`.
-  test.each([
-    ["a nonzero actual exit", "plugin | npm test | 0 | 1 | 1 failed"],
-    ["the highest exit status, 255, in both exit fields", "plugin | npm test | 255 | 255 | 5 passed"],
-    ["a required nonzero exit that the run met", "plugin | npm test | 2 | 2 | 1 failed"],
-    ["a command that contains a pipe", "plugin | npm test | tee run.log | 0 | 0 | 5 passed"],
-    ["a command that contains ||", "plugin | cd pkg || exit 1 | 0 | 0 | 5 passed"],
-    ["a command that holds a quoted pipe", "plugin | vitest run -t \"a|b\" | 0 | 0 | 5 passed"],
-    ["a command that ends with a pipe symbol inside quotes", "plugin | echo 'x|' | 0 | 0 | 5 passed"],
-    ["a bulleted row", "- plugin | npm test | 0 | 0 | 5 passed"],
-    ["a counts field of free text", "plugin | npm test | 0 | 0 | a 3 passed, b 2 passed"],
-    ["no spaces around the pipes", "plugin|npm test|0|0|5 passed"],
-  ])("%s is a complete command row and the receipt text is kept exactly", (_label, row) => {
-    const body = lines([COMMAND.slice(0, 6), row]);
-    expect(receiptOf(result(body))).toEqual({ text: body.join("\n"), testedCommit: "abc1234" });
-  });
-
-  test("a command that contains pipes keeps its spacing and quoting in the retained text", () => {
-    const row = "plugin | npm  test -- -t \"a|b\"  |  tee  run.log || true | 0 | 0 | 5 passed";
-    expect(receiptOf(result(lines([COMMAND.slice(0, 6), row])))?.text.split("\n")[1]).toBe(row);
-  });
-
-  test("metadata pipes in Coverage do not stand in for the command row when a real one is present", () => {
-    const body = lines(["Coverage:", "Coverage: API | UI | CLI | Docs"]);
-    expect(receiptOf(result(body))?.text).toBe(body.join("\n"));
-  });
-
-  test("the 3,000-character bound is inclusive: 3,000 parses, 3,001 does not, and nothing is clipped", () => {
-    const sized = (length: number) => {
-      const fixed = lines(["Gaps:", "Gaps: "]).join("\n").length;
-      return result(lines(["Gaps:", `Gaps: ${"g".repeat(length - fixed)}`]));
-    };
-    const at = receiptOf(sized(3_000));
-    expect(at?.text).toHaveLength(3_000);
-    expect(at?.text.endsWith("Receipt end.")).toBe(true);
-    expect(receiptOf(sized(3_001))).toBeNull();
-  });
-});
-
 // Contract (docs/specs/report-intake.md, Section helper): sectionOf returns the untrimmed text under the first heading whose text
 // starts with the name, up to the next heading of the same or a higher level; undefined without the heading. contractsOf is its trimmed form.
 // Regression: trimming the section hides an indented first item from the count; stopping at a lower-level heading drops nested contracts.
@@ -653,139 +562,58 @@ describe("sectionOf", () => {
   });
 });
 
-// Contract (docs/specs/report-intake.md, Plan test-wave bound): a test wave's Contracts section holds 1 to 8 top-level list items and its
-// Test files section 1 to 5; the bound runs at planner ready-report intake; implementation waves are never bounded.
-// Regression: no bound lets a 20-contract test wave start a long tester session; a trimmed count reads an indented first item as top level;
-// counting wrapped lines, nested items, fenced code or checkbox text miscounts the wave.
-describe("test wave bound", () => {
-  const items = (n: number, line = (i: number) => `- contract ${i}`) => Array.from({ length: n }, (_, i) => line(i)).join("\n");
-  const IMPL = { body: "# Impl\n\n## Contracts to verify\n- Totals stay non-negative\n\n## What we're NOT doing\n- x" };
-  const wave2 = (contracts: string, files: string | null = items(1, () => "- a.test.ts")) =>
-    ({ body: `# Tests\n\n${files === null ? "" : `## Test files\n${files}\n\n`}## Contracts to verify\n${contracts}`, test: true });
-  const refusal = (...lines: string[]) => new Error(`chief_report was not saved; fix all of these and call it once more:\n${lines.map((line) => `- ${line}`).join("\n")}`);
-  const submit = (plan: unknown[]) => {
+// Contract (plan-1 "testsPassed on tester and fix reports"; docs/specs/report-intake.md): testsPassed belongs only to the review gate's tester,
+// its corrector and a fix run, on a ready report. A gate tester's, a corrector's and a fix run's ready report must carry it, and a fix
+// run's must carry true. A gate tester that is blocked needs none. The accepted value lands in managed_threads.tests_passed (1 or 0).
+// Regression: a tester that omits it passes the gate unseen; a worker or reviewer sets it; a fix run ships red tests; the value is dropped.
+describe("testsPassed acceptance", () => {
+  const READY: ReportParams = { state: "ready", result: "Ran the suite.", testsPassed: true };
+  const BLOCKED: ReportParams = { state: "blocked", result: "Cannot run.", blocker: "No test runner installed.", recommendation: "Install one and rerun." };
+
+  /** A gate on plan:p1 over worker w1, with a tester, a corrector and a fix worker row, and a plain worker and a reviewer beside them. */
+  function gated() {
     const w = world();
     w.seed("p1", "planner");
-    return w.intake.report("p1", { state: "ready", plan, result: "Planned." } as ReportParams, "proj");
-  };
-  const tooMany = (count: number) => `plan wave 2 is a test wave with ${count} contracts; max 8. Split the implementation into more chains (dependsOn [] or stackOn k), each ending with its own test wave.`;
-  const tooManyFiles = (count: number) => `plan wave 2 is a test wave listing ${count} test files under "## Test files"; list 1 to 5. Split the implementation into more chains, each ending with its own test wave.`;
+    w.seed("w1", "worker", { planThreadId: "p1", planWave: 1 });
+    w.seed("t1", "worker", { kind: "tester" });
+    w.seed("c1", "worker", { kind: "worker" });
+    w.seed("f1", "worker", { kind: "worker" });
+    w.seed("plain", "worker");
+    w.seed("r1", "reviewer", { workerThreadId: "w1" });
+    w.store.batch(() => {
+      w.store.openGate({ gateKey: "plan:p1", projectId: "proj", chiefThreadId: "chief1", planThreadId: "p1", targets: [{ threadId: "w1", reportSeq: 1, branch: "b", prUrl: null, headSha: "abc", base: "main" }], now: 1 });
+      w.store.setGateActor("plan:p1", "reviewer_thread_id", "r1");
+      w.store.setGateActor("plan:p1", "tester_thread_id", "t1");
+      w.store.setGateActor("plan:p1", "corrector_thread_id", "c1");
+      w.store.setFixRun("f1", "gate");
+    });
+    return w;
+  }
 
-  test("a test wave with 8 contracts and 5 test files is accepted at planner intake", async () => {
-    await expect(submit([IMPL, wave2(items(8), items(5, (i) => `- f${i}.test.ts`))])).resolves.toBeDefined();
+  test.each([
+    ["a gate tester's ready report without it", "t1", { ...READY, testsPassed: undefined }, /testsPassed is missing/],
+    ["a corrector's ready report without it", "c1", { ...READY, testsPassed: undefined }, /testsPassed is missing/],
+    ["a fix run's ready report without it", "f1", { ...READY, testsPassed: undefined }, /testsPassed is missing/],
+    ["a fix run's ready report with testsPassed: false", "f1", { ...READY, testsPassed: false }, /A fix run reports ready only with testsPassed: true/],
+    ["a plain worker's report carrying it", "plain", READY, /testsPassed is only for the review gate's tester, its corrector and a fix run/],
+    ["a gate reviewer's report carrying it", "r1", { ...APPROVE, testsPassed: true }, /testsPassed is only for the review gate's tester/],
+    ["a gate tester's blocked report carrying it", "t1", { ...BLOCKED, testsPassed: false }, /testsPassed is only for a ready report/],
+  ] as [string, string, ReportParams, RegExp][])("%s is refused and writes nothing", async (_name, id, params, message) => {
+    const w = gated();
+    await expect(w.intake.report(id, params, "proj")).rejects.toThrow(message);
+    expect(w.rowOf(id).tests_passed).toBeNull();
+    expect(w.rowOf(id).report_seq).toBe(0);
   });
 
   test.each([
-    ["9 contracts", wave2(items(9)), tooMany(9)],
-    ["6 test files", wave2(items(1), items(6, (i) => `- f${i}.test.ts`)), tooManyFiles(6)],
-    ["0 test files", wave2(items(1), ""), tooManyFiles(0)],
-    ["no Test files heading", wave2(items(1), null), 'plan wave 2 is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max 5).'],
-    ["contract text without a list item", wave2("Everything works."), 'plan wave 2 is a test wave whose "## Contracts to verify" has no Markdown list item; write each contract as a list item (-, *, +, 1. or 1)).'],
-  ])("planner intake refuses %s with that one line", async (_name, testWave, line) => {
-    await expect(submit([IMPL, testWave])).rejects.toThrow(refusal(line));
-  });
-
-  test("a test wave with no Contracts heading gets only the missing-heading error", async () => {
-    await expect(submit([IMPL, { body: "# Tests\n\n## Test files\n- a.test.ts", test: true }])).rejects.toThrow(refusal(
-      'plan wave 2 lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.'));
-  });
-
-  test("an implementation wave with 9 contracts is accepted", async () => {
-    await expect(submit([{ body: `${IMPL.body.split("\n\n## What")[0]}\n${items(8)}\n\n## What we're NOT doing\n- x` }, wave2(items(2))])).resolves.toBeDefined();
-  });
-
-  // Each case holds 9 counted items plus lines the rules say are not counted, so the error names exactly 9.
-  test.each([
-    ["an indented first item", `  - indented first\n${items(9)}`],
-    ["wrapped lines", items(9, (i) => `- contract ${i}\n  wraps onto a second line`)],
-    ["deeper items", items(9, (i) => `- contract ${i}\n  - detail ${i}`)],
-    ["fenced code with list lines", `${items(9)}\n\`\`\`\n- fake 1\n- fake 2\n\`\`\`\n~~~\n- fake 3\n~~~`],
-    ["checkbox items", items(9, (i) => i % 2 ? `- [x] contract ${i}` : `- [ ] contract ${i}`)],
-    ["every supported marker", [...items(5, (i) => ["- a", "* b", "+ c", "1. d", "2) e"][i]!).split("\n"), "- f", "* g", "+ h", "10. i"].join("\n")],
-    ["tab and four-space indentation as one level", items(9, (i) => i % 2 ? `    - contract ${i}` : `\t- contract ${i}`)],
-  ])("contracts count %s as 9", async (_name, contracts) => {
-    expect(checkPlan([IMPL, wave2(contracts)])).toEqual([tooMany(9)]);
-  });
-
-  // A heading inside a fence is not a section boundary: the item before the fence and the items after it are one list.
-  test("a fenced heading inside the Contracts list does not end it", async () => {
-    const fence = "```\n## Example\n- fake\n```";
-    await expect(submit([IMPL, wave2(`- first\n${fence}\n${items(8)}`)])).rejects.toThrow(refusal(tooMany(9)));
-  });
-
-  test("a fenced heading inside the Test files list does not end it", async () => {
-    const fence = "```\n## Example\n- fake\n```";
-    await expect(submit([IMPL, wave2(items(1), `- first.test.ts\n${fence}\n${items(5, (i) => `- f${i}.test.ts`)}`)])).rejects.toThrow(refusal(tooManyFiles(6)));
-  });
-
-  test("a fenced copy of the heading name does not start the section", () => {
-    const fenced = "```\n## Contracts to verify\n- fake\n```";
-    expect(checkPlan([IMPL, { body: `# Tests\n\n## Test files\n- a.test.ts\n\n${fenced}\n\n## Contracts to verify\n${items(9)}`, test: true }])).toEqual([tooMany(9)]);
-  });
-
-  test("contractsOf still stops at a fenced heading, as before the fence rule", () => {
-    expect(contractsOf("## Contracts to verify\n- a\n```\n## Example\n```\n- b")).toBe("- a\n```");
-  });
-
-  // One fence rule for admission extraction and counting (docs/specs/report-intake.md, Fence rule): a fence closes only on the same marker,
-  // at least as long as its opener, with only whitespace after it. Regression: a tilde line inside a backtick fence toggled the scanner out of
-  // the fence, so the fake `## Example` ended the section and intake counted 1 item where 9 (or 6 files) were listed.
-  // Each case holds one real item, the fence (a fake heading and a fake item inside), then more real items after the real close.
-  describe("one fence rule at planner intake", () => {
-    const kinds = [
-      { name: "Contracts", max: 8, over: tooMany, wave: (list: string) => wave2(list), item: (i: number) => `- c${i}` },
-      { name: "Test files", max: 5, over: tooManyFiles, wave: (list: string) => wave2(items(1), list), item: (i: number) => `- f${i}.test.ts` },
-    ];
-    const blocks: [string, string][] = [
-      ["a backtick fence holding a tilde line", "```\n~~~\n## Example\n- fake\n```"],
-      ["a four-backtick fence holding a three-backtick line", "````\n```\n## Example\n- fake\n````"],
-      ["a backtick fence holding a same-marker line with a suffix", "```\n``` x\n## Example\n- fake\n```"],
-      ["a tilde fence holding a backtick line", "~~~\n```\n## Example\n- fake\n~~~"],
-      ["a five-tilde fence holding a four-tilde line", "~~~~~\n~~~~\n## Example\n- fake\n~~~~~"],
-      ["a fence closed by a longer backtick run", "```\n## Example\n- fake\n`````"],
-      ["a fence closed by a longer tilde run", "~~~\n## Example\n- fake\n~~~~~~"],
-      ["a fence closer with trailing whitespace", "```\n## Example\n- fake\n```  \t"],
-      ["an indented fence", "  ```\n  ~~~\n  ## Example\n  - fake\n  ```"],
-    ];
-    const cases = kinds.flatMap((kind) => blocks.map(([name, block]) => [kind.name, name, block, kind] as const));
-
-    test.each(cases)("%s: %s then one more than the limit is refused", async (_kind, _name, block, kind) => {
-      await expect(submit([IMPL, kind.wave(`${kind.item(0)}\n${block}\n${items(kind.max, (i) => kind.item(i + 1))}`)])).rejects.toThrow(refusal(kind.over(kind.max + 1)));
-    });
-
-    test.each(cases)("%s: %s then exactly the limit is accepted", async (_kind, _name, block, kind) => {
-      await expect(submit([IMPL, kind.wave(`${kind.item(0)}\n${block}\n${items(kind.max - 1, (i) => kind.item(i + 1))}`)])).resolves.toBeDefined();
-    });
-
-    test("CRLF line endings follow the same rule", async () => {
-      const body = wave2(`- c0\n${blocks[0]![1]}\n${items(8)}`).body.replace(/\n/g, "\r\n");
-      await expect(submit([IMPL, { body, test: true }])).rejects.toThrow(refusal(tooMany(9)));
-    });
-
-    test("an unclosed fence hides the rest of the Contracts section", async () => {
-      await expect(submit([IMPL, wave2(`- c0\n\`\`\`\n${items(8)}`)])).resolves.toBeDefined();
-    });
-
-    // A fenced copy of a heading is not the section: the real heading after it is, and a heading only inside a fence is missing.
-    test.each([
-      ["Contracts", "```\n~~~\n## Contracts to verify\n- fake\n```", (fake: string) => `# Tests\n\n## Test files\n- a.test.ts\n\n${fake}\n\n## Contracts to verify\n${items(9)}`, tooMany(9)],
-      ["Test files", "```\n~~~\n## Test files\n- fake\n```", (fake: string) => `# Tests\n\n${fake}\n\n## Test files\n${items(6, (i) => `- f${i}.test.ts`)}\n\n## Contracts to verify\n- c0`, tooManyFiles(6)],
-    ])("a fake %s start before the real start is ignored", async (_name, fake, body, line) => {
-      await expect(submit([IMPL, { body: body(fake), test: true }])).rejects.toThrow(refusal(line));
-    });
-
-    const missingContracts = 'plan wave 2 lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.';
-    const missingFiles = 'plan wave 2 is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max 5).';
-    test.each([
-      ["Contracts", "# Tests\n\n## Test files\n- a.test.ts\n\n```\n~~~\n## Contracts to verify\n- a\n```", missingContracts],
-      ["Test files", "# Tests\n\n## Contracts to verify\n- a\n\n```\n~~~\n## Test files\n- a.test.ts\n```", missingFiles],
-    ])("a %s heading that exists only inside a fence is missing, with that one line", async (_name, body, line) => {
-      await expect(submit([IMPL, { body, test: true }])).rejects.toThrow(refusal(line));
-    });
-  });
-
-  test("test files count by the same rules", () => {
-    const files = items(6, (i) => `- [ ] f${i}.test.ts\n  - note\n  wrapped`);
-    expect(checkPlan([IMPL, wave2(items(1), `\`\`\`\n- fake\n\`\`\`\n${files}`)])).toEqual([tooManyFiles(6)]);
+    ["a gate tester's passing ready report", "t1", READY, 1],
+    ["a gate tester's failing ready report", "t1", { ...READY, testsPassed: false }, 0],
+    ["a corrector's ready report", "c1", READY, 1],
+    ["a fix run's passing ready report", "f1", READY, 1],
+    ["a gate tester's blocked report without it", "t1", BLOCKED, null],
+  ] as [string, string, ReportParams, number | null][])("%s is accepted and stored in tests_passed", async (_name, id, params, stored) => {
+    const w = gated();
+    await expect(w.intake.report(id, params, "proj")).resolves.toBe(true);
+    expect(w.rowOf(id).tests_passed).toBe(stored);
   });
 });

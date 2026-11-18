@@ -8,7 +8,6 @@ import { readyIdle, tool } from "./testerHelpers";
 // The docs/ ownership gate world: a bare origin with main, the project's clone `work`, and a `peer` clone that pushes the task branch the way a worker does.
 // Git runs for real (recorded); gh answers from a stub. Shared by docsGate.test.ts and docsOwnershipCrossPlan.test.ts.
 const PRIMARY = { config: async () => ({ primaryHostId: "host_1" }), usageLimits: async () => ({}) };
-export const NO_TESTER = { testsSkipped: "tests are not under test here" };
 export const PR = "https://github.com/o/r/pull/7";
 let realExecPromise: Promise<(file: string, args: string[], options: object) => Promise<{ stdout: string; stderr: string }>> | undefined;
 const realExec = async () => realExecPromise ??= (async () => {

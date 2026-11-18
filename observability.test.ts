@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { CLOSE_OUT, PLAN_FIXTURE, TEST_WAVE, completeWorker, delegate, disposeAll, execFileMock, setup, start, status, wave } from "./test/harness";
-import { plan, report, reviewed, tool, type State } from "./test/testerHelpers";
+import { CLOSE_OUT, PLAN_FIXTURE, REQUEST_CHANGES, APPROVE, completeWorker, delegate, disposeAll, execFileMock, setup, start, status, wave } from "./test/harness";
+import { plan, report, tool, type State } from "./test/testerHelpers";
+import { forgeAnswers, forged, startGate } from "./test/gateForge";
 import { skipSpecs, specPlan } from "./test/specWriterHelpers";
 import { createToolRegistry } from "./src/tools/register";
 import { COORDINATOR_REFUSED, coordinatorRefusal } from "./src/runtime/prompts";
@@ -95,42 +96,46 @@ describe("event ledger: one row at each detection point", () => {
     expect(events(state, "blocked")).toEqual([expect.objectContaining({ thread_id: worker.threadId, detail: "Need the staging key" })]);
   });
 
-  test("a reviewer's request_changes writes one row per rejected worker with its round; an approve writes none", async () => {
+  test("a gate reviewer's request_changes writes one row per rejected worker, with no round detail; an approve writes none", async () => {
     const state = await setup();
+    forgeAnswers(state);
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await report(state, worker.threadId, { state: "ready", result: "Done" });
-    await reviewed(state, chief.threadId, worker.threadId, "approve");
-    expect(events(state, "request_changes")).toEqual([]);
-    await reviewed(state, chief.threadId, worker.threadId, "request_changes");
-    expect(events(state, "request_changes")).toEqual([expect.objectContaining({ thread_id: worker.threadId, role: "worker", detail: "round=1" })]);
+    const approved = await delegate(state, chief.threadId, "Approved work", forged(1));
+    const rejected = await delegate(state, chief.threadId, "Rejected work", forged(2));
+    for (const [worker, verdict] of [[approved, APPROVE], [rejected, REQUEST_CHANGES]] as const) {
+      await report(state, worker.threadId, { state: "ready", result: "Done" });
+      const { reviewerId } = await startGate(state, chief.threadId, worker.threadId);
+      await report(state, reviewerId!, { state: "ready", result: "Reviewed", ...verdict });
+    }
+    expect(events(state, "request_changes")).toEqual([expect.objectContaining({ thread_id: rejected.threadId, role: "worker", detail: null })]);
   });
 
   test("an advisor's request_changes on a plan writes plan_review_changes tagged with the advisor", async () => {
     const state = await setup();
     const chief = await start(state);
-    const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, { body: wave(2) }, TEST_WAVE(3)]);
+    const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, { body: wave(2) }]);
     await tool(state, "chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan before delegation" }, chief.threadId);
     const advisor = (await status(state)).threads.filter((row) => row.role === "advisor").at(-1)!;
     await report(state, advisor.threadId, { state: "ready", result: "Wave 2 is missing a contract.", verdict: "request_changes" });
     expect(events(state, "plan_review_changes")).toEqual([expect.objectContaining({ thread_id: advisor.threadId, role: "advisor" })]);
   });
 
-  test("completing with both skips writes review_skipped and tests_skipped with each reason; an override writes override", async () => {
+  test("completing with skipReview writes review_skipped with its reason; an override writes override, and no tests_skipped row is written", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await completeWorker(state, chief.threadId, worker.threadId);
     expect(events(state).filter((row) => row.thread_id === worker.threadId).map((row) => [row.kind, row.detail])).toEqual([
-      ["review_skipped", CLOSE_OUT.skipReview], ["tests_skipped", CLOSE_OUT.testsSkipped],
+      ["review_skipped", CLOSE_OUT.skipReview],
     ]);
 
     const second = await delegate(state, chief.threadId, "Second");
     await report(state, second.threadId, { state: "ready", result: "Done" });
-    await tool(state, "chief_complete", { threadId: second.threadId, testsSkipped: "no tests here", override: "owner said ship it" }, chief.threadId);
+    await tool(state, "chief_complete", { threadId: second.threadId, override: "owner said ship it" }, chief.threadId);
     expect(events(state).filter((row) => row.thread_id === second.threadId).map((row) => [row.kind, row.detail])).toEqual([
-      ["tests_skipped", "no tests here"], ["override", "owner said ship it"],
+      ["override", "owner said ship it"],
     ]);
+    expect(events(state, "tests_skipped")).toEqual([]);
   });
 
   test("chief_stop writes a stopped row with its reason", async () => {
@@ -142,15 +147,12 @@ describe("event ledger: one row at each detection point", () => {
     expect(events(state, "stopped")).toEqual([expect.objectContaining({ thread_id: worker.threadId, detail: "looping" })]);
   });
 
-  test("chief_skip_tests and chief_skip_specs each write one row tagged with the plan and wave, and a repeat adds none", async () => {
+  test("chief_skip_specs writes one row tagged with the plan and wave, and a repeat adds none", async () => {
     const state = await setup();
     const { chief, planner } = await specPlan(state);
     await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
     await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
-    await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: "no tests for a docs wave" }, chief.threadId);
-    await tool(state, "chief_skip_tests", { planThreadId: planner.threadId, wave: 2, reason: "no tests for a docs wave" }, chief.threadId);
     expect(events(state, "specs_skipped")).toEqual([expect.objectContaining({ plan_thread_id: planner.threadId, plan_wave: 1, detail: "docs are unchanged" })]);
-    expect(events(state, "tests_skipped")).toEqual([expect.objectContaining({ plan_thread_id: planner.threadId, plan_wave: 2, detail: "no tests for a docs wave" })]);
   });
 
   test("a nudge writes a chars=N row and never reaches Sentry; a stop does", async () => {

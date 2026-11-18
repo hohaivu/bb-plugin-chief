@@ -78,7 +78,6 @@ export interface Ctx {
   planBaseOf: ReturnType<typeof createCore>["planBaseOf"];
   coexists: ReturnType<typeof createCore>["coexists"];
   isDesignWave: ReturnType<typeof createCore>["isDesignWave"];
-  isTestWave: ReturnType<typeof createCore>["isTestWave"];
   latestSideWriter: ReturnType<typeof createCore>["latestSideWriter"];
   latestWorker: ReturnType<typeof createCore>["latestWorker"];
   latestChiefForProject: ReturnType<typeof createCore>["latestChiefForProject"];
@@ -147,6 +146,8 @@ export interface Ctx {
   startPlan: ReturnType<typeof createDelegation>["startPlan"];
   busyRejection: ReturnType<typeof createNextAction>["busyRejection"];
   nextAction: ReturnType<typeof createNextAction>["nextAction"];
+  gateLine: ReturnType<typeof createNextAction>["gateLine"];
+  gateOf: ReturnType<typeof createNextAction>["gateOf"];
   planAdvisors: ReturnType<typeof createNextAction>["planAdvisors"];
   planReviewRefusal: ReturnType<typeof createNextAction>["planReviewRefusal"];
   revisionsOf: ReturnType<typeof createNextAction>["revisionsOf"];
@@ -154,7 +155,6 @@ export interface Ctx {
   startBranchReview: ReturnType<typeof createNextAction>["startBranchReview"];
   startReview: ReturnType<typeof createNextAction>["startReview"];
   waitIdleAfterReport: ReturnType<typeof createNextAction>["waitIdleAfterReport"];
-  waivedLine: ReturnType<typeof createNextAction>["waivedLine"];
   waveWaitLine: ReturnType<typeof createNextAction>["waveWaitLine"];
   workerReadyNextStep: ReturnType<typeof createNextAction>["workerReadyNextStep"];
   checkoutHostSkip: ReturnType<typeof createCheckout>["checkoutHostSkip"];

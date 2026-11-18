@@ -17,10 +17,7 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 - **Verdict file**: `verdict-<seq>.md`. It holds the full report of a reviewer verdict.
 - **Report file**: `report-<seq>.md`. It holds the full text of a long or clipped report.
 - **Stamp**: the `Read at <sha>` text of a researcher or planner report. `checkout-freshness.md` defines it.
-- **Implementation wave**: a plan wave that is neither `design: true` nor `test: true`.
-- **Test wave**: a plan wave with `test: true`. Its parent is an implementation wave.
-- **Top-level item**: a Markdown list item at the smallest list indentation of its section. Deeper items are not top-level items.
-- **Fence**: a fenced code block. The Fence rule section defines its opening and closing lines.
+- **Implementation wave**: a plan wave that is not `design: true`.
 
 ## Ownership and Entry Points
 
@@ -28,7 +25,7 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 | --- | --- | --- |
 | `createReportIntake(adapters).report(threadId, params, callerProjectId)` | `src/report/reportIntake.ts` | Owns the order of acceptance and publication. Resolves to whether Chief received the alert now. `false` means the alert waits in the outbox. |
 | `checkReport`, `reportAlert`, `verdictFileBody`, `reportFileBody` | `src/report/reportIntake.ts` | Pure helpers. They validate a report and lay out the alert and the files. |
-| `sectionOf`, `contractsOf`, `checkPlan` | `src/report/reportIntake.ts` | Pure helpers. `sectionOf` reads a named Markdown section. `checkPlan` validates a planner plan, including the test-wave bound. |
+| `sectionOf`, `contractsOf`, `checkPlan` | `src/report/reportIntake.ts` | Pure helpers. `sectionOf` reads a named Markdown section. `checkPlan` validates a planner plan, including the refusal of a `test` key. |
 | `chief_report` handler and adapters | `server.ts` | Calls the intake one time. Provides the adapters. |
 
 The adapters are:
@@ -84,9 +81,9 @@ The transaction runs these steps in order:
 
 1. `reserveReport` stores the report columns, adds 1 to `report_seq`, and clears `report_path`.
 2. An advisor ready or blocked report marks the row advised. When the advisor has a plan thread, the first advice resolves the plan review. `approved` means a ready report with verdict `approve`. Any other advice means `changes`.
-3. A planner ready report with a plan sets the plan review. The review is `required` when the row has no `replaces_thread_id`, and either the plan has more than one implementation wave or `complex` is true. Otherwise the review is null. A design wave and a test wave never count, because each is a fixed companion wave (a Designer's artboards, a Tester's tests) and not extra implementation scope. When the planner replaces a planner with review `changes`, the replaced planner completes.
+3. A planner ready report with a plan sets the plan review. The review is `required` when the row has no `replaces_thread_id`, and either the plan has more than one implementation wave or `complex` is true. Otherwise the review is null. A design wave never counts, because it is a fixed companion wave (a Designer's artboards) and not extra implementation scope. When the planner replaces a planner with review `changes`, the replaced planner completes.
 4. An advisor or reviewer ready report with a `lesson` inserts one `chief_lessons` row. The row holds the project, the text, the reporting thread, the reviewed worker, the time, and the role. The row has the status `proposed`, so no prompt contains it until Chief accepts it. `observability.md` describes the lesson lifecycle.
-5. `ledger.recordVerdict` adds 1 to `reject_streak` for `request_changes` and sets it to 0 for `approve`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head.
+5. `ledger.recordVerdict` no longer changes `reject_streak`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head. A ready report of a gate tester, fix run, or corrector stores its `testsPassed` in `tests_passed`.
 6. A reviewer ready report with a verdict enqueues forge comments (one for each covered pull request). A worker blocked report enqueues one blocked comment. `forge-comments.md` describes them.
 7. When the row has a Chief, the code writes the pending alert. It has the title, the state, and the report number. It adds up to 300 characters of `summary` or `result`. The last line is `The full alert could not be built; run chief_inspect <id>.`
 8. A worker in a plan with `fails` appends one `FAIL` entry for each fail to the plan log.
@@ -96,10 +93,13 @@ The transaction runs these steps in order:
 | Role and state | Stored in addition to the common columns |
 | --- | --- |
 | Any ready report | `verdict` (null when the report sends none). Other states store a null verdict. |
-| Planner ready with a plan | `plan_waves`: path, contracts, title, and the flags `dependsOn`, `design`, `test`, `spec`, `baseline`, `feature`, `reshape` for each wave. An array plan stores `feature` and `reshape` as booleans on every wave. A string plan stores neither. `checkReport` refuses a non-boolean `design`, `test`, `spec`, `feature` or `reshape`, and refuses a `dependsOn` that is not an array of at most one earlier wave number. It also refuses `feature` or `reshape` true together with `test` or `design` true. |
+| Planner ready with a plan | `plan_waves`: path, contracts, title, and the flags `dependsOn`, `design`, `spec`, `baseline`, `feature`, `reshape` for each wave. An array plan stores `feature` and `reshape` as booleans on every wave. A string plan stores neither. `checkReport` refuses a non-boolean `design`, `spec`, `feature` or `reshape`, and refuses a `dependsOn` that is not an array of at most one earlier wave number. It also refuses `feature` or `reshape` true together with `design` true. |
 | Worker or reviewer with `fails` | The merged `fails` JSON. A report without `fails` keeps the stored value. |
 | Reviewer | `findings` JSON. Every reviewer report replaces it. A report without findings clears it. |
 | Ready with `regression` true and verdict `request_changes` | `regression` is 1. |
+| Ready gate tester or corrector | `tests_passed` from `testsPassed`. `checkReport` refuses the ready report without `testsPassed`. A corrector's `false` makes the gate escalate. |
+| Ready fix run | `tests_passed` from `testsPassed`. `checkReport` refuses the ready report unless `testsPassed` is `true`, and the refusal says to keep fixing or report blocked with wrong-test evidence. |
+| Any other row | `checkReport` refuses `testsPassed`. |
 
 ### Alert and file rules
 
@@ -135,7 +135,6 @@ Each contract carries its reason.
 - One transaction holds the report columns, the review marks, the lesson, the verdict rows, the counter, the forge comments, and the pending alert. Reason: a crash before the full alert still leaves Chief a pointer.
 - `report_seq` is reserved in the transaction. Reason: the file names of each report never collide.
 - The ledger writes run only inside `store.batch`. Reason: `inBatch` throws `A review ledger write must run inside store.batch.` otherwise.
-- `reject_streak` counts consecutive `request_changes` verdicts. An `approve` resets it. Reason: the code comment says `active_cycle` counts every resume, so a resumed reviewer must not look like a deadlock.
 - The verdict file is best-effort. A failed write never erases the stored verdict. Reason: the verdict is in the database either way.
 - A reviewer with a verdict never gets a report file. Reason: the verdict file is the full report.
 - The stamp read starts after the transaction. Reason: the state, the seq, and the pending alert are already committed.
@@ -204,54 +203,22 @@ Each contract carries its reason.
 
 ### Section helper
 
-`sectionOf` reads one Markdown section of a plan body. It has two scans.
+`sectionOf` reads one Markdown section of a plan body. It has no fence rule, so a heading inside a fenced code block still counts as a heading. `contractsOf` uses it. Reason: `contractsOf` output is stored and must not change for any body.
 
-- The legacy scan is `sectionOf(body, name)`. It has no fence rule, so a heading inside a fenced code block still counts as a heading. `contractsOf` uses this scan. Reason: `contractsOf` output is stored and must not change for any body.
-- The admission scan is `sectionOf(body, name, skipFenced)` with `skipFenced` set to true. It applies the Fence rule below. The plan checks use this scan for the test-wave bound and its presence checks. Reason: a heading in example text must neither end a section nor satisfy a missing one.
-- Both scans match the first heading of any level from 1 to 6 whose text starts with the name. They ignore case and leading spaces or tabs. Reason: `contractsOf` already matched these headings, and its output must not change for any body.
-- Both scans return the text after the heading line up to the next heading of the same or a higher level, or to the end. Reason: a deeper heading stays in the section, so a nested `###` does not cut a contract list.
-- Both scans do not trim the text. The first content line keeps its indentation. Reason: the top-level item count reads list indentation.
-- Both scans return undefined when no heading matches. Reason: the plan check reports a missing heading with its own error, and an empty section returns an empty string, so the two cases stay apart.
+- `sectionOf` matches the first heading of any level from 1 to 6 whose text starts with the name. It ignores case and leading spaces or tabs. Reason: `contractsOf` already matched these headings, and its output must not change for any body.
+- `sectionOf` returns the text after the heading line up to the next heading of the same or a higher level, or to the end. Reason: a deeper heading stays in the section, so a nested `###` does not cut a contract list.
+- `sectionOf` does not trim the text. The first content line keeps its indentation. Reason: indentation carries list depth.
+- `sectionOf` returns undefined when no heading matches. Reason: the caller reports a missing heading, and an empty section returns an empty string, so the two cases stay apart.
 - `contractsOf(body)` returns the trimmed legacy text for `Contracts to verify`, or undefined when that text is empty. Reason: existing callers keep their output.
 
-### Fence rule
+### Test key refusal
 
-The admission scan uses this rule. A fence is a fenced code block.
-
-- A fence opens on a line that starts, after leading spaces or tabs, with three or more backticks or three or more tildes. Reason: this is the Markdown fence form.
-- A backtick fence's opening line has no backtick after the markers. Reason: the Markdown rule for backtick fences, so an inline code span does not open a fence.
-- A fence closes on a line that repeats the opener's marker, uses at least as many markers as the opener, and has only spaces or tabs after the markers. Reason: a closer must match its opener, and a longer fence can hold a shorter one.
-- A line with the other marker, or with fewer markers than the opener, is text inside the fence. Reason: example text can contain fence lines.
-- An unclosed fence runs to the end of the file. Reason: the Markdown rule for an unclosed fence.
-
-### Plan test-wave bound
-
-`checkPlan` bounds the size of each test wave. It does not bound implementation waves.
-
-- A test wave's `## Contracts to verify` holds 1 to 8 top-level list items. Reason: a small test wave keeps a tester session short, because each call re-reads the growing context.
-- A test wave's `## Test files` holds 1 to 5 top-level list items. Reason: a short file list keeps the tester session short, as the contract bound does.
-- A test wave with contract text and no list item is refused. Reason: the bound counts list items, so plain text has no count.
-- A test wave without a `## Test files` heading is refused. Reason: the list names the test files the tester adds or changes, so a wave without it has no file scope.
-- A test wave without a Contracts heading gets only the missing-heading error. Reason: that error already refuses the wave, so the bound adds no second line and existing error text stays byte-identical.
-- A heading inside a fenced code block never satisfies the Contracts or Test files presence check of a test wave. Reason: the presence check reads the admission scan, so a fenced-only heading is treated as missing.
-- Implementation and design waves have no bound. Reason: the bound limits tester work only.
-
-Counting rules:
-
-- Top level is the smallest indentation among the list items of the section. A tab counts as 4 spaces.
-- Supported markers are `-`, `*`, `+`, `N.` and `N)`. A checkbox (`[ ]` or `[x]`) belongs to its item.
-- Wrapped lines, deeper items and fenced code blocks are not counted. Reason: one top-level item stands for one contract or one test file.
-- Under the admission scan, headings inside fenced code blocks are not section boundaries, in either section. A fenced `## Example` does not end the section. Reason: a fenced heading is example text, so ending the section there would hide the items after it.
-- The legacy scan of `contractsOf` does not apply this rule. Reason: its output is stored and must not change.
-- A section with no list item counts 0.
+`checkPlan` refuses a plan wave whose `test` key is `true` or `false`. The refusal says: `plan wave N: test waves are gone; the tester runs once in the review gate after every wave. Drop test.` Reason: the review gate runs one tester after every wave, so a test wave adds no work.
 
 Invariants:
 
-- The bound runs only at planner ready-report intake. Admitted plans are never checked again. Reason: plans already admitted stay valid.
-
-Trade-offs:
-
-- A contract list in an unsupported marker style, such as `•`, is refused when no supported item exists. When supported and unsupported items are mixed, the unsupported items are not counted. Reason: `•` is not Markdown list syntax, so counting it would need a marker rule that Markdown does not define.
+- The refusal runs only at planner ready-report intake. Admitted plans are never checked again. Reason: plans already admitted stay valid.
+- A `test` value that is not a boolean, such as `null`, fails the report schema first. The schema refuses it before `checkPlan` runs, so this refusal never names it. Reason: the schema accepts only a boolean or no key.
 
 ## Out of Scope
 

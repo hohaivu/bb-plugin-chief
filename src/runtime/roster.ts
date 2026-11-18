@@ -6,21 +6,19 @@ import type { Ctx } from "./context";
 import { isWriter } from "../plan/waveSchedule";
 
 export function createRoster(ctx: Ctx) {
-  const { bb, db, isTestWave, ledger, onSpecChain, planWavesFor, progress, sideLane, store, todosForProject } = ctx;
+  const { bb, db, ledger, onSpecChain, planWavesFor, progress, sideLane, store, todosForProject } = ctx;
   function rosterFor(projectId: string, includeComplete = false) {
     return store.all().filter((row) => row.project_id === projectId && (includeComplete || row.state !== "complete"));
   }
 
-  /** A hand-off from a tester or a test-wave worker must name its kind (see explicitKind in startWorker). */
+  /** A hand-off from a tester must name its kind (see explicitKind in startWorker). */
   function replacesCall(row: ManagedRow): string {
     if (isWriter(row.kind)) {
       if (sideLane(row)) return `chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
-      return isTestWave(row)
-        ? `chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test rerun or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`
-        : `chief_delegate (replaces: ${row.thread_id}, kind: worker) once it reported ready, or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
+      return `chief_delegate (replaces: ${row.thread_id}, kind: worker) once it reported ready, or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
     }
-    if ((row.kind === "tester" || isTestWave(row)) && onSpecChain(row)) return `chief_delegate (replaces: ${row.thread_id}, kind: worker) for a product-code fix, chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test fix or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
-    return row.kind === "tester" || isTestWave(row)
+    if (row.kind === "tester" && onSpecChain(row)) return `chief_delegate (replaces: ${row.thread_id}, kind: worker) for a product-code fix, chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test fix or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
+    return row.kind === "tester"
       ? `chief_delegate (replaces: ${row.thread_id}, kind: worker) for a product-code fix or chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test fix`
       : `chief_delegate (replaces: ${row.thread_id})`;
   }
@@ -154,7 +152,7 @@ export function createRoster(ctx: Ctx) {
     );
   }
 
-  const SEGMENT_LABELS = { notDelegated: "not delegated", approved: "approved", changesRequested: "changes requested", inReview: "in review", testsSkipped: "tests skipped" } as const;
+  const SEGMENT_LABELS = { notDelegated: "not delegated", approved: "approved", changesRequested: "changes requested", inReview: "in review" } as const;
 
   /** A planner's wave schedule and how far it has been delegated, or a worker's own
    * wave — shared by chief_roster and bb chief status so the two never disagree either. */
@@ -166,7 +164,7 @@ export function createRoster(ctx: Ctx) {
       return [
         `waves: ${done}/${total} done, ${segments.map((segment) => `wave ${segment.wave} ${segmentLabel(segment.state)}`).join(", ")}`,
         ...waves.map((wave, index) => `  wave ${index + 1} of ${waves.length}: ${wave.path}${
-          wave.dependsOn ? wave.dependsOn.length ? ` (after wave ${wave.dependsOn[0]})` : " (independent)" : ""}${wave.stackOn ? ` (stacked on wave ${wave.stackOn})` : ""}${wave.testsSkipped ? `: tests skipped: ${clip(wave.testsSkipped, 200)}` : ""}${wave.specsSkipped ? `: specs skipped: ${clip(wave.specsSkipped, 200)}` : ""}`),
+          wave.dependsOn ? wave.dependsOn.length ? ` (after wave ${wave.dependsOn[0]})` : " (independent)" : ""}${wave.stackOn ? ` (stacked on wave ${wave.stackOn})` : ""}${wave.specsSkipped ? `: specs skipped: ${clip(wave.specsSkipped, 200)}` : ""}`),
       ];
     }
     if (row.role === "worker" && row.plan_thread_id && row.plan_wave != null) {
@@ -202,7 +200,6 @@ export function createRoster(ctx: Ctx) {
       ...planReviewLines(row),
       ...(row.unplanned_reason ? [`unplanned: ${clip(row.unplanned_reason, 200)}`] : []),
       ...(row.review_skipped ? [`review skipped: ${clip(row.review_skipped, 200)}`] : []),
-      ...(row.tests_skipped ? [`tests skipped: ${clip(row.tests_skipped, 200)}`] : []),
       ...(row.retest_skipped ? [`retest skipped: ${clip(row.retest_skipped, 200)}`] : []),
       ...(row.summary || row.result ? [`result: ${row.summary ?? clip(row.result!, 300)}`] : []),
       ...(row.report_path ? [`report: ${row.report_path}`] : []),

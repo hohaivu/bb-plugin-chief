@@ -105,14 +105,9 @@ export function createForgeWiring(ctx: Ctx) {
         lines: [
           `**${forgeText(row.title, 160)}**${row.plan_wave && waves ? ` · wave ${row.plan_wave} of ${waves}` : ""}`,
           ...(row.pr_url ? [`Pull request: ${row.pr_url}`] : []),
-          ...(overrideReason ? [`**Completed without a matching approve:** ${forgeText(overrideReason, 1_000)}`] : []),
+          ...(overrideReason ? [`**Completed without the review gate:** ${forgeText(overrideReason, 1_000)}`] : []),
           ...(row.unplanned_reason ? [`**Planning skipped:** ${forgeText(row.unplanned_reason, 500)}`] : []),
           ...(row.review_skipped ? [`**Review skipped:** ${forgeText(row.review_skipped, 500)}`] : []),
-          ...(row.tests_skipped ? [`**Tests skipped:** ${forgeText(row.tests_skipped, 500)}`] : []),
-          ...(row.retest_skipped ? [`**Retest skipped:** ${forgeText(row.retest_skipped, 500)}`] : []),
-          // The waived test waves of this worker's chain (an absent one is off the chain, so compare chain heads).
-          ...(row.plan_thread_id && row.plan_wave != null ? ((plan) => plan.flatMap((wave, index) => wave.testsSkipped && chainOf(plan, index + 1)[0] === chainOf(plan, row.plan_wave!)[0]
-            ? [`**Tests skipped (wave ${index + 1}):** ${forgeText(wave.testsSkipped, 500)}`] : []))(planWavesFor(row.plan_thread_id)) : []),
           ...(row.plan_thread_id && row.plan_wave != null ? ((plan) => plan.flatMap((wave, index) => wave.specsSkipped && chainOf(plan, index + 1)[0] === chainOf(plan, row.plan_wave!)[0]
             ? [`**Specs skipped (wave ${index + 1}):** ${forgeText(wave.specsSkipped, 500)}`] : []))(planWavesFor(row.plan_thread_id)) : []),
         ],

@@ -119,9 +119,9 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 ### Chief configuration (`bb.agents.configure`, Chief branch)
 
 - A row in state `complete`, `archived` or `deleted` gets no tools and no skills.
-- The base list is `chief_consult`, `chief_spawn`, `chief_forge_init`, `chief_delegate`, `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_skip_tests`, `chief_skip_specs`, `chief_escalate` and `chief_sync`.
+- The base list is `chief_consult`, `chief_spawn`, `chief_forge_init`, `chief_delegate`, `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_skip_specs`, `chief_escalate` and `chief_sync`.
 - The list adds `chief_plan` when planning is on, and `chief_research` when research is on.
-- A plain Chief also gets `chief_coordinate` and `chief_attach`. A plain Chief has 19 tools with planning and research on. A child Chief has 17. A Coordinator has 3.
+- A plain Chief also gets `chief_coordinate` and `chief_attach`. A plain Chief has 18 tools with planning and research on. A child Chief has 16. A Coordinator has 3.
 - The skills are `["chief"]`.
 - The instructions hold the greeting, then the preload line for `claude-code`, then the Chief rules. The project rules come last. Reason: the SDK cuts instructions at 32,768 characters.
 - The preload line is `select:` followed by the exact `mcp__bb-bridge__` names of the row's tools, in the host's selected order.
@@ -147,7 +147,7 @@ Each contract has an identifier. Tests and reviews cite it.
 ### COORD-2 Purity
 
 - A Coordinator receives exactly `chief_roster`, `chief_spawn` and `chief_attach`.
-- These tools refuse a Coordinator at execution time: `chief_plan`, `chief_consult`, `chief_delegate`, `chief_forge_init`, `chief_review`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_complete`, `chief_owner_approval`, `chief_skip_tests`, `chief_skip_specs`, `chief_escalate`, `chief_sync` and `chief_research`.
+- These tools refuse a Coordinator at execution time: `chief_plan`, `chief_consult`, `chief_delegate`, `chief_forge_init`, `chief_review`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_complete`, `chief_owner_approval`, `chief_skip_specs`, `chief_escalate`, `chief_sync` and `chief_research`.
 - The CLI commands `plan`, `consult`, `delegate` and every managed-Chief command that acts on a target refuse a Coordinator in the same way.
 - The refusal text says that the tool is not available to a Coordinator and names the roles that it does not run. It tells the caller to ask the child Chief that owns the work.
 - `chief_report` keeps its own rejection. `chief_log` still returns "Not part of a plan run." A repeated `chief_coordinate` still returns "Already a Coordinator."
@@ -242,8 +242,8 @@ Each contract has an identifier. Tests and reviews cite it.
 | Row | Tools | Skills | Preload names |
 | --- | --- | --- | --- |
 | Coordinator | `chief_roster`, `chief_spawn`, `chief_attach` | none | 3 |
-| Plain Chief | The base list plus `chief_coordinate` and `chief_attach` | `chief`, `coordinator` | Tool count (19 with planning and research on) |
-| Child Chief | The base list | `chief` | Tool count (17 with planning and research on) |
+| Plain Chief | The base list plus `chief_coordinate` and `chief_attach` | `chief`, `coordinator` | Tool count (18 with planning and research on) |
+| Child Chief | The base list | `chief` | Tool count (16 with planning and research on) |
 
 - The Coordinator greeting states that the Coordinator supervises child Chiefs in any project, not managed threads.
 - The Coordinator instructions replace the Chief rules. They state that the Coordinator never edits code, never plans, delegates, reviews or completes, and attaches only Chiefs that the owner names.

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
-import { APPROVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, rowOf, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
+import { APPROVE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, planTwoWaves, rowOf, setup, start, status, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -33,7 +33,7 @@ describe("chief_report reviewer findings acceptance", () => {
     execFileMock.mockImplementation(async (file: string, args: string[]) => ({ stdout: file === "gh" && args[0] === "pr" ? ghHead("feature/x") : "" }));
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { prUrl: PR });
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { prUrl: PR, branch: "feature/x" });
     const as = (threadId: string) => ({ threadId, projectId: "proj_1" });
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready for review" }, as(worker.threadId));
     const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
@@ -91,12 +91,13 @@ describe("chief_report reviewer findings acceptance", () => {
     expect(stores(state, worker.threadId)).toEqual(before);
   });
 
-  test("a refused request_changes leaves the streak at 0, and the corrected report then counts as the first rejection", async () => {
+  test("a refused request_changes records no verdict, and the corrected report then records the first one", async () => {
     const { state, review, report } = await reviewed();
     await expect(report({ verdict: "request_changes", findings: [nit(0)] })).rejects.toThrow("chief_report was not saved");
-    expect(rowOf(state, review.threadId).reject_streak).toBe(0);
+    expect(count(state, "reviewer_verdicts")).toBe(0);
     await report({ verdict: "request_changes", findings: [blocking(), nit(0)] });
-    expect(rowOf(state, review.threadId)).toMatchObject({ report_seq: 1, reject_streak: 1, verdict: "request_changes" });
+    expect(count(state, "reviewer_verdicts")).toBe(1);
+    expect(rowOf(state, review.threadId)).toMatchObject({ report_seq: 1, verdict: "request_changes" });
   });
 
   test("accepts 40 findings and stores all of them", async () => {
@@ -148,19 +149,18 @@ describe("chief_report reviewer findings acceptance", () => {
     expect(nitPart).not.toMatch(/\t|  Nit text|Nit text\n\n\n/);
   });
 
-  test("request_changes writes one reviewer_verdicts row per covered target, adds 1 to reject_streak, and a later approve resets it", async () => {
+  test("request_changes writes one reviewer_verdicts row per covered target per report and leaves reject_streak at 0", async () => {
     const { state, worker, review, report } = await reviewed();
     const verdictRows = () => state.db.prepare("SELECT worker_thread_id, verdict, report_seq FROM reviewer_verdicts WHERE reviewer_thread_id=? ORDER BY id").all(review.threadId);
     const commentsBefore = count(state, "forge_comments");
     await report({ verdict: "request_changes", findings: [blocking(), nit(0)] });
     expect(verdictRows()).toEqual([{ worker_thread_id: worker.threadId, verdict: "request_changes", report_seq: 1 }]);
-    expect(rowOf(state, review.threadId).reject_streak).toBe(1);
     expect(count(state, "forge_comments")).toBe(commentsBefore + 1);
     await report({ verdict: "request_changes", findings: [blocking()] });
-    expect(rowOf(state, review.threadId).reject_streak).toBe(2);
     expect(verdictRows()).toHaveLength(2);
     await report({ ...APPROVE });
     expect(rowOf(state, review.threadId)).toMatchObject({ reject_streak: 0, verdict: "approve", report_seq: 3 });
+    expect(rowOf(state, worker.threadId).reject_streak).toBe(0);
     expect(verdictRows().at(-1)).toEqual({ worker_thread_id: worker.threadId, verdict: "approve", report_seq: 3 });
   });
 });
@@ -182,15 +182,17 @@ describe("reviewer lesson from chief_report to the next reviewer", () => {
   };
 
   async function firstReview() {
+    execFileMock.mockImplementation(async (file: string, args: string[]) => ({ stdout: file === "gh" && args[0] === "pr" ? ghHead("feature/x") : "" }));
     const state = await setup();
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { prUrl: "https://github.com/acme/shop/pull/8", branch: "feature/x" });
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready for review" }, as(worker.threadId));
     const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
     const report = (params: object, threadId = review.threadId) => state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Reviewed", ...APPROVE, ...params }, as(threadId)) as Promise<unknown>;
     // The next reviewer reviews another worker of the same project.
     const nextReviewer = async () => {
-      const other = await delegate(state, chief.threadId, `Other work ${Math.random()}`);
+      const n = Math.random().toString(36).slice(2);
+      const other = await delegate(state, chief.threadId, `Other work ${n}`, { prUrl: `https://github.com/acme/shop/pull/${n}`, branch: `feature/${n}` });
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready for review" }, as(other.threadId));
       return (await chiefReview(state, chief.threadId, { workerThreadId: other.threadId })).threadId;
     };
@@ -232,17 +234,18 @@ describe("reviewer lesson from chief_report to the next reviewer", () => {
 
   test("an advisor's lesson shows under earlier-review lessons for every managed role, and not under Review lessons", async () => {
     const { state, chief, nextReviewer } = await firstReview();
-    await state.harness.behavior.runCli(["consult", "--title", "Rework checkout", "--mission", "Explore a fix for the discount bug"], as(chief.threadId));
+    const { planner } = await planTwoWaves(state, chief.threadId);
+    await state.harness.behavior.callAgentTool("chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan before delegation" }, as(chief.threadId));
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done", lesson: "Plans name their test wave." }, as(advisor.threadId));
-    expect(lessonRows(state)).toEqual([expect.objectContaining({ text: "Plans name their test wave.", source_thread_id: advisor.threadId, role: "advisor" })]);
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done", verdict: "approve", lesson: "Plans name their contracts." }, as(advisor.threadId));
+    expect(lessonRows(state)).toEqual([expect.objectContaining({ text: "Plans name their contracts.", source_thread_id: advisor.threadId, role: "advisor" })]);
     await acceptAll(state, chief.threadId);
     const seeded = (role: string) => ({ role, chiefThreadId: chief.threadId });
     const next = await nextReviewer();
     const texts: [string, string][] = [["reviewer", await instructionsOf(state, next)]];
     for (const role of ["worker", "planner", "advisor"]) texts.push([role, await instructionsOf(state, `thr_seed_${role}`, "proj_1", seeded(role))]);
     for (const [role, text] of texts) {
-      expect(section(text, EARLIER), role).toBe(`${EARLIER}\n- Plans name their test wave.`);
+      expect(section(text, EARLIER), role).toBe(`${EARLIER}\n- Plans name their contracts.`);
       expect(text, role).not.toContain(REVIEW);
     }
   });

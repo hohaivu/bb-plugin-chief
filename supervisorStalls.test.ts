@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import { delegate, disposals, disposeAll, setup, start, status } from "./test/harness";
+import { forgeAnswers, forged } from "./test/gateForge";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -190,9 +191,10 @@ describe("Chief backend", () => {
 
   test("a reviewer's stall ladder points at a fresh review, not a replacement worker", async () => {
     const state = await setup();
+    forgeAnswers(state);
     await state.harness.behavior.setSettings({ stallMinutes: "1" });
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Ready for review",
     }, { threadId: worker.threadId, projectId: "proj_1" });

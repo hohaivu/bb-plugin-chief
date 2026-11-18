@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { READY, type State, delegateWave, plan, planWaves, readyIdle, report, rowOf, setLive, tool, workerOn } from "./testerHelpers";
-import { TEST_WAVE, approvePlan, start, wave } from "./harness";
+import { approvePlan, start, wave } from "./harness";
 
 export const SPEC_DELTA = "## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative";
 /** An implementation wave that runs a Spec Writer before its worker. */
@@ -16,15 +16,15 @@ export const swap = async (state: State, chief: { threadId: string }, planThread
   return workerOn(state, planThreadId, waveNo).thread_id as string;
 };
 
-/** Chief + a plan (default: spec implementation wave 1, then its test wave 2). Nothing delegated. */
-export async function specPlan(state: State, waves: object[] = [specImpl(), TEST_WAVE(2)], approve = false) {
+/** Chief + a plan (default: one spec implementation wave). Nothing delegated. */
+export async function specPlan(state: State, waves: object[] = [specImpl()], approve = false) {
   const chief = await start(state);
   const planner = await plan(state, chief.threadId, waves);
   // A plan with two or more implementation waves needs its one advisor review first.
-  if (approve || waves.filter((entry: any) => !entry.test && !entry.design).length > 1) await approvePlan(state, chief.threadId, planner.threadId);
+  if (approve || waves.filter((entry: any) => !entry.design).length > 1) await approvePlan(state, chief.threadId, planner.threadId);
   return { chief, planner };
 }
-/** The newest implementation-lane row (worker, designer, tester or a legacy writer that replaced one) and the newest side writer of a wave. */
+/** The newest implementation-lane row (worker, designer or a legacy writer that replaced one) and the newest side writer of a wave. */
 export const ownerOn = (state: State, planThreadId: string, waveNo: number) =>
   state.db.prepare(`SELECT * FROM managed_threads WHERE plan_thread_id=? AND plan_wave=? AND role='worker' AND (kind IS NULL OR kind<>'spec-writer' OR replaces_thread_id IN (SELECT thread_id FROM managed_threads WHERE kind IS NULL OR kind<>'spec-writer')) ORDER BY rowid DESC`).get(planThreadId, waveNo) as any;
 export const writerOn = (state: State, planThreadId: string, waveNo: number) =>
@@ -54,14 +54,12 @@ export async function withBoth(state: State, waves?: object[]) {
   const ctx = await withWorker(state, waves);
   return { ...ctx, writer: await delegateWriter(state, ctx.chief, ctx.planner.threadId, 1) };
 }
-/** The whole parallel chain, every row ready and idle: wave 1's worker and Spec Writer, wave 2's tester (which replaces the worker). */
+/** The whole parallel chain, every row ready and idle: wave 1's worker and Spec Writer. */
 export async function fullChain(state: State, waves?: object[]) {
   const ctx = await withBoth(state, waves);
   await readyIdle(state, ctx.worker);
   await readyIdle(state, ctx.writer);
-  const tester = await swap(state, ctx.chief, ctx.planner.threadId, 2, ctx.worker, "tester");
-  await readyIdle(state, tester);
-  return { ...ctx, tester };
+  return ctx;
 }
 
 /** Puts wave 1's Spec Writer into `how`: ready (busy host), ready and idle, blocked and idle, idle with no report, or complete.
@@ -98,12 +96,12 @@ export const baseImpl = (n = 1, extra: object = {}) => ({ body: wave(n, `Build t
 export const CHAIN_B = "feature/chain-b";
 export const CHAIN_B_PR = "https://github.com/o/r/pull/8";
 /** The `## Docs needed` text each row reports (undefined: the row reports none). */
-export type DocsNotes = Partial<Record<"w1" | "w2" | "w3" | "t4" | "w5" | "t6" | "s1", string>>;
-/** One plan, two chains whose Spec deltas name the same docs path. Chain A: wave 1 (spec), wave 2 (plain), wave 3 (spec), wave 4 (test).
- * Chain B: wave 5 (spec), wave 6 (test). Every row reported ready and idle except chain B's writer when `blockB` is set (it reports blocked last, idle; a string is its blocker text).
+export type DocsNotes = Partial<Record<"w1" | "w2" | "w3" | "w4" | "w5" | "w6" | "s1", string>>;
+/** One plan, two chains whose Spec deltas name the same docs path. Chain A: wave 1 (spec), wave 2 (plain), wave 3 (spec), wave 4 (plain).
+ * Chain B: wave 5 (spec), wave 6 (plain). Every row reported ready and idle except chain B's writer when `blockB` is set (it reports blocked last, idle; a string is its blocker text).
  * Wave 1's writer s1 owns waves 1-2, wave 3's s3 owns 3-4, wave 5's s5 owns 5-6. */
 export async function docsChains(state: State, notes: DocsNotes = {}, blockB: boolean | string = false) {
-  const waves = [specImpl(1), { body: wave(2) + NOT_DOING }, specImpl(3), TEST_WAVE(4), specImpl(5, { dependsOn: [] }), TEST_WAVE(6)];
+  const waves = [specImpl(1), { body: wave(2) + NOT_DOING }, specImpl(3), { body: wave(4) + NOT_DOING }, specImpl(5, { dependsOn: [] }), { body: wave(6) + NOT_DOING }];
   const { chief, planner } = await specPlan(state, waves);
   const P = planner.threadId;
   const done = (id: string, note?: string) => readyIdle(state, id, note === undefined ? READY : `${READY}\n\n## Docs needed\n${note}`);
@@ -121,18 +119,20 @@ export async function docsChains(state: State, notes: DocsNotes = {}, blockB: bo
   await done(w3, notes.w3);
   await done(s1, notes.s1);
   await done(s3);
-  const t4 = await swap(state, chief, P, 4, w3, "tester");
-  await done(t4, notes.t4);
+  await delegateWave(state, chief.threadId, P, 4, { replaces: w3 });
+  const w4 = ownerOn(state, P, 4).thread_id as string;
+  await done(w4, notes.w4);
   const chainB = { branch: CHAIN_B, prUrl: CHAIN_B_PR };
   await delegateWave(state, chief.threadId, P, 5, chainB);
   const w5 = ownerOn(state, P, 5).thread_id as string;
   const s5 = await delegateWriter(state, chief, P, 5, chainB);
   await done(w5, notes.w5);
   await done(s5);
-  const t6 = await swap(state, chief, P, 6, w5, "tester");
-  await done(t6, notes.t6);
+  await delegateWave(state, chief.threadId, P, 6, { replaces: w5 });
+  const w6 = ownerOn(state, P, 6).thread_id as string;
+  await done(w6, notes.w6);
   if (blockB) await report(state, s5, { state: "blocked", result: "Cannot write the delta", blocker: typeof blockB === "string" ? blockB : "Delta names no domain", recommendation: "Re-plan" });
-  return { chief, planner, P, s1, s3, s5, w1, w2, w3, t4, w5, t6, firstWriterPrompt };
+  return { chief, planner, P, s1, s3, s5, w1, w2, w3, w4, w5, w6, firstWriterPrompt };
 }
 /** The prompt of the thread the last chief_delegate spawned. */
 export const lastPrompt = (state: State) => state.spawned.at(-1).prompt as string;

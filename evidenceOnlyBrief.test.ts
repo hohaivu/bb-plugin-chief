@@ -7,7 +7,6 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { type WorkerBriefInput, workerBrief } from "./src/research/delegationBrief";
 import { READY, ctxOf, delegateWave, plan, readyIdle, readyImpl, refusal, report, rowOf, tool, workerOn } from "./test/testerHelpers";
 import { briefMatrix } from "./test/briefMatrix";
-import { COMPLETE_RESULT, CUT_RESULT, RECEIPT_BODY } from "./test/receiptFixtures";
 import { delegate, disposeAll, setup, start, status } from "./test/harness";
 import { provideSdk } from "./test/sdk";
 
@@ -160,35 +159,14 @@ describe("evidence-only tester brief", () => {
     expect(evidence({ wave: undefined, waveTotal: undefined, planContextLine: undefined, contracts: undefined }).prompt).not.toContain("## Deviations from plan");
   });
 
-  // Contract (plan-chains.md "Evidence-Only Tester Brief", wave 3): `## Evidence work` replaces the first rule line and the old run line and adds the
-  // inputs, pin, escalation and Receipt lines; Record, Base runs, Ready and Blocked are the base's bytes (a5d01fe). The pin compares HEAD with the
-  // mission's Expected head and never with the predecessor's commits. Regression: an old line edited or dropped; a missing input/escalation/receipt line.
-  test("Evidence work is the base's unchanged lines plus the replaced rule and run lines and the new inputs, pin, escalation and Receipt lines", () => {
-    const work = section(evidence().prompt, "Evidence work")!.split("\n");
-    expect(work).toEqual([
-      "- This brief overrides the `chief-role-tester` skill: write no tests. Run only the commands your mission names, else the commands of a complete `## Prior receipt`, in this worktree. Commit nothing, push nothing, edit no tracked file; never use stash, autostash or another worktree. Chief owns the forge.",
-      "- Record `git rev-parse HEAD` as `Head commit: <sha>` before any run.",
-      "- Base runs: `git switch --detach <base>` on a clean tree; afterwards `git switch -` and check HEAD equals Head commit. After each switch, reinstall dependencies if the lockfile differs, and reset any database or state the suites write.",
-      "- You need: `Expected head: <sha>` in your mission; `Last tested` (mission, else the receipt's Tested commit); and for each command its cwd, the exact command and the required exit status (mission, else a complete receipt). If any is missing, report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: tester)` without evidenceOnly. Never report ready without them.",
-      "- After the sync, HEAD must equal Expected head; otherwise report blocked naming both commits. Do not compare against the predecessor's commits.",
-      "- If the fix needs a new or changed test (a finding asks for one, the receipt's Coverage lacks the fixed behaviour, or a test asserts the old behaviour), report blocked with the same normal-mode recommendation.",
-      "- Run each command alone as `<cmd> > \"$BB_THREAD_STORAGE/<name>.log\" 2>&1; echo exit=$?`, then `tail -n 80` the log; read more only when the tail does not show the failure. Record per-file pass counts.",
-      "- Ready: per command, base and head side by side (commit, exit status, pass counts); explain every difference, since an unexplained one is a regression. Before you report, HEAD equals Head commit and `git status --porcelain` prints nothing.",
-      "- Blocked: name the command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: tester)` for a wrong test, `kind: worker` for product code.",
-      "- Your ready result ends with `## Receipt` in the `chief-role-tester` skill format: Coverage and Gaps carried from the prior receipt, Tested commit = Expected head, commands and results updated.",
-    ]);
-  });
-
-  // Contract: the pin is the mission's Expected head. The predecessor's Head commit never appears in an evidence brief, and the mission's line survives whole.
-  test("the pin names the mission's Expected head even when the predecessor's report names another Head commit", () => {
-    const { prompt } = evidence({
-      params: { ...exampleInput().params, mission: `Rerun the suites. Expected head: 1111111aaaa. ${MISSION}` },
-      prior: { ...exampleInput().prior!, result: "Done.\nHead commit: 2222222bbbb\nBase commit: 3333333cccc" },
-    });
-    expect(prompt).toContain("Expected head: 1111111aaaa.");
-    expect(prompt).toContain("After the sync, HEAD must equal Expected head; otherwise report blocked naming both commits. Do not compare against the predecessor's commits.");
-    expect(prompt).not.toContain("2222222bbbb");
-    expect(prompt).not.toContain("3333333cccc");
+  // Contract (plan-chains.md "Evidence-Only Tester Brief"): `## Evidence work` orders the run-only steps: write no tests, commit and push nothing, record Head commit,
+  // base runs, ready and blocked reports with the two recommendation routes. The receipt, the Expected head pin and the Prior receipt section are gone.
+  // Regression: a step is dropped, or a receipt/pin line returns.
+  test("Evidence work orders the run-only steps and carries no receipt or pin lines", () => {
+    const prompt = evidence().prompt;
+    const work = section(prompt, "Evidence work")!;
+    for (const step of ["write no tests", "Commit nothing, push nothing", "`Head commit: <sha>`", "git switch --detach", "git status --porcelain", "kind: tester", "kind: worker"]) expect(work, step).toContain(step);
+    for (const gone of ["Receipt", "receipt", "Expected head", "Last tested"]) expect(prompt, gone).not.toContain(gone);
   });
 
   // Contract (byte equivalence): without the flag, or with it on a kind other than tester, prompt, brief and reviewerBrief are unchanged.
@@ -275,14 +253,6 @@ describe("evidence-only tester brief", () => {
       });
     });
 
-    // Contract: `## Prior receipt` is for testers only. Regression: the builder drops its tester check and a worker, designer or Spec Writer brief grows the section.
-    const RECEIPT_INPUT = { tester: { thread_id: "thr_prev", report_path: "/reports/prev.md" }, receipt: { text: RECEIPT_BODY } };
-    test.each(["worker", "designer", "spec-writer side", "spec-writer implementation"])("%s: a receipt input renders the same bytes as none", (kind) => {
-      const own = cells.filter(([label]) => label.startsWith(`${kind} planned`));
-      expect(own).toHaveLength(64);
-      for (const [label, input] of own) expect(workerBrief({ ...input, receipt: RECEIPT_INPUT }), label).toEqual(workerBrief(input));
-    });
-
     test("tester: evidenceOnly false renders the same bytes as omitted, and true changes the brief", () => {
       const own = cells.filter(([label]) => label.startsWith("tester planned"));
       expect(own).toHaveLength(64);
@@ -303,7 +273,6 @@ describe("evidence-only tester brief", () => {
 describe("evidence-only through chief_delegate", () => {
   const rows = (state: Awaited<ReturnType<typeof setup>>) => (state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads`).get() as { n: number }).n;
   const REFUSAL = /kind: tester/;
-  const section = (text: string, heading: string) => text.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0]?.trim();
 
   // Regression: the guard is missing or runs after managedSpawn.prepare, so a worker starts (or the prior is superseded) with a run-only brief.
   test("refuses a resolved kind other than tester before anything starts, and leaves the prior untouched", async () => {
@@ -331,16 +300,16 @@ describe("evidence-only through chief_delegate", () => {
   });
 
   // Regression: the tester is refused or gets the normal brief; or the ready report with the Deviations heading is not accepted.
-  test("a tester on a test wave gets the evidence brief, keeps the Deviations line, and its ready report is accepted", async () => {
+  test("a tester replacing a plan wave's worker gets the evidence brief, keeps the Deviations line, and its ready report is accepted", async () => {
     const state = await setup();
     const { chief, planner, impl } = await readyImpl(state);
-    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl, evidenceOnly: true });
+    await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: impl, kind: "tester", evidenceOnly: true });
     const prompt = state.spawned.at(-1).prompt as string;
-    expect(prompt).toMatch(/^You are the managed tester for “Wave 2”/);
+    expect(prompt).toMatch(/^You are the managed tester for “Wave 1”/);
     expect(prompt).toContain("## Evidence work");
     expect(prompt).toContain("`## Deviations from plan` heading");
     for (const gone of ["## Test work", "## Contracts to verify", "## Source of truth for test cases", "Commit and push"]) expect(prompt).not.toContain(gone);
-    const tester = workerOn(state, planner.threadId, 2).thread_id as string;
+    const tester = workerOn(state, planner.threadId, 1).thread_id as string;
     await report(state, tester, { state: "ready", result: READY });
     expect(rowOf(state, tester).last_report_state).toBe("ready");
   });
@@ -350,53 +319,13 @@ describe("evidence-only through chief_delegate", () => {
   test("replacing an evidence tester without the flag gives a normal tester brief", async () => {
     const state = await setup();
     const { chief, planner, impl } = await readyImpl(state);
-    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl, evidenceOnly: true });
-    const first = workerOn(state, planner.threadId, 2).thread_id as string;
+    await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: impl, kind: "tester", evidenceOnly: true });
+    const first = workerOn(state, planner.threadId, 1).thread_id as string;
     await readyIdle(state, first);
-    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: first, kind: "tester" });
-    const prompt = state.spawned.at(-1).prompt as string;
-    expect(prompt).toMatch(/^You are the managed worker for “Wave 2”/);
-    expect(prompt).toContain("## Test work");
-    expect(prompt).not.toContain("## Evidence work");
-  });
-
-  // Contract (wave 3): the pin and inputs come from the mission, so an evidence tester replacing a tester whose newest report holds a complete receipt gets that
-  // receipt with the evidence line, its mission's Expected head is kept whole, and the predecessor's Head commit is never in the brief.
-  test("an evidence tester replacing a tester with a complete receipt gets the receipt, the pin and the mission's Expected head, not the predecessor's commit", async () => {
-    const state = await setup();
-    const { chief, planner, impl } = await readyImpl(state);
-    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: impl });
-    const first = workerOn(state, planner.threadId, 2).thread_id as string;
-    await readyIdle(state, first, `${COMPLETE_RESULT.split("\n\n## Receipt")[0]}\nHead commit: 2222222bbbb\n\n## Receipt${COMPLETE_RESULT.split("\n\n## Receipt")[1]}`);
-    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: first, kind: "tester", evidenceOnly: true, mission: "Rerun the retest suites. Expected head: 1111111aaaa" });
-    const prompt = state.spawned.at(-1).prompt as string;
-    expect(section(prompt, `Prior receipt (${first})`)).toBe(`${RECEIPT_BODY}\nIts commands are your commands and its Tested commit is Last tested, unless your mission names others.`);
-    expect(prompt).toContain("Expected head: 1111111aaaa");
-    expect(prompt).toContain("After the sync, HEAD must equal Expected head");
-    expect(prompt).not.toContain("2222222bbbb");
-  });
-
-  // Contract: explicit evidenceOnly with a legacy or cut receipt still succeeds (the brief says so with a pointer); the flag is not inherited from an
-  // evidence tester that holds a complete receipt. Regression: a missing receipt refuses the delegation, or a successor inherits the evidence brief.
-  test("an explicit evidenceOnly delegation without a usable receipt still succeeds, and its successor does not inherit evidenceOnly", async () => {
-    const state = await setup();
-    const { chief, planner, impl } = await readyImpl(state);
-    let previous = impl;
-    for (const result of [READY, CUT_RESULT]) {
-      await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: previous, kind: "tester", evidenceOnly: true });
-      previous = workerOn(state, planner.threadId, 2).thread_id as string;
-      expect(state.spawned.at(-1).prompt).toContain("## Evidence work");
-      await readyIdle(state, previous, result);
-    }
-    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: previous, kind: "tester", evidenceOnly: true });
-    expect(section(state.spawned.at(-1).prompt, `Prior receipt (${previous})`)).toMatch(/^\S+'s report has no complete receipt: .+\. Do not run partial commands from it\.$/);
-    const evidenceTester = workerOn(state, planner.threadId, 2).thread_id as string;
-    await readyIdle(state, evidenceTester, COMPLETE_RESULT);
-    await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: evidenceTester, kind: "tester" });
+    await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: first, kind: "tester" });
     const prompt = state.spawned.at(-1).prompt as string;
     expect(prompt).toContain("## Test work");
     expect(prompt).not.toContain("## Evidence work");
-    expect(section(prompt, `Prior receipt (${evidenceTester})`)).toContain("Reuse it:");
   });
 
   // Contract: CLI --evidence-only maps to evidenceOnly: true, and an absent flag to undefined (a normal brief).
@@ -404,15 +333,15 @@ describe("evidence-only through chief_delegate", () => {
     const state = await setup();
     const { chief, planner, impl } = await readyImpl(state);
     const cli = (args: string[]) => state.harness.behavior.runCli(["delegate", "--title", "Wave", "--mission", "Run", ...args], ctxOf(state, chief.threadId));
-    const wave2 = ["--plan-thread", planner.threadId, "--wave", "2", "--replaces", impl];
+    const wave1 = ["--plan-thread", planner.threadId, "--wave", "1", "--kind", "tester"];
 
-    const flagged = await cli([...wave2, "--evidence-only"]);
+    const flagged = await cli([...wave1, "--replaces", impl, "--evidence-only"]);
     expect(flagged.exitCode, flagged.stderr).toBe(0);
     expect(state.spawned.at(-1).prompt).toContain("## Evidence work");
-    const first = workerOn(state, planner.threadId, 2).thread_id as string;
+    const first = workerOn(state, planner.threadId, 1).thread_id as string;
     await readyIdle(state, first);
 
-    const plain = await cli(["--plan-thread", planner.threadId, "--wave", "2", "--replaces", first, "--kind", "tester"]);
+    const plain = await cli([...wave1, "--replaces", first]);
     expect(plain.exitCode, plain.stderr).toBe(0);
     expect(state.spawned.at(-1).prompt).toContain("## Test work");
     expect(state.spawned.at(-1).prompt).not.toContain("## Evidence work");

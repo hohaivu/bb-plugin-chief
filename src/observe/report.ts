@@ -47,23 +47,17 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
 
   const countsByKind = (from: number, to: number) => new Map((db.prepare(`SELECT kind, COUNT(*) n FROM chief_events WHERE at >= ? AND at < ? GROUP BY kind`).all(from, to) as { kind: string; n: number }[]).map((row) => [row.kind, row.n]));
   const now = countsByKind(since, until), before = countsByKind(since - (until - since), since);
-  const rounds = (from: number, to: number) => {
-    const best = new Map<string, number>();
-    for (const row of db.prepare(`SELECT thread_id, detail FROM chief_events WHERE kind='request_changes' AND at >= ? AND at < ?`).all(from, to) as { thread_id: string | null; detail: string | null }[]) {
-      const round = Number(/round=(\d+)/.exec(row.detail ?? "")?.[1]);
-      if (row.thread_id && round > (best.get(row.thread_id) ?? 0)) best.set(row.thread_id, round);
-    }
-    return best;
-  };
-  const roundsNow = rounds(since, until), roundsBefore = rounds(since - (until - since), since);
-  const rounds2 = (best: Map<string, number>) => [...best.values()].filter((round) => round >= 2).length;
+  // One request_changes event per covered thread per verdict; old rows that carry a round detail count the same.
+  const rejections = (from: number, to: number) => new Map((db.prepare(`SELECT thread_id, COUNT(*) n FROM chief_events WHERE kind='request_changes' AND thread_id IS NOT NULL AND at >= ? AND at < ? GROUP BY thread_id`).all(from, to) as { thread_id: string; n: number }[]).map((row) => [row.thread_id, row.n]));
+  const rejectionsNow = rejections(since, until), rejectionsBefore = rejections(since - (until - since), since);
+  const twice = (counts: Map<string, number>) => [...counts.values()].filter((n) => n >= 2).length;
   const kinds = [...new Set([...now.keys(), ...before.keys()])].sort();
   const blocked = store.all().filter((row) => row.state === "blocked").length;
   const stalls = (now.get("stall") ?? 0) + (now.get("hard_stall") ?? 0);
   block("Scorecard (24 h vs previous 24 h)", ["| Metric | Last 24 h | Previous 24 h |", "| --- | --- | --- |",
     ...kinds.map((kind) => `| ${kind} | ${now.get(kind) ?? 0} | ${before.get(kind) ?? 0} |`),
-    `| tasks with review round ≥ 2 | ${rounds2(roundsNow)} | ${rounds2(roundsBefore)} |`,
-    `| highest review round of one task | ${Math.max(0, ...roundsNow.values())} | ${Math.max(0, ...roundsBefore.values())} |`,
+    `| threads with ≥ 2 request_changes | ${twice(rejectionsNow)} | ${twice(rejectionsBefore)} |`,
+    `| most request_changes on one thread | ${Math.max(0, ...rejectionsNow.values())} | ${Math.max(0, ...rejectionsBefore.values())} |`,
     `| workers blocked now | ${blocked} | |`]);
 
   const completions = db.prepare(`SELECT thread_id, pr_url, diff_state, diff_note FROM chief_completions WHERE at >= ? AND at < ? ORDER BY at`).all(since, until) as { thread_id: string; pr_url: string | null; diff_state: string; diff_note: string | null }[];
@@ -192,7 +186,7 @@ export async function buildDailyReport(ctx: Ctx, since: number, until: number, a
   }
   if (markdown.length > REPORT_MAX_CHARS) markdown = markdown.slice(0, REPORT_MAX_CHARS); // unreachable unless the fixed parts alone are too long
 
-  return { markdown, sections, counts: { newSentry: newIssues.length, patterns: recurring.length, blocked, stalls, reviewRounds: rounds2(roundsNow), proposedLessons: proposedCount } };
+  return { markdown, sections, counts: { newSentry: newIssues.length, patterns: recurring.length, blocked, stalls, reviewRounds: twice(rejectionsNow), proposedLessons: proposedCount } };
 }
 
 /** The 08:00 job. Never throws: a failure is logged and the next day runs again. Idempotent per date: one file path, one alert row (daily:<date>). */

@@ -51,6 +51,32 @@ describe("daily report job", () => {
     expect(outcome.alerts).toHaveLength(withChief ? 1 : 0);
   });
 
+  test("the scorecard counts request_changes per thread from old rows (round=N) and new rows (no detail) alike", async () => {
+    const state = await setup();
+    const world = await dailyWorld(state);
+    const row = (id: string, thread: string | null, kind: string, at: number, detail: string | null) =>
+      state.db.prepare(`INSERT INTO chief_events (event_id, at, thread_id, kind, detail) VALUES (?, ?, ?, ?, ?)`).run(id, at, thread, kind, detail);
+    const hour = Date.now() - 3_600_000;
+    row("rc-1", "thr_a", "request_changes", hour, "round=1"); // written before the gate
+    row("rc-2", "thr_a", "request_changes", hour + 1, null); // written by the gate
+    row("rc-3", "thr_a", "request_changes", hour + 2, null);
+    row("rc-4", "thr_b", "request_changes", hour + 3, "round=2");
+    row("rc-5", "thr_c", "request_changes", hour + 4, null);
+    row("rc-6", "thr_c", "request_changes", Date.now() - 30 * 3_600_000, null); // previous window
+    row("rc-7", null, "request_changes", hour + 5, null); // no thread: counted in no thread
+    const report = await readFile((await world.run()).path!, "utf8");
+    expect(report).toMatch(/\| request_changes \| 6 \| 1 \|/);
+    expect(report).toMatch(/\| threads with ≥ 2 request_changes \| 1 \| 0 \|/);
+    expect(report).toMatch(/\| most request_changes on one thread \| 3 \| 1 \|/);
+  });
+
+  test("a tests_skipped row from before the gate stays readable in the scorecard", async () => {
+    const state = await setup();
+    const world = await dailyWorld(state);
+    state.db.prepare(`INSERT INTO chief_events (event_id, at, thread_id, kind, detail) VALUES ('ts-1', ?, 'thr_a', 'tests_skipped', 'no tests needed')`).run(Date.now() - 3_600_000);
+    expect(await readFile((await world.run()).path!, "utf8")).toMatch(/\| tests_skipped \| 1 \| 0 \|/);
+  });
+
   test("one adapter failing makes only its sections error; the report is still written", async () => {
     const state = await setup();
     const world = await dailyWorld(state);

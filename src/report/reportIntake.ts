@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ReviewTarget, createReviewLedger } from "../review/reviewLedger";
 import type { Role } from "../core/roles";
-import { ACTION_ROOM, LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
+import { ACTION_ROOM, LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../types";
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
 import { ALERT_MARKER_ROOM, COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
@@ -16,7 +16,7 @@ export interface ReportIntakeAdapters {
   /** chief_lessons is written only by the intake; the thread store keeps only managed_threads (threadStore.ts:66-67). */
   db: Database;
   store: ThreadStore<ManagedRow>;
-  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets" | "ladder">;
+  ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets">;
   lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInsert<ManagedRow["role"], ManagedRow["state"]> }>;
   writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string): Promise<{ path: string }[]>;
   writeArtifact(threadId: string, projectId: string, name: string, content: string): Promise<string>;
@@ -40,9 +40,9 @@ export interface ReportIntakeAdapters {
   event?(kind: string, row: Partial<ManagedRow>, detail?: string | null): void;
 }
 
-export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
+export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 
-type WaveInput = { body: string; dependsOn?: number[]; stackOn?: number; design?: boolean; test?: boolean; spec?: boolean; feature?: boolean; reshape?: boolean };
+type WaveInput = { body: string; dependsOn?: number[]; stackOn?: number; design?: boolean; spec?: boolean; feature?: boolean; reshape?: boolean };
 
 /** One Markdown bullet per finding of the given severity, never clipped. */
 export function findingLines(list: ReportFinding[], severity: ReportFinding["severity"]) {
@@ -50,79 +50,19 @@ export function findingLines(list: ReportFinding[], severity: ReportFinding["sev
     .map((entry) => `- ${entry.file}${entry.line ? `:${entry.line}` : ""} — ${entry.message}${entry.fix ? ` (fix: ${entry.fix})` : ""}`);
 }
 
-/** Per line: whether it is fenced code (opener, interior and closer). A fence closes only on the same marker, at least as long as the opener, with nothing but whitespace after it; an unclosed fence runs to the end. */
-function fencedLines(lines: string[]): boolean[] {
-  let open: { marker: string; length: number } | null = null;
-  return lines.map((line) => {
-    if (!open) {
-      const opener = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line);
-      if (!opener || (opener[1]![0] === "`" && opener[2]!.includes("`"))) return false;
-      open = { marker: opener[1]![0]!, length: opener[1]!.length };
-      return true;
-    }
-    const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(line);
-    if (closer && closer[1]![0] === open.marker && closer[1]!.length >= open.length) open = null;
-    return true;
-  });
-}
-
 /** The untrimmed text under the first heading named `name` (any level), up to the next heading of the same or higher level. Undefined without the heading. */
-export function sectionOf(body: string, name: string, skipFenced = false): string | undefined {
-  // With skipFenced, fenced lines are blanked for matching only (same length, so indices still fit `body`); contractsOf keeps the plain scan.
-  let scan = body;
-  if (skipFenced) {
-    const parts = body.split(/(\r?\n)/);
-    const text = parts.filter((_, i) => i % 2 === 0);
-    const fenced = fencedLines(text);
-    scan = parts.map((part, i) => (i % 2 || !fenced[i / 2] ? part : " ".repeat(part.length))).join("");
-  }
-  const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(scan);
+export function sectionOf(body: string, name: string): string | undefined {
+  const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(body);
   if (!heading) return undefined;
   const start = heading.index + heading[0].length;
-  const skip = /^\r?\n/.exec(scan.slice(start))?.[0].length ?? 0;
-  const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(scan.slice(start + skip));
+  const skip = /^\r?\n/.exec(body.slice(start))?.[0].length ?? 0;
+  const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(body.slice(start + skip));
   return body.slice(start + skip, end ? start + skip + end.index : undefined);
 }
 
 /** A wave body's `Contracts to verify` section, trimmed. */
 export function contractsOf(body: string): string | undefined {
   return sectionOf(body, "contracts to verify")?.trim() || undefined;
-}
-
-/** A tester result's `## Receipt` when complete, else null: a `Tested commit: <7-40 hex>` line, a command row (`cwd | command | required exit | actual exit | pass counts`: nonempty cwd, command and pass counts, exit statuses 0-255; all five fields required), `Coverage:` and `Gaps:` lines,
- * `Receipt end.` as the last line, at most 3,000 characters. The end line proves the stored text was not cut; a receipt is never clipped. */
-export function receiptOf(result: string | null): { text: string; testedCommit: string } | null {
-  const text = sectionOf(result ?? "", "receipt")?.trim();
-  if (!text || text.length > 3_000 || text.split(/\r?\n/).at(-1)!.trim() !== "Receipt end.") return null;
-  const line = (label: string) => new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?${label}`, "im");
-  const testedCommit = /^[ \t]*(?:[-*][ \t]+)?Tested commit:[ \t]*`?([0-9a-f]{7,40})`?[ \t]*$/im.exec(text)?.[1];
-  // Label lines never count. A row is `cwd | command | required exit | actual exit | counts`: the first pipe ends cwd, the last three split the rest, and the command is the exact middle span (it may hold pipes). No backtracking.
-  const exit = (field: string) => /^\d{1,3}$/.test(field) && Number(field) <= 255;
-  const isCommandRow = (row: string) => {
-    if (/^[ \t]*(?:[-*][ \t]+)?(?:Tested commit|Coverage|Gaps):/i.test(row)) return false;
-    const pipes = [...row.matchAll(/\|/g)].map((m) => m.index!);
-    if (pipes.length < 4) return false;
-    const [first, a, b, c] = [pipes[0]!, ...pipes.slice(-3)] as [number, number, number, number]; // 4+ pipes: first < a
-    const command = row.slice(first + 1, a).trim();
-    return !!row.slice(0, first).replace(/^[ \t]*(?:[-*][ \t]+)?/, "").trim()
-      && !/^\|(?!\|)|^[|\s]*$/.test(command)
-      && exit(row.slice(a + 1, b).trim()) && exit(row.slice(b + 1, c).trim()) && !!row.slice(c + 1).trim();
-  };
-  const hasCommand = text.split(/\r?\n/).some(isCommandRow);
-  return testedCommit && hasCommand && line("Coverage:").test(text) && line("Gaps:").test(text) ? { text, testedCommit } : null;
-}
-
-/** Markdown list items at the section's shallowest indentation (tab = 4 spaces); wrapped lines, deeper items and fenced code are not counted. */
-function topLevelItems(section: string): number {
-  const lines = section.split(/\r?\n/);
-  const fenced = fencedLines(lines);
-  const indents: number[] = [];
-  lines.forEach((line, i) => {
-    const item = !fenced[i] && /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+\S/.exec(line);
-    if (item) indents.push(item[1]!.replace(/\t/g, "    ").length);
-  });
-  const top = Math.min(...indents);
-  return indents.filter((indent) => indent === top).length;
 }
 
 /** Whether a spec wave body has a `## Spec baseline` heading (any level). Read at intake only. */
@@ -231,7 +171,7 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id">, pa
     if (row.role !== "planner") errors.push(`plan is only for a planner's ready report (role is ${row.role}); remove it.`);
     errors.push(...checkPlan(plan));
   } else if (row.role === "planner" && ready) {
-    errors.push("plan is missing; a planner's ready report requires the full plan body, as an array of {body, dependsOn?, design?, test?}.");
+    errors.push("plan is missing; a planner's ready report requires the full plan body, as a string or an array of {body, dependsOn?, design?}.");
   }
   return errors;
 }
@@ -242,9 +182,8 @@ export function checkPlan(plan: string | unknown[]): string[] {
   const errors: string[] = [];
   const num = (n: number) => n.toLocaleString("en-US");
   const kind = (value: unknown) => value === null ? "null" : Array.isArray(value) ? "an array" : typeof value === "object" ? "an object" : `a ${typeof value}`;
-  if (Array.isArray(plan) && !plan.length) return [`plan is an empty array; pass an array of {body, dependsOn?, design?, test?} with 2 to ${MAX_WAVES} waves.`];
+  if (Array.isArray(plan) && !plan.length) return [`plan is an empty array; pass a string or an array of {body, dependsOn?, design?} with 1 to ${MAX_WAVES} waves.`];
   const multi = typeof plan !== "string";
-  if (!multi) errors.push(`plan needs at least two waves: implementation wave(s), then a test wave (test: true) ending each chain; pass an array of {body, dependsOn?, design?, test?}.`);
   const items: unknown[] = multi ? plan : [{ body: plan }];
   if (items.length > MAX_WAVES) errors.push(`plan has ${items.length} waves; max ${MAX_WAVES}. Merge waves.`);
   // Per wave: its trimmed body (undefined when missing or not a string), the legal earlier waves it may build on
@@ -253,15 +192,14 @@ export function checkPlan(plan: string | unknown[]): string[] {
   const maybeParents: (number[] | "any")[] = [];
   const parents: (number | null | undefined)[] = [];
   const designs: boolean[] = [];
-  const tests: boolean[] = [];
   items.forEach((item, index) => {
     const n = index + 1;
     if (typeof item !== "object" || item === null || Array.isArray(item)) {
-      errors.push(`plan wave ${n} is ${kind(item)}, not an object; use {body, dependsOn?, design?, test?}.`);
-      bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false); tests.push(false);
+      errors.push(`plan wave ${n} is ${kind(item)}, not an object; use {body, dependsOn?, design?}.`);
+      bodies.push(undefined); maybeParents.push("any"); parents.push(undefined); designs.push(false);
       return;
     }
-    const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown; test?: unknown; spec?: unknown; feature?: unknown; reshape?: unknown };
+    const wave = item as { body?: unknown; dependsOn?: unknown; design?: unknown; spec?: unknown; feature?: unknown; reshape?: unknown };
     const name = multi ? `plan wave ${n} body` : "plan";
     const body = typeof wave.body === "string" ? wave.body.trim() : undefined;
     bodies.push(body);
@@ -272,23 +210,19 @@ export function checkPlan(plan: string | unknown[]): string[] {
       errors.push(`plan wave ${n} design is ${JSON.stringify(wave.design)} (${typeof wave.design}); allowed true or false. Send a boolean, or drop design.`);
     }
     designs.push(wave.design === true);
-    if (wave.test !== undefined && typeof wave.test !== "boolean") {
-      errors.push(`plan wave ${n} test is ${JSON.stringify(wave.test)} (${typeof wave.test}); allowed true or false. Send a boolean, or drop test.`);
-    }
-    tests.push(wave.test === true);
-    if (wave.design === true && wave.test === true) errors.push(`plan wave ${n} is both design: true and test: true; a wave is one or the other.`);
+    if ("test" in wave) errors.push(`plan wave ${n}: test waves are gone; the tester runs once in the review gate after every wave. Drop test.`);
     if (wave.spec !== undefined && typeof wave.spec !== "boolean") {
       errors.push(`plan wave ${n} spec is ${JSON.stringify(wave.spec)} (${typeof wave.spec}); allowed true or false. Send a boolean, or drop spec.`);
-    } else if (wave.spec === true && (wave.test === true || wave.design === true)) {
-      errors.push(`plan wave ${n} is spec: true and ${wave.test === true ? "test" : "design"}: true; spec marks an implementation wave only.`);
+    } else if (wave.spec === true && wave.design === true) {
+      errors.push(`plan wave ${n} is spec: true and design: true; spec marks an implementation wave only.`);
     } else if (wave.spec === true && body && !/^[ \t]*#{1,6}[ \t]+spec delta/im.test(body)) {
       errors.push(`plan wave ${n} is spec: true but lacks a "## Spec delta" Markdown heading naming the docs the Spec Writer changes; add one, or drop spec.`);
     }
     for (const flag of ["feature", "reshape"] as const) {
       if (wave[flag] !== undefined && typeof wave[flag] !== "boolean") {
         errors.push(`plan wave ${n} ${flag} is ${JSON.stringify(wave[flag])} (${typeof wave[flag]}); allowed true or false. Send a boolean, or drop ${flag}.`);
-      } else if (wave[flag] === true && (wave.test === true || wave.design === true)) {
-        errors.push(`plan wave ${n} is ${flag}: true and ${wave.test === true ? "test" : "design"}: true; feature and reshape mark an implementation wave only.`);
+      } else if (wave[flag] === true && wave.design === true) {
+        errors.push(`plan wave ${n} is ${flag}: true and design: true; feature and reshape mark an implementation wave only.`);
       }
     }
     if (body && hasSpecBaseline(body) && wave.spec !== true) {
@@ -318,8 +252,7 @@ export function checkPlan(plan: string | unknown[]): string[] {
       ? " If you meant to send several waves, pass plan as an actual array of {body}, not a JSON string." : ""}`);
   }
   bodies.forEach((body, index) => {
-    // A test wave's heading must exist outside fenced code, the same slice its count reads.
-    if (body !== undefined && !(tests[index] ? sectionOf(body, "contracts to verify", true)?.trim() : contractsOf(body))) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
+    if (body !== undefined && !contractsOf(body)) errors.push(`plan wave ${index + 1} lacks a "## Contracts to verify" Markdown heading listing the invariants its worker must keep and its reviewer will check (a heading, not bold text); add one.`);
   });
   // A design wave is a chain tip when no later wave could build on it; a later wave whose dependsOn is not an array might, so it blocks the check.
   designs.forEach((design, index) => {
@@ -327,18 +260,6 @@ export function checkPlan(plan: string | unknown[]): string[] {
     if (design && maybeParents.every((candidates, other) => other <= index || (candidates !== "any" && !candidates.includes(n)))) {
       errors.push(`plan wave ${n} is design: true but no wave builds on it; follow it with the wave that implements it (dependsOn [${n}] or the next wave), or drop design.`);
     }
-  });
-  // Every chain ends with a test wave: a tip no later wave could build on must be test: true. A test wave is a tip
-  // with a parent that is an implementation wave (neither design nor test). Skipped where dependsOn is invalid.
-  if (multi) items.forEach((_, index) => {
-    const n = index + 1;
-    const tip = maybeParents.every((candidates, other) => other <= index || (candidates !== "any" && !candidates.includes(n)));
-    if (tip && !tests[index] && !designs[index]) errors.push(`plan wave ${n} ends a chain but is not test: true; follow it with a test wave (test: true, dependsOn [${n}]) that tests it.`);
-    if (!tests[index]) return;
-    if (parents.some((parent, other) => other > index && parent === n)) errors.push(`plan wave ${n} is test: true but a later wave builds on it; a test wave ends its chain.`);
-    const parent = parents[index];
-    if (parent === null) errors.push(`plan wave ${n} is test: true but starts a chain; set dependsOn [k] with k the chain's last implementation wave.`);
-    else if (parent !== undefined && (designs[parent - 1] || tests[parent - 1])) errors.push(`plan wave ${n} is test: true but builds on ${designs[parent - 1] ? "design" : "test"} wave ${parent}; build it on the chain's last implementation wave.`);
   });
   // stackOn: an earlier implementation wave, on another chain, that a chain head builds on. Skipped on a wave whose dependsOn is invalid.
   items.forEach((item, index) => {
@@ -350,7 +271,7 @@ export function checkPlan(plan: string | unknown[]): string[] {
     else if (stackOn < 1 || stackOn >= n) bad("not an earlier wave", n === 1 ? "wave 1 stacks on nothing; drop stackOn." : `use one wave from 1 to ${n - 1}.`);
     else {
       if (parents[index] !== undefined && parents[index] !== null) bad("but wave " + n + " is not a chain head", "stackOn goes on a wave with dependsOn [].");
-      if (tests[stackOn - 1] || designs[stackOn - 1]) bad(`${tests[stackOn - 1] ? "test" : "design"} wave ${stackOn}`, "stack on an implementation wave.");
+      if (designs[stackOn - 1]) bad(`design wave ${stackOn}`, "stack on an implementation wave.");
     }
   });
   const taken = new Set<number>();
@@ -358,23 +279,6 @@ export function checkPlan(plan: string | unknown[]): string[] {
     if (parent === undefined || parent === null) return;
     if (taken.has(parent)) errors.push(`plan wave ${index + 1} and another wave both build on wave ${parent}; waves form chains only, so mark one of them dependsOn [] or chain it after the other.`);
     taken.add(parent);
-  });
-  // A small test wave keeps a tester session short; the bound runs here only, at planner intake.
-  bodies.forEach((body, index) => {
-    if (body === undefined || !tests[index]) return;
-    const n = index + 1;
-    const contracts = sectionOf(body, "contracts to verify", true);
-    if (contracts !== undefined) {
-      const count = topLevelItems(contracts);
-      if (!count && contracts.trim()) errors.push(`plan wave ${n} is a test wave whose "## Contracts to verify" has no Markdown list item; write each contract as a list item (-, *, +, 1. or 1)).`);
-      else if (count > MAX_TEST_CONTRACTS) errors.push(`plan wave ${n} is a test wave with ${count} contracts; max ${MAX_TEST_CONTRACTS}. Split the implementation into more chains (dependsOn [] or stackOn k), each ending with its own test wave.`);
-    }
-    const files = sectionOf(body, "test files", true);
-    if (files === undefined) errors.push(`plan wave ${n} is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max ${MAX_TEST_FILES}).`);
-    else {
-      const count = topLevelItems(files);
-      if (!count || count > MAX_TEST_FILES) errors.push(`plan wave ${n} is a test wave listing ${count} test files under "## Test files"; list 1 to ${MAX_TEST_FILES}. Split the implementation into more chains, each ending with its own test wave.`);
-    }
   });
   return errors;
 }
@@ -556,11 +460,19 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       try { reportFindings = JSON.parse(reportFindings); } catch { /* checkReport refuses the string */ }
     }
     const errors = checkReport(candidate, { ...params, fails: reportFails, findings: reportFindings }, plan);
+    // testsPassed belongs to the review gate's tester, corrector and every fix run; a fix run's ready report must carry true.
+    const gate = found.row ? store.gateFor(threadId) : undefined;
+    const fixRun = !!found.row?.fix_run;
+    const runsTests = fixRun || gate?.tester_thread_id === threadId || gate?.corrector_thread_id === threadId;
+    if (params.testsPassed !== undefined && !runsTests) errors.push("testsPassed is only for the review gate's tester, its corrector and a fix run; remove it.");
+    else if (params.testsPassed !== undefined && params.state !== "ready") errors.push(`testsPassed is only for a ready report (state is ${params.state}); remove it.`);
+    else if (runsTests && params.state === "ready" && params.testsPassed === undefined) errors.push("testsPassed is missing: send true when every test you ran passed on every branch head you pushed, false otherwise (list them under ## Failing tests).");
+    else if (fixRun && params.state === "ready" && params.testsPassed === false) errors.push("A fix run reports ready only with testsPassed: true. Keep fixing the product code until every failing test passes, or report blocked only with wrong-test evidence (test file:line, the plan or docs text it contradicts, command output).");
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
     // The launch row may have landed while the lookup awaited; keep it, as a recovery candidate has no PR or branch.
     if (found.pending && !store.get(threadId)) store.insert(found.pending);
     const row = store.get(threadId)!;
-    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, test?, spec?, feature?, reshape?}[], with bodies not yet trimmed if JSON-decoded.
+    // checkReport proved the shape: a wave array here is {body, dependsOn?, design?, spec?, feature?, reshape?}[], with bodies not yet trimmed if JSON-decoded.
     const waveList = Array.isArray(plan) ? (plan as WaveInput[]).map((wave) => ({ ...wave, body: wave.body.trim() })) : undefined;
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
     const verdict = params.state === "ready" ? params.verdict ?? null : null;
@@ -572,7 +484,6 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         ...(typeof planInput !== "string" && planInput[index]!.dependsOn ? { dependsOn: planInput[index]!.dependsOn } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.stackOn !== undefined ? { stackOn: planInput[index]!.stackOn } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.design ? { design: true } : {}),
-        ...(typeof planInput !== "string" && planInput[index]!.test ? { test: true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.spec ? { spec: true } : {}),
         ...(typeof planInput !== "string" ? { feature: planInput[index]!.feature === true, reshape: planInput[index]!.reshape === true } : {}),
         ...(typeof planInput !== "string" && planInput[index]!.spec && hasSpecBaseline(planInput[index]!.body) ? { baseline: true } : {}) }))
@@ -605,8 +516,6 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const now = Date.now();
     // A reviewer's active_cycle counts every resume, not rejection rounds — a
     // reviewer resumed for an unrelated reason must not read as a deadlock.
-    // reject_streak counts only consecutive request_changes verdicts, and
-    // resets the moment either side breaks the streak with an approve.
     // report_seq is reserved here, so the per-report file names below never collide.
     let lessonId: number | null = null;
     const { report_seq: seq, result_rev: resultRev } = store.batch(() => {
@@ -615,7 +524,8 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         blocker: params.state === "blocked" ? params.blocker ?? null : null,
         recommendation: params.recommendation ?? null, verdict,
         planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails,
-        findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null, now,
+        findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null,
+        testsPassed: params.testsPassed === undefined ? null : params.testsPassed ? 1 : 0, now,
       });
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {
         store.markAdvised(threadId, now);
@@ -624,7 +534,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         if (params.state === "ready" && verdict === "request_changes") event?.("plan_review_changes", row);
       }
       if (plannerReady && scheduledWaves) {
-        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.test && !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
+        store.setPlanReview(threadId, (scheduledWaves.filter((wave) => !wave.design).length > 1 || params.complex === true) && !row.replaces_thread_id ? "required" : null);
         const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
         if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
       }
@@ -635,10 +545,10 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       ledger.recordVerdict(row, verdict, reserved.report_seq, now);
       if (params.state === "blocked") event?.("blocked", row, clip(params.blocker?.split("\n")[0] ?? "", 160));
       if (event && row.role === "reviewer" && params.state === "ready" && verdict === "request_changes") {
-        // One row per covered worker, with the streak that worker's task is on now that this verdict is recorded.
+        // One row per covered worker.
         const covered = ledger.targets(threadId).map((target) => target.worker_thread_id);
         for (const workerId of covered.length ? covered : row.worker_thread_id ? [row.worker_thread_id] : []) {
-          event("request_changes", store.get(workerId) ?? { thread_id: workerId, project_id: row.project_id }, `round=${ledger.ladder(workerId).streak}`);
+          event("request_changes", store.get(workerId) ?? { thread_id: workerId, project_id: row.project_id });
         }
       }
       if (row.role === "reviewer" && params.state === "ready" && verdict) {

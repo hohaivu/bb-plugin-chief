@@ -2,48 +2,64 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { MIGRATIONS } from "./src/db/migrations";
-import { APPROVE, CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposals, disposeAll, planTwoWaves, readyAction, setup, start, status, wave } from "./test/harness";
+import { APPROVE, NO_DEVIATIONS, approvePlan, completeWorker, configurationContext, delegate as delegateWith, disposals, disposeAll, execFileMock, ghHead, planTwoWaves, readyAction, setup as setupWith, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
+// The review gate pins a pull-request head, so a worker under review carries a pull request and branch that the forge double answers.
+let prs = 0;
+const delegate = (state: Parameters<typeof delegateWith>[0], chiefId: string, title?: string, forge: NonNullable<Parameters<typeof delegateWith>[3]> = {}) => {
+  prs += 1;
+  // A replacement inherits its task's branch and pull request.
+  return delegateWith(state, chiefId, title, forge.replaces ? forge : { prUrl: `https://github.com/acme/shop/pull/${prs}`, branch: `feature/pr-${prs}`, ...forge });
+};
+const setup = async (...args: Parameters<typeof setupWith>) => {
+  const state = await setupWith(...args);
+  execFileMock.mockImplementation(async (file: string, args: string[]) => {
+    const pull = file === "gh" && args[0] === "pr" ? /(\d+)$/.exec(args[2]!)?.[1] : undefined;
+    return { stdout: pull ? ghHead(`feature/pr-${pull}`) : "", stderr: "" };
+  });
+  return state;
+};
 describe("auto-completing absorbed supporting threads", () => {
   const P = { projectId: "proj_1" };
+  // The gate path completes its idle actors with the last target at once; an override completes without it, so the sweep alone decides when a supporting row goes.
+  const OVERRIDE = "the sweep is under test, not the gate";
   // The sweep runs off the reload and awaits a fresh threads.get per row; let it drain.
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
   const stateOf = (state: Awaited<ReturnType<typeof setup>>, id: string) =>
     (state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(id) as { state: string }).state;
   const call = (state: Awaited<ReturnType<typeof setup>>, tool: string, params: object, threadId: string) =>
     state.harness.behavior.callAgentTool(tool, params, { threadId, ...P });
-  async function reviewed(state: Awaited<ReturnType<typeof setup>>, chiefId: string, workerId: string, verdict: "approve" | "request_changes") {
+  async function testerPasses(state: Awaited<ReturnType<typeof setup>>) {
+    const { thread_id } = state.db.prepare(`SELECT thread_id FROM managed_threads WHERE kind='tester' AND state<>'complete'`).get() as { thread_id: string };
+    await call(state, "chief_report", { state: "ready", result: `Tests ran${NO_DEVIATIONS}`, testsPassed: true }, thread_id);
+    return thread_id;
+  }
+  async function reviewed(state: Awaited<ReturnType<typeof setup>>, chiefId: string, workerId: string, verdict: "approve" | "request_changes", testerReports = true) {
     await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, workerId);
     await call(state, "chief_review", { workerThreadId: workerId }, chiefId);
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer" && row.workerThreadId === workerId && row.state !== "complete")!;
     const findings = verdict === "approve" ? [] : [{ file: "totals.ts", line: 3, severity: "blocking", message: "Wrong total", fix: "Fix it" }];
     await call(state, "chief_report", { state: "ready", result: "Checked", verdict, findings }, reviewer.threadId);
+    if (testerReports) await testerPasses(state);
     return reviewer.threadId;
   }
-  async function consulted(state: Awaited<ReturnType<typeof setup>>, chiefId: string, workerId: string) {
-    await call(state, "chief_consult", { title: "Advice", mission: "Diagnose", workerThreadId: workerId }, chiefId);
-    const advisor = (await status(state)).threads.find((row) => row.role === "advisor" && row.state !== "complete")!;
-    await call(state, "chief_report", { state: "ready", result: "Try X" }, advisor.threadId);
-    return advisor.threadId;
-  }
-
-  test("chief_complete on a worker completes its reviewer and advisor, idempotently", async () => {
+  test("chief_complete on a worker whose gate passed completes its reviewer and tester, idempotently", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
-    const advisor = await consulted(state, chief.threadId, worker.threadId);
-    await call(state, "chief_complete", { threadId: worker.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId);
+    const tester = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE kind='tester'`).get() as { thread_id: string }).thread_id;
+    await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
     await settle();
-    expect([stateOf(state, reviewer), stateOf(state, advisor)]).toEqual(["complete", "complete"]);
+    expect([stateOf(state, reviewer), stateOf(state, tester)]).toEqual(["complete", "complete"]);
     const before = state.db.prepare(`SELECT thread_id, state, updated_at FROM managed_threads ORDER BY thread_id`).all();
     await call(state, "chief_roster", {}, chief.threadId);
-    await expect(call(state, "chief_complete", { threadId: worker.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId)).resolves.toBeDefined();
+    await expect(call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId)).resolves.toBeDefined();
     expect(state.db.prepare(`SELECT thread_id, state, updated_at FROM managed_threads WHERE thread_id<>? ORDER BY thread_id`).all(worker.threadId))
       .toEqual((before as any[]).filter((row) => row.thread_id !== worker.threadId));
   });
@@ -55,7 +71,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" });
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
-    await call(state, "chief_complete", { threadId: worker.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId);
+    await call(state, "chief_complete", { threadId: worker.threadId, override: OVERRIDE }, chief.threadId);
     await settle();
     expect(stateOf(state, reviewer)).toBe("active");
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "idle" });
@@ -72,7 +88,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" });
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
-    await call(state, "chief_complete", { threadId: worker.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId);
+    await call(state, "chief_complete", { threadId: worker.threadId, override: OVERRIDE }, chief.threadId);
     await settle();
     expect(stateOf(state, reviewer)).toBe("active");
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "failed" });
@@ -81,30 +97,15 @@ describe("auto-completing absorbed supporting threads", () => {
     expect(stateOf(state, reviewer)).toBe("complete");
   });
 
-  test("replaces: completes the prior worker's advisor and hides the re-pointed reviewer's stale line", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    const reviewer = await reviewed(state, chief.threadId, worker.threadId, "request_changes");
-    const advisor = await consulted(state, chief.threadId, worker.threadId);
-    const fresh = await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
-    await settle();
-    expect(stateOf(state, advisor)).toBe("complete");
-    await settle();
-    expect(stateOf(state, reviewer)).toBe("ready");
-    const roster = String(await call(state, "chief_roster", {}, chief.threadId));
-    expect(roster).not.toContain(`replaces: ${fresh.threadId}`);
-    expect(roster).not.toContain(`(${reviewer}):`);
-  });
-
   test("a planner completes only after its final wave and every linked worker is done", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const { planner } = await planTwoWaves(state, chief.threadId);
+    await approvePlan(state, chief.threadId, planner.threadId);
     const cli = async (args: string[]) => {
       const result = await state.harness.behavior.runCli(["delegate", "--title", "Wave", "--mission", "Do it", ...args, "--json"], { threadId: chief.threadId, ...P });
-      expect(result.exitCode).toBe(0);
+      expect(result.exitCode, result.stderr).toBe(0);
       return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
     };
     const wave1 = await cli(["--plan-thread", planner.threadId, "--wave", "1"]);
@@ -131,19 +132,20 @@ describe("auto-completing absorbed supporting threads", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const { planner } = await planTwoWaves(state, chief.threadId);
+    await approvePlan(state, chief.threadId, planner.threadId);
     const cli = async (args: string[]) => {
       const result = await state.harness.behavior.runCli(["delegate", "--title", "Wave", "--mission", "Do it", ...args, "--json"], { threadId: chief.threadId, ...P });
-      expect(result.exitCode).toBe(0);
+      expect(result.exitCode, result.stderr).toBe(0);
       return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
     };
-    const wave1 = await cli(["--plan-thread", planner.threadId, "--wave", "1"]);
-    const wave2 = await cli(["--replaces", wave1, "--plan-thread", planner.threadId, "--wave", "2"]);
+    const forge = ["--pr-url", "https://github.com/acme/shop/pull/90", "--branch", "feature/pr-90"];
+    const wave1 = await cli(["--plan-thread", planner.threadId, "--wave", "1", ...forge]);
+    const wave2 = await cli(["--replaces", wave1, "--plan-thread", planner.threadId, "--wave", "2", ...forge]);
     const reviewer = await reviewed(state, chief.threadId, wave2, "approve");
-    const advisor = await consulted(state, chief.threadId, wave2);
     await call(state, "chief_complete", { threadId: wave2 }, chief.threadId);
     await settle();
     await settle();
-    expect([wave2, planner.threadId, reviewer, advisor].map((id) => stateOf(state, id))).toEqual(["complete", "complete", "complete", "complete"]);
+    expect([wave2, planner.threadId, reviewer].map((id) => stateOf(state, id))).toEqual(["complete", "complete", "complete"]);
     expect([state.archivedEnvs, state.archivedThreads]).toEqual([[], []]);
   });
 
@@ -152,7 +154,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await reviewed(state, chief.threadId, worker.threadId, "approve");
-    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId));
+    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
     expect(reply).not.toMatch(/Worktree|Archived|release/);
     expect(stateOf(state, worker.threadId)).toBe("complete");
     expect([state.archivedEnvs, state.archivedThreads]).toEqual([[], []]);
@@ -162,7 +164,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    await reviewed(state, chief.threadId, worker.threadId, "approve");
+    await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker.threadId);
     await delegate(state, chief.threadId, "Fix checkout totals", { replaces: worker.threadId });
     await settle();
     expect(stateOf(state, worker.threadId)).toBe("complete");
@@ -189,7 +191,7 @@ describe("auto-completing absorbed supporting threads", () => {
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" });
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
     await call(state, "chief_report", { state: "ready", result: "Checked", ...APPROVE }, reviewer);
-    await call(state, "chief_complete", { threadId: worker.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId);
+    await call(state, "chief_complete", { threadId: worker.threadId, override: OVERRIDE }, chief.threadId);
     await settle();
     expect(stateOf(state, reviewer)).toBe("ready");
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "idle" });
@@ -202,14 +204,14 @@ describe("auto-completing absorbed supporting threads", () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
+    const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve", false);
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(reviewer)!, lastAssistantText: "done" });
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" }); // no lifecycle event
     const other = await delegate(state, chief.threadId, "Other");
-    const failing = await reviewed(state, chief.threadId, other.threadId, "approve");
-    await call(state, "chief_complete", { threadId: worker.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId);
+    const failing = await reviewed(state, chief.threadId, other.threadId, "approve", false);
+    await call(state, "chief_complete", { threadId: worker.threadId, override: OVERRIDE }, chief.threadId);
     state.failNextGet(failing);
-    await call(state, "chief_complete", { threadId: other.threadId, testsSkipped: CLOSE_OUT.testsSkipped }, chief.threadId);
+    await call(state, "chief_complete", { threadId: other.threadId, override: OVERRIDE }, chief.threadId);
     await settle();
     expect([stateOf(state, reviewer), stateOf(state, failing)]).toEqual(["ready", "ready"]);
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(failing)!, lastAssistantText: "done" }); // a later reload retries
@@ -262,6 +264,7 @@ describe("auto-completing absorbed supporting threads", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const { planner } = await planTwoWaves(state, chief.threadId);
+    await approvePlan(state, chief.threadId, planner.threadId);
     await state.harness.behavior.runCli(["delegate", "--title", "Planned", "--mission", "Do it", "--plan-thread", planner.threadId, "--wave", "1", "--json"], { threadId: chief.threadId, ...P });
     const ready = await delegate(state, chief.threadId, "Ready work");
     await call(state, "chief_report", { state: "ready", result: "Done" }, ready.threadId);
@@ -270,24 +273,25 @@ describe("auto-completing absorbed supporting threads", () => {
     await call(state, "chief_review", { workerThreadId: blockedWorker.threadId }, chief.threadId);
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await call(state, "chief_report", { state: "blocked", blocker: "No access", recommendation: "Grant it" }, reviewer.threadId);
-    await call(state, "chief_consult", { title: "Idle advice", mission: "Think" }, chief.threadId);
     const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(advisor.threadId)!, lastAssistantText: "hm" });
 
     const roster = String(await call(state, "chief_roster", {}, chief.threadId));
     const pendingLines = roster.split("\n").filter((line) => /\(thr_[^)]+\): /.test(line));
-    // Only a thread with a next action is listed; the planner, the idle advisor, the planned worker in progress and the worker already under review are not.
-    expect([...pendingLines].sort()).toEqual([
-      `- reviewer “Review · Blocked review target” (${reviewer.threadId}): Blocked: No access — decide or escalate to the user.`,
-      `- worker “Ready work” (${ready.threadId}): ${readyAction(ready.threadId)}`,
-    ]);
+    // Only a thread with a next action is listed; the planner, the idle advisor and the planned worker in progress are not; a blocked gate reviewer shows on the worker it reviews.
+    expect(pendingLines).toHaveLength(2);
+    expect(pendingLines.find((line) => line.startsWith(`- worker “Ready work” (${ready.threadId}): `))).toBe(`- worker “Ready work” (${ready.threadId}): ${readyAction(ready.threadId)}`);
+    // The blocked reviewer is a gate actor: its line sits on the worker the gate covers and names the reviewer-only restart.
+    const blocked = pendingLines.find((line) => line.startsWith(`- worker “Blocked review target” (${blockedWorker.threadId}): `))!;
+    expect(blocked).toContain(`Reviewer ${reviewer.threadId} is blocked: No access`);
+    expect(blocked).toContain(`Run chief_review (workerThreadId: ${blockedWorker.threadId}) again: it starts only the reviewer.`);
   });
 
   test("chief_complete lists open todos for a worker; instructions name the close-todo rule", async () => {
     const state = await setup();
     const chief = await start(state);
-    // Completing an unplanned worker needs a ready report, a tester or testsSkipped, and a review or skipReview; none is under test here.
-    const closeOut = { testsSkipped: "todos are under test", skipReview: "todos are under test" };
+    // Completing an unplanned worker needs a ready report and a passed review gate or skipReview; none is under test here.
+    const closeOut = { skipReview: "todos are under test" };
     const quiet = await delegate(state, chief.threadId, "Quiet");
     await call(state, "chief_report", { state: "ready", result: "Done" }, quiet.threadId);
     expect(String(await call(state, "chief_complete", { threadId: quiet.threadId, ...closeOut }, chief.threadId))).not.toContain("Open todos");

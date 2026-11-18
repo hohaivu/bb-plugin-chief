@@ -54,8 +54,9 @@ describe("forge comments", () => {
     const worker = await delegate(state, chief.threadId, "Fix totals", forge);
     return { chief, worker, act: () => call(state, "chief_report", { state: "blocked", result: "Tests fail", blocker: "Totals test fails", recommendation: "Fix the product code" }, worker.threadId) };
   }
-  const readyWorker = async (state: State, forge?: { issueUrl?: string; prUrl?: string }) => {
-    const { chief, worker } = await blockedWorker(state, forge);
+  // A branch lets the review gate pin the worker; `route` answers every pull request lookup with that branch's head.
+  const readyWorker = async (state: State, forge: { issueUrl?: string; prUrl?: string } = { prUrl: PR }) => {
+    const { chief, worker } = await blockedWorker(state, { branch: "feature/x", ...forge } as any);
     await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker.threadId);
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "idle" });
     return { chief, worker };
@@ -84,14 +85,14 @@ describe("forge comments", () => {
       return {
         chief: chief.threadId, prefix: "verdict:", act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId), result: "Report delivered to Chief.",
         row: { id: review.threadId, fields: { state: "ready", verdict: "approve", last_report_state: "ready", report_seq: 1, result: "Reviewed" } },
-        report: { from: review.threadId, text: `[Chief lifecycle alert]\nReviewer report from Review · Fix totals (${review.threadId})\nState: ready\nVerdict: approve\nVerdict file: ${join(state.storageRoot, "chief", "proj_1", review.threadId, "verdict-1.md")}\nThe reviewer approves. chief_complete (threadId: ${worker.threadId}); it marks the pull request ready. Nits listed with an approve are optional: start no worker round for them alone.\nFull report and last output: bb chief inspect ${review.threadId}\nResult: Reviewed` },
+        report: { from: review.threadId, text: `[Chief lifecycle alert]\nReviewer report from Review · Fix totals (${review.threadId})\nState: ready\nVerdict: approve\nVerdict file: ${join(state.storageRoot, "chief", "proj_1", review.threadId, "verdict-1.md")}\nThe review gate is waiting on tester ${review.testerThreadId} (starting). Wait for their reports.\nFull report and last output: bb chief inspect ${review.threadId}\nResult: Reviewed` },
       };
     }],
     ["completion", async (state, pr) => {
       const { chief, worker } = await readyWorker(state, { prUrl: pr });
       return {
         chief: chief.threadId, prefix: "complete:", act: () => completeWorker(state, chief.threadId, worker.threadId),
-        result: "Marked “Fix totals” complete without a review (reason recorded).\nIts pull request is marked ready for review.\nNo cleanup: no approving review.",
+        result: "Marked “Fix totals” complete without a review (reason recorded).\nIts pull request is marked ready for review.\nNo cleanup: completed without the gate.",
         row: { id: worker.threadId, fields: { state: "complete", last_report_state: "ready", report_seq: 1, result: `Done${NO_DEVIATIONS}` } },
         report: null,
       };
@@ -231,7 +232,7 @@ describe("forge comments", () => {
         act: () => completeWorker(state, chief.threadId, worker.threadId),
         golden: {
           key, thread: worker.threadId, target: ISSUE, mention: 0, path: "repos/acme/shop/issues/7/comments",
-          body: `**Chief · Completed** · round 1\n**Fix totals**\nPull request: ${PR}\n**Planning skipped:** Bounded test fixture\n**Review skipped:** review is not under test here\n**Tests skipped:** tests are not under test here\n\n<details><summary>Result</summary>\n\nDone\n\n## Deviations from plan\nNone\n\n</details>\n\n${markerOf(key)}`,
+          body: `**Chief · Completed** · round 1\n**Fix totals**\nPull request: ${PR}\n**Planning skipped:** Bounded test fixture\n**Review skipped:** review is not under test here\n\n<details><summary>Result</summary>\n\nDone\n\n## Deviations from plan\nNone\n\n</details>\n\n${markerOf(key)}`,
         },
       };
     }],

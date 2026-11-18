@@ -447,4 +447,10 @@ export const MIGRATIONS = [
     `ALTER TABLE chief_models_v9 RENAME TO chief_models`,
     // One-time seed of the user's existing investigate pick as the Researcher pick; migrations run once, so a later clear is never re-imported.
     `INSERT OR IGNORE INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at) SELECT host_id, 'researcher', provider_id, model, reasoning_level, updated_at FROM research_mode_models WHERE mode='investigate'`,
+    // The review gate: one per plan (plan:<planner>) or unplanned task (task:<chain root>). targets is JSON [{threadId, reportSeq, branch, prUrl, headSha}], pinned once at open.
+    `CREATE TABLE review_gates (gate_key TEXT PRIMARY KEY, project_id TEXT NOT NULL, chief_thread_id TEXT NOT NULL, plan_thread_id TEXT, targets TEXT NOT NULL, reviewer_thread_id TEXT, tester_thread_id TEXT, fixer_thread_id TEXT, corrector_thread_id TEXT, created_at INTEGER NOT NULL)`,
+    // The latest ready report's testsPassed (gate tester): 1, 0, or NULL.
+    `ALTER TABLE managed_threads ADD COLUMN tests_passed INTEGER`,
+    // A fix run's origin, set at admission: 'gate' (the review gate's one fix worker) or 'chat' (a change asked for after completion); NULL otherwise.
+    `ALTER TABLE managed_threads ADD COLUMN fix_run TEXT`,
 ];

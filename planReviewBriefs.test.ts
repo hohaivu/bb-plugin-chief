@@ -32,10 +32,6 @@ describe("advisor plan-review brief", () => {
     expect(lines(without)).toContain("Planner report: bb chief inspect thr_plan");
     expect(diff(withPath, without)).toEqual({ onlyA: ["Planner report: /p/report-1.md"], onlyB: ["Planner report: bb chief inspect thr_plan"] });
   });
-
-  test("a consult with no plan has no Planner report line", () => {
-    expect(advisorBrief({ title: "Totals", chiefThreadId: "thr_chief", mission: "Why do totals go negative?", reviews: [] })).not.toContain("Planner report:");
-  });
 });
 
 describe("planner revision brief", () => {

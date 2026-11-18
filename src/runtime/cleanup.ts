@@ -1,4 +1,4 @@
-import { cleanupEligible, deleteSafeBranch, ownedBranch } from "../forge/cleanup";
+import { cleanupEligible, deleteSafeBranch, ownedBranch, taskPullRequests } from "../forge/cleanup";
 import { clip } from "../core/text";
 import { z } from "zod";
 import { bounded } from "./exec";
@@ -18,6 +18,32 @@ export function createCleanup(ctx: Ctx) {
   const CLEANUP_GRACE_MS = 5 * 60_000;
   const CLEANUP_READ_MS = 15_000;
   const CLEANUP_CALL_MS = 30_000;
+  /** Forge merge answers per pull request. A merged answer is kept (newest 500); any other answer, or none, is re-asked after 5 minutes. */
+  const MERGE_RECHECK_MS = 5 * 60_000;
+  const MERGE_CACHE_MAX = 500;
+  const MERGE_LOOKUPS_PER_PASS = 10;
+  const mergeCache = new Map<string, { merged: boolean; head: string | null; at: number }>();
+  let lookupsLeft = 0;
+  /** The cached or freshly asked merge answer, or null when unknown (lookup budget spent, forge failed, or re-ask not due). */
+  async function mergeOf(url: string, cwd: string | null) {
+    const known = mergeCache.get(url);
+    if (known && (known.merged || Date.now() - known.at < MERGE_RECHECK_MS)) return known;
+    if (lookupsLeft <= 0) return null;
+    lookupsLeft--;
+    const answer = await bounded(() => prMerged(url, cwd), CLEANUP_CALL_MS).catch(() => null);
+    mergeCache.delete(url);
+    mergeCache.set(url, { merged: answer?.merged ?? false, head: answer?.head ?? null, at: Date.now() });
+    if (mergeCache.size > MERGE_CACHE_MAX) mergeCache.delete(mergeCache.keys().next().value!);
+    return answer;
+  }
+  const rowTargets = (id: string) => ledger.targets(id).map((target) => ({ worker_thread_id: target.worker_thread_id, pr_url: target.pr_url }));
+  /** True when every pull request tied to the row is known merged; a row with none passes. */
+  async function prsMerged(id: string, rows: ReturnType<typeof store.all>, cwd: string | null) {
+    const row = rows.find((candidate) => candidate.thread_id === id);
+    if (!row) return !store.get(id); // no managed row: cleanupStep ends the job; an unread row list keeps it
+    for (const url of taskPullRequests(row, rows, rowTargets)) if (!(await mergeOf(url, cwd))?.merged) return false;
+    return true;
+  }
   type CleanupStep = "archive" | "teardown" | "branch" | "storage" | "done";
   interface CleanupJob {
     thread_id: string; chief_thread_id: string; project_id: string; environment_id: string | null; branch: string | null; step: CleanupStep;
@@ -82,11 +108,15 @@ export function createCleanup(ctx: Ctx) {
   async function observeCleanup() {
     if (!ctx.state.cleanupActive) return;
     let eligible = new Set<string>();
+    let rows: ReturnType<typeof store.all> = [];
+    lookupsLeft = MERGE_LOOKUPS_PER_PASS;
     try {
-      eligible = cleanupEligible(store.all(), (id) => ledger.targets(id).map((target) => target.worker_thread_id));
+      rows = store.all();
+      eligible = cleanupEligible(rows, (id) => ledger.targets(id).map((target) => target.worker_thread_id));
       const insert = db.prepare(`INSERT OR IGNORE INTO cleanup_jobs (thread_id, chief_thread_id, project_id, step, step_at, created_at, updated_at) VALUES (?, ?, ?, 'archive', ?, ?, ?)`);
       const now = Date.now();
       for (const id of eligible) {
+        if (!(await prsMerged(id, rows, null))) continue;
         const row = store.get(id)!;
         insert.run(id, row.chief_thread_id, row.project_id, now, now, now);
       }
@@ -97,6 +127,8 @@ export function createCleanup(ctx: Ctx) {
       const jobs = db.prepare(`SELECT * FROM cleanup_jobs WHERE step <> 'done' ORDER BY created_at ASC, rowid ASC`).all() as CleanupJob[];
       for (const job of jobs) {
         try {
+          // Archive and branch deletion wait for the forge to report every tied pull request merged; unknown keeps the job for a later pass.
+          if ((job.step === "archive" || job.step === "branch") && !(await prsMerged(job.thread_id, rows, null))) continue;
           await cleanupStep(job, eligible);
         } catch (error) {
           try { cleanupFail(job, error); }
@@ -218,7 +250,7 @@ export function createCleanup(ctx: Ctx) {
       // A worker or spec-writer row carries its chain's pr_url; a reviewer's PRs come from the workers it covered.
       const urls = [...new Set([row.pr_url, ...ledger.targets(id).map((target) => store.get(target.worker_thread_id)?.pr_url)].filter((url): url is string => !!url))];
       const mergedHeads = urls.length
-        ? () => bounded(async () => (await Promise.all(urls.map((url) => prMerged(url, source.path!)))).flatMap((merged) => merged?.merged && merged.head ? [merged.head] : []), CLEANUP_CALL_MS)
+        ? async () => (await Promise.all(urls.map((url) => mergeOf(url, source.path!)))).flatMap((merged) => merged?.merged && merged.head ? [merged.head] : [])
         : undefined;
       const result = await bounded(() => deleteSafeBranch({ cwd: source.path!, env: forgeEnv(), branch: job.branch!, deadlineMs: CLEANUP_CALL_MS, mergedHeads }), 2 * CLEANUP_CALL_MS + 5_000);
       if ("error" in result) throw new Error(result.error);

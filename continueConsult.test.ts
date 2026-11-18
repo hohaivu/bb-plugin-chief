@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { CLOSE_OUT, REQUEST_CHANGES, chiefReview, configurationContext, delegate, disposeAll, setup, start, status } from "./test/harness";
+import { CLOSE_OUT, REQUEST_CHANGES, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, planTwoWaves, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -7,6 +7,23 @@ provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
 describe("Chief backend", () => {
+  const BRANCH = "feature/fix-checkout-totals";
+  const PR = "https://github.com/acme/shop/pull/8";
+  const as = (threadId: string) => ({ threadId, projectId: "proj_1" });
+  /** A worker on a branch with a pull request, reported ready: what a review gate pins. gh answers the pull-request lookup. */
+  async function readyWorker(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string) {
+    execFileMock.mockImplementation(async (file: string, args: string[]) => ({ stdout: file === "gh" && args[0] === "pr" ? ghHead(BRANCH) : "" }));
+    const worker = await delegate(state, chiefThreadId, "Fix checkout totals", { branch: BRANCH, prUrl: PR });
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready for review" }, as(worker.threadId));
+    return worker;
+  }
+  /** A planner with a two-wave plan, then the advisor chief_consult starts over it. */
+  async function planAdvisor(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string) {
+    const { planner } = await planTwoWaves(state, chiefThreadId);
+    await state.harness.behavior.callAgentTool("chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan before delegation" }, as(chiefThreadId));
+    return { planner, advisor: (await status(state)).threads.find((row) => row.role === "advisor")! };
+  }
+
   test("steers a continuation with the instruction first", async () => {
     const state = await setup();
     await state.harness.behavior.setSettings({ plannerEnabled: true });
@@ -36,8 +53,8 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     if (role === "planner") await state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals"], opts);
-    if (role === "reviewer") await chiefReview(state, chief.threadId, { workerThreadId: (await delegate(state, chief.threadId)).threadId });
-    if (role === "advisor") await state.harness.behavior.runCli(["consult", "--title", "Rework checkout", "--mission", "Explore a fix for the discount bug"], opts);
+    if (role === "reviewer") await chiefReview(state, chief.threadId, { workerThreadId: (await readyWorker(state, chief.threadId)).threadId });
+    if (role === "advisor") await planAdvisor(state, chief.threadId);
     const target = (await status(state)).threads.find((row) => row.role === role)!;
     const sentBefore = state.sent.filter((entry: any) => entry.threadId === target.threadId).length;
     const result = await state.harness.behavior.runCli(["continue", target.threadId, "--instruction", "x".repeat(7_995)]);
@@ -72,12 +89,8 @@ describe("Chief backend", () => {
     const state = await setup();
     const chief = await start(state);
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
-    const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Ready for review",
-    }, { threadId: worker.threadId, projectId: "proj_1" });
+    const worker = await readyWorker(state, chief.threadId);
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
-    expect(state.spawned.at(-1).prompt).toContain("file:line");
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Tax is off", ...REQUEST_CHANGES,
@@ -130,96 +143,62 @@ describe("Chief backend", () => {
     expect(state.sent.filter((entry: any) => entry.threadId === worker.threadId)).toHaveLength(sentBefore + 1);
   });
 
-  test("consults a read-only advisor in the failing worker's worktree with its brief, verdicts, and branch", async () => {
+  test("chief_consult starts a read-only advisor over a plan, and it reports advice back to Chief without an auto-review", async () => {
     const state = await setup();
     await state.harness.behavior.callRpc("setRoleModel", {
       hostId: "host_1", role: "advisor",
       selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
     });
     const chief = await start(state);
-    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { branch: "feature/fix-checkout-totals" });
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Ready for review",
-    }, { threadId: worker.threadId, projectId: "proj_1" });
-    await state.harness.behavior.callAgentTool(
-      "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
-    );
-    const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!;
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "Totals are off by the discount", ...REQUEST_CHANGES,
-    }, { threadId: reviewer.threadId, projectId: "proj_1" });
-
-    await state.harness.behavior.callAgentTool("chief_consult", {
-      title: "Fix checkout totals", mission: "Diagnose why the discount keeps failing review",
-      workerThreadId: worker.threadId,
-    }, { threadId: chief.threadId, projectId: "proj_1" });
-
-    const spawned = state.spawned.at(-1);
-    expect(spawned).toMatchObject({
-      title: "Consult · Fix checkout totals",
-      environment: { type: "reuse", environmentId: "env_worker" },
-      pluginMetadata: { role: "advisor" },
-      providerId: "codex",
-    });
-    expect(spawned.prompt).toBeDefined();
-    expect(spawned.input).toBeUndefined();
-    const prompt = spawned.prompt as string;
-    expect(prompt).toContain("Remain advisory");
-    expect(prompt).toContain("Correct and verify totals");
-    expect(prompt).toContain("Regression passes");
-    expect(prompt).toContain("Verdict: request_changes");
-    expect(prompt).toContain("Totals are off by the discount");
-    expect(prompt).toContain("feature/fix-checkout-totals");
-
-    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    const { advisor } = await planAdvisor(state, chief.threadId);
+    expect(state.spawned.at(-1)).toMatchObject({ pluginMetadata: { role: "advisor" }, providerId: "codex" });
+    expect(state.spawned.at(-1).prompt).toContain("Remain advisory");
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(advisor.threadId));
     expect(configured.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
-    expect(configured.skills).toEqual(["chief-worker", "chief-role-read-only"]);
-  });
 
-  test("consults without a worker in the project checkout, and only from Chief", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const opts = { threadId: chief.threadId, projectId: "proj_1" };
-    const result = await state.harness.behavior.runCli(
-      ["consult", "--title", "Rework checkout", "--mission", "Explore a fix for the discount bug"], opts,
-    );
-    expect(result.exitCode).toBe(0);
-    expect(state.spawned.at(-1)).toMatchObject({ environment: { type: "project-default" } });
-
-    const worker = await delegate(state, chief.threadId);
-    await expect(state.harness.behavior.callAgentTool(
-      "chief_consult", { title: "Sneak one in", mission: "Not allowed" }, { threadId: worker.threadId, projectId: "proj_1" },
-    )).rejects.toThrow(/active registered Chief/);
-
-    const otherChief = await start(state, "proj_2");
-    await expect(state.harness.behavior.callAgentTool(
-      "chief_consult", { title: "Cross-chief", mission: "Not allowed", workerThreadId: worker.threadId },
-      { threadId: otherChief.threadId, projectId: "proj_2" },
-    )).rejects.toThrow("for this Chief");
-  });
-
-  test("hands an advisor's advice back to Chief and never auto-reviews it", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.runCli(
-      ["consult", "--title", "Fix checkout totals", "--mission", "Diagnose the discount bug", "--worker", worker.threadId],
-      { threadId: chief.threadId, projectId: "proj_1" },
-    );
-    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
-    await state.harness.behavior.callAgentTool("chief_report", {
-      state: "ready", result: "The discount is applied before the tax rounds",
-    }, { threadId: advisor.threadId, projectId: "proj_1" });
-
-    const reported = state.sent.at(-1).input[0].text;
-    expect(reported).toContain("Advisor report");
-    expect(reported).toContain(`chief_delegate (replaces: ${worker.threadId})`);
-
-    await state.harness.behavior.emitThreadEvent("thread.idle", {
-      thread: state.live.get(advisor.threadId)!,
-      lastAssistantText: "advice given",
-    });
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "The plan is sound.", verdict: "approve" }, as(advisor.threadId));
+    expect(state.sent.at(-1).input[0].text).toContain("Advisor report");
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(advisor.threadId)!, lastAssistantText: "advice given" });
     expect(state.spawned.some((entry) => String(entry.title).startsWith("Review · "))).toBe(false);
+  });
+
+  // Contract (plan-4/plan-5): chief_consult is for plans only; the worker consult mode is gone.
+  // Regression: a consult over a worker (or over nothing) starts an advisor again.
+  test("chief_consult is for plans only: no plan, or a worker in place of one, starts no advisor, and only Chief may call it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const opts = as(chief.threadId);
+    const worker = await delegate(state, chief.threadId);
+    const spawnedBefore = state.spawned.length;
+    await expect(state.harness.behavior.callAgentTool("chief_consult", { title: "Totals", mission: "Why do totals go negative?" }, opts)).rejects.toThrow(/planThreadId/);
+    await expect(state.harness.behavior.callAgentTool("chief_consult", { title: "Totals", mission: "Why do totals go negative?", workerThreadId: worker.threadId }, opts)).rejects.toThrow(/planThreadId/);
+    await expect(state.harness.behavior.callAgentTool("chief_consult", { title: "Totals", mission: "Why?", planThreadId: worker.threadId }, opts)).rejects.toThrow();
+    const cli = await state.harness.behavior.runCli(["consult", "--title", "Totals", "--mission", "Why do totals go negative?", "--worker", worker.threadId], opts);
+    expect(cli.exitCode).toBe(1);
+    await expect(state.harness.behavior.callAgentTool("chief_consult", { title: "Sneak", mission: "Not allowed", planThreadId: "thr_plan" }, as(worker.threadId))).rejects.toThrow(/active registered Chief/);
+    expect(state.spawned).toHaveLength(spawnedBefore);
+    expect((await status(state)).threads.some((row) => row.role === "advisor")).toBe(false);
+  });
+
+  // Contract (plan-4 step B7 and the redesign): replacement is never gated on a rejection count. W is not a gate target (B7
+  // refuses replacing an open gate's target); it carries the request_changes history a pre-gate database left behind.
+  // Regression: the removed consult and user-flag steps returning, so a replacement after repeated request_changes needs a consult or a user flag.
+  test("chief_delegate (replaces: W, kind: worker) after request_changes verdicts is admitted with no consult and no user flag", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const worker = await delegate(state, chief.threadId, "Fix checkout totals", { branch: BRANCH });
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, as(worker.threadId));
+    state.db.prepare(`UPDATE managed_threads SET reject_streak=7 WHERE thread_id=?`).run(worker.threadId);
+    for (let n = 0; n < 7; n += 1) {
+      state.db.prepare(`INSERT INTO reviewer_verdicts (reviewer_thread_id, worker_thread_id, verdict, report_seq, at, head_sha, worker_report_seq) VALUES (?, ?, 'request_changes', ?, ?, ?, ?)`).run(`thr_old_${n}`, worker.threadId, n + 1, n, "a".repeat(40), 1);
+    }
+    const spawnedBefore = state.spawned.length;
+    const result = await state.harness.behavior.runCli([
+      "delegate", "--title", "Fix totals again", "--mission", "Do it differently", "--unplanned-reason", "Replacement fixture", "--replaces", worker.threadId, "--json",
+    ], as(chief.threadId));
+    expect(result.exitCode).toBe(0);
+    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+    expect(state.spawned.at(-1).pluginMetadata).toMatchObject({ role: "worker" });
+    expect((await status(state)).threads.some((row) => row.role === "advisor")).toBe(false);
   });
 });

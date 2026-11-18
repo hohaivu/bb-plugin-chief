@@ -1,4 +1,5 @@
 # Retest after a fix round gates the review
+Status: superseded by [one review gate per plan](2026-11-18-single-review-gate.md).
 
 ## Context
 

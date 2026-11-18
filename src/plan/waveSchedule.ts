@@ -1,10 +1,10 @@
 /** spec: an implementation wave whose `## Spec delta` a Spec Writer turns into docs/ in parallel with the wave's worker, on a side branch folded onto the chain branch.
  * baseline: a spec wave whose `## Spec baseline` heading names new docs/specs files whose current behaviour its Spec Writer documents first; set at intake, never re-parsed.
  * specsSkipped: Chief's reason for going without that Spec Writer (chief_skip_specs, until a Spec Writer was delegated on the wave).
- * testsSkipped: Chief's recorded reason for going without this test wave (chief_skip_tests). absent is never persisted:
- * planWavesFor sets it on a waived wave no worker was ever delegated on, and the graph helpers then skip that wave.
+ * absent is never persisted: planWavesFor sets it on a legacy test wave (persisted `test: true`, waived or not) no worker was ever
+ * delegated on, and the graph helpers then skip that wave.
  * stackOn: a chain head (dependsOn: []) whose chain builds on wave k's changes, which live on another chain: its branch and PR stack on that chain's branch. */
-export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; stackOn?: number; design?: boolean; test?: boolean; testsSkipped?: string; spec?: boolean; baseline?: boolean; specsSkipped?: string; feature?: boolean; reshape?: boolean; title?: string; absent?: boolean };
+export type PlanWave = { path: string; contracts?: string; dependsOn?: number[]; stackOn?: number; design?: boolean; spec?: boolean; baseline?: boolean; specsSkipped?: string; feature?: boolean; reshape?: boolean; title?: string; absent?: boolean };
 
 /** The first heading, else the first non-empty line, of a wave body: what the wave is about, for the tracking issue's schedule. */
 export function waveTitle(body: string): string | undefined {
@@ -71,34 +71,20 @@ export type Lane = "side" | "implementation";
 /** One module owns the plan-wave graph and the state derived from it: which worker holds a wave, which waves are
  * still pending, which workers one review covers, and whether a worker ends its plan. It returns data and
  * decisions, never sentences. rows reads the server's live row cache, which is reloaded after writes. */
-export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<string, Row>) {
-  /** A worker's linked planner's persisted wave schedule, or [] when unlinked. A waived test wave no worker was
-   * ever delegated on is marked absent, so the graph helpers skip it. */
+/** gateActor: a review gate's tester (or later fix) row; wave scheduling never sees it. */
+export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<string, Row>, gateActor: (row: Row) => boolean = () => false) {
+  /** A worker's linked planner's persisted wave schedule, or [] when unlinked. A legacy test wave no worker was ever
+   * delegated on is marked absent, so the graph helpers skip it; one with rows is an ordinary wave. */
   function planWavesFor(planThreadId: string | null): PlanWave[] {
-    return rawWaves(planThreadId).map((wave, index) => wave.testsSkipped && !laneRows(planThreadId!, index + 1).length ? { ...wave, absent: true } : wave);
+    return rawWaves(planThreadId).map((wave, index) => {
+      return (wave as { test?: boolean }).test && !laneRows(planThreadId!, index + 1).length ? { ...wave, absent: true } : wave;
+    });
   }
 
   /** The planner's persisted waves with absent never set (the graph helpers' raw input), or [] when unlinked. */
   function rawWaves(planThreadId: string | null): PlanWave[] {
     const planner = planThreadId ? rows().get(planThreadId) : undefined;
     return planner?.plan_waves ? (JSON.parse(planner.plan_waves) as PlanWave[]) : [];
-  }
-
-  /** The test waves on wave n's raw chain (an absent waived wave counts), head to tip. */
-  function chainTests(planThreadId: string | null, n: number): number[] {
-    const waves = rawWaves(planThreadId);
-    return chainOf(waves, n).filter((m) => waves[m - 1]?.test);
-  }
-
-  /** The testsSkipped reason of the first test wave on wave n's raw chain that has one. */
-  function chainWaiver(planThreadId: string | null, n: number): string | undefined {
-    const waves = rawWaves(planThreadId);
-    return chainTests(planThreadId, n).map((m) => waves[m - 1]!.testsSkipped).find(Boolean);
-  }
-
-  /** True for a worker delegated on a plan wave marked test: true. */
-  function isTestWave(row: Row): boolean {
-    return row.role === "worker" && !!row.plan_thread_id && row.plan_wave != null && !!planWavesFor(row.plan_thread_id)[row.plan_wave - 1]?.test;
   }
 
   /** True for a worker delegated on a plan wave marked design: true. */
@@ -109,7 +95,7 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
   /** Wave n runs a Spec Writer beside its worker: an implementation wave marked spec, not bypassed. */
   function specWave(waves: PlanWave[], n: number): boolean {
     const wave = waves[n - 1];
-    return !!wave?.spec && !wave.test && !wave.design && !wave.specsSkipped;
+    return !!wave?.spec && !wave.design && !wave.specsSkipped;
   }
 
   /** The row and its whole replaces ancestry are spec-writers (a missing ancestor ends the walk): the writer never took over a worker's environment. */
@@ -147,7 +133,7 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
   /** Every worker-role row of a planner in any lane, optionally for one wave, oldest first. */
   function laneRows(planThreadId: string, wave?: number): Row[] {
     return [...rows().values()]
-      .filter((other) => other.role === "worker" && other.plan_thread_id === planThreadId && (wave === undefined || other.plan_wave === wave))
+      .filter((other) => other.role === "worker" && other.plan_thread_id === planThreadId && (wave === undefined || other.plan_wave === wave) && !gateActor(other))
       .sort((a, b) => a.created_at - b.created_at);
   }
 
@@ -235,10 +221,10 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
   }
 
   /** The waves of a plan whose latest implementation row is not ready or complete (or does not exist yet). An idle worker
-   * whose latest report was ready counts as ready. A waived test wave is never pending: absent, or done whatever its worker's state. */
+   * whose latest report was ready counts as ready. An absent wave is never pending. */
   function pendingWaves(planThreadId: string, waves: PlanWave[]): number[] {
     return waves.flatMap((wave, index) => {
-      if (wave.testsSkipped) return [];
+      if (wave.absent) return [];
       const latest = latestWorker(planThreadId, index + 1);
       return latest && isSettled(latest) ? [] : [index + 1];
     });
@@ -308,5 +294,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(latestWorker(worker.plan_thread_id!, tip)?.state ?? ""));
   }
 
-  return { planWavesFor, rawWaves, chainTests, chainWaiver, isDesignWave, isTestWave, laneFor, laneOf, sideLane, coexists, waveWorkers, ownedWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, planBaseOf, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, rawWaves, isDesignWave, laneFor, laneOf, sideLane, coexists, waveWorkers, ownedWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, planBaseOf, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }

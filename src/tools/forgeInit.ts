@@ -57,7 +57,7 @@ export function registerForgeInitTool(ctx: Ctx) {
         if (wave > waves.length) {
           throw new Error(`Wave ${wave} is out of range: planner ${planThreadId} scheduled ${waves.length} wave(s).`);
         }
-        // A chain has one branch and one pull request, opened here on its head and never again: raw waves, so a waived test wave stays on the chain.
+        // A chain has one branch and one pull request, opened here on its head and never again: raw waves, so an absent legacy test wave stays on the chain.
         const rawWaves = planner.plan_waves ? JSON.parse(planner.plan_waves) as PlanWave[] : [];
         const chain = chainOf(rawWaves, wave);
         if (chain[0] !== wave) {
@@ -85,7 +85,6 @@ export function registerForgeInitTool(ctx: Ctx) {
           "</details>",
           ...chain.flatMap((n) => [
             "", `<details><summary>Wave ${n} of ${waves.length} — ${rawWaves[n - 1]!.title ?? "no description"}</summary>`,
-            ...(rawWaves[n - 1]!.testsSkipped ? ["", `Tests skipped: ${ctx.forgeText(rawWaves[n - 1]!.testsSkipped!, 500)}`] : []),
             "", "### Contracts to verify", clip(rawWaves[n - 1]!.contracts ?? "None listed.", 2_000),
             "</details>",
           ]),

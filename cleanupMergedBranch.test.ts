@@ -11,8 +11,9 @@ provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => ({ ...(await vi.importActual<object>("node:child_process")), ...(await import("./test/execMock")).childProcessMock() }));
 afterEach(disposeAll);
 
-// Contracts (wave 1, src/runtime/cleanup.ts branch step): the job resolves its PR URLs (its own row's, plus its covered workers' for a reviewer),
-// asks the forge only when origin holds nothing, and deletes the bb/ branch only for a merged PR whose head is the tip or contains it.
+// Contracts (wave 1, src/runtime/cleanup.ts branch step; wave 3 merge proof): the job resolves its PR URLs (its own row's, plus its covered workers' for a reviewer),
+// runs only after the forge says every one merged (one lookup, cached), and deletes the bb/ branch only for a merged PR whose head is the tip or contains it.
+// A PR that is open, closed unmerged or unknown keeps the job at the branch step: no attempt, no alert, the branch untouched.
 const PR = "https://github.com/acme/shop/pull/8";
 const BRANCH = "bb/fix-totals-thr_abc123";
 const KEPT = (count: number) => `branch kept: ${count} commit(s) not on origin and no merged task pull request contains them`;
@@ -49,7 +50,7 @@ async function runBranchStep(options: Setup) {
   const state = await setup({ projectPath: fx.clone, system: { usageLimits: async () => ({}), config: async () => ({ primaryHostId: "host_1" }) } });
   await state.harness.behavior.setSettings({ cleanupApproved: true });
   const chief = (await start(state)).threadId;
-  await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", prUrl: PR }, chief);
+  await tool(state, "chief_delegate", { title: "Fix totals", mission: "Do it.", unplannedReason: "Bounded fixture", prUrl: PR, ...(options.role === "reviewer" ? { branch: BRANCH } : {}) }, chief);
   const worker = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE role='worker'`).get() as { thread_id: string }).thread_id;
   await readyIdle(state, worker);
   let owner = worker;
@@ -105,10 +106,23 @@ describe("cleanup branch step with a task PR", () => {
     } finally { run.fx.dispose(); }
   });
 
+  // Not merged (or not known to be): the job waits at the branch step with no attempt counted and no alert; the forge answer is asked once.
+  test.each<[string, Forge]>([
+    ["the PR is open", { state: "OPEN" }],
+    ["the PR is closed without a merge", { state: "CLOSED" }],
+    ["the forge cannot say whether it is merged", "fail"],
+  ])("waits, branch untouched, no alert: %s", async (_name, forge) => {
+    const run = await runBranchStep({ layout: tipIsHead, forge: typeof forge === "string" ? forge : (head) => ({ ...forge, headRefOid: head }) });
+    try {
+      await run.cycle();
+      expect(job(run.state, run.owner)).toEqual({ step: "branch", outcome: null, attempts: 0 });
+      expect(run.fx.sha(BRANCH)).toBe(run.tip);
+      expect(run.forgeCalls).toHaveLength(1);
+      expect(keptAlerts(run.state).n).toBe(0);
+    } finally { run.fx.dispose(); }
+  });
+
   test.each<[string, Setup, number]>([
-    ["the PR is open", { layout: tipIsHead, forge: (head) => ({ state: "OPEN", headRefOid: head }) }, 1],
-    ["the PR is closed without a merge", { layout: tipIsHead, forge: (head) => ({ state: "CLOSED", headRefOid: head }) }, 1],
-    ["the forge cannot say whether it is merged", { layout: tipIsHead, forge: "fail" }, 1],
     ["the merged PR reports no usable head", { layout: tipIsHead, forge: { state: "MERGED", headRefOid: "" } }, 1],
     ["the merged PR's head does not contain the tip (cherry-picked)", {
       layout: (fx) => {
@@ -146,20 +160,20 @@ describe("cleanup branch step with a task PR", () => {
     } finally { run.fx.dispose(); }
   });
 
-  test("a branch origin already holds is deleted without any forge call", async () => {
+  test("a branch origin already holds is deleted; the forge is asked once, for the merge proof only", async () => {
     const run = await runBranchStep({
       layout: (fx) => { fx.commit("work"); fx.git("push", "-q", "origin", BRANCH); return { head: fx.sha("HEAD") }; },
     });
     try {
       await run.cycle();
       expect(job(run.state, run.owner)).toMatchObject({ outcome: "branch deleted" });
-      expect(run.forgeCalls).toEqual([]);
+      expect(run.forgeCalls).toHaveLength(1);
     } finally { run.fx.dispose(); }
   });
 
-  // Contract: a forge call that never answers throws inside the branch step (bounded by CLEANUP_CALL_MS = 30 s), so cleanupFail counts one attempt.
-  // Nothing is deleted and no "kept" outcome is recorded: the job stays at the branch step for its next try.
-  test("a forge call that never settles counts one failed attempt and leaves the branch and the job in place", async () => {
+  // Contract: a forge call that never answers is bounded (CLEANUP_CALL_MS = 30 s): the merge proof is unknown, so the job stays at the branch step
+  // for a later pass with no attempt counted. Nothing is deleted and no "kept" outcome is recorded.
+  test("a forge call that never settles leaves the branch and the job in place, with no attempt counted", async () => {
     const run = await runBranchStep({ layout: tipIsHead });
     const realSetTimeout = globalThis.setTimeout;
     const realSleep = (ms: number) => new Promise<void>((resolve) => realSetTimeout(resolve, ms));
@@ -177,7 +191,7 @@ describe("cleanup branch step with a task PR", () => {
       await vi.advanceTimersByTimeAsync(31_000);
       // Without the 30 s bound the cycle would wait for the hung forge call: it must settle on its own.
       expect(await Promise.race([cycle.then(() => "settled"), realSleep(3_000).then(() => "hung")])).toBe("settled");
-      expect(job(run.state, run.owner)).toMatchObject({ step: "branch", outcome: null, attempts: 1 });
+      expect(job(run.state, run.owner)).toEqual({ step: "branch", outcome: null, attempts: 0 });
       expect(run.fx.sha(BRANCH)).toBe(run.tip);
       expect(keptAlerts(run.state).n).toBe(0);
     } finally {

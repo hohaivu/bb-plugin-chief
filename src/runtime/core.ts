@@ -188,13 +188,13 @@ export function createCore(ctx: Ctx) {
       void ctx.sweep();
     },
   });
-  const ledger = createReviewLedger<ManagedRow>(db, store.get, store, { busy: (status) => BUSY_STATUSES.has(status) });
-  const schedule = createWaveSchedule<ManagedRow>(store.rows);
-  const { planWavesFor, isDesignWave, isTestWave, latestWorker, latestSideWriter, specWave, reviewTargetsFor, coexists, sideLane, specWriters, taskWriters, writerPending, chainOwner, chainStarted, planBase, planBaseOf } = schedule;
+  const ledger = createReviewLedger<ManagedRow>(db, store.get, { busy: (status) => BUSY_STATUSES.has(status) });
+  const schedule = createWaveSchedule<ManagedRow>(store.rows, (row) => row.plan_wave == null && store.isGateActor(row.thread_id));
+  const { planWavesFor, isDesignWave, latestWorker, latestSideWriter, specWave, reviewTargetsFor, coexists, sideLane, specWriters, taskWriters, writerPending, chainOwner, chainStarted, planBase, planBaseOf } = schedule;
 
   const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
   const { onSpecChain } = progress;
   const plans = createPlanLifecycle<ManagedRow>(store, schedule, ledger, (planner: ManagedRow): string | null => ctx.planReviewRefusal(planner));
-  return { activeChiefForProject, anyCooldown, chainOwner, chainStarted, planBase, planBaseOf, chiefCountForProject, closedTodosForProject, coexists, cooldownFor, db, insertTodo, isDesignWave, isTestWave, latestChiefForProject, latestSideWriter, latestWorker, ledger, onSpecChain, pendingAlerts, planWavesFor, plans, progress, reviewTargetsFor, reviewerFails, roleModelRow, schedule, settings, sideLane, specWave, specWriters, store, taskWriters, todoById, todosForProject, updateTodo, upsertCooldown, writerPending };
+  return { activeChiefForProject, anyCooldown, chainOwner, chainStarted, planBase, planBaseOf, chiefCountForProject, closedTodosForProject, coexists, cooldownFor, db, insertTodo, isDesignWave, latestChiefForProject, latestSideWriter, latestWorker, ledger, onSpecChain, pendingAlerts, planWavesFor, plans, progress, reviewTargetsFor, reviewerFails, roleModelRow, schedule, settings, sideLane, specWave, specWriters, store, taskWriters, todoById, todosForProject, updateTodo, upsertCooldown, writerPending };
 }
 

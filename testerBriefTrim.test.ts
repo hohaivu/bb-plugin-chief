@@ -3,8 +3,8 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { type WorkerBriefInput, workerBrief } from "./src/research/delegationBrief";
 import { SPEC_WRITER_BOUNDARY, TESTER_BOUNDARY, WORKER_BOUNDARY } from "./test/docsOwnership";
 import { NOT_DOING, SPEC_DELTA, fullChain } from "./test/specWriterHelpers";
-import { PLAN_FIXTURE, TEST_FILES, TEST_WAVE, delegate, disposeAll, setup, start } from "./test/harness";
-import { plan, readyIdle, workerOn } from "./test/testerHelpers";
+import { delegate, disposeAll, setup, start } from "./test/harness";
+import { readyIdle } from "./test/testerHelpers";
 import { provideSdk } from "./test/sdk";
 
 provideSdk(sdkTesting);
@@ -25,8 +25,6 @@ const count = (text: string, needle: string) => text.split(needle).length - 1;
 const lines = (text: string, line: string) => text.split("\n").filter((entry) => entry === line).length;
 const section = (text: string, heading: string) => text.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0];
 const planned = { wave: 2, waveTotal: 2, planContextLine: "Plan file (wave 2 of 2): /plans/plan-2.md" };
-// A test wave lists at most 8 contracts at planner intake, so its 5,000 characters come as 8 wide items.
-const wideContracts = (tag: string) => Array.from({ length: 8 }, (_, i) => `- ${tag} item ${i} ${"x".repeat(620)}`).join("\n");
 const contractList = (tag: string, size: number) => Array.from({ length: Math.ceil(size / 19) }, (_, i) => `- ${tag} item ${String(i).padStart(4, "0")} holds`).join("\n");
 
 describe("empty sections", () => {
@@ -245,39 +243,22 @@ describe("tester working contract", () => {
   });
 });
 
-describe("chief_delegate: planned chain with 5,000-character contract lists", () => {
-  const long = (n: number) => `# Wave ${n}\nBuild the totals.\n\n${n === 1 ? `${SPEC_DELTA}\n\n` : `${TEST_FILES}\n\n`}## Contracts to verify\n${n === 1 ? contractList("W1", 5_000) : wideContracts("W2")}${NOT_DOING}`;
-  const chainPrompts = async () => {
-    const state = await setup();
-    await fullChain(state, [{ body: long(1), spec: true }, { body: long(2), test: true }]);
-    const [worker, writer, tester] = state.spawned.filter((entry: any) => entry.prompt.startsWith("You are the managed worker")).map((entry: any) => entry.prompt as string);
-    return { worker: worker!, writer: writer!, tester: tester! };
-  };
+describe("chief_delegate: a spec wave with a 5,000-character contract list", () => {
+  const long = `# Wave 1\nBuild the totals.\n\n${SPEC_DELTA}\n\n## Contracts to verify\n${contractList("W1", 5_000)}${NOT_DOING}`;
 
-  // Regression: a contract clip on the worker, the tester's Source of truth still listing contracts, or the Spec Writer's context losing or lengthening them.
-  test("the worker and the tester get a plan-file pointer, not the list, and the Spec Writer a 3,000-character clip", async () => {
-    const { worker, writer, tester } = await chainPrompts();
+  // Regression: a contract clip on the worker, or the Spec Writer's context losing or lengthening the list.
+  test("the worker gets a plan-file pointer, not the list, and the Spec Writer a 3,000-character clip", async () => {
+    const state = await setup();
+    await fullChain(state, [{ body: long, spec: true }]);
+    const [worker, writer] = state.spawned.filter((entry: any) => entry.prompt.startsWith("You are the managed worker")).map((entry: any) => entry.prompt as string);
     expect(worker).not.toContain("W1 item");
-    expect(tester).not.toContain("W2 item");
-    expect(tester).not.toContain("W1 item");
-    expect(section(worker, "Contracts to verify")).toMatch(/plan-1\.md/);
-    expect(section(tester, "Contracts to verify")).toMatch(/plan-2\.md/);
-    const context = section(writer, "Read-only context")!;
+    expect(section(worker!, "Contracts to verify")).toMatch(/plan-1\.md/);
+    const context = section(writer!, "Read-only context")!;
     const full = count(contractList("W1", 5_000), "W1 item");
-    // Own-wave contracts only: wave 1's list, clipped; wave 2's never reaches the wave-1 Spec Writer.
     expect(count(context, "W1 item")).toBeGreaterThan(100);
     expect(count(context, "W1 item")).toBeLessThan(full);
-    expect(context).not.toContain("W2 item");
     expect(context.length).toBeLessThan(5_000);
     expect(writer).not.toContain("## Contracts to verify");
-  });
-
-  test("the tester's Source of truth names the plan files only", async () => {
-    const { tester } = await chainPrompts();
-    const source = section(tester, "Source of truth for test cases")!;
-    expect(source.split("\n").filter((entry) => entry.startsWith("- "))).toEqual([]);
-    expect(source.split("\n").filter((entry) => /^Wave \d of 2: .*plan-\d\.md$/.test(entry))).toHaveLength(2);
-    expect(source).not.toContain("item");
   });
 });
 
@@ -294,18 +275,5 @@ describe("chief_delegate: an unplanned tester", () => {
     expect(text.split("\n## Source of truth for test cases\n")[0]).not.toContain("None stated.");
     expect(section(text, "Predecessor's last report")!.startsWith("Its report names no Head commit: read the full report.")).toBe(true);
     expect(text).not.toContain("The totals are fixed.\nFull report");
-  });
-
-  test("a planned tester behind a worker whose report names its Head commit gets the commit line", async () => {
-    const state = await setup();
-    const chief = await start(state);
-    const planner = await plan(state, chief.threadId, [{ body: PLAN_FIXTURE }, TEST_WAVE(2)]);
-    await state.harness.behavior.callAgentTool("chief_delegate", { title: "Wave 1", mission: "Do the wave.", planThreadId: planner.threadId, wave: 1 }, { threadId: chief.threadId, projectId: "proj_1" });
-    const impl = workerOn(state, planner.threadId, 1).thread_id as string;
-    const sha = "1234567890abcdef1234567890abcdef12345678";
-    const base = "abcdef1234567890abcdef1234567890abcdef12";
-    await readyIdle(state, impl, `Done.\nBase commit: ${base}\nHead commit: ${sha}\n\n## Deviations from plan\nNone`);
-    await state.harness.behavior.callAgentTool("chief_delegate", { title: "Wave 2", mission: "Do the wave.", planThreadId: planner.threadId, wave: 2, replaces: impl }, { threadId: chief.threadId, projectId: "proj_1" });
-    expect(section(state.spawned.at(-1).prompt as string, "Predecessor's last report")).toBe(`Head commit: ${sha}. Changed files: \`git diff --name-only ${base}..${sha}\`.\n`);
   });
 });

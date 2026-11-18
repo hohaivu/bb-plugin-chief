@@ -67,12 +67,8 @@ export const PLAN_FIXTURE = "# Plan\n\n## Contracts to verify\n- Totals stay non
 export const wave = (n: number, text = "Do the work.") => `# Wave ${n}\n${text}\n\n## Contracts to verify\n- Wave ${n} keeps its invariant`;
 // A plan worker's ready report must carry a Deviations heading.
 export const NO_DEVIATIONS = "\n\n## Deviations from plan\nNone";
-// #159: every chain of a plan ends in a test wave (test: true), which defaults to depending on the wave before it.
 // Plan files are artifacts of the data dir: <dataDir>/chief/<project>/<planner>/plan-<n>.md.
 export const planFile = (state: { storageRoot: string }, plannerThreadId: string, n: number) => join(state.storageRoot, "chief", "proj_1", plannerThreadId, `plan-${n}.md`);
-// Wave 1 of the test-wave bound: a test wave must list 1 to 5 test files under "## Test files".
-export const TEST_FILES = "## Test files\n- wave.test.ts";
-export const TEST_WAVE = (n: number, dependsOn?: number[]) => ({ body: wave(n, `Write the tests.\n\n${TEST_FILES}`), test: true, ...(dependsOn ? { dependsOn } : {}) });
 
 export function configurationContext(threadId: string, projectId = "proj_1", name = projectId === "proj_1" ? "Asha" : "Second"): PluginAgentConfigurationContext {
   return {
@@ -422,14 +418,6 @@ export async function approvePlan(state: Awaited<ReturnType<typeof setup>>, chie
   await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "The plan is sound.", verdict: "approve" }, { threadId: advisor.threadId, projectId: "proj_1" });
 }
 
-// Waiving a plan's test waves (chief_skip_tests) drops them from the wave graph, so the implementation waves are the
-// chain tips again: the graph the tests below were written against, before #159 made every chain end in a test wave.
-export async function waiveTests(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, planThreadId: string, testWaves: number[]) {
-  for (const wave of testWaves) {
-    await state.harness.behavior.callAgentTool("chief_skip_tests", { planThreadId, wave, reason: "graph under test is the implementation waves" }, { threadId: chiefThreadId, projectId: "proj_1" });
-  }
-}
-
 // A plan wave delegated the way the server stored one before a chain shared one branch: a worker row of its own, on its own branch.
 // chief_delegate now refuses to build one (a later wave of a chain replaces its chain's worker), so a test of the legacy stacked
 // graph seeds the row directly: an unplanned worker, stamped with its plan wave. The thread store reloads its row cache on its
@@ -444,11 +432,20 @@ export async function legacyWave(state: Awaited<ReturnType<typeof setup>>, chief
   return { threadId };
 }
 
-// chief_review answers `Started|Using existing “<title>” in thread <id>.`: the retired `bb chief review` CLI answered JSON with these fields.
+// chief_review answers `Started|Using existing “<title>” in thread <id>.` for a branch review; the retired `bb chief review` CLI answered JSON with these fields.
 export async function chiefReview(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, params: { workerThreadId?: string; branch?: string; pullRequest?: string }) {
   const text = await state.harness.behavior.callAgentTool("chief_review", params, { threadId: chiefThreadId, projectId: "proj_1" }) as string;
+  // A worker's gate answers `Review gate <key> pinned ... Started reviewer <id> and tester <id>.` or `The review gate <key> already runs reviewer <id> and tester <id>; nothing started.`
+  // threadId is the gate's reviewer, testerThreadId its tester (null for a branch review); created is true when a reviewer was started.
+  const gate = /(?:Started reviewer (\S+?)(?: and tester (\S+?))?\.|already runs reviewer (\S+) and tester (\S+?);|Started tester (\S+?)\.)/.exec(text);
+  if (gate) {
+    const reviewer = gate[1] ?? gate[3];
+    const threadId = reviewer ?? (state.db.prepare("SELECT reviewer_thread_id FROM review_gates WHERE chief_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(chiefThreadId) as { reviewer_thread_id: string }).reviewer_thread_id;
+    const title = (state.db.prepare("SELECT title FROM managed_threads WHERE thread_id=?").get(threadId) as { title: string }).title;
+    return { text, title, threadId, testerThreadId: gate[2] ?? gate[4] ?? gate[5] ?? null, created: gate[1] != null };
+  }
   const [, title, threadId] = /^(?:Started|Using existing) “(.*)” in thread (\S+?)\./.exec(text)!;
-  return { text, title: title!, threadId: threadId!, created: text.startsWith("Started") };
+  return { text, title: title!, threadId: threadId!, testerThreadId: null as string | null, created: text.startsWith("Started") };
 }
 
 // A reviewer's ready report must carry findings: [] for an approve and a blocking entry for request_changes.
@@ -462,14 +459,13 @@ export const reviewContextOf = async (state: { spawned: { prompt?: string }[] },
 };
 export const latestReviewContext = async (state: Awaited<ReturnType<typeof setup>>) =>
   reviewContextOf(state, (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId);
-/** The Pending line a ready, unplanned worker shows until Chief starts its review; the roster and the lifecycle alert carry it word for word. */
-export const readyAction = (id: string) => `Workers never test: delegate a tester on this branch first — chief_delegate (replaces: ${id}, kind: tester) — or, to go without, pass testsSkipped (your reason) when you complete it. Start its review now: chief_review (workerThreadId: ${id}), and complete the work on the reviewer's approve — or, if you judge a review unnecessary after reading its report and recorded commands, complete it without one: chief_complete (threadId: ${id}, skipReview: your reason).`;
+/** The Pending line a ready worker shows until Chief opens its review gate; the roster and the lifecycle alert carry it word for word. */
+export const readyAction = (id: string) => `Start the review gate: chief_review (workerThreadId: ${id}). It starts one reviewer and one tester in parallel.`;
 export const APPROVE = { verdict: "approve", findings: [] } as const;
 export const REQUEST_CHANGES = { verdict: "request_changes", findings: [{ file: "totals.ts", line: 1, severity: "blocking", message: "Totals go negative." }] } as const;
 
-// #159: completing unplanned work needs a tester (or testsSkipped) and a review (or skipReview). A test that is not about
-// either closes its worker out with both reasons.
-export const CLOSE_OUT = { testsSkipped: "tests are not under test here", skipReview: "review is not under test here" };
+// Completing work needs a passed review gate, or skipReview. A test that is not about the gate closes its worker out with skipReview.
+export const CLOSE_OUT = { skipReview: "review is not under test here" };
 export async function completeWorker(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, threadId: string, extra: Record<string, unknown> = {}) {
   // skipReview needs a ready report to skip a review of.
   if (!state.db.prepare("SELECT 1 FROM managed_threads WHERE thread_id=? AND last_report_state='ready'").get(threadId)) {
@@ -492,10 +488,10 @@ export async function planTwoWaves(state: Awaited<ReturnType<typeof setup>>, chi
   const planner = (await status(state)).threads.find((row) => row.role === "planner" && row.chiefThreadId === chiefThreadId)!;
   await state.harness.behavior.callAgentTool("chief_report", {
     state: "ready",
-    result: "Two waves: schema, then its tests.",
+    result: "Two waves: schema, then its API.",
     plan: [
       { body: PLAN_FIXTURE },
-      TEST_WAVE(2),
+      { body: wave(2) },
     ],
   }, { threadId: planner.threadId, projectId: state.live.get(chiefThreadId)!.projectId });
   return {

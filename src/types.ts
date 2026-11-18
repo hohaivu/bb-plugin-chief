@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "./reportLimits";
+import { LESSON_MAX, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "./reportLimits";
 import { modelRoleSchema, roleSchema, type Role } from "./core/roles";
 
 /** reasoningLevel is a plain string like the SDK's own: providers may define levels beyond `reasoningSchema`, which only guards tool input. */
@@ -113,16 +113,16 @@ export const waveShape = z.object({
     "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
   ),
   test: z.boolean().optional().describe(
-    `true for a test wave: a tester writes and runs the tests for its parent wave on that wave's branch. Every chain ends with one; its parent is an implementation wave (neither design nor test). A test wave lists at most ${MAX_TEST_CONTRACTS} contracts and a \`## Test files\` list of 1 to ${MAX_TEST_FILES} test files.`,
+    "Removed: a wave with test is refused.",
   ),
   spec: z.boolean().optional().describe(
-    "true only on an implementation wave that changes documented behaviour: a Spec Writer runs in parallel with its worker and commits docs/ from the wave's `## Spec delta`. Never on a test or design wave.",
+    "true only on an implementation wave that changes documented behaviour: a Spec Writer runs in parallel with its worker and commits docs/ from the wave's `## Spec delta`. Never on a design wave.",
   ),
   feature: z.boolean().optional().describe(
-    "true on an implementation wave that adds new behaviour; its review runs the native-design check. Never on a test or design wave.",
+    "true on an implementation wave that adds new behaviour; its review runs the native-design check. Never on a design wave.",
   ),
   reshape: z.boolean().optional().describe(
-    "true on the reshape (make-native) wave of a big feature. Never on a test or design wave.",
+    "true on the reshape (make-native) wave of a big feature. Never on a design wave.",
   ),
 });
 // One flat object, published without length limits: the validator's own errors cannot be customised, so checkReport()
@@ -145,18 +145,21 @@ export const reportParams = z.object({
     "Ready only, reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
   ),
   complex: z.boolean().optional().describe(
-    "Planner ready report only: true when the plan is high-risk (see your brief). A plan with more than one implementation wave gets one advisor review either way; design and test waves do not count.",
+    "Planner ready report only: true when the plan is high-risk (see your brief). A plan with more than one implementation wave gets one advisor review either way; design waves do not count.",
   ),
   plan: z.union([
     z.string().trim(),
     z.array(waveShape),
   ]).optional().describe(
-    `Ready only. A planner's ready report requires this: an array of 2 to ${MAX_WAVES} {body, dependsOn, stackOn?, design?, test?, spec?, feature?, reshape?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; test: true marks a test wave, and every chain ends with one (a test wave lists at most ${MAX_TEST_CONTRACTS} contracts and a \`## Test files\` list of 1 to ${MAX_TEST_FILES} test files); spec: true marks an implementation wave whose ## Spec delta a Spec Writer turns into docs/ in parallel with its worker; feature: true marks an implementation wave that adds new behaviour; reshape: true marks a big feature's reshape wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
+    `Ready only. A planner's ready report requires this: a string (one wave) or an array of 1 to ${MAX_WAVES} {body, dependsOn, stackOn?, design?, spec?, feature?, reshape?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; spec: true marks an implementation wave whose ## Spec delta a Spec Writer turns into docs/ in parallel with its worker; feature: true marks an implementation wave that adds new behaviour; reshape: true marks a big feature's reshape wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
   ),
   blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
   recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
   fails: failsParam,
   findings: findingsParam,
+  testsPassed: z.boolean().optional().describe(
+    "Ready only, review-gate tester only (required there): true when every test you ran passed on every branch head you pushed, false when any failed (list them under ## Failing tests). Every other role leaves this unset.",
+  ),
 });
 
 export type ReportParams = z.infer<typeof reportParams>;
@@ -233,9 +236,9 @@ export interface ManagedRow {
   simple: number | null;
   /** Worker row only: Chief's reason for completing it with skipReview, without a review; null otherwise. */
   review_skipped: string | null;
-  /** Worker row only: Chief's reason for completing unplanned work with no tester (chief_complete testsSkipped); null otherwise. */
+  /** Worker row only: Chief's reason for completing unplanned work with no tester (legacy chief_complete waiver); no longer read or written. */
   tests_skipped: string | null;
-  /** Worker row only: Chief's reason for reviewing this fix without the tester rerun it owed (chief_review retestSkipped); null otherwise. */
+  /** Worker row only: Chief's reason for reviewing this fix without the tester rerun it owed (legacy chief_review waiver); no longer read or written. */
   retest_skipped: string | null;
   /** Worker row only: the command the worker's brief makes it run; nothing reruns it. */
   verify_command: string | null;
@@ -254,6 +257,10 @@ export interface ManagedRow {
   thread_errors: number;
   /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
   busy_rejections: number;
+  /** Gate tester row only: its latest ready report's testsPassed (1/0); null otherwise. */
+  tests_passed: number | null;
+  /** A fix run's origin: 'gate' or 'chat'; null on every other row. */
+  fix_run: "gate" | "chat" | null;
   /** Worker row only: when chief_complete stamped it as positively approved while cleanupApproved was on; NULL otherwise, and on every row from before the column. */
   cleanup_approved_at: number | null;
   created_at: number;
