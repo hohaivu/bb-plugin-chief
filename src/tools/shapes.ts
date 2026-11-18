@@ -50,6 +50,11 @@ export const delegateParams = delegateShape.superRefine((value, ctx) => {
 export const planParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({
   revises: z.string().trim().min(1).optional().describe("A planner whose plan its one advisor review sent back with changes: the new planner revises that plan with the advice attached, and its plan is delegated with no second review."),
   branch: z.string().trim().min(1).max(300).optional().describe("An open branch (for example a stacked pull request's head) to read instead of the project default: the thread runs in a fresh worktree based on it. For a plan, its chain heads stack on this branch."),
+  researchThreadId: z.string().trim().min(1).optional().describe("A design researcher (chief_research design: true) whose design the user approved: its design and fact report become the planner's brief."),
+  undesignedReason: z.string().trim().min(1).max(300).optional().describe("Required when research is on and no researchThreadId: why this work needs no design discussion, e.g. a small fix. Not with revises."),
+}).superRefine((value, ctx) => {
+  if (value.researchThreadId && value.undesignedReason) ctx.addIssue({ code: "custom", path: ["undesignedReason"], message: "Pass researchThreadId or undesignedReason, not both." });
+  if (value.revises && (value.researchThreadId || value.undesignedReason)) ctx.addIssue({ code: "custom", path: ["revises"], message: "A revision inherits its original plan's design: omit researchThreadId and undesignedReason." });
 }).transform(titled((v) => v.mission));
 
 export const consultParams = delegateShape.pick({ title: true, mission: true, context: true }).extend({

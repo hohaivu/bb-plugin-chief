@@ -69,6 +69,16 @@ export function createArtifacts(ctx: Ctx) {
     return atomicWrite(hostId, join(storageRootPath, relPath), content);
   }
 
+  /** A file under a thread's own storage root, or null when it is missing or unreadable. */
+  async function readStorageFile(threadId: string, relPath: string) {
+    try {
+      const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
+      return await readFile(hostId, join(storageRootPath, relPath));
+    } catch {
+      return null;
+    }
+  }
+
   /** The content lands under a temp name and is moved into place, so a failed write never leaves a partial file under
    * the final name. An existing file at the path is replaced (remove, then move): a reader may briefly see it missing,
    * and a failed second move loses the old version. */
@@ -186,6 +196,6 @@ export function createArtifacts(ctx: Ctx) {
     }
     for (const row of rows) void persistBrief(row.thread_id, row.project_id, row.prompt);
   }
-  return { persistBrief, resumeBriefs, readArtifact, writeArtifact, writePlan, writeStorageFile, retryWhileProvisioning, publishHeavy };
+  return { persistBrief, resumeBriefs, readArtifact, writeArtifact, writePlan, writeStorageFile, readStorageFile, retryWhileProvisioning, publishHeavy };
 }
 

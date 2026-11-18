@@ -25,7 +25,7 @@ function slug(title: string) {
 }
 
 /** issueUrl reuses a plan's shared tracking issue; issueTitle and issueBody replace the task's own title and body on a newly created issue (the pull request keeps title and body). */
-export function forgeInitScript(input: { title: string; base?: string; body?: string; issueUrl?: string; issueTitle?: string; issueBody?: string }) {
+export function forgeInitScript(input: { title: string; base?: string; body?: string; issueUrl?: string; issueTitle?: string; issueBody?: string; designMarker?: string }) {
   const branch = `feature/${slug(input.title)}`;
   const script = [
     "set -u",
@@ -37,6 +37,9 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     `BASE=${quote(input.base ?? "")}`,
     `ISSUE_URL=${quote(input.issueUrl ?? "")}`,
     "PR_URL=''",
+    `DESIGN_MARKER=${quote(input.designMarker ?? "")}`,
+    "PR_CREATED=''",
+    `DESIGN=${input.designMarker ? "ok" : "''"}`,
     "",
     "git fetch origin --quiet 2>/dev/null || true",
     "",
@@ -109,6 +112,12 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     '  if [ -z "$PR_URL" ]; then',
     '    PR_URL=$(gh pr create --draft --base "$BASE" --head "$BRANCH" --title "$TITLE" --body "$PR_BODY" 2>/dev/null \\',
     '      | grep -o "https://[^ ]*" | tail -1 || true)',
+    '    [ -n "$PR_URL" ] && PR_CREATED=1',
+    "  fi",
+    "  # A reused pull request must carry the approved design block: rewrite its body when the marker is missing.",
+    '  if [ -n "$DESIGN_MARKER" ] && [ -n "$PR_URL" ] && [ -z "$PR_CREATED" ]; then',
+    '    gh pr view "$PR_URL" --json body --jq .body 2>/dev/null | grep -qF "$DESIGN_MARKER" || gh pr edit "$PR_URL" --body "$PR_BODY" >/dev/null 2>&1 || true',
+    '    if gh pr view "$PR_URL" --json body --jq .body 2>/dev/null | grep -qF "$DESIGN_MARKER"; then DESIGN=ok; else DESIGN=missing; fi',
     "  fi",
     'elif [ "$FORGE" = glab ]; then',
     "  # Reuse the open merge request a partial earlier run left; glab mr list lists open ones.",
@@ -118,6 +127,11 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     '  if [ -z "$PR_URL" ]; then',
     '    PR_URL=$(glab mr create --draft --source-branch "$BRANCH" --target-branch "$BASE" -t "$TITLE" -d "$PR_BODY" --yes 2>/dev/null \\',
     '      | grep -o "https://[^ ]*" | tail -1 || true)',
+    '    [ -n "$PR_URL" ] && PR_CREATED=1',
+    "  fi",
+    '  if [ -n "$DESIGN_MARKER" ] && [ -n "$PR_URL" ] && [ -z "$PR_CREATED" ]; then',
+    '    glab mr view "$PR_URL" -F json 2>/dev/null | grep -qF "$DESIGN_MARKER" || glab mr update "$PR_URL" --description "$PR_BODY" >/dev/null 2>&1 || true',
+    '    if glab mr view "$PR_URL" -F json 2>/dev/null | grep -qF "$DESIGN_MARKER"; then DESIGN=ok; else DESIGN=missing; fi',
     "  fi",
     "fi",
     "",
@@ -125,7 +139,7 @@ export function forgeInitScript(input: { title: string; base?: string; body?: st
     "# worktree that would fail to check it out.",
     'git rev-parse --verify -q "refs/heads/$BRANCH" >/dev/null 2>&1 || BRANCH=\'\'',
     "",
-    "printf 'CHIEF_FORGE branch=%s base=%s issue_url=%s pr_url=%s forge=%s\\n' \"$BRANCH\" \"$BASE\" \"$ISSUE_URL\" \"$PR_URL\" \"$FORGE\"",
+    "printf 'CHIEF_FORGE branch=%s base=%s issue_url=%s pr_url=%s forge=%s design=%s\\n' \"$BRANCH\" \"$BASE\" \"$ISSUE_URL\" \"$PR_URL\" \"$FORGE\" \"$DESIGN\"",
   ].join("\n");
   return { branch, script };
 }

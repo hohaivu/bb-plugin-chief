@@ -144,6 +144,7 @@ export interface Ctx {
   stallCapNote: ReturnType<typeof createDelegation>["stallCapNote"];
   startConsult: ReturnType<typeof createDelegation>["startConsult"];
   startPlan: ReturnType<typeof createDelegation>["startPlan"];
+  approvedDesign: ReturnType<typeof createDelegation>["approvedDesign"];
   busyRejection: ReturnType<typeof createNextAction>["busyRejection"];
   nextAction: ReturnType<typeof createNextAction>["nextAction"];
   gateLine: ReturnType<typeof createNextAction>["gateLine"];
@@ -191,6 +192,7 @@ export interface Ctx {
   writeArtifact: ReturnType<typeof createArtifacts>["writeArtifact"];
   writePlan: ReturnType<typeof createArtifacts>["writePlan"];
   writeStorageFile: ReturnType<typeof createArtifacts>["writeStorageFile"];
+  readStorageFile: ReturnType<typeof createArtifacts>["readStorageFile"];
   retryWhileProvisioning: ReturnType<typeof createArtifacts>["retryWhileProvisioning"];
   publishHeavy: ReturnType<typeof createArtifacts>["publishHeavy"];
   intake: ReturnType<typeof createLifecycle>["intake"];

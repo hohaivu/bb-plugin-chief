@@ -37,18 +37,34 @@ export function createDelegation(ctx: Ctx) {
     }
     const { chief, projectId } = await ctx.owningChief(callerThreadId);
     const revision = params.revises ? revisionInput(params.revises, chief.thread_id) : undefined;
+    // A revision keeps the design its original planner was bound to; every refusal below runs before any freshen or spawn.
+    const researchThreadId = params.researchThreadId ?? (params.revises ? store.get(params.revises)?.research_thread_id ?? undefined : undefined);
+    if (!researchThreadId && !params.revises && !params.undesignedReason && (await ctx.researchSettings()).enabled) {
+      throw new Error("chief_plan needs researchThreadId (an approved chief_research design: true) or undesignedReason.");
+    }
+    let design: { researcherThreadId: string; designPath: string; factsPath: string } | undefined;
+    if (researchThreadId) {
+      const researcher = store.get(researchThreadId);
+      if (!researcher || researcher.role !== "researcher" || !ctx.controlsThread(researcher, chief.thread_id)) throw new Error(`No managed researcher ${researchThreadId} for this Chief.`);
+      if (researcher.research_design !== 1) throw new Error(`Researcher ${researchThreadId} ran without design: chief_plan researchThreadId needs a chief_research design: true researcher.`);
+      if (researcher.last_report_state !== "ready" || (researcher.state !== "ready" && researcher.state !== "complete")) {
+        throw new Error(`Researcher ${researchThreadId} has no approved design yet: its last report is ${researcher.last_report_state ?? "missing"}; wait for its ready report.`);
+      }
+      const bound = await approvedDesign(researcher, projectId);
+      design = { researcherThreadId: researchThreadId, designPath: bound.designPath, factsPath: bound.factsPath };
+    }
     // A revision stays on the branch its original planner read.
     const branch = params.branch ?? (params.revises ? store.get(params.revises)?.branch ?? undefined : undefined);
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: "planner", hostId: await ctx.projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = plannerBrief({
       title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context,
-      revision, branch,
+      revision, branch, design, undesignedReason: params.undesignedReason,
     });
     const warning = branch ? null : await ctx.freshenChiefCheckout(chief, "planner");
     const thread = await ctx.managedSpawn.launch(prepared,
       { projectId, environment: await readerEnvironment(projectId, branch), title, prompt },
-      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null, ...(branch ? { branch } : {}) },
+      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null, researchThreadId: researchThreadId ?? null, ...(branch ? { branch } : {}) },
       // Earlier revision attempts that failed or stopped are superseded atomically with the new one.
       params.revises ? (newId) => {
         const now = Date.now();
@@ -58,6 +74,31 @@ export function createDelegation(ctx: Ctx) {
       } : undefined);
     void (params.revises ? ctx.trackerSync.join(store.get(thread.id)!) : ctx.trackerSync.start(store.get(thread.id)!, params.mission));
     return { threadId: thread.id, title, projectId, ...(warning ? { warning } : {}) };
+  }
+
+  /** The user-approved design bound to a plan: write-once snapshots of design.md and the full ready result, keyed by the researcher's
+   * ready report, in its Chief artifact dir. An existing snapshot is reused and never rewritten, so the design cannot change under a plan. */
+  async function approvedDesign(researcher: ManagedRow, projectId: string) {
+    const id = researcher.thread_id;
+    const designName = `design-approved-r${researcher.report_seq}.md`;
+    const factsName = `facts-approved-r${researcher.report_seq}.md`;
+    const snapshot = async (name: string, source: () => Promise<string>) => {
+      const existing = await ctx.readArtifact(id, projectId, name);
+      if (existing) return existing;
+      const text = await source();
+      return { path: await ctx.writeArtifact(id, projectId, name, text), text };
+    };
+    const designSnap = await snapshot(designName, async () => {
+      const text = await ctx.readStorageFile(id, "design.md");
+      if (!text?.trim()) throw new Error(`Researcher ${id}'s design.md is missing or empty; it cannot be planned.`);
+      if (text.length > 40_000) throw new Error(`Researcher ${id}'s design.md is ${text.length} characters, over the 40,000 limit; ask it to shorten the design.`);
+      return text;
+    });
+    const factsSnap = await snapshot(factsName, async () => {
+      if (!researcher.result?.trim()) throw new Error(`Researcher ${id}'s ready report has no result (fact report).`);
+      return researcher.result;
+    });
+    return { designPath: designSnap.path, factsPath: factsSnap.path, designText: designSnap.text };
   }
 
   /** chief_plan revises: P is allowed only once P's one review asked for changes and no revision is in or working; returns the revision brief input. */
@@ -425,6 +466,6 @@ export function createDelegation(ctx: Ctx) {
       }),
     ].filter((line) => line !== null).join("\n");
   }
-  return { appendPlanLog, continueThread, delegate, planLog, stallCapNote, startConsult, startPlan };
+  return { appendPlanLog, approvedDesign, continueThread, delegate, planLog, stallCapNote, startConsult, startPlan };
 }
 
