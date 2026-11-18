@@ -27,10 +27,15 @@ sequenceDiagram
 
   Owner->>Chief: request (or tracker task)
   opt scope unclear
-    Chief->>Researcher: chief_research
+    Chief->>Researcher: chief_research with design false
     Researcher-->>Chief: report (findings)
   end
-  Chief->>Planner: chief_plan
+  opt feature or multi-file work
+    Chief->>Researcher: chief_research with design true
+    Owner->>Researcher: design discussion in the researcher thread
+    Researcher-->>Chief: report (approved design and facts)
+  end
+  Chief->>Planner: chief_plan with researchThreadId or undesignedReason
   Planner-->>Chief: report with plan, alert lists waves and next call
 
   opt more than one implementation wave (design waves do not count), or planner marked complex
