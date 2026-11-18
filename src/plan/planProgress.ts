@@ -1,3 +1,4 @@
+import { receiptOf } from "../report/reportIntake";
 import { chainOf, heads, isReady, isWriter, parentOf, successorOf, tips, type PlanWave } from "./waveSchedule";
 import type { createWaveSchedule } from "./waveSchedule";
 import type { createReviewLedger, ReviewTarget } from "../review/reviewLedger";
@@ -21,6 +22,8 @@ export interface ProgressRow {
   reject_streak: number;
   regression: number | null;
   retest_skipped: string | null;
+  /** The last ready report's full result; optional so older callers need not carry it. */
+  result?: string | null;
 }
 
 /** Where Chief hands a chain's tester rerun: a tester on the chain's live owner (wave: the plan wave it runs on), the tester already
@@ -121,6 +124,13 @@ export function createPlanProgress<Row extends ProgressRow>(
       evaluate(chainRows, owner, undefined, () => isWriter(owner.kind) ? { kind: "workerFirst", replaces: owner } : { kind: "tester", replaces: owner });
     }
     return { owed, waived };
+  }
+
+  /** The prior tester of a task chain (its newest ready tester, whatever its state) and its complete receipt, null when missing or incomplete.
+   * Only the newest counts: an older tester's coverage may be stale. */
+  function priorReceipt(threadId: string): { tester: Row; receipt: ReturnType<typeof receiptOf> } | undefined {
+    const tester = ledger.taskChain(threadId).flatMap((id) => rows().get(id) ?? []).find((r) => r.kind === "tester" && r.last_report_state === "ready");
+    return tester && { tester, receipt: receiptOf(tester.result ?? null) };
   }
 
   /** Why a worker may not start a review now, or null (a plan's one review runs once, after every wave is ready).
@@ -349,5 +359,5 @@ export function createPlanProgress<Row extends ProgressRow>(
     return { waves, next: successorOf(waves, row.plan_wave!) };
   }
 
-  return { reviewBlock, retestDebts, waitingOn, readyStep, reviewAdvice, onSpecChain, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
+  return { reviewBlock, retestDebts, priorReceipt, waitingOn, readyStep, reviewAdvice, onSpecChain, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
 }

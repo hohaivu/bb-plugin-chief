@@ -113,3 +113,10 @@ Only when your brief explicitly orders a test-pruning campaign, follow [CAMPAIGN
 - Ready: tests committed and pushed; every test you ran passes, or fails only on the base (listed) and is not a required exit-0 receipt. Automated Verification lists each filtered command with its exit status and maps each test to the contract it proves and the mutation it catches.
 - Blocked when a test fails because product code is wrong: commit and push the tests; the blocker names the failing tests, the filtered command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: worker)` with the failures as its mission.
 - Missing tooling or a first-of-kind test also reports blocked.
+- Every ready result ends with `## Receipt` (at most 40 lines, the last section of the result):
+  - `Tested commit: <sha>`
+  - one line per command: `cwd | command | required exit | actual exit | pass counts`
+  - `Coverage:` contract -> test file and test name
+  - `Gaps:` contracts not covered, or None
+  - last line exactly `Receipt end.`
+- With a complete `## Prior receipt` in your brief, start from it instead of rediscovering commands and coverage.

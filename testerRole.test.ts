@@ -11,6 +11,7 @@ import { PLAN_FIXTURE, TEST_WAVE, approvePlan, configurationContext, delegate, d
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { inPlaceLine } from "./test/blockedAlerts";
+import { BLANK_COMMAND_RESULT, COMPLETE_RESULT, CUT_RESULT, FOUR_FIELD_RESULT, METADATA_ONLY_RESULT, MISSING_FIELDS_RESULT, NORMAL_MODE, PIPED_BODY, PIPED_RESULT, PIPES_ONLY_RESULT, RECEIPT_BODY, withReceipt } from "./test/receiptFixtures";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -609,7 +610,7 @@ describe("tester role", () => {
     await delegateWave(state, chief.threadId, planner.threadId, 2, { replaces: tester, kind: "worker" });
     const fix = workerOn(state, planner.threadId, 2).thread_id;
     await readyIdle(state, fix);
-    const retest = `A worker changed code on test wave 2 after the tests ran: rerun them — chief_delegate (replaces: ${fix}, kind: tester) — then review. If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${planner.threadId}, wave: 2, reason) or start the review: chief_review (workerThreadId: ${fix}).`;
+    const retest = `A worker changed code on test wave 2 after the tests ran: rerun them — chief_delegate (replaces: ${fix}, kind: tester) — then review.${NORMAL_MODE} If you judge a rerun unnecessary, waive it with chief_skip_tests (planThreadId: ${planner.threadId}, wave: 2, reason) or start the review: chief_review (workerThreadId: ${fix}).`;
     expect(state.sent.at(-1).input[0].text).toContain(retest);
     expect(String(await tool(state, "chief_roster", {}, chief.threadId))).toContain(retest);
 
@@ -776,7 +777,7 @@ describe("tester role", () => {
     // T0 reported ready but was created before the fix: it pays nothing.
     expect(rowOf(state, oldTester).last_report_state).toBe("ready");
     const first = await refusal(review(state, chief, fix));
-    expect(first).toBe(`Review refused: ${fix} changed code after the review's rejection and no tester started after it has reported ready: rerun the tests — ${rerunRoute(planner, 2, fix)}. To review without the rerun, record why: chief_review (workerThreadId: ${fix}, retestSkipped: "<reason>") — it waives every rerun listed here.`);
+    expect(first).toBe(`Review refused: ${fix} changed code after the review's rejection and no tester started after it has reported ready: rerun the tests — ${rerunRoute(planner, 2, fix)}.${NORMAL_MODE} To review without the rerun, record why: chief_review (workerThreadId: ${fix}, retestSkipped: "<reason>") — it waives every rerun listed here.`);
     expect(await reviewerCount(state)).toBe(1);
 
     const { params, thread: tester } = await followRoute(state, chief.threadId, first);
@@ -809,7 +810,7 @@ describe("tester role", () => {
     const { chief, fix } = await unplannedFix(state);
     expect(rowOf(state, fix).kind).toBeNull();
     const owed = await refusal(review(state, chief, fix));
-    expect(owed).toBe(`Review refused: ${fix} changed code after the review's rejection and no tester started after it has reported ready: rerun the tests — ${unplannedRoute(fix)}. To review without the rerun, record why: chief_review (workerThreadId: ${fix}, retestSkipped: "<reason>") — it waives every rerun listed here.`);
+    expect(owed).toBe(`Review refused: ${fix} changed code after the review's rejection and no tester started after it has reported ready: rerun the tests — ${unplannedRoute(fix)}.${NORMAL_MODE} To review without the rerun, record why: chief_review (workerThreadId: ${fix}, retestSkipped: "<reason>") — it waives every rerun listed here.`);
     // The fix's own ready alert shows the same debt, not the plain review.
     expect(state.sent.some((sent) => String(sent.input[0].text).includes(`chief_review (workerThreadId: ${fix}, retestSkipped: "<reason>")`))).toBe(true);
 
@@ -1172,5 +1173,109 @@ describe("tester role", () => {
     expect(await refusal(review(state, chief, fix))).toContain(`${fix} changed code after the review's rejection`);
     const design = await refusal(review(state, chief, designer));
     expect(design).toBe("Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.");
+  });
+});
+
+// Contracts (docs/specs/plan-chains.md "Brief Contents"), through the real chief_delegate: a tester delegated with replaces: gets `## Prior receipt (<id>)`
+// from the newest READY tester of its task chain: the complete receipt in full, or a pointer saying it is not usable. An older receipt never stands in,
+// no ready tester means no section, other kinds never get it, and no case refuses the delegation.
+// Regression: a cut receipt or a stale older one reaches the next tester as its command list; a worker brief grows the section; a missing receipt refuses.
+describe("prior receipt", () => {
+  const REUSE = "Reuse it: rerun the commands the change affects; do not rediscover commands or coverage it already names.";
+  const BLOCKED = { state: "blocked", result: "Two tests fail", blocker: "Totals test fails", recommendation: "Fix the product" };
+  const sectionOf = (prompt: string, heading: string) => prompt.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0]?.trim();
+
+  /** Plan [impl, test]: wave 2 testers T1, T2, ... each replace the one before and report `result` (a string is ready) or the blocked report. */
+  async function chain(state: State, reports: Array<string | typeof BLOCKED>) {
+    const ctx = await readyImpl(state);
+    const ids: string[] = [];
+    for (const [index, result] of reports.entries()) {
+      await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ids.at(-1) ?? ctx.impl, ...(index ? { kind: "tester" } : {}) });
+      const id = workerOn(state, ctx.planner.threadId, 2).thread_id as string;
+      await report(state, id, typeof result === "string" ? { state: "ready", result } : result);
+      setLive(state, id, "idle");
+      ids.push(id);
+    }
+    /** Delegates the next tester (or `extra.kind`) replacing the newest one and returns the brief it was spawned with. */
+    const next = async (extra: object = {}) => {
+      await delegateWave(state, ctx.chief.threadId, ctx.planner.threadId, 2, { replaces: ids.at(-1) ?? ctx.impl, kind: "tester", ...extra });
+      return state.spawned.at(-1).prompt as string;
+    };
+    return { ...ctx, ids, next };
+  }
+  const pointer = (prompt: string, id: string) => `${id}'s report has no complete receipt: ${/Full report: (\S+)/.exec(prompt)?.[1] ?? `bb chief inspect ${id}`}. Do not run partial commands from it.`;
+
+  test("a tester replacing a tester with a complete receipt gets it in full after the predecessor's report, with the reuse line", async () => {
+    const state = await setup();
+    const { ids, next } = await chain(state, [COMPLETE_RESULT]);
+    const prompt = await next();
+    expect(sectionOf(prompt, `Prior receipt (${ids[0]})`)).toBe(`${RECEIPT_BODY}\n${REUSE}`);
+    expect(prompt.indexOf("## Predecessor's last report")).toBeGreaterThan(-1);
+    expect(prompt.indexOf("## Predecessor's last report")).toBeLessThan(prompt.indexOf("## Prior receipt"));
+    expect(prompt).not.toContain("Its commands are your commands");
+  });
+
+  test("an evidence-only tester gets the same receipt with the evidence line, and the delegation succeeds", async () => {
+    const state = await setup();
+    const { ids, next } = await chain(state, [COMPLETE_RESULT]);
+    const prompt = await next({ evidenceOnly: true });
+    expect(sectionOf(prompt, `Prior receipt (${ids[0]})`)).toBe(`${RECEIPT_BODY}\nIts commands are your commands and its Tested commit is Last tested, unless your mission names others.`);
+    expect(prompt).toContain("## Evidence work");
+    expect(prompt).not.toContain(REUSE);
+  });
+
+  // A command with a real pipe, `||` and a quoted pipe is a valid row: the receipt arrives intact, in normal and in evidence-only mode, over an older complete one.
+  test("a valid receipt whose command holds pipes arrives intact in the normal and the evidence-only brief", async () => {
+    const state = await setup();
+    const { ids, next } = await chain(state, [COMPLETE_RESULT, PIPED_RESULT]);
+    expect(sectionOf(await next(), `Prior receipt (${ids[1]})`)).toBe(`${PIPED_BODY}\n${REUSE}`);
+    expect(sectionOf(await next({ evidenceOnly: true }), `Prior receipt (${ids[1]})`)).toBe(`${PIPED_BODY}\nIts commands are your commands and its Tested commit is Last tested, unless your mission names others.`);
+  });
+
+  // The newest READY tester decides: a legacy or cut report there gives the pointer even when an older tester has a complete receipt; a newer tester
+  // that is not ready is skipped; a complete newest receipt wins over a legacy older one. Delegation succeeds in every case.
+  test.each<[string, Array<string | typeof BLOCKED>, number, boolean]>([
+    ["a legacy report (no receipt)", [READY], 0, false],
+    ["a cut receipt", [CUT_RESULT], 0, false],
+    ["a receipt whose only pipes are Coverage metadata", [METADATA_ONLY_RESULT], 0, false],
+    ["a receipt whose command row is pipes only", [PIPES_ONLY_RESULT], 0, false],
+    ["a receipt whose command row lacks its exit statuses", [MISSING_FIELDS_RESULT], 0, false],
+    ["a receipt whose command row has four fields and no pass counts", [FOUR_FIELD_RESULT], 0, false],
+    ["a receipt whose command row has no command (`| | 0 | 0 | 0`)", [BLANK_COMMAND_RESULT], 0, false],
+    ["a four-field newest tester over an older complete receipt", [COMPLETE_RESULT, FOUR_FIELD_RESULT], 1, false],
+    ["a blank-command newest tester over an older complete receipt", [COMPLETE_RESULT, BLANK_COMMAND_RESULT], 1, false],
+    ["a metadata-only newest tester over an older complete receipt", [COMPLETE_RESULT, METADATA_ONLY_RESULT], 1, false],
+    ["a legacy newest tester over an older complete receipt", [COMPLETE_RESULT, READY], 1, false],
+    ["a cut newest tester over an older complete receipt", [COMPLETE_RESULT, CUT_RESULT], 1, false],
+    ["a blocked newest tester over a ready complete one", [COMPLETE_RESULT, BLOCKED], 0, true],
+    ["a complete newest tester over an older legacy one", [READY, COMPLETE_RESULT], 1, true],
+  ])("prior receipt of %s", async (_label, reports, owner, complete) => {
+    const state = await setup();
+    const { ids, next } = await chain(state, reports);
+    const prompt = await next();
+    const section = sectionOf(prompt, `Prior receipt (${ids[owner]})`);
+    expect(prompt.match(/\n## Prior receipt \(/g)).toHaveLength(1);
+    if (complete) expect(section).toBe(`${RECEIPT_BODY}\n${REUSE}`);
+    else {
+      expect(section).toBe(pointer(prompt, ids[owner]!));
+      expect(prompt).not.toContain(RECEIPT_BODY);
+      expect(prompt).not.toContain("Coverage: retest option");
+    }
+  });
+
+  test("no ready tester in the chain means no section: the first tester, and a tester replacing a blocked one", async () => {
+    const state = await setup();
+    const { next } = await chain(state, []);
+    expect(await next()).not.toContain("\n## Prior receipt (");
+    const blockedOnly = await chain(await setup(), [BLOCKED]);
+    expect(await blockedOnly.next()).not.toContain("\n## Prior receipt (");
+  });
+
+  test("a worker replacing a tester with a complete receipt gets no section", async () => {
+    const state = await setup();
+    const { next } = await chain(state, [COMPLETE_RESULT]);
+    const prompt = await next({ kind: "worker" });
+    expect(prompt).toMatch(/^You are the managed worker for/);
+    expect(prompt).not.toContain("\n## Prior receipt (");
   });
 });
