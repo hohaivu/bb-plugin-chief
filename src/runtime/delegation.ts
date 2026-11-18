@@ -351,7 +351,10 @@ export function createDelegation(ctx: Ctx) {
         && row.project_id === projectId && row.branch === branch && row.thread_id !== params.replaces
         && !(planThreadId !== undefined && coexists(row, planThreadId, wave, lane))
         // A gate fix run works on the pinned targets' branch: its targets and tester do not hold it.
-        && !(fix?.gate && (fix.gate.tester_thread_id === row.thread_id || fix.gate.targets.some((target) => target.threadId === row.thread_id))))
+        && !(fix?.gate && (fix.gate.tester_thread_id === row.thread_id || fix.gate.targets.some((target) => target.threadId === row.thread_id)))
+        // A docs repair does not wait on a gate's fixer, corrector or tester that is no longer busy; a busy one still holds the branch.
+        && !(isWriter(kind) && gate && !BUSY_STATUSES.has(row.state)
+          && [gate.fixer_thread_id, gate.corrector_thread_id, gate.tester_thread_id].includes(row.thread_id)))
       : undefined;
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
