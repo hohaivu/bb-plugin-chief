@@ -454,7 +454,7 @@ Known limits:
 
 - `chief_plan` with `researchThreadId` refuses an unknown thread, a non-researcher, a light researcher, a researcher owned by another Chief, or a researcher without a ready approval. These checks occur before checkout freshen, planner spawn or planner row insertion.
 - `bindDesign` uses `design-approved-r<seq>.md` and `facts-approved-r<seq>.md` in the researcher's artifact directory. `<seq>` is the ready report's sequence. When the design snapshot is absent, the helper reads `design.md` and refuses a missing, blank or over-40,000-character source before checkout freshen or planner spawn.
-- A later initial bind to the same researcher and ready-report sequence reuses the existing snapshots. An unreadable snapshot causes refusal, not replacement.
+- A later initial bind to the same researcher and ready-report sequence reuses the existing snapshots. The snapshots are write-once. An unreadable snapshot causes refusal, not replacement. Reason: a design edited after approval must not change a plan, and a plan must not start on an unreadable design.
 - The facts snapshot holds the full ready result of the researcher row. Reason: the planner must read the fact report in full.
 - With research on, `chief_plan` requires `undesignedReason` when neither `researchThreadId` nor `revises` is supplied. Reason: a new plan records its approved design or its reason for skipping the discussion.
 - With research off, `undesignedReason` is optional. When given, the server accepts it and the brief gets `Design discussion skipped: <reason>`. Reason: a skip stays on record even when the design flow is off.
