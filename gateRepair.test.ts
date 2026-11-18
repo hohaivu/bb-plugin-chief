@@ -29,6 +29,39 @@ async function inWrongTest(world: GateWorld) {
   return { ...gated, fix: fix.threadId };
 }
 
+test("a stopped fix run without a report is replaced in its own environment", async () => {
+  const world = await gateWorld();
+  const { tester } = await inFix(world);
+  const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
+  const environment = world.state.live.get(fix.threadId)!.environmentId;
+  world.state.live.set(fix.threadId, { ...world.state.live.get(fix.threadId)!, status: "active" });
+  await world.call("chief_stop", { threadId: fix.threadId });
+  expect(await refused(world, { replaces: tester, kind: "worker" })).toContain(`replaces: ${fix.threadId}, kind: worker`);
+  const next = await world.delegateTo({ replaces: fix.threadId, kind: "worker" });
+  expect(world.gate().fixer_thread_id).toBe(next.threadId);
+  expect(world.row(fix.threadId).state).toBe("complete");
+  expect(world.state.live.get(next.threadId)!.environmentId).toBe(environment);
+});
+
+test("a green fix permits one advisory re-review even if it also requests changes", async () => {
+  const world = await gateWorld();
+  const { worker, reviewer, tester } = await world.gated();
+  await world.verdict(reviewer, "request_changes");
+  await world.testReport(tester, true);
+  const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
+  await world.ready(fix.threadId, { testsPassed: true });
+  await world.open(worker.threadId);
+  const second = world.gate().reviewer_thread_id;
+  expect(second).not.toBe(reviewer);
+  await world.open(worker.threadId);
+  expect(world.gate().reviewer_thread_id).toBe(second);
+  await world.verdict(second, "request_changes");
+  await world.open(worker.threadId);
+  expect(world.gate().reviewer_thread_id).toBe(second);
+  await world.complete(fix.threadId);
+  expect(world.row(fix.threadId).state).toBe("complete");
+});
+
 describe("the gate's one fix run", () => {
   test("the first replaces: <tester>, kind: worker is admitted, and reuses the tester's environment", async () => {
     const world = await gateWorld();
@@ -163,6 +196,20 @@ describe("kind: tester while the gate is open", () => {
     const message = await world.refusal(world.call("chief_delegate", { title: "More tests", mission: "Add tests.", planThreadId: planner.threadId, wave: 1, kind: "tester" }));
     expect(message).toContain("is open: its one tester writes the tests. Pass evidenceOnly");
   });
+});
+
+test("a ready green fixer no longer holds the branch against a Spec Writer", async () => {
+  const world = await gateWorld();
+  const { worker, reviewer, tester } = await world.gated();
+  await world.verdict(reviewer, "request_changes", {
+    findings: [{ file: "docs/specs/totals.md", line: 1, severity: "blocking", message: "Document the total." }],
+  });
+  await world.testReport(tester, false);
+  const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
+  await world.ready(fix.threadId, { testsPassed: true });
+  const writer = await world.delegateTo({ replaces: worker.threadId, kind: "spec-writer" });
+  expect(world.row(writer.threadId)).toMatchObject({ kind: "spec-writer", branch: worker.branch });
+  expect(world.row(fix.threadId).state).toBe("ready");
 });
 
 describe("a docs repair while the gate's writable run is busy", () => {

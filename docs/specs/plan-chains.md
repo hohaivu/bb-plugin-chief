@@ -146,6 +146,8 @@ Shared worktree cleanup coordinates action ownership:
   - A second live side-lane Spec Writer on one wave is rejected, unless it replaces the first.
   - A second live implementation-lane row is rejected.
   - A holder from another plan, or an unplanned holder, is rejected.
+  - A Spec Writer delegation ignores a review gate's fixer, corrector or tester that is not busy. Reason: the owner chose this rule, because a ready fix run blocked every docs repair.
+  - A busy gate fixer, corrector or tester still holds the branch for a Spec Writer. Busy means `starting`, `pending`, `active` or `stopping`. Reason: two writable rows must not share one worktree branch.
   - Reason: a side worktree checks out its own `bb/` side branch, so it never blocks the task branch.
 - `startWorker` rejects a delegation when `params.branch` differs from the branch of the prior worker. Reason: replacement workers must remain on the established chain branch.
 
