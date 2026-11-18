@@ -1,6 +1,6 @@
 import { type ManagedRow, terminal } from "../types";
 import { clip } from "../core/text";
-import { forgeEnv, markPrReady, prHead } from "../forge/forge";
+import { forgeEnv, markBranchReady, markPrReady, prHead } from "../forge/forge";
 import { docsCommits } from "../review/impactSlice";
 import { BUSY_STATUSES, MAX_RESULT_LENGTH } from "./constants";
 import { overrideSchema } from "../tools/shapes";
@@ -159,10 +159,13 @@ export function createCompletion(ctx: Ctx) {
   }[cleanup];
 
   /** After a worker completes: flips its draft pull request to ready, best-effort. A forge failure
-   * never undoes the completion. "skipped" means there was no pull request to flip. */
+   * never undoes the completion. Without pr_url it flips by branch name. "skipped" means there was no pull request to flip. */
   async function readyPullRequest(row: ManagedRow): Promise<{ prReady: boolean | "skipped"; error?: string; line: string }> {
-    if (row.role !== "worker" || !row.pr_url) return { prReady: "skipped", line: "" };
-    const { ready, error } = await markPrReady(row.pr_url, await ctx.projectPath(row.project_id));
+    if (row.role !== "worker" || !(row.pr_url ?? row.branch)) return { prReady: "skipped", line: "" };
+    const cwd = await ctx.projectPath(row.project_id);
+    // A branch names no repo: only the project's checkout on this server can resolve it.
+    const unreachable = row.pr_url ? null : !cwd ? "no local checkout of the project to resolve its branch" : await ctx.checkoutHostSkip(row.project_id);
+    const { ready, error } = unreachable ? { ready: false, error: unreachable } : row.pr_url ? await markPrReady(row.pr_url, cwd) : await markBranchReady(row.branch!, cwd!);
     return ready
       ? { prReady: true, line: "\nIts pull request is marked ready for review." }
       : { prReady: false, error, line: `\nCould not mark its pull request ready (${error}); the work is complete either way. Tell the user it is still a draft.` };

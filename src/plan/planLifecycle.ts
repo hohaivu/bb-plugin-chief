@@ -219,7 +219,7 @@ export function createPlanLifecycle<Row extends PlanRow>(
             : `Spec Writer ${prior.thread_id} has not reported ready: retry it with the fix — chief_delegate (replaces: ${prior.thread_id}, kind: spec-writer) — or start a fresh chief_plan with its report in context.`);
         }
       }
-      if (kind === "tester" && !prior) throw new Error("kind: tester on unplanned work needs replaces: of the worker whose branch it tests.");
+      if (kind === "tester" && !prior && !request.branch) throw new Error("kind: tester on unplanned work needs replaces: <the worker whose branch it tests>, or branch (and prUrl) of the existing work it tests.");
       const chain = prior ? ledger.taskChain(prior.thread_id).map((id) => rows.get(id)) : [];
       if (kind === "tester" || isWriter(kind)) {
         const head = chain.at(-1);

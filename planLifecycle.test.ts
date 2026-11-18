@@ -351,7 +351,9 @@ describe("admitDelegation: unplanned", () => {
   });
 
   test("a tester without a prior is refused", () => {
-    expect(() => world({}).admit({ kind: "tester", resolvedKind: "tester" })).toThrow("kind: tester on unplanned work needs replaces: of the worker whose branch it tests.");
+    const { admit } = world({});
+    expect(() => admit({ kind: "tester", resolvedKind: "tester" })).toThrow(/replaces:.*or branch/);
+    expect(() => admit({ kind: "tester", resolvedKind: "tester", branch: "feature/existing" })).not.toThrow();
   });
 
   test("a tester or Spec Writer reads the chain head's brief as its spec source; a worker does not", () => {
