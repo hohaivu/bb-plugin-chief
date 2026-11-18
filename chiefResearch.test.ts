@@ -58,6 +58,72 @@ describe("chief_research", () => {
     expect(callRows(state)).toEqual([{ caller_thread_id: chief, role: "chief", mode: null, run_id: null, outcome: "spawned" }]);
   });
 
+  describe("design mode", () => {
+    const launch = async (design: boolean, question = "Who calls this?") => {
+      const state = await setup();
+      const chief = await roleThread(state, "chief");
+      const reply = await call(state, chief, ask({ design, question })) as string;
+      const spawn = researcherSpawn(state);
+      return { state, reply, spawn, prompt: spawn.prompt as string, title: spawn.title as string };
+    };
+    const SHARED = ["at least 1 and at most 6", "bb thread wait <id> --status idle --timeout 540s", "Do not spawn threads. Your final message is your answer.", "Report facts only: no advice, no recommendations, no opinion on what should change.", "Do not answer the questions yourself before the helpers report."];
+
+    // Contract (research.md Chief tool): design is required and boolean; every refusal happens before any thread exists, and no call row is written for a refused schema.
+    // Regression: design optional, so a feature ticket silently runs without the discussion.
+    test.each([["missing", {}], ["not a boolean", { design: "true" }]])("a call with design %s is refused before any thread starts", async (_name, extra) => {
+      const state = await setup();
+      const chief = await roleThread(state, "chief");
+      await expect(call(state, chief, { question: "Who calls this?", ...extra })).rejects.toThrow();
+      expect(researcherRows(state)).toEqual([]);
+      expect(state.spawned.filter((args) => args.pluginMetadata?.role === "researcher")).toEqual([]);
+    });
+
+    // Contract (research.md Researcher work): both modes share the stage 1 and 2 rules; only design mode has stage 3, the AskUserQuestion rounds, the waiting report and the blocked fallback,
+    // and the light brief keeps the rule that it never asks the user. Regression: a design brief that still forbids asking the user, or a light brief that opens a discussion.
+    test("a design brief carries the shared stage 1 and 2 rules plus stage 3, and a light brief carries the shared rules and no ask-the-user path", async () => {
+      const design = await launch(true);
+      const light = await launch(false);
+      for (const part of SHARED) {
+        expect(design.prompt).toContain(part);
+        expect(light.prompt).toContain(part);
+      }
+      for (const part of ["Stage 3, Design", "design.md", "AskUserQuestion", "at most 4 questions per call", "waitingOnUser: true", "Rejection:", "Exit:", "Fallback:", "never take silence as approval", "Design: <absolute design.md path>"]) {
+        expect(design.prompt).toContain(part);
+        expect(light.prompt).not.toContain(part);
+      }
+      expect(light.prompt).toContain("Do not ask the user directly from this thread.");
+      expect(design.prompt).not.toContain("Do not ask the user directly from this thread.");
+      expect(design.prompt).toContain(RESEARCH_ONLY);
+      expect(light.prompt).toContain(RESEARCH_ONLY);
+    });
+
+    // Contract (research.md Chief tool): the title is `Design · ` for design true and `Research · ` for light, the question clipped to 60 characters; a design reply says the discussion runs in the
+    // researcher thread; no reply asks Chief to announce anything. Regression: both modes titled Research, or a launch reply that tells Chief to speak to the user.
+    test("the title prefix follows the mode and the replies announce nothing", async () => {
+      const long = "Q".repeat(100);
+      const design = await launch(true, long);
+      const light = await launch(false, long);
+      expect(design.title.startsWith("Design · QQQ")).toBe(true);
+      expect(light.title.startsWith("Research · QQQ")).toBe(true);
+      expect(design.title.slice("Design · ".length).length).toBeLessThanOrEqual(60);
+      expect(light.title.slice("Research · ".length).length).toBeLessThanOrEqual(60);
+      expect(researcherRows(design.state)).toHaveLength(1);
+      expect(design.reply).toContain("Do not poll: end your turn.");
+      expect(design.reply).toMatch(/design discussion with the user in its own thread/);
+      expect(light.reply).not.toMatch(/design discussion/);
+      for (const reply of [design.reply, light.reply]) expect(reply).not.toMatch(/announce|tell the user|say to the user|inform the user/i);
+    });
+
+    // Contract (research.md Data): research_design is 1 for a design launch and 0 for a light launch. Regression: the flag never stored, so supervision and the Next line read every researcher as light.
+    test("the launch stores research_design 1 for design and 0 for light", async () => {
+      const design = await launch(true);
+      const light = await launch(false);
+      const flag = (state: State) => (state.db.prepare("SELECT research_design AS flag FROM managed_threads WHERE role='researcher'").get() as { flag: number | null }).flag;
+      expect(flag(design.state)).toBe(1);
+      expect(flag(light.state)).toBe(0);
+    });
+  });
+
   test("the brief and its helper command carry Chief's permission mode", async () => {
     const state = await setup();
     const chief = await roleThread(state, "chief");
