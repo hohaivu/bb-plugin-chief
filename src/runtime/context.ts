@@ -191,6 +191,7 @@ export interface Ctx {
   writeArtifact: ReturnType<typeof createArtifacts>["writeArtifact"];
   writePlan: ReturnType<typeof createArtifacts>["writePlan"];
   writeStorageFile: ReturnType<typeof createArtifacts>["writeStorageFile"];
+  publishHeavy: ReturnType<typeof createArtifacts>["publishHeavy"];
   intake: ReturnType<typeof createLifecycle>["intake"];
   lifecycle: ReturnType<typeof createLifecycle>["lifecycle"];
   managedRow: ReturnType<typeof createLifecycle>["managedRow"];

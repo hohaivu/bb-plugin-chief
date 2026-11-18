@@ -1,6 +1,8 @@
 import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
 import { MAX_CARRIED_FAILS } from "../report/reportIntake";
 import { worktreeEnvironment } from "../research/managedSpawn";
+import { heavySlotCount } from "../research/heavySlots";
+import { isWriter } from "../plan/waveSchedule";
 import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
 import { clip } from "../core/text";
@@ -232,6 +234,10 @@ export function createDelegation(ctx: Ctx) {
     }
     const hostId = prior ? await ctx.environmentHostId(priorLive!.environmentId!) : await ctx.projectHost(projectId);
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: kind, hostId });
+    // Nothing in this preparation may fail the delegation: without a path the brief simply has no wrapper.
+    const heavyScript = isWriter(kind) || !hostId ? null
+      : await (async () => ctx.publishHeavy(hostId, heavySlotCount(await ctx.settings.get())))()
+        .catch((error) => { bb.log.warn(`Heavy-command slots are unavailable for ${params.title}: ${String(error)}`); return null; });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
     // hands the fresh worker the review that prompted the handoff.
@@ -242,7 +248,7 @@ export function createDelegation(ctx: Ctx) {
     const { prompt, reviewerBrief } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
-      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly,
+      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly, heavyScript,
     });
     // A side-lane writer, first or repair, never reuses a worktree: its own managed worktree is cut from the chain branch, so a stale or half-rebased side checkout never reaches the fold.
     const thread = await ctx.managedSpawn.launch(prepared, {
