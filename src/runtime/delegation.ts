@@ -1,8 +1,8 @@
-import { advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
-import { MAX_CARRIED_FAILS } from "../report/reportIntake";
+import { DOCS_WORK_FILE, advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
+import { MAX_CARRIED_FAILS, sectionOf } from "../report/reportIntake";
+import { isWriter } from "../plan/waveSchedule";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
-import { isWriter } from "../plan/waveSchedule";
 import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
 import { clip } from "../core/text";
@@ -17,7 +17,7 @@ const MAX_STALL_RESETS = 2;
 const MAX_LOG_READ = 30;
 
 export function createDelegation(ctx: Ctx) {
-  const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, progress, reviewerFails, store } = ctx;
+  const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, progress, reviewerFails, schedule, store } = ctx;
   /** A read-only role's environment: a fresh worktree on `branch` when it names one, else the project default. */
   async function readerEnvironment(projectId: string, branch?: string) {
     return branch ? worktreeEnvironment(await ctx.projectHost(projectId), branch) : { type: "project-default" as const };
@@ -245,10 +245,19 @@ export function createDelegation(ctx: Ctx) {
     const ruledOut = prior ? chainFails(prior.thread_id) : [];
     let structured: ReportFinding[] | undefined;
     try { structured = findings?.findings ? JSON.parse(findings.findings) as ReportFinding[] : undefined; } catch { structured = undefined; }
-    const { prompt, reviewerBrief } = workerBrief({
+    // A same-plan side-lane docs repair carries every known docs item of the waves its writer owns, and the prior writer's blocker.
+    const docsWork = isWriter(kind) && lane === "side" && prior && planThreadId !== undefined && prior.plan_thread_id === planThreadId && wave !== undefined ? [
+      ...schedule.ownedWorkers(planThreadId, wave).flatMap((row) => {
+        const text = sectionOf(row.result ?? "", "docs needed")?.trim();
+        return text && !/^none\.?$/i.test(text) ? [{ id: row.thread_id, kind: row.kind ?? "worker", wave: row.plan_wave, text }] : [];
+      }),
+      ...(prior.blocker && prior.last_report_state === "blocked" ? [{ id: prior.thread_id, kind: "spec-writer", wave: prior.plan_wave, blocker: true, text: prior.blocker }] : []),
+    ] : [];
+    const { prompt, reviewerBrief, docsWorkFile } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
-      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly, heavyPath,
+      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly, docsWork, heavyPath,
+      sharedReview: !!findings && ledger.targets(findings.thread_id).length > 1,
       receipt: kind === "tester" && prior ? progress.priorReceipt(prior.thread_id) : undefined,
     });
     // A side-lane writer, first or repair, never reuses a worktree: its own managed worktree is cut from the chain branch, so a stale or half-rebased side checkout never reaches the fold.
@@ -263,6 +272,21 @@ export function createDelegation(ctx: Ctx) {
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
       kind: kind === "worker" ? null : kind, plannerOn, verifyCommand,
     });
+    // The overflow file is written after the spawn, once the thread's own storage exists; the brief names it by $BB_THREAD_STORAGE.
+    if (docsWorkFile) {
+      // The file is the only place the omitted source items live, so a failed write rolls the launch back: the new thread is stopped and unlinked
+      // from the plan (the prior writer stays the scheduler's owner and the review gate stays closed), and Chief gets a retryable error.
+      try {
+        await ctx.retryWhileProvisioning(() => ctx.writeStorageFile(thread.id, DOCS_WORK_FILE, docsWorkFile));
+      } catch (error) {
+        const stopFailure = await bb.sdk.threads.stop({ threadId: thread.id }).then(() => undefined, (stopError: unknown) => String(stopError));
+        store.rollBackLaunch(thread.id, Date.now(), stopFailure === undefined);
+        if (stopFailure !== undefined) bb.log.warn(`Could not stop ${thread.id} after its docs work list failed: ${stopFailure}`);
+        throw new Error(`Could not write the docs work list for the repair writer ${thread.id} (${clip(String(error), 300)}). ${stopFailure === undefined
+          ? "That thread was stopped and retired from the plan"
+          : `Stopping that thread FAILED (${clip(stopFailure, 200)}): it may still be running without the work list, and it still holds the branch, so a retry is refused until you stop and archive it`}; ${prior ? `${prior.thread_id} stays the owner of the docs work` : "nothing else changed"}. Repeat this chief_delegate call${stopFailure === undefined ? "" : " after that"}.`);
+      }
+    }
     if (prior) {
       const now = Date.now();
       store.batch(() => {

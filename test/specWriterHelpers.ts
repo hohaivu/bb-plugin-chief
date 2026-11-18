@@ -93,3 +93,51 @@ export const section = (prompt: string, heading: string) => (prompt.split(`\n## 
 export const BASELINE = "## Spec baseline\n- docs/specs/totals.md (new): totals.ts `computeTotal`";
 /** A spec wave whose body names a new spec file's baseline. */
 export const baseImpl = (n = 1, extra: object = {}) => ({ body: wave(n, `Build the totals.\n\n${SPEC_DELTA}\n\n${BASELINE}`) + NOT_DOING, spec: true, ...extra });
+
+// ---- Docs work list world (wave 8 tests) ----
+export const CHAIN_B = "feature/chain-b";
+export const CHAIN_B_PR = "https://github.com/o/r/pull/8";
+/** The `## Docs needed` text each row reports (undefined: the row reports none). */
+export type DocsNotes = Partial<Record<"w1" | "w2" | "w3" | "t4" | "w5" | "t6" | "s1", string>>;
+/** One plan, two chains whose Spec deltas name the same docs path. Chain A: wave 1 (spec), wave 2 (plain), wave 3 (spec), wave 4 (test).
+ * Chain B: wave 5 (spec), wave 6 (test). Every row reported ready and idle except chain B's writer when `blockB` is set (it reports blocked last, idle; a string is its blocker text).
+ * Wave 1's writer s1 owns waves 1-2, wave 3's s3 owns 3-4, wave 5's s5 owns 5-6. */
+export async function docsChains(state: State, notes: DocsNotes = {}, blockB: boolean | string = false) {
+  const waves = [specImpl(1), { body: wave(2) + NOT_DOING }, specImpl(3), TEST_WAVE(4), specImpl(5, { dependsOn: [] }), TEST_WAVE(6)];
+  const { chief, planner } = await specPlan(state, waves);
+  const P = planner.threadId;
+  const done = (id: string, note?: string) => readyIdle(state, id, note === undefined ? READY : `${READY}\n\n## Docs needed\n${note}`);
+  const s1 = await delegateWriter(state, chief, P, 1);
+  const firstWriterPrompt = state.spawned.at(-1).prompt as string;
+  await delegateWave(state, chief.threadId, P, 1, { branch: CHAIN, prUrl: CHAIN_PR });
+  const w1 = ownerOn(state, P, 1).thread_id as string;
+  await done(w1, notes.w1);
+  await delegateWave(state, chief.threadId, P, 2, { replaces: w1 });
+  const w2 = ownerOn(state, P, 2).thread_id as string;
+  await done(w2, notes.w2);
+  await delegateWave(state, chief.threadId, P, 3, { replaces: w2 });
+  const w3 = ownerOn(state, P, 3).thread_id as string;
+  const s3 = await delegateWriter(state, chief, P, 3);
+  await done(w3, notes.w3);
+  await done(s1, notes.s1);
+  await done(s3);
+  const t4 = await swap(state, chief, P, 4, w3, "tester");
+  await done(t4, notes.t4);
+  const chainB = { branch: CHAIN_B, prUrl: CHAIN_B_PR };
+  await delegateWave(state, chief.threadId, P, 5, chainB);
+  const w5 = ownerOn(state, P, 5).thread_id as string;
+  const s5 = await delegateWriter(state, chief, P, 5, chainB);
+  await done(w5, notes.w5);
+  await done(s5);
+  const t6 = await swap(state, chief, P, 6, w5, "tester");
+  await done(t6, notes.t6);
+  if (blockB) await report(state, s5, { state: "blocked", result: "Cannot write the delta", blocker: typeof blockB === "string" ? blockB : "Delta names no domain", recommendation: "Re-plan" });
+  return { chief, planner, P, s1, s3, s5, w1, w2, w3, t4, w5, t6, firstWriterPrompt };
+}
+/** The prompt of the thread the last chief_delegate spawned. */
+export const lastPrompt = (state: State) => state.spawned.at(-1).prompt as string;
+/** The `## Docs work list` section of a brief, heading line included, or "" when it has none. */
+export const docsWorkList = (prompt: string) => {
+  const at = prompt.indexOf("\n## Docs work list");
+  return at < 0 ? "" : prompt.slice(at).split("\n## ").slice(0, 2).join("\n## ").trimEnd();
+};

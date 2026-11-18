@@ -186,6 +186,6 @@ export function createArtifacts(ctx: Ctx) {
     }
     for (const row of rows) void persistBrief(row.thread_id, row.project_id, row.prompt);
   }
-  return { persistBrief, resumeBriefs, readArtifact, writeArtifact, writePlan, writeStorageFile, publishHeavy };
+  return { persistBrief, resumeBriefs, readArtifact, writeArtifact, writePlan, writeStorageFile, retryWhileProvisioning, publishHeavy };
 }
 

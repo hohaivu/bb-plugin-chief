@@ -277,6 +277,22 @@ An evidence-only tester runs the commands that the mission names, or the command
 - A Tester checks that the Fold head of each listed Spec Writer is an ancestor of its HEAD. Reason: the Tester must test against the folded docs.
 - The Reviewer scopes a side-lane writer by Fold base to Fold head. `Fold: none` means an empty scope. A docs commit inside a fold range is not drift in the range of a worker. Reason: the fold commits land in the task branch while the worker runs.
 - A worker or designer on a spec wave treats the plan as its source of truth, and pre-plan specs can be stale. Reason: the Spec Writer records the change in parallel.
+- A same-plan side-lane repair gets a `## Docs work list (wave <w>)` section. Reason: one repair fixes and folds every known docs item.
+- The section lists the `## Docs needed` of each worker, designer and tester row on the owned waves. Reason: those rows report the docs that their waves need.
+- The owned waves are wave `w` and each later wave of its chain before the next `spec: true` wave. Reason: the writer owns the docs of its chain segment only.
+- Each item carries its source thread id and wave. Reason: the writer checks each item against the docs and finds its owner.
+- Rows of other waves, other chains, other plans, and Spec Writer rows never appear in the section. Reason: other owners fix their own docs items.
+- A `None` section is skipped. Reason: it holds no docs item.
+- The section lists the prior writer's blocker only when its last report was blocked. Reason: an open blocker is docs work that the repair must fix.
+- The section holds whole items within 4,000 characters. Reason: a cut item loses its meaning.
+- The section shows the longest whole-item prefix that leaves room, within 4,000 characters, for the exact omitted count and every omitted source thread id. The prefix may be empty. Reason: inline items let the writer fix them without a file read.
+- When no prefix leaves that room, the section shows the exact omitted count and the path of one file in `$BB_THREAD_STORAGE`. The file holds the full work list. It has every collected worker, designer and tester `## Docs needed` item of the owned waves. It also has the prior writer's blocker when its last report was blocked. Reason: no item is dropped without a way to recover it.
+- A repair with no items gets no section. Reason: an empty section adds only noise.
+- A first writer, an implementation-lane or unplanned repair, a writer adopted by a new plan, and every non-writer kind get no section. Reason: only a same-plan side-lane repair owns the docs of its owned waves.
+- The writer fixes each item that still holds, then folds once. Reason: one repair replaces separate fix and fold writers.
+- On a review with several targets, a Spec Writer's findings section gets one scope line. Reason: findings carry no wave or target, so the writer needs a scope.
+- The scope line tells the writer to fix only the docs findings that its mission assigns. Reason: other findings belong to their owners. The findings list itself does not change.
+- The routing text says that Chief assigns each wave's review docs findings in the mission, and that the plugin attaches the wave's `## Docs needed` items. Reason: the plugin cannot attribute a review finding to a wave.
 
 ### Blocked Alerts
 

@@ -10,3 +10,5 @@ export const MAX_FINDINGS = 40;
 export const REPORT_TEXT_MAX = 4_000;
 export const LESSON_MAX = 400;
 export const MAX_CARRIED_FAILS = 12;
+/** The alert's Next line budget: the report intake clips past it, and the next-action text fits whole routes inside it. */
+export const ACTION_ROOM = 1_200;

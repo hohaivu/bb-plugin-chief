@@ -194,3 +194,48 @@ describe("Spec Writer fold (section 10 command sequence, real git)", () => {
     expect(git(writer, "status", "--porcelain")).toBe(oldStatus);
   });
 });
+
+// Plan wave 6/8: a same-plan side-lane repair gets one `## Docs work list` and folds the Spec delta, every listed item and the earlier writer's
+// blocked work in that one attempt (section 10), never as separate fix and fold writers. Scripted against real repositories like the suite above.
+describe("docs work list: a same-plan repair folds every known docs item once", () => {
+  test("after a blocked first fold the repair writes the delta and each listed item, then one fold publishes them all, docs-only, with the trailer", () => {
+    const w = world();
+    w.commit(w.worker, "docs/shared.md", "shared\n", "worker adds shared");
+    git(w.worker, "push", "-q", "origin", `HEAD:${BRANCH}`);
+    // The first writer's fold conflicts with a docs edit that landed first: it reports blocked (its blocker is the first work-list line).
+    const first = w.clone("first");
+    const firstBase = git(first, "rev-parse", "HEAD");
+    w.commit(first, "docs/shared.md", "writer edit\n", "docs shared", true);
+    w.commit(w.worker, "docs/shared.md", "other edit\n", "other docs edit");
+    git(w.worker, "push", "-q", "origin", `HEAD:${BRANCH}`);
+    const tip = git(w.worker, "rev-parse", "HEAD");
+    expect(fold(first, firstBase)).toMatchObject({ status: "conflict", U: tip });
+    expect(git(w.origin, "rev-parse", BRANCH)).toBe(tip);
+
+    // The repair: one fresh checkout from the branch writes the Spec delta plus the worker's and the tester's `## Docs needed` items, then folds once.
+    const repair = w.clone("repair");
+    const base = git(repair, "rev-parse", "HEAD");
+    expect(base).toBe(tip);
+    w.commit(repair, "docs/shared.md", "merged edit\n", "docs: spec delta and the blocked fold's edit", true);
+    w.commit(repair, "docs/specs/worker-item.md", "worker item\n", "docs: worker Docs needed item", true);
+    w.commit(repair, "docs/specs/tester-item.md", "tester item\n", "docs: tester Docs needed item", true);
+    const result = fold(repair, base);
+    expect(result).toMatchObject({ status: "pushed", attempts: 1, U: tip });
+    const pushed = result as Extract<Fold, { status: "pushed" }>;
+    expect(git(w.origin, "rev-parse", BRANCH)).toBe(pushed.pushed);
+    expect(w.subjects(w.origin, `${tip}..${BRANCH}`)).toEqual(["docs: tester Docs needed item", "docs: worker Docs needed item", "docs: spec delta and the blocked fold's edit"]);
+    expect(git(repair, "diff", "--name-only", `${tip}..${pushed.pushed}`).split("\n")).toEqual(["docs/shared.md", "docs/specs/tester-item.md", "docs/specs/worker-item.md"]);
+    expect(git(w.origin, "log", "--format=%(trailers:key=Chief-Spec-Writer,valueonly)", `${tip}..${BRANCH}`).split("\n").filter(Boolean)).toEqual(["thr_writer", "thr_writer", "thr_writer"]);
+  });
+
+  test("a repair commit that touches a non-docs path is refused by the fold scope check and nothing is published", () => {
+    const w = world();
+    const writer = w.clone("repair");
+    const base = git(writer, "rev-parse", "HEAD");
+    const tip = git(w.origin, "rev-parse", BRANCH);
+    w.commit(writer, "docs/specs/item.md", "item\n", "docs: item", true);
+    w.commit(writer, "src/fix.ts", "fix\n", "fix a listed item in code", true);
+    expect(() => fold(writer, base)).toThrow(/fold scope: .*src\/fix\.ts/);
+    expect(git(w.origin, "rev-parse", BRANCH)).toBe(tip);
+  });
+});

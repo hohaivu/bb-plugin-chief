@@ -4,6 +4,7 @@ import { STOP_AFTER_REJECTIONS } from "../review/reviewLedger";
 import { createReviewStart } from "../review/reviewStart";
 import { terminal, type ManagedRow } from "../types";
 import { clip } from "../core/text";
+import { ACTION_ROOM } from "../reportLimits";
 import { chainOf, isWriter, type PlanWave } from "../plan/waveSchedule";
 import { BUSY_STATUSES, MAX_NUDGE_LENGTH } from "./constants";
 import { bounded } from "./exec";
@@ -33,7 +34,7 @@ export function createNextAction(ctx: Ctx) {
   /** On a spec-bearing chain, the routes for a wrong spec and for a Spec delta that cannot be built. */
   function specRoutes(row: ManagedRow): string {
     const plans = row.plan_thread_id ? planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ") : "";
-    return `If the spec is wrong: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) with the fix. If the Spec delta cannot be built: start a fresh chief_plan with ${plans ? `the plan files (${plans}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}.`;
+    return `If the spec is wrong: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) with the fix, with the docs items in the mission. If the Spec delta cannot be built: start a fresh chief_plan with ${plans ? `the plan files (${plans}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}.`;
   }
 
   /** A blocked worker's in-place route: an environment or permission blocker is answered with the allowed step, not a fresh worker. */
@@ -223,7 +224,7 @@ export function createNextAction(ctx: Ctx) {
           : "If you judge the failures acceptable, complete it with testsSkipped (your reason)."}`;
       }
       if (isWriter(row.kind)) {
-        return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route${schedule.sideLane(row) ? ` (the retry gets a fresh worktree from ${row.branch})` : ""}. If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}, kind: spec-writer.`;
+        return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route${schedule.sideLane(row) ? ` (the retry gets a fresh worktree from ${row.branch})` : ""}. ${row.plan_thread_id && schedule.sideLane(row) ? "The retry gets this wave's `## Docs needed` items with the blocker; one repair per wave, not separate fix and fold writers. " : ""}If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}, kind: spec-writer.`;
       }
       if (row.kind !== "tester" && onSpecChain(row)) return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user. ${inPlaceLine(row)} ${specRoutes(row)}`;
       if (row.kind === "tester") {
@@ -284,6 +285,9 @@ export function createNextAction(ctx: Ctx) {
     }
     // A tester's branch: a product fix goes to a worker, a test fix to a tester; replacing it needs the kind.
     // Docs findings go to the side-lane Spec Writers of the target's whole chain (a test wave has none of its own); a side-lane target is only ever fixed by one. A chain without a live one (legacy, whose completed head writer handed its checkout on; unplanned) falls back to the target itself.
+    const docsRoute = "In each Spec Writer's mission, list the docs findings that wave owns (verdict file item or file:line); a finding on a docs path several waves share goes to the wave whose Spec delta names it. The plugin attaches that wave's `## Docs needed` items.";
+    /** The docs routing sentence, once, when a handoff the alert renders emitted a Spec Writer route. */
+    const docsNote = (routes: { writerRoute: boolean }[]) => routes.some((route) => route.writerRoute) ? ` ${docsRoute}` : "";
     const docsHandoff = (target: RepairTarget) => {
       const plan = store.get(target.threadId)?.plan_thread_id;
       const writers = plan && target.wave != null ? chainOf(planWavesFor(plan), target.wave).flatMap((wave) => {
@@ -293,13 +297,25 @@ export function createNextAction(ctx: Ctx) {
       if (writers.length < 2) return `chief_delegate (replaces: ${writers[0]?.thread_id ?? target.threadId}, kind: spec-writer) for docs findings`;
       return writers.map((writer) => `chief_delegate (replaces: ${writer.thread_id}, kind: spec-writer) for wave ${writer.plan_wave} docs findings`).join(" or ");
     };
-    const handoff = (target: RepairTarget) => target.lane === "side"
-      ? `chief_delegate (replaces: ${target.threadId}, kind: spec-writer) for docs findings`
+    // The text of one target's handoff and whether it offers a Spec Writer route: set by the arm that emits it.
+    const handoff = (target: RepairTarget): { text: string; writerRoute: boolean } => target.lane === "side"
+      ? { text: `chief_delegate (replaces: ${target.threadId}, kind: spec-writer) for docs findings`, writerRoute: true }
       : target.spec
-      ? `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings${target.tested ? `, chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings` : ""} or ${docsHandoff(target)}`
+      ? { text: `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings${target.tested ? `, chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings` : ""} or ${docsHandoff(target)}`, writerRoute: true }
       : target.tested
-      ? `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings or chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings`
-      : `chief_delegate (replaces: ${target.threadId})`;
+      ? { text: `chief_delegate (replaces: ${target.threadId}, kind: worker) for product-code findings or chief_delegate (replaces: ${target.threadId}, kind: tester) for test-only findings`, writerRoute: false }
+      : { text: `chief_delegate (replaces: ${target.threadId})`, writerRoute: false };
+    // The alert's action is clipped at ACTION_ROOM: keep whole routes only and point at chief_roster, which prints the full text, for the rest.
+    // When even the fixed text alone is over, `short` replaces it: the pointer leads (a clip never reaches it) and the ids, order and wave rule stay inline.
+    const fitRoutes = (routes: { text: string; writerRoute: boolean }[], build: (list: string) => string, short: string) => {
+      const list = (n: number) => `${routes.slice(0, n).map((route) => route.text).join(" / ")}${n < routes.length ? `${n ? " / " : ""}and ${routes.length - n} more branch(es) omitted here: read the complete handoff in chief_roster before delegating` : ""}`;
+      let n = routes.length;
+      while (forAlert && n > 0 && build(list(n)).length > ACTION_ROOM) n--;
+      const action = build(list(n));
+      return forAlert && action.length > ACTION_ROOM
+        ? `Shortened: read the complete handoff in chief_roster (Pending) before delegating. ${short}${routes.some((route) => route.writerRoute) ? " A docs finding goes to the Spec Writer of the wave whose Spec delta names its path." : ""}`
+        : action;
+    };
     // A stacked chain's waves each build on the one before, so they are fixed one at a time, never in parallel.
     if (work.layout === "plan") {
       const { open, stacks, loose } = work;
@@ -314,15 +330,20 @@ export function createNextAction(ctx: Ctx) {
           : "one fresh worker per branch the findings name with chief_delegate (replaces: …), all in this turn, and run exactly one more review."}${mixed} If that review still requires changes, stop and escalate to the user.${flagged}`;
       }
       if (stacks.length) {
-        return `The reviewer requires changes.${flagged} ${stacks.map((stack) => `Waves ${stack.map((target) => target.wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${target.wave}: ${target.threadId}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${loose.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${loose.map(handoff).join(" / ")}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`;
+        const routes = loose.map(handoff);
+        return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} ${stacks.map((stack) => `Waves ${stack.map((target) => target.wave).join(" → ")} are stacked, each on the one before: fix them in wave order, never in parallel. Delegate the earliest of them the findings name now with chief_delegate (replaces: its worker) — ${stack.map((target) => `wave ${target.wave}: ${target.threadId}`).join(", ")} — then restack each later wave on it as each ready report directs, even one the findings do not name.`).join(" ")}${routes.length ? ` Hand the fixes on the other branches the findings name to fresh workers in this turn: ${list}.` : ""}${mixed} Their findings are attached automatically, and the next review covers every branch again once every wave is ready. Escalate if the disagreement is a genuine decision.`,
+          `The reviewer requires changes.${flagged} Stacked waves are fixed in wave order, never in parallel: ${stacks.map((stack) => `waves ${stack.map((target) => `${target.wave}: ${target.threadId}`).join(", ")}`).join("; ")}. Delegate the earliest the findings name now with chief_delegate (replaces: its worker), then restack each later wave on it as each ready report directs, even one the findings do not name.${loose.length ? ` Other branches the findings name: each to a fresh worker in this turn (kind per the roster handoff): ${loose.map((target) => `chief_delegate (replaces: ${target.threadId}${target.lane === "side" ? ", kind: spec-writer" : ""})`).join(", ")}.` : ""} The next review covers every branch again once every wave is ready.`);
       }
-      return `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map(handoff).join(" / ")}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`;
+      const routes = open.map(handoff);
+      return fitRoutes(routes, (list) => `The reviewer requires changes.${flagged}${docsNote(routes)} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${list}; their findings are attached automatically.${mixed} Delegate all of them before any reports: the next review covers every branch again. Escalate if the disagreement is a genuine decision.`,
+        `The reviewer requires changes.${flagged} Hand the fixes to fresh workers in this turn, one per branch the findings name: ${open.map((target) => target.threadId).join(", ")}. Delegate all of them before any reports: the next review covers every branch again.`);
     }
+    const single = work.layout === "single" ? handoff(work.target) : undefined;
     if (advice.kind === "consult") {
-      return `The reviewer still requires changes after ${advice.streak} consecutive rounds. Call chief_consult${work.layout === "single" ? ` (workerThreadId: ${work.target.threadId})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix. Then hand its advice to one fresh worker with ${work.layout === "single" ? handoff(work.target) : `chief_delegate (branch: ${row.branch})`} and run exactly one more review.${work.layout === "single" && work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} If that review still requires changes, stop and escalate to the user.${flagged}`;
+      return `The reviewer still requires changes after ${advice.streak} consecutive rounds. Call chief_consult${work.layout === "single" ? ` (workerThreadId: ${work.target.threadId})` : " with this branch and review in its context"} now, before any further delegation — required even when every finding names file:line and a concrete fix.${single ? docsNote([single]) : ""} Then hand its advice to one fresh worker with ${single ? single.text : `chief_delegate (branch: ${row.branch})`} and run exactly one more review.${work.layout === "single" && work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} If that review still requires changes, stop and escalate to the user.${flagged}`;
     }
-    return work.layout === "single"
-      ? `The reviewer requires changes.${flagged} Hand the fix to a fresh worker with ${handoff(work.target)}; its findings are attached automatically.${work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} Escalate if the disagreement is a genuine decision.`
+    return single && work.layout === "single"
+      ? `The reviewer requires changes.${flagged}${docsNote([single])} Hand the fix to a fresh worker with ${single.text}; its findings are attached automatically.${work.target.tested ? " Mixed findings on a tester's branch: a worker fixes the product code first; its ready alert then asks for a tester to fix and rerun the tests." : ""} Escalate if the disagreement is a genuine decision.`
       : `The reviewer requires changes, and no managed worker owns branch ${row.branch}.${flagged} Hand the fix to a fresh worker with chief_delegate (branch: ${row.branch}${row.pr_url ? `, prUrl: ${row.pr_url}` : ""}; through chief_plan first when planning is on) with the findings in its context, then chief_complete this review. Escalate if the disagreement is a genuine decision.`;
   }
 
