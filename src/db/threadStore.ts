@@ -173,6 +173,11 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       inBatch();
       db.prepare(`UPDATE review_gates SET ${column}=? WHERE gate_key=?`).run(threadId, gateKey);
     },
+    /** Records a fix run's origin. Batch only. */
+    setFixRun(threadId: string, run: "gate" | "chat") {
+      inBatch();
+      db.prepare(`UPDATE managed_threads SET fix_run=? WHERE thread_id=?`).run(run, threadId);
+    },
     /** The live cache: replaced on reload, so read it again each time rather than holding it. */
     rows: () => rows,
     all: () => [...rows.values()],

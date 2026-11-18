@@ -135,12 +135,16 @@ export function createNextAction(ctx: Ctx) {
         return `The review gate's ${decision.sides.join(" and ")} ${decision.sides.length > 1 ? "are" : "is"} missing, failed or blocked.${blocked} Run chief_review (workerThreadId: ${first}) again: it starts only the ${decision.sides.join(" and ")}.`;
       }
       case "wait": return `The review gate is waiting on ${decision.who.map((side) => `${side.role === "reviewer" ? "reviewer" : side.kind ?? "worker"} ${side.thread_id} (${side.state})`).join(", ")}. Wait for their reports.`;
-      case "fix":
-        return `The review gate needs a fix: ${[decision.redTests ? `${testerReport} has failing tests` : "", decision.codeFindings ? `${verdictRef} has ${decision.codeFindings} blocking code finding${decision.codeFindings > 1 ? "s" : ""}` : ""].filter(Boolean).join("; ")}. Escalate to the user with them, or complete with chief_complete (threadId: ${first}, override: your reason).`;
+      case "fix": {
+        const fixRun = gate.tester_thread_id ? `chief_delegate (replaces: ${gate.tester_thread_id}, kind: worker)` : "chief_delegate (replaces: <the gate tester>, kind: worker)";
+        return `The review gate needs a fix: ${[decision.redTests ? `${testerReport} has failing tests` : "", decision.codeFindings ? `${verdictRef} has ${decision.codeFindings} blocking code finding${decision.codeFindings > 1 ? "s" : ""}` : ""].filter(Boolean).join("; ")}. Delegate the gate's one fix run: ${fixRun}; its brief carries the verdict, the findings and the failing tests. There is no re-review: its green run passes the gate.`;
+      }
       case "docsRepair":
         return `The review gate's code passed, but ${verdictRef} has docs findings: chief_delegate (replaces: ${decision.writer.thread_id}, kind: spec-writer) with them as its mission, then wait for its ready report.`;
       case "wrongTest":
-        return `Fix worker ${decision.fixer.thread_id} reports a wrong test: ${clip(decision.fixer.blocker ?? "", 200)}. Escalate to the user.`;
+        return gate.corrector_thread_id
+          ? `Fix run ${decision.fixer.thread_id} reports a wrong test: ${clip(decision.fixer.blocker ?? "", 200)}. The gate already had its corrector: escalate to the user.`
+          : `Fix run ${decision.fixer.thread_id} reports a wrong test: ${clip(decision.fixer.blocker ?? "", 200)}. Read its evidence (bb chief inspect ${decision.fixer.thread_id}). If it holds, delegate the gate's one corrector: chief_delegate (replaces: ${decision.fixer.thread_id}, kind: tester); otherwise escalate to the user.`;
       case "escalate": return `The review gate cannot pass on its own: ${decision.why}. Escalate to the user.`;
       case "pass": return `The review gate passed. Complete ${ids.length > 1 ? "each target" : "it"}: ${ids.filter((id) => store.get(id)?.state !== "complete").map((id) => `chief_complete (threadId: ${id})`).join("; ")}; each marks its pull request ready.`;
     }
@@ -209,6 +213,9 @@ export function createNextAction(ctx: Ctx) {
     // A gate target or actor renders the gate's one line: on its first target, and on any row in an alert.
     const gated = (row.role === "worker" || row.role === "reviewer") && row.state !== "complete" ? gateOf(row) : null;
     if (gated) return forAlert || gated.gate.targets[0]!.threadId === row.thread_id ? gateLine(gated.gate, gated.decision) : null;
+    // A chat fix run gets no review: its own green run completes it.
+    if (row.fix_run === "chat" && row.state === "blocked") return `Chat fix run ${row.thread_id} is blocked: ${clip(row.blocker ?? "", 200)}. Escalate to the user.`;
+    if (row.fix_run === "chat" && row.state === "ready") return `Chat fix run ${row.thread_id} is green (testsPassed). Complete it: chief_complete (threadId: ${row.thread_id}); it marks the pull request ready. No review.`;
     if (row.role === "planner" && row.replaces_thread_id && row.state === "blocked") {
       return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user, then chief_plan (revises: ${row.replaces_thread_id}) with the decision in context; it gets no review.`;
     }

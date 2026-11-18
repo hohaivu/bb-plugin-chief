@@ -259,6 +259,8 @@ export interface ManagedRow {
   busy_rejections: number;
   /** Gate tester row only: its latest ready report's testsPassed (1/0); null otherwise. */
   tests_passed: number | null;
+  /** A fix run's origin: 'gate' or 'chat'; null on every other row. */
+  fix_run: "gate" | "chat" | null;
   /** Worker row only: when chief_complete stamped it as positively approved while cleanupApproved was on; NULL otherwise, and on every row from before the column. */
   cleanup_approved_at: number | null;
   created_at: number;

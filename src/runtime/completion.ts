@@ -15,6 +15,13 @@ export function createCompletion(ctx: Ctx) {
     if (isDesignWave(row)) {
       return row.owner_approval ? null : `${row.thread_id} is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: ${row.thread_id}), or pass override with a reason to complete anyway.`;
     }
+    // A chat fix run has no gate and no review: its own green run and a clean docs/ history complete it.
+    if (row.fix_run === "chat") {
+      if (row.last_report_state !== "ready" || row.tests_passed !== 1) return `chat fix run ${row.thread_id} has no green ready report (testsPassed: true) yet: wait for it, or pass override with a reason.`;
+      let docs: string | null = null;
+      await docsGate(row, (why) => { docs = why; throw new Error(why); }).catch(() => undefined);
+      return docs;
+    }
     const gated = ctx.gateOf(row);
     if (!gated) return `${row.thread_id} has no review gate. Start the review gate: chief_review (workerThreadId: ${row.thread_id}${row.plan_thread_id ? "; on a plan it covers every branch, once every wave is ready" : ""}), complete it without one with skipReview (your reason), or pass override with a reason to complete anyway.`;
     if (gated.decision.kind === "pass") return null;
