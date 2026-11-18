@@ -354,7 +354,7 @@ describe("Chief backend", () => {
     });
 
     // Contract (observability.md): stats counts a legacy reviewer (no reviewer_verdicts rows, current verdict request_changes) as one event,
-    // whatever streak the old ladder carried on its row. The ladder itself is gone: the carried streak refuses nothing.
+    // whatever streak the row carried from before the gate. The carried streak refuses nothing.
     test("chief stats: a legacy reviewer with a carried streak of 3 is one request_changes event", async () => {
       const state = await setup();
       const chief = await start(state);

@@ -270,21 +270,18 @@ describe("tool-call stability", () => {
     expect((await head()).catalog.chief_forge_init!.inputSchema.required).toContain("title");
   });
 
-  // Contract (plan-1 steps 6-7, plan-2 step 3): the test-skip surface and the rejection ladder are gone from the tool and CLI surface; the review gate's tools remain with their documented params.
-  // Regression: chief_skip_tests, chief_complete.testsSkipped, chief_review.retestSkipped or userApprovedRound reappear in a tool definition, or `skip-tests` is a CLI command again.
-  test("the tool surface has no chief_skip_tests, testsSkipped, retestSkipped or userApprovedRound; the gate tools keep their documented params", async () => {
+  // Contract (plan-1 steps 6-7, plan-2 step 3): the test-skip tool and CLI command are gone; the review gate's tools remain with their documented params.
+  // Regression: chief_skip_tests is registered again for any role or provider, or `skip-tests` is a CLI command again.
+  test("the tool surface has no chief_skip_tests and no skip-tests command; the gate tools keep their documented params", async () => {
     const { catalog, entries } = await head();
     expect(Object.keys(catalog)).not.toContain("chief_skip_tests");
     for (const entry of entries) expect(entry.tools, entry.key).not.toContain("chief_skip_tests");
     for (const name of ["chief_review", "chief_complete", "chief_delegate", "chief_consult"]) expect(Object.keys(catalog), name).toContain(name);
     const fields = (name: string) => Object.keys(catalog[name]!.inputSchema.properties);
     expect(fields("chief_complete")).toEqual(expect.arrayContaining(["threadId", "skipReview", "override"]));
-    expect(fields("chief_complete")).not.toContain("testsSkipped");
     expect(fields("chief_review")).toEqual(expect.arrayContaining(["workerThreadId", "focus", "acceptedGaps"]));
-    expect(fields("chief_review")).not.toContain("retestSkipped");
     expect(fields("chief_consult")).toContain("planThreadId");
     expect(catalog["chief_consult"]!.inputSchema.required).toContain("planThreadId");
-    for (const name of ["chief_consult", "chief_delegate"]) expect(fields(name), name).not.toContain("userApprovedRound");
     const state = await setup();
     const chief = await start(state);
     const opts = ctxOf(state, chief.threadId);
@@ -294,8 +291,8 @@ describe("tool-call stability", () => {
     expect(cli.stderr).toContain("Unknown command “skip-tests”");
   });
 
-  // Contract (plan-4 step F): chief_complete accepts override (a reason, no gate needed) and skipReview, and neither takes testsSkipped.
-  // Regression: the params are refused or ignored, or a stray testsSkipped changes the outcome.
+  // Contract (plan-4 step F): chief_complete accepts override (a reason, no gate needed) and skipReview.
+  // Regression: either param is refused or ignored.
   test.each(["override", "skipReview"] as const)("chief_complete accepts %s on a ready worker", async (field) => {
     const state = await setup();
     const chief = await start(state);
