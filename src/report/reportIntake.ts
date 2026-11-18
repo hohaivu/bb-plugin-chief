@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { ReviewTarget, createReviewLedger } from "../review/reviewLedger";
 import type { Role } from "../core/roles";
-import { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
+import { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../types";
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
 import { ALERT_MARKER_ROOM, COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
@@ -40,7 +40,7 @@ export interface ReportIntakeAdapters {
   event?(kind: string, row: Partial<ManagedRow>, detail?: string | null): void;
 }
 
-export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
+export { LESSON_MAX, MAX_CARRIED_FAILS, MAX_FINDINGS, MAX_PLAN_LENGTH, MAX_REPORT_FAILS, MAX_TEST_CONTRACTS, MAX_TEST_FILES, MAX_WAVES, REPORT_TEXT_MAX, SUMMARY_MAX } from "../reportLimits";
 
 type WaveInput = { body: string; dependsOn?: number[]; stackOn?: number; design?: boolean; test?: boolean; spec?: boolean; feature?: boolean; reshape?: boolean };
 
@@ -50,14 +50,32 @@ export function findingLines(list: ReportFinding[], severity: ReportFinding["sev
     .map((entry) => `- ${entry.file}${entry.line ? `:${entry.line}` : ""} — ${entry.message}${entry.fix ? ` (fix: ${entry.fix})` : ""}`);
 }
 
-/** A wave body's `Contracts to verify` section, up to the next heading of the same or higher level. */
-export function contractsOf(body: string): string | undefined {
+/** The untrimmed text under the first heading named `name` (any level), up to the next heading of the same or higher level. Undefined without the heading. */
+export function sectionOf(body: string, name: string): string | undefined {
   // ponytail: headings inside code blocks are deliberately out of scope, as for the NOT-doing check.
-  const heading = /^[ \t]*(#{1,6})[ \t]+contracts to verify\b.*$/im.exec(body);
+  const heading = new RegExp(`^[ \\t]*(#{1,6})[ \\t]+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b.*$`, "im").exec(body);
   if (!heading) return undefined;
-  const rest = body.slice(heading.index + heading[0].length);
+  const rest = body.slice(heading.index + heading[0].length).replace(/^\r?\n/, "");
   const end = new RegExp(`^[ \\t]*#{1,${heading[1]!.length}}[ \\t]`, "m").exec(rest);
-  return (end ? rest.slice(0, end.index) : rest).trim() || undefined;
+  return end ? rest.slice(0, end.index) : rest;
+}
+
+/** A wave body's `Contracts to verify` section, trimmed. */
+export function contractsOf(body: string): string | undefined {
+  return sectionOf(body, "contracts to verify")?.trim() || undefined;
+}
+
+/** Markdown list items at the section's shallowest indentation (tab = 4 spaces); wrapped lines, deeper items and fenced code are not counted. */
+function topLevelItems(section: string): number {
+  const indents: number[] = [];
+  let fenced = false;
+  for (const line of section.split(/\r?\n/)) {
+    if (/^(```|~~~)/.test(line.trim())) { fenced = !fenced; continue; }
+    const item = !fenced && /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+\S/.exec(line);
+    if (item) indents.push(item[1]!.replace(/\t/g, "    ").length);
+  }
+  const top = Math.min(...indents);
+  return indents.filter((indent) => indent === top).length;
 }
 
 /** Whether a spec wave body has a `## Spec baseline` heading (any level). Read at intake only. */
@@ -292,6 +310,23 @@ export function checkPlan(plan: string | unknown[]): string[] {
     if (parent === undefined || parent === null) return;
     if (taken.has(parent)) errors.push(`plan wave ${index + 1} and another wave both build on wave ${parent}; waves form chains only, so mark one of them dependsOn [] or chain it after the other.`);
     taken.add(parent);
+  });
+  // A small test wave keeps a tester session short; the bound runs here only, at planner intake.
+  bodies.forEach((body, index) => {
+    if (body === undefined || !tests[index]) return;
+    const n = index + 1;
+    const contracts = sectionOf(body, "contracts to verify");
+    if (contracts !== undefined) {
+      const count = topLevelItems(contracts);
+      if (!count && contracts.trim()) errors.push(`plan wave ${n} is a test wave whose "## Contracts to verify" has no Markdown list item; write each contract as a list item (-, *, +, 1. or 1)).`);
+      else if (count > MAX_TEST_CONTRACTS) errors.push(`plan wave ${n} is a test wave with ${count} contracts; max ${MAX_TEST_CONTRACTS}. Split the implementation into more chains (dependsOn [] or stackOn k), each ending with its own test wave.`);
+    }
+    const files = sectionOf(body, "test files");
+    if (files === undefined) errors.push(`plan wave ${n} is a test wave without a "## Test files" Markdown heading; list each test file the tester adds or changes as one list item (max ${MAX_TEST_FILES}).`);
+    else {
+      const count = topLevelItems(files);
+      if (!count || count > MAX_TEST_FILES) errors.push(`plan wave ${n} is a test wave listing ${count} test files under "## Test files"; list 1 to ${MAX_TEST_FILES}. Split the implementation into more chains, each ending with its own test wave.`);
+    }
   });
   return errors;
 }
