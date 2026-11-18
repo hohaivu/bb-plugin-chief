@@ -444,6 +444,7 @@ describe("Chief backend", () => {
     forgeAnswers(state);
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
+    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: worker.threadId, projectId: "proj_1" });
     const { reviewerId } = await startGate(state, chief.threadId, worker.threadId);
     // insertThread only runs after threads.spawn resolves, so the tool set for a
     // brand-new thread's first turn cannot depend on that row already existing —

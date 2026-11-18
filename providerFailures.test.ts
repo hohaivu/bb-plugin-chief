@@ -72,16 +72,18 @@ describe("Chief backend", () => {
     const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
     const opts = { threadId: chief.threadId, projectId: "proj_1" };
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: worker.threadId, projectId: "proj_1" });
-    const sentBefore = state.sent.length;
-    await coolDown(state, worker.threadId, MODEL_COOLDOWN);
+    const limited = await delegate(state, chief.threadId, "Unrelated work");
+    const alertsBefore = state.sent.length;
+    await coolDown(state, limited.threadId, MODEL_COOLDOWN);
     expect(state.sent.at(-1).input[0].text).toMatch(/work on codex\/gpt-6-astra is refused until \d{4}-/);
-    expect(state.sent.length).toBe(sentBefore + 1);
+    expect(state.sent.length).toBe(alertsBefore + 1);
     const spawnedBefore = state.spawned.length;
     await expect(state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts))
       .rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
     await expect(state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts)).rejects.toThrow(ISO);
-    expect(state.spawned).toHaveLength(spawnedBefore);
-    // The refused call left nothing behind: once the cooldown expires, the one gate starts its reviewer and its tester.
+    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+    expect(state.spawned.slice(spawnedBefore).some((spawn) => spawn.pluginMetadata?.role === "reviewer")).toBe(false);
+    // The tester starts independently; once the cooldown expires, the one gate starts its reviewer and its tester.
     state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
     expect(state.spawned).toHaveLength(spawnedBefore + 2);
@@ -294,10 +296,17 @@ describe("Chief backend", () => {
       const state = await setup();
       const chief = await start(state);
       const worker = await delegate(state, chief.threadId);
+      await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Ready" }, { threadId: worker.threadId, projectId: "proj_1" });
       state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, status: "active" });
-      await expect(state.harness.behavior.callAgentTool(
-        "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
-      )).rejects.toThrow(`Worker ${worker.threadId} is active; wait until it is idle before starting a review.`);
+      vi.useFakeTimers({ toFake: ["setTimeout", "Date"] });
+      try {
+        const outcome = expect(state.harness.behavior.callAgentTool(
+          "chief_review", { workerThreadId: worker.threadId }, { threadId: chief.threadId, projectId: "proj_1" },
+        )).rejects.toThrow(`Worker ${worker.threadId} is active; wait until it is idle before starting a review.`);
+        await Promise.all([outcome, vi.advanceTimersByTimeAsync(60_000)]);
+      } finally {
+        vi.useRealTimers();
+      }
       expect((await stats(state)).failures.busyRejections).toBe(1);
     });
 

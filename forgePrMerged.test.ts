@@ -22,18 +22,18 @@ beforeEach(() => { execFileMock.mockReset(); }); // not an arrow returning the m
 describe("prMerged", () => {
   test("GitHub: asks for state and headRefOid, reports merged and the head", async () => {
     forges({ gh: { state: "MERGED", headRefOid: SHA } });
-    expect(await prMerged(GITHUB_PR, "/repo")).toEqual({ merged: true, head: SHA });
+    expect(await prMerged(GITHUB_PR, "/repo")).toEqual({ merged: true, open: false, head: SHA });
     expect(calls("gh")).toEqual([["pr", "view", "8", "--json", "state,headRefOid", "--repo", "acme/shop"]]);
   });
 
   test("GitHub: an open PR is not merged, and still reports its head", async () => {
     forges({ gh: { state: "OPEN", headRefOid: SHA } });
-    expect(await prMerged(GITHUB_PR, "/repo")).toEqual({ merged: false, head: SHA });
+    expect(await prMerged(GITHUB_PR, "/repo")).toEqual({ merged: false, open: true, head: SHA });
   });
 
   test("GitHub: the head is trimmed and lowercased", async () => {
     forges({ gh: { state: "MERGED", headRefOid: `  ${SHA.toUpperCase()}\n` } });
-    expect(await prMerged(GITHUB_PR, "/repo")).toEqual({ merged: true, head: SHA });
+    expect(await prMerged(GITHUB_PR, "/repo")).toEqual({ merged: true, open: false, head: SHA });
   });
 
   test.each<[string, { headRefOid?: string }]>([
@@ -43,20 +43,20 @@ describe("prMerged", () => {
     ["too short", { headRefOid: "abc12" }],
   ])("GitHub: a head that is %s gives head null, the merged state is kept", async (_name, extra) => {
     forges({ gh: { state: "MERGED", ...extra } });
-    expect(await prMerged(GITHUB_PR, "/repo")).toEqual({ merged: true, head: null });
+    expect(await prMerged(GITHUB_PR, "/repo")).toEqual({ merged: true, open: false, head: null });
   });
 
   test("GitLab: takes the head from sha, else from diff_refs.head_sha", async () => {
     forges({ glab: { state: "merged", sha: SHA, diff_refs: { head_sha: "f".repeat(40) } } });
-    expect(await prMerged(GITLAB_MR, "/repo")).toEqual({ merged: true, head: SHA });
+    expect(await prMerged(GITLAB_MR, "/repo")).toEqual({ merged: true, open: false, head: SHA });
     expect(calls("glab")).toEqual([["mr", "view", "3", "-F", "json", "--repo", "acme/shop"]]);
     forges({ glab: { state: "opened", diff_refs: { head_sha: SHA } } });
-    expect(await prMerged(GITLAB_MR, "/repo")).toEqual({ merged: false, head: SHA });
+    expect(await prMerged(GITLAB_MR, "/repo")).toEqual({ merged: false, open: true, head: SHA });
   });
 
   test("an unknown host tries gh, then glab, and uses the first CLI that answers", async () => {
     forges({ glab: { state: "merged", sha: SHA } });
-    expect(await prMerged("#12", null)).toEqual({ merged: true, head: SHA });
+    expect(await prMerged("#12", null)).toEqual({ merged: true, open: false, head: SHA });
     expect(calls("gh")).toHaveLength(1);
     expect(calls("glab")).toHaveLength(1);
   });

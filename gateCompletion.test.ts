@@ -40,7 +40,7 @@ describe("a passed gate completes the target", () => {
     await world.verdict(reviewer, "approve");
     await world.testReport(tester, false);
     const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
-    await world.block(fix.threadId, "The test contradicts the plan.");
+    await world.block(fix.threadId, "totals.test.ts:12 contradicts the plan.");
     const corrector = await world.delegateTo({ replaces: fix.threadId, kind: "tester" });
     await world.testReport(corrector.threadId, true);
     world.setIdle(corrector.threadId);
@@ -108,7 +108,7 @@ describe("a gate that has not passed refuses completion with its next step", () 
       await world.verdict(reviewer, "approve");
       await world.testReport(tester, false);
       const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
-      await world.block(fix.threadId, "The test contradicts the plan.");
+      await world.block(fix.threadId, "totals.test.ts:12 contradicts the plan.");
       const corrector = await world.delegateTo({ replaces: fix.threadId, kind: "tester" });
       if (ending === "red") await world.testReport(corrector.threadId, false); else await world.block(corrector.threadId);
       const message = await refused(world, worker.threadId);

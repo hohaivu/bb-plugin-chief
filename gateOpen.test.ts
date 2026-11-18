@@ -3,11 +3,13 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { disposals, headOf, pr, SHA_A, SHA_B, world } from "./test/reviewWorld";
 import { createWaveSchedule, type PlanWave } from "./src/plan/waveSchedule";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
+
+vi.mock("node:child_process", async (importOriginal) => (await import("./test/execMock")).builderPassMock(await importOriginal()));
 
 provideSdk(sdkTesting);
 
@@ -47,11 +49,11 @@ describe("one gate per plan", () => {
       { threadId: "W1", reportSeq: 1, branch: "feature/one", prUrl: pr(1), headSha: SHA_A, base: "main" },
       { threadId: "W2", reportSeq: 1, branch: "feature/two", prUrl: pr(2), headSha: SHA_B, base: "main" },
     ]);
-    expect(w.launches.map((launch) => launch.row.role === "reviewer" ? "reviewer" : launch.row.kind)).toEqual(["reviewer", "tester"]);
-    expect(gates[0].reviewer_thread_id).toBe(w.launches[0]!.id);
-    expect(gates[0].tester_thread_id).toBe(w.launches[1]!.id);
-    expect(out).toMatchObject({ created: true, threadId: w.launches[0]!.id });
-    expect(w.targetRows(w.launches[0]!.id).map((target) => [target.worker_thread_id, target.report_seq, target.head_sha])).toEqual([["W1", 1, SHA_A], ["W2", 1, SHA_B]]);
+    expect(w.launches.map((launch) => launch.row.role === "reviewer" ? "reviewer" : launch.row.kind).sort()).toEqual(["reviewer", "tester"]);
+    expect(gates[0].reviewer_thread_id).toBe(w.reviewerLaunch()!.id);
+    expect(gates[0].tester_thread_id).toBe(w.testerLaunch()!.id);
+    expect(out).toMatchObject({ created: true, threadId: w.reviewerLaunch()!.id });
+    expect(w.targetRows(w.reviewerLaunch()!.id).map((target) => [target.worker_thread_id, target.report_seq, target.head_sha])).toEqual([["W1", 1, SHA_A], ["W2", 1, SHA_B]]);
   });
 
   // Contract: the same call from either chain's worker is the same gate.
@@ -59,7 +61,7 @@ describe("one gate per plan", () => {
   test("a call from the other chain's worker opens nothing new and names both live actors", async () => {
     const w = twoChains();
     await w.review.startReview(w.chief, "W1");
-    const [reviewer, tester] = w.launches.map((launch) => launch.id);
+    const [reviewer, tester] = [w.reviewerLaunch()!.id, w.testerLaunch()!.id];
     const again = await w.review.startReview(w.chief, "W2");
 
     expect(w.launches).toHaveLength(2);
@@ -75,7 +77,7 @@ describe("one gate per plan", () => {
   test("the tester replaces nothing and holds no wave; both builders stay ready, pinned", async () => {
     const w = twoChains();
     await w.review.startReview(w.chief, "W1");
-    const tester = w.row(w.launches[1]!.id);
+    const tester = w.row(w.testerLaunch()!.id);
 
     expect(tester).toMatchObject({ role: "worker", kind: "tester", plan_thread_id: "P", plan_wave: null, replaces_thread_id: null });
     for (const id of ["W1", "W2"]) expect(w.row(id)).toMatchObject({ state: "ready", report_seq: 1 });
@@ -92,7 +94,7 @@ describe("one gate per plan", () => {
       expect(launch.args.environment).toEqual({ type: "host", hostId: "host_proj", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/one" } } });
     }
     expect(w.host.reusableEnvironment).not.toHaveBeenCalled();
-    expect(w.managedSpawn.prepare.mock.calls.map(([, pick]) => (pick as any).role)).toEqual(["reviewer", "tester"]);
+    expect(w.managedSpawn.prepare.mock.calls.map(([, pick]) => (pick as any).role).sort()).toEqual(["reviewer", "tester"]);
   });
 
   // Contract: the heads are pinned once at open; a retry reviews the pinned heads, whatever the forge says now.
@@ -102,7 +104,7 @@ describe("one gate per plan", () => {
     await w.review.startReview(w.chief, "W1");
     const asked = w.forge.head.mock.calls.length;
     w.forge.head.mockImplementation(async () => headOf("feature/one", "c".repeat(40)));
-    w.setState(w.launches[0]!.id, "failed");
+    w.setState(w.reviewerLaunch()!.id, "failed");
     await w.review.startReview(w.chief, "W1");
 
     expect(w.forge.head).toHaveBeenCalledTimes(asked);
@@ -116,7 +118,7 @@ describe("retry launches only the side that is missing", () => {
   test.each(["failed", "blocked", "archived"])("a %s reviewer: only a reviewer starts", async (state) => {
     const w = twoChains();
     await w.review.startReview(w.chief, "W1");
-    const [oldReviewer, tester] = w.launches.map((launch) => launch.id);
+    const [oldReviewer, tester] = [w.reviewerLaunch()!.id, w.testerLaunch()!.id];
     w.setState(oldReviewer!, state);
     const out = await w.review.startReview(w.chief, "W2");
 
@@ -131,7 +133,7 @@ describe("retry launches only the side that is missing", () => {
   test.each(["failed", "blocked", "archived"])("a %s tester: only a tester starts", async (state) => {
     const w = twoChains();
     await w.review.startReview(w.chief, "W1");
-    const [reviewer, oldTester] = w.launches.map((launch) => launch.id);
+    const [reviewer, oldTester] = [w.reviewerLaunch()!.id, w.testerLaunch()!.id];
     w.setState(oldTester!, state);
     const out = await w.review.startReview(w.chief, "W1");
 
@@ -146,27 +148,34 @@ describe("retry launches only the side that is missing", () => {
   test("a tester launch that fails after the reviewer started: the retry starts only the tester", async () => {
     const w = twoChains();
     const launch = w.managedSpawn.launch.getMockImplementation()!;
-    w.managedSpawn.launch.mockImplementationOnce(launch).mockRejectedValueOnce(new Error("no capacity"));
+    let allowTester = false;
+    w.managedSpawn.launch.mockImplementation((prepared, args, row, commit) => row.kind === "tester" && !w.testerLaunch() && !allowTester
+      ? Promise.reject(new Error("no capacity")) : launch(prepared, args, row, commit));
     await expect(w.review.startReview(w.chief, "W1")).rejects.toThrow("no capacity");
-    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: "R1", tester_thread_id: null });
+    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: w.reviewerLaunch()!.id, tester_thread_id: null });
     const pinned = w.forge.head.mock.calls.length;
 
+    allowTester = true;
     await w.review.startReview(w.chief, "W1");
     expect(w.launches.map((entry) => entry.row.role === "reviewer" ? "reviewer" : entry.row.kind)).toEqual(["reviewer", "tester"]);
-    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: "R1", tester_thread_id: w.launches[1]!.id });
+    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: w.reviewerLaunch()!.id, tester_thread_id: w.testerLaunch()!.id });
     expect(w.forge.head).toHaveBeenCalledTimes(pinned);
   });
 
   // Contract: a reviewer launch that throws leaves the gate open and pinned with no actor; the next call starts both sides on the same pins.
   // Regression: the retry opens a second gate, or pins again.
-  test("a reviewer launch that fails: the gate stays open and the retry starts both sides on the same pins", async () => {
+  test("a reviewer launch that fails: the retry starts only the reviewer on the same pins", async () => {
     const w = twoChains();
-    w.managedSpawn.launch.mockRejectedValueOnce(new Error("no capacity"));
+    const launch = w.managedSpawn.launch.getMockImplementation()!;
+    let allowReviewer = false;
+    w.managedSpawn.launch.mockImplementation((prepared, args, row, commit) => row.role === "reviewer" && !allowReviewer
+      ? Promise.reject(new Error("no capacity")) : launch(prepared, args, row, commit));
     await expect(w.review.startReview(w.chief, "W1")).rejects.toThrow("no capacity");
-    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: null, tester_thread_id: null });
-    expect(w.launches).toHaveLength(0);
+    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: null, tester_thread_id: w.testerLaunch()!.id });
+    expect(w.launches).toHaveLength(1);
     const pinned = w.forge.head.mock.calls.length;
 
+    allowReviewer = true;
     await w.review.startReview(w.chief, "W1");
     expect(w.launches).toHaveLength(2);
     expect(gateRows(w)).toHaveLength(1);
@@ -243,10 +252,10 @@ describe("wave scheduling does not see the gate's actor rows", () => {
     expect(before.block).toBeNull();
 
     await w.review.startReview(w.chief, "W1");
-    expect(w.store.isGateActor(w.launches[1]!.id)).toBe(true);
+    expect(w.store.isGateActor(w.testerLaunch()!.id)).toBe(true);
     expect(answers(w)).toEqual(before);
     // Control: a schedule that does not hide gate actors does see the tester, so the comparison above can fail.
-    expect(createWaveSchedule(w.store.rows).waveWorkers("P").map((row) => row.thread_id)).toContain(w.launches[1]!.id);
+    expect(createWaveSchedule(w.store.rows).waveWorkers("P").map((row) => row.thread_id)).toContain(w.testerLaunch()!.id);
 
     w.store.insert({ threadId: "F1", role: "worker", projectId: "proj", chiefThreadId: "chief", title: "Fix F1", state: "ready", status: "idle", kind: "worker", planThreadId: "P", branch: "feature/one" });
     w.store.batch(() => w.store.setGateActor(KEY, "fixer_thread_id", "F1"));
@@ -300,7 +309,7 @@ describe("a target with no pull request is pinned at the tip of its branch on or
 
     expect(w.forge.head).not.toHaveBeenCalled();
     expect(w.store.gate("task:W1")!.targets).toEqual([{ threadId: "W1", reportSeq: 1, branch: "feature/one", prUrl: null, headSha: origin.tip("feature/one"), base: "main" }]);
-    expect(w.launches.map((launch) => launch.row.role === "reviewer" ? "reviewer" : launch.row.kind)).toEqual(["reviewer", "tester"]);
+    expect(w.launches.map((launch) => launch.row.role === "reviewer" ? "reviewer" : launch.row.kind).sort()).toEqual(["reviewer", "tester"]);
   });
 
   // Contract: no fallback to a mutable checkout: a branch missing from origin is refused even when the builder's checkout has it.
@@ -389,13 +398,12 @@ describe("the builder's checkout must be clean and contained in the pin", () => 
     expect(w.store.gate("task:W1")!.targets[0]!.headSha).toBe(origin.tip("feature/one"));
   });
 
-  // Contract: a builder whose checkout is not on the plugin server is not checked, and the reply says so.
+  // Contract: a builder whose checkout is not on the plugin server is refused with a handoff to a local worker.
   // Regression: a silent pass, or a refusal that no recovery can clear.
-  test("a checkout the plugin server cannot reach is named as not checked", async () => {
+  test("a checkout the plugin server cannot reach is refused with recovery instructions", async () => {
     const origin = remote();
     const w = branchOnly(origin, null);
-    const out = await w.review.startReview(w.chief, "W1");
-    expect(out.reply).toMatch(/Not checked: W1: its checkout is not on the plugin server/);
+    await expect(w.review.startReview(w.chief, "W1")).rejects.toThrow(/Worker W1.*not on the plugin server.*chief_delegate \(replaces: W1, kind: worker\)/);
   });
 
   // Contract: the check runs for every target, so one dirty builder in a plan refuses the whole gate.
