@@ -121,7 +121,7 @@ export type WorkerBriefInput = {
   specDocs?: string[];
   /** Spec Writer: its own wave has a `## Spec baseline` before that wave's worker ran. Tester: its wave or an ancestor has one. Optional: older callers omit it. */
   baseline?: boolean;
-  /** A worker or designer on a spec wave: it builds from the plan alone while the wave's Spec Writer records the docs in parallel. Optional: older callers omit it. */
+  /** A worker or designer on a spec wave: it builds from the plan alone; the plan's Spec Writer records the docs after the last wave. Optional: older callers omit it. */
   specWave?: boolean;
   /** side: a Spec Writer in its own side worktree, folding docs/ onto the chain branch. Absent or implementation: every other row. */
   lane?: "side" | "implementation";
@@ -298,7 +298,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ...(wave !== undefined && waveTotal !== undefined ? [
       "", "## Wave",
       specWriter
-        ? `Wave ${wave} of ${waveTotal}: ${side ? `you run in parallel with its worker, in your own worktree on a side branch cut from ${branch}` : "its worker continues from your branch once you report ready"}. Your work is only its \`## Spec delta\` and the docs rules in the \`chief-role-spec-writer\` skill. Name "Wave ${wave} of ${waveTotal}" in your ready result.`
+        ? `Wave ${wave} of ${waveTotal}: ${side ? `you are the plan's one Spec Writer. You run after every wave of the plan is ready, in your own worktree on a side branch cut from ${branch}. Your work is the \`## Spec delta\` of every spec: true wave in the plan files below, the docs work list when present, and the docs rules in the \`chief-role-spec-writer\` skill.` : "its worker continues from your branch once you report ready. Your work is only its `## Spec delta` and the docs rules in the `chief-role-spec-writer` skill."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`
         : `Wave ${wave} of ${waveTotal}.${evidence ? "" : " Implement only this wave's plan file."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
       waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
       ...(stackBase ? [`This wave heads its own chain, stacked on ${stackBase}: its branch and PR are based on ${stackBase}; do not rebase onto the default branch.`] : waveIndependent ? ["This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch."] : []),
@@ -307,7 +307,9 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(specSources.length && specWriter ? [
       "", "## Read-only context",
-      "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below are your wave's; they belong to the worker and the tester: never write code or tests for them.",
+      side
+        ? "Read each plan file in full; the `## Spec delta` of each spec: true wave is your work list. Each plan file's `## Contracts to verify` belongs to the worker and the tester: never write code or tests for them."
+        : "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below are your wave's; they belong to the worker and the tester: never write code or tests for them.",
       ...specSources,
     ] : specSources.length && !evidence ? [
       "", "## Source of truth for test cases",
@@ -320,7 +322,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       tester
         ? "The committed docs are the source of truth. Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed. Derive tests from those docs and the plan contracts, not from the code."
         : specWave
-          ? "The plan file is your source of truth. Pre-plan specs may be stale for the domains this wave touches: where they conflict with the plan, follow the plan and name the conflict in your report. A Spec Writer records this change in docs/ in parallel: do not wait for it and do not implement against its docs."
+          ? "The plan file is your source of truth. Pre-plan specs may be stale for the domains this wave touches: where they conflict with the plan, follow the plan and name the conflict in your report. A Spec Writer records this change in docs/ after the last wave of the plan is ready: do not wait for it and do not implement against its docs."
           : "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
       ...specDocs,
       ...(tester ? [
@@ -437,9 +439,9 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ...(specWriter ? [
       "", "## Spec work",
       "- Follow the `chief-role-spec-writer` skill.",
-      "- Planned: the wave's `## Spec delta` is your work list. Unplanned: Chief's mission is your Spec delta; it names the docs and domains to change.",
+      "- Planned: the `## Spec delta` of each spec: true wave is your work list. Unplanned: Chief's mission is your Spec delta; it names the docs and domains to change.",
       "- Inputs: the plan file, docs/INDEX.md first, then only the specs the delta names and the decisions they link. Read code only to check a name or path the delta states; a gap goes under `## Open questions`.",
-      ...(baseline ? ["- Baseline: this wave's plan has a `## Spec baseline` heading. It names each new docs/specs file and the code paths it covers. For each named file that does not exist at your Base commit, first document the current behaviour of that code as the `chief-role-spec-writer` skill's baseline section says, then apply the Spec delta. Behaviour that looks like a bug goes under `## Open questions` in your report, never into the docs as a contract."] : []),
+      ...(baseline ? ["- Baseline: a spec wave's plan file has a `## Spec baseline` heading. It names each new docs/specs file and the code paths it covers. For each named file that does not exist at your Base commit, first document the current behaviour of that code as the `chief-role-spec-writer` skill's baseline section says, then apply the Spec delta. Behaviour that looks like a bug goes under `## Open questions` in your report, never into the docs as a contract."] : []),
       ...(prior && !isWriter(prior.kind) ? [`- Repair: Chief's mission is the docs fix. Read the report of the ${prior.kind ?? "worker"} you replace: bb chief inspect ${prior.thread_id}.`] : []),
       "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
       side

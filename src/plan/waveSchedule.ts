@@ -1,6 +1,6 @@
-/** spec: an implementation wave whose `## Spec delta` a Spec Writer turns into docs/ in parallel with the wave's worker, on a side branch folded onto the chain branch.
+/** spec: an implementation wave whose `## Spec delta` the plan's one Spec Writer turns into docs/ after the plan's last wave is ready, on a side branch folded onto the chain branch.
  * baseline: a spec wave whose `## Spec baseline` heading names new docs/specs files whose current behaviour its Spec Writer documents first; set at intake, never re-parsed.
- * specsSkipped: Chief's reason for going without that Spec Writer (chief_skip_specs, until a Spec Writer was delegated on the wave).
+ * specsSkipped: Chief's reason for going without the plan's Spec Writer (the plan-level chief_skip_specs, until it was delegated).
  * absent is never persisted: planWavesFor sets it on a legacy test wave (persisted `test: true`, waived or not) no worker was ever
  * delegated on, and the graph helpers then skip that wave.
  * stackOn: a chain head (dependsOn: []) whose chain builds on wave k's changes, which live on another chain: its branch and PR stack on that chain's branch. */
@@ -92,10 +92,16 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return row.role === "worker" && !!row.plan_thread_id && row.plan_wave != null && !!planWavesFor(row.plan_thread_id)[row.plan_wave - 1]?.design;
   }
 
-  /** Wave n runs a Spec Writer beside its worker: an implementation wave marked spec, not bypassed. */
+  /** Wave n's Spec delta goes to docs: an implementation wave marked spec, not bypassed; the plan's one Spec Writer covers it after the last wave. */
   function specWave(waves: PlanWave[], n: number): boolean {
     const wave = waves[n - 1];
     return !!wave?.spec && !wave.design && !wave.specsSkipped;
+  }
+
+  /** The wave the plan's one Spec Writer runs on: the highest-numbered spec wave, or null when there is none. */
+  function planWriterWave(waves: PlanWave[]): number | null {
+    for (let n = waves.length; n > 0; n--) if (specWave(waves, n)) return n;
+    return null;
   }
 
   /** The row and its whole replaces ancestry are spec-writers (a missing ancestor ends the walk): the writer never took over a worker's environment. */
@@ -147,10 +153,11 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return laneRows(planThreadId, wave).filter(sideLane);
   }
 
-  /** The non-writer implementation rows a side-lane Spec Writer on wave n owns docs for: wave n and the later waves of its chain before
-   * the next spec wave, oldest first per wave. */
+  /** The non-writer implementation rows a side-lane Spec Writer on wave n owns docs for, oldest first per wave: every wave of the plan for
+   * the plan's Spec Writer; for a legacy per-wave writer, wave n and the later waves of its chain before the next spec wave. */
   function ownedWorkers(planThreadId: string, n: number): Row[] {
     const waves = planWavesFor(planThreadId);
+    if (n === planWriterWave(waves)) return waves.flatMap((_, i) => waveWorkers(planThreadId, i + 1)).filter((row) => !isWriter(row.kind));
     const later = chainOf(waves, n).filter((m) => m > n);
     const end = later.findIndex((m) => waves[m - 1]?.spec);
     return [n, ...later.slice(0, end < 0 ? undefined : end)].flatMap((m) => waveWorkers(planThreadId, m)).filter((row) => !isWriter(row.kind));
@@ -176,11 +183,12 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return laneRows(planThreadId, n).filter((row) => isWriter(row.kind)).at(-1);
   }
 
-  /** A writer is owed on wave n: a spec wave with no Spec Writer row in any lane, or whose latest one is not ready and not complete. */
+  /** A writer is owed on spec wave n: its latest Spec Writer row (either lane) is not ready and not complete, or it is the plan's
+   * Spec Writer wave and has none. A legacy per-wave writer still has to settle. */
   function writerPending(planThreadId: string, waves: PlanWave[], n: number): boolean {
     if (!specWave(waves, n)) return false;
     const latest = latestWriter(planThreadId, n);
-    return !latest || !isSettled(latest);
+    return latest ? !isSettled(latest) : n === planWriterWave(waves);
   }
 
   /** The Spec Writers of one task, the one provenance rule for docs/ commits: the writers in the task's replaces: chain (chainIds, from the
@@ -294,5 +302,5 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return tips(waves).every((tip) => ["ready", "complete"].includes(latestWorker(worker.plan_thread_id!, tip)?.state ?? ""));
   }
 
-  return { planWavesFor, rawWaves, isDesignWave, laneFor, laneOf, sideLane, coexists, waveWorkers, ownedWorkers, specWriters, taskWriters, specWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, planBaseOf, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
+  return { planWavesFor, rawWaves, isDesignWave, laneFor, laneOf, sideLane, coexists, waveWorkers, ownedWorkers, specWriters, taskWriters, specWave, planWriterWave, latestWorker, latestSideWriter, writersAt, latestWriter, writerPending, chainOwner, chainStarted, planBase, planBaseOf, specChain, pendingWaves, undelegatedHeads, reviewTargetsFor, onFinalWave };
 }

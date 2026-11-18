@@ -152,7 +152,6 @@ export interface Ctx {
   planAdvisors: ReturnType<typeof createNextAction>["planAdvisors"];
   planReviewRefusal: ReturnType<typeof createNextAction>["planReviewRefusal"];
   revisionsOf: ReturnType<typeof createNextAction>["revisionsOf"];
-  specFirstLine: ReturnType<typeof createNextAction>["specFirstLine"];
   startBranchReview: ReturnType<typeof createNextAction>["startBranchReview"];
   startReview: ReturnType<typeof createNextAction>["startReview"];
   waitIdleAfterReport: ReturnType<typeof createNextAction>["waitIdleAfterReport"];

@@ -78,11 +78,20 @@ export function createCompletion(ctx: Ctx) {
     let approved = false;
     let reviewSkipped: string | null = null;
     let docsNote: string | null = null;
-    // An implementation-lane Spec Writer never counts as done work: its worker follows. A side-lane writer completes like a worker.
-    if (row.role === "worker" && isWriter(row.kind) && !sideLane(row)) {
+    // An implementation-lane Spec Writer never counts as done work: its worker follows, unless its replaces: chain reaches a gate target
+    // whose gate passed (a hand-off worker would have no gate). A side-lane writer completes like a worker.
+    const implWriter = row.role === "worker" && isWriter(row.kind) && !sideLane(row);
+    const writerPassed = implWriter && ledger.taskChain(threadId).some((id) => {
+      const target = store.get(id);
+      const gated = target && ctx.gateOf(target);
+      return gated?.decision.kind === "pass" && gated.gate.targets.some((t) => t.threadId === id);
+    });
+    if (implWriter && !writerPassed) {
       throw new Error(`Refusing to complete ${threadId}: a Spec Writer's docs need their worker — chief_delegate (${row.plan_thread_id ? `planThreadId: ${row.plan_thread_id}, wave: ${row.plan_wave}, ` : ""}replaces: ${threadId}, kind: worker).`);
     }
-    if (skipReview !== undefined) {
+    if (writerPassed) {
+      approved = true;
+    } else if (skipReview !== undefined) {
       const refuse = (why: string): never => { throw new Error(`Refusing to skip the review of ${threadId}: ${why}`); };
       const reason = overrideSchema.safeParse(skipReview);
       if (!reason.success || !reason.data) refuse("skipReview needs a non-empty reason of at most the allowed length.");
@@ -146,7 +155,7 @@ export function createCompletion(ctx: Ctx) {
     store.recordOwnerApproval(row.thread_id, approval);
     const { waves, next } = progress.nextWave(row);
     return next !== null
-      ? `Recorded the owner's approval of wave ${row.plan_wave}. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); name the approved artboards in its mission.${ctx.specFirstLine(row.plan_thread_id, waves, next)}`
+      ? `Recorded the owner's approval of wave ${row.plan_wave}. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); name the approved artboards in its mission.`
       : `Recorded the owner's approval of wave ${row.plan_wave}. Complete it with chief_complete (threadId: ${row.thread_id}). Never chief_review.`;
   }
 

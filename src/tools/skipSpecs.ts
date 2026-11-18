@@ -1,32 +1,28 @@
-import { MAX_WAVES } from "../report/reportIntake";
 import { z } from "zod";
 import { overrideSchema } from "./shapes";
 import type { Ctx } from "../runtime/context";
 
 export function registerSkipSpecsTool(ctx: Ctx) {
-  const { latestWorker, plans, store } = ctx;
+  const { plans, store } = ctx;
   ctx.registerChiefTool({
     name: "chief_skip_specs",
     presentation: { label: { pending: "Waiving specs…", completed: "Waived specs" } },
-    description: "Go without the Spec Writer of a plan's spec: true implementation wave, by your own judgment, until a Spec Writer was delegated on it: your reason is recorded on that wave (no Spec Writer can be delegated on it afterwards; its worker runs alone and the review judges it against its plan) and shown in chief_roster, chief_inspect and the review. It never waives the tests. Refused for a wave that is not a spec: true implementation wave, or once a Spec Writer was delegated on it (fix its docs with chief_delegate (replaces: the writer, kind: spec-writer), or re-plan with a fresh chief_plan). Calling it again changes nothing.",
-    parameters: z.object({ planThreadId: z.string(), wave: z.number().int().min(1).max(MAX_WAVES), reason: overrideSchema.describe("Why this wave goes without its Spec Writer.") }),
-    async execute({ planThreadId, wave, reason }, context) {
+    description: "Go without the plan's one Spec Writer, by your own judgment, until it was delegated: your reason is recorded on every spec: true wave without a Spec Writer (no Spec Writer can be delegated on them afterwards; the review judges the work against its plan) and shown in chief_roster, chief_inspect and the review. It never waives the tests. Refused for a plan with no spec: true implementation wave, or once the plan's Spec Writer was delegated (fix its docs with chief_delegate (replaces: the writer, kind: spec-writer), or re-plan with a fresh chief_plan). Calling it again changes nothing.",
+    parameters: z.object({ planThreadId: z.string(), reason: overrideSchema.describe("Why this plan goes without its Spec Writer.") }),
+    async execute({ planThreadId, reason }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
       if (!ctx.isActiveChief(caller)) throw new Error(`No managed planner ${planThreadId} for this Chief.`);
       const planner = store.get(planThreadId);
       if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, caller.thread_id)) throw new Error(`No managed planner ${planThreadId} for this Chief.`);
-      if (!reason) throw new Error("reason is required: why this wave goes without its Spec Writer.");
+      if (!reason) throw new Error("reason is required: why this plan goes without its Spec Writer.");
       ctx.touchCallerChief(caller);
       const refusal = ctx.planReviewRefusal(planner);
       if (refusal) throw new Error(refusal);
-      const { outcome, parent } = plans.waiveSpecs(planThreadId, wave);
-      const nextStep = `Specs on wave ${wave} bypassed: delegate its worker — chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}${parent !== null ? `, replaces: ${latestWorker(planThreadId, parent)?.thread_id ?? `<wave ${parent}'s latest worker>`}` : ""})${parent !== null ? ` once wave ${parent} is ready` : ""}.`;
-      if (outcome === "already-waived-delegated") return `Specs on wave ${wave} were already bypassed.`;
-      if (outcome === "waive") {
-        store.skipWave(planThreadId, wave, { specsSkipped: reason });
-        ctx.observe.event("specs_skipped", { ...planner, plan_thread_id: planThreadId, plan_wave: wave }, reason);
-      }
-      return nextStep;
+      const { outcome, waves } = plans.waiveSpecs(planThreadId);
+      if (outcome === "already-waived") return `Specs on planner ${planThreadId} were already bypassed.`;
+      store.batch(() => { for (const n of waves) store.skipWave(planThreadId, n, { specsSkipped: reason }); });
+      ctx.observe.event("specs_skipped", { ...planner, plan_thread_id: planThreadId, plan_wave: null }, reason);
+      return `Specs bypassed for planner ${planThreadId} (wave(s) ${waves.join(", ")}): no Spec Writer runs for this plan; start the review gate when the ready alert names it.`;
     },
   });}
 
