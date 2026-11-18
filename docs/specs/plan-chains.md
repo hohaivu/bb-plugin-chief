@@ -349,11 +349,11 @@ A tester brief has these rules:
 - A tester delegated with `replaces:` gets `## Prior receipt (<id>)` after `## Predecessor's last report`. The evidence-only brief keeps it too. `<id>` is the prior tester: the newest row of its task chain with kind `tester` and a ready last report, in any row state. `priorReceipt` in `src/plan/planProgress.ts` finds it. Reason: the next tester starts from the last complete receipt.
 - A receipt is the `## Receipt` section at the end of a tester's ready result. It is complete when it has these parts:
   - a `Tested commit: <7-40 hex>` line,
-  - at least one command row, a separate row per command with a nonempty cwd, the exact command, and a valid exit status,
+  - at least one command row. Each row has five fields in this order: `cwd | command | required exit | actual exit | counts`. The cwd, command and counts fields are nonempty. Each exit is an integer from 0 to 255. A pipe is allowed only inside the command field. A four-field row is incomplete.
   - `Coverage:` and `Gaps:` lines,
   - a last non-blank line that reads `Receipt end.`,
   - at most 3,000 characters.
-  Reason: the end line proves the stored text was not cut, and a row without cwd, command or exit status cannot be rerun to prove a retest.
+  Reason: the end line proves the stored text was not cut, and a row with a missing field cannot be rerun to prove a retest.
 - A complete receipt renders in full. Normal mode adds: "Reuse it: rerun the commands the change affects; do not rediscover commands or coverage it already names." Evidence mode adds: "Its commands are your commands and its Tested commit is Last tested, unless your mission names others."
 - A prior tester without a complete receipt renders a pointer line: "<id>'s report has no complete receipt: <report path, else `bb chief inspect <id>`>. Do not run partial commands from it." An older receipt never stands in for the newest tester's, and no receipt is clipped. Reason: an older receipt may name stale coverage.
 - A tester with no prior tester gets no section. An absent or incomplete receipt never refuses a delegation. Workers, designers and Spec Writers never get the section. Reason: only a tester reuses a receipt.
