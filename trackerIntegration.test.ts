@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, TEST_WAVE, chiefReview, completeWorker, delegate, disposeAll, execFileMock, ghHead, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
+import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, chiefReview, completeWorker, delegate, disposeAll, execFileMock, ghHead, setup, start, status, wave, withoutAlertMarker } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 
@@ -78,20 +78,21 @@ describe("tracker integration", () => {
   const plan = (state: State, chief: string, args: string[] = []) =>
     state.harness.behavior.runCli(["plan", "--title", "Rework checkout", "--mission", "Propose how to fix totals", ...args], chiefCtx(chief));
   const planners = async (state: State) => (await status(state)).threads.filter((row) => row.role === "planner").map((row) => row.threadId);
-  const WAVES = [{ body: PLAN_FIXTURE }, TEST_WAVE(2)];
+  const WAVES = [{ body: PLAN_FIXTURE }];
   // Only a plan of more than one implementation wave gets its one advisor review.
-  const MULTI = [{ body: PLAN_FIXTURE }, { body: wave(2) }, TEST_WAVE(3)];
+  const MULTI = [{ body: PLAN_FIXTURE }, { body: wave(2) }];
   const ready = (state: State, planner: string, waves: object[] = WAVES) => call(state, "chief_report", { state: "ready", result: "Waves written.", plan: waves }, planner);
   async function delegateTo(state: State, chief: string, args: string[]) {
     const result = await state.harness.behavior.runCli(["delegate", "--title", "Wave", "--mission", "Do it", ...args, "--json"], chiefCtx(chief));
     expect(result.exitCode, result.stderr).toBe(0);
     return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
   }
-  /** Ready report, an approving review, then Chief completes the worker. */
+  /** Ready report, then a passed gate (an approving reviewer and a green tester), then Chief completes the worker. The worker needs a branch and pull request to be pinned. */
   async function approveAndComplete(state: State, chief: string, worker: string) {
     await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker);
     const review = await chiefReview(state, chief, { workerThreadId: worker });
     await call(state, "chief_report", { state: "ready", result: "Checked", ...APPROVE }, review.threadId);
+    await call(state, "chief_report", { state: "ready", result: `Tests pass${NO_DEVIATIONS}`, testsPassed: true }, review.testerThreadId!);
     await call(state, "chief_complete", { threadId: worker }, chief);
   }
   const decisionBody = (n: number, request: string) =>
@@ -121,9 +122,9 @@ describe("tracker integration", () => {
   });
 
   // Contract (spec, Mirroring + Planned unit): a revision creates no task; its planner is attached and the first planner detached after
-  // that attach; the status follows the effective (revised) plan: working once its wave is delegated, done only when that plan is absorbed.
+  // that attach; the status follows the effective (revised) plan: working once its wave is delegated, review once its pull request is up and the plan is absorbed.
   // Regression: a second task for the revision; detach before the successor's attach; done while a wave is still open.
-  test("tracker integration: a revision creates no task and the status follows the revised plan to done", async () => {
+  test("tracker integration: a revision creates no task and the status follows the revised plan to review", async () => {
     const state = await setup();
     const tasks = tasksCli();
     await on(state);
@@ -143,14 +144,14 @@ describe("tracker integration", () => {
     expect(tasks.calls.findIndex((a) => a[0] === "attach" && a[3] === revised)).toBeLessThan(tasks.calls.findIndex((a) => a[0] === "detach" && a[3] === first));
     expect(tasks.statuses()).toEqual(["todo"]);
 
-    const wave1 = await delegateTo(state, chief, ["--plan-thread", revised, "--wave", "1"]);
-    const wave2 = await delegateTo(state, chief, ["--replaces", wave1, "--plan-thread", revised, "--wave", "2"]);
+    const wave1 = await delegateTo(state, chief, ["--plan-thread", revised, "--wave", "1", "--branch", "feature/x", "--pr-url", PR]);
     await settled(state, tasks);
     expect(tasks.statuses()).toEqual(["todo", "in_progress"]);
 
-    await approveAndComplete(state, chief, wave2);
+    await approveAndComplete(state, chief, wave1);
     await settled(state, tasks);
-    expect(tasks.statuses()).toEqual(["todo", "in_progress", "done"]);
+    // The wave has a pull request, so the unit waits in review until the forge reports it merged.
+    expect(tasks.statuses()).toEqual(["todo", "in_progress", "in_review"]);
     expect(tasks.of("create")).toHaveLength(1);
   });
 
@@ -199,8 +200,9 @@ describe("tracker integration", () => {
   });
 
   const ISSUE = "https://github.com/acme/shop/issues/7";
+  const PR = "https://github.com/acme/shop/pull/8";
   const norm = (state: State, text: string) => text.replaceAll(state.storageRoot, "<root>");
-  const taskOf = (tasks: Tasks, root: string) => [...tasks.tasks].find(([, task]) => task.description.endsWith(`chief-unit:${sha12(root)}`))![0];
+  const taskOf = (tasks: Tasks, root: string) => [...tasks.tasks].find(([, task]) => task.description.includes(`chief-unit:${sha12(root)}`))![0];
 
   /** One scripted run through the real tool callers: a plan and its report, an unplanned worker reviewed and approved, two escalations. */
   async function reportsScenario(state: State) {
@@ -209,7 +211,7 @@ describe("tracker integration", () => {
     const [planner] = await planners(state);
     const out: string[] = [];
     out.push(await ready(state, planner!));
-    const worker = (await delegate(state, chief, "Fix totals", { issueUrl: ISSUE })).threadId;
+    const worker = (await delegate(state, chief, "Fix totals", { issueUrl: ISSUE, branch: "feature/x", prUrl: PR })).threadId;
     out.push(await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker));
     const review = await chiefReview(state, chief, { workerThreadId: worker });
     out.push(review.text, await call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId));
@@ -260,10 +262,9 @@ describe("tracker integration", () => {
     const files = (root: string) => tasks.attachments.filter((a) => a.task === taskOf(tasks, root));
     expect(files(run.planner)).toEqual([
       { task: taskOf(tasks, run.planner), name: "plan-1.md", content: await onDisk(run.planner, "plan-1.md") },
-      { task: taskOf(tasks, run.planner), name: "plan-2.md", content: await onDisk(run.planner, "plan-2.md") },
     ]);
     expect(files(run.worker)).toEqual([{ task: taskOf(tasks, run.worker), name: "verdict-1.md", content: await onDisk(run.review, "verdict-1.md") }]);
-    expect(state.db.prepare("SELECT state, payload FROM tracker_receipts WHERE kind='file'").all()).toEqual(Array(3).fill({ state: "sent", payload: null }));
+    expect(state.db.prepare("SELECT state, payload FROM tracker_receipts WHERE kind='file'").all()).toEqual(Array(2).fill({ state: "sent", payload: null }));
     expect(tasks.of("comment")).toEqual([["comment", taskOf(tasks, run.worker), "--body", decisionBody(1, "Which total rule?"), "--author", "Chief"]]);
   });
 
