@@ -45,6 +45,7 @@ bb plugin config chief set autoSpawn false
 preselected in the **Start Chief** picker on the root New thread screen, which bb gives no project of its own. It does not limit Chief to
 one project. `autoSpawn` (default `false`) controls whether Chief should automatically start upon BB launch or settings changes.
 `stallMinutes` (default 15) sets the soft stall alert; twice that sends the stop alert.
+`heavySlots` (default 2, 1 to 8) caps how many builds and how many test runs Chief's workers and testers run at once on the computer, each; simulators and emulators always get one slot. The wrapper and its capacity file live in `<BB data dir>/chief/heavy/`; the next delegation applies a changed value.
 
 `reviewEngine` (default `reviewer`; `pr-agent` or `both`, anything else means `reviewer`) chooses how a worker's reviewer forms its verdict, and `prAgentDir` (default `/Volumes/VuHo_T5/Develop/personal/research/pr-agent`) is the pr-agent checkout `uv run pr-agent` runs in. See "PR-bound review and completion".
 

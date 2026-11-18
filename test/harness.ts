@@ -100,6 +100,8 @@ export function catalogModel(model: string, reasoningEfforts = ["medium", "high"
 export async function setup(options: { /** projects.get rejects these ids, as the host does for a project that does not exist. */ missingProjects?: string[]; rules?: string; hostStatus?: string; providerAvailable?: boolean; /** The plugin build under test; defaults to this checkout (the base-preservation tests pass the 95aa7df build). */ module?: typeof plugin; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
   /** tabs.update fails this many times from the start, so a plugin start can meet it. */
   failTabsUpdates?: number;
+  /** The host accepts writes and reads under <data dir>/chief/heavy/ on host_1, so heavy-command slots can be published; without it that publish fails, as for any other host_1 path. */
+  heavyFiles?: boolean;
   /** Runs on the migrated database right before the plugin starts: seeds state a restart would find. */
   seed?: (ctx: { bb: any; db: any; live: Map<string, any>; tabsStore: Map<string, { revision: number; tabs: any[] }> }) => void;
   /** Runs in every tabs.get after it read its snapshot, before it returns it: a hook may race a write or never settle. */
@@ -175,11 +177,13 @@ export async function setup(options: { /** projects.get rejects these ids, as th
           const attemptFolder = /\/review-\d+\/[0-9a-f]{8}\//.test(path);
           // A brief's Chief artifact copy goes to the project's host (host_1) without asking for the thread's storage location.
           const briefArtifact = /\/brief\.md\.tmp-/.test(path);
-          if (hostId !== "host_storage" && !((attemptFolder || briefArtifact) && hostId === "host_1")) throw new Error(`wrote ${path} to host ${hostId}`);
+          const heavyFolder = options.heavyFiles && /\/chief\/heavy\//.test(path);
+          if (hostId !== "host_storage" && !((attemptFolder || briefArtifact || heavyFolder) && hostId === "host_1")) throw new Error(`wrote ${path} to host ${hostId}`);
           await mkdir(dirname(path), { recursive: true });
           await writeFile(path, content);
           return {};
         },
+        ...(options.heavyFiles ? { read: async ({ path }: { path: string }) => ({ content: await readFile(path, "utf8") }) } : {}),
         // The real host refuses an existing destination (no overwrite flag); node rename would silently replace it.
         move: async ({ sourcePath, destinationPath }: { sourcePath: string; destinationPath: string }) => {
           if (await access(destinationPath).then(() => true, () => false)) throw new Error(`HTTP 502: Destination already exists: ${destinationPath}`);

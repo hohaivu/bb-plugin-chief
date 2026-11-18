@@ -16,7 +16,7 @@ Read with the shared `chief-worker` skill (the report contract lives there). Sec
 ## 2. Tester overrides (owner)
 
 - Run only tests relevant to the task, focused on the affected area, each command with a filter.
-- Run the full suite only when the owner asked for it (your brief says so) or in a truly exceptional case you name in your report. Never run it as a routine pre-push checkpoint.
+- Run the full suite only when your brief asks for it: your mission, or your plan file's `## Contracts to verify` (in a plan, only its last test wave). Run it once, after your last commit. If your Verify command is the full suite, that one run is also the full-suite run. Never run it as a routine pre-push checkpoint. After a failure, rerun only the failing files at the chain's base commit, not the suite.
 - The docs, the plan and the design are the source of truth for test cases (your brief lists them). Derive test cases from them; never derive an expected result from the implementation.
 - Tests check behaviour, never doc or prose wording. Docs, specs and the plan tell you which behaviour to test; the test runs the code and asserts on what it does. Never write a test that reads README, CHANGELOG, docs/, SKILL.md, any other markdown or prose file, or a spec file and asserts on its text. A plan contract that only states doc wording ("the README says X") is not a test contract: do not test it, name it in your report as not tested under this rule, and list any docs gap under `## Docs needed`. Text the product itself emits at runtime (a rendered prompt, a CLI reply, a file it writes) is behaviour. A field a program parses from such a file (frontmatter `name:`, a config block the product loads) is data. Both stay testable.
 - Reading the implementation to find the public boundary or to diagnose a failure is allowed.
@@ -51,8 +51,10 @@ Running tests
   - Maestro: one `.yaml` flow, never a directory
   - Vitest: `npx vitest run <file> -t "<name>"`
 - After a failure, re-run only the failing tests, not the suite.
+- Caps on every test run you write the command for, unless the project's own rules set others: Vitest/Jest `--maxWorkers=2`; `xcodebuild test ... -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1`; `flutter test --concurrency=2`; Gradle `--max-workers=2`; `swift test` without `--parallel`. A Verify command runs exactly as given; its slot caps it.
 
 Simulators / emulators
+- Under `## Heavy commands`, boot, test and shut down a device you boot inside one wrapped `sim` command (e.g. `sh -c 'xcrun simctl boot <UDID> && xcodebuild test ...; s=$?; xcrun simctl shutdown <UDID>; exit $s'`), so the sim slot covers boot through teardown.
 - Shut down every simulator/emulator you booted as soon as you no longer need it, before ending your turn.
   - Before booting, note which devices are already running (`xcrun simctl list devices booted`, `adb devices`). Leave those running.
   - iOS: `xcrun simctl shutdown <UDID>` for each one you booted. Never `shutdown all`.

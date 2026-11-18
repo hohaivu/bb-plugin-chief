@@ -2,6 +2,7 @@ import { DOCS_WORK_FILE, advisorBrief, plannerBrief, resolveDelegation, workerBr
 import { MAX_CARRIED_FAILS, sectionOf } from "../report/reportIntake";
 import { isWriter } from "../plan/waveSchedule";
 import { worktreeEnvironment } from "../research/managedSpawn";
+import { heavySlotCount } from "../research/heavySlots";
 import { CONTINUE_REMINDERS } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
 import { clip } from "../core/text";
@@ -233,6 +234,10 @@ export function createDelegation(ctx: Ctx) {
     }
     const hostId = prior ? await ctx.environmentHostId(priorLive!.environmentId!) : await ctx.projectHost(projectId);
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: kind, hostId });
+    // Nothing in this preparation may fail the delegation: without a path the brief simply has no wrapper.
+    const heavyPath = isWriter(kind) || !hostId ? null
+      : await ctx.settings.get().then((values) => ctx.publishHeavy(hostId, heavySlotCount(values)))
+        .catch((error) => { bb.log.warn(`Heavy-command slots are unavailable for ${params.title}: ${String(error)}`); return null; });
     const planContextLine = planPath !== undefined ? `Plan file (wave ${wave} of ${waveTotal}): ${planPath}` : undefined;
     // Read before the reviewer row is re-pointed below, so a `replaces` chain always
     // hands the fresh worker the review that prompted the handoff.
@@ -251,7 +256,7 @@ export function createDelegation(ctx: Ctx) {
     const { prompt, reviewerBrief, docsWorkFile } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
-      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly, docsWork,
+      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly, docsWork, heavyPath,
       sharedReview: !!findings && ledger.targets(findings.thread_id).length > 1,
       receipt: kind === "tester" && prior ? progress.priorReceipt(prior.thread_id) : undefined,
     });

@@ -43,6 +43,9 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Spec Writers of this task**: the Spec Writers in the `replaces:` chain of a task row, plus the side-lane writers on the waves of its chain. `taskWriters` returns them.
 - **Retest debt**: the duty to rerun the tests after a fix. A chain owes it when a fix exists and nothing discharges it.
 - **Evidence-only tester**: a Tester that Chief delegates with `evidenceOnly: true`. It runs commands that already exist, compares the results, writes no test, and makes no commit.
+- **Heavy command**: a build, a test run, or a simulator, emulator or device run that a worker, designer or tester starts.
+- **Slot pool**: one of three independent groups of heavy-command slots: `sim`, `test` and `build`.
+- **Slot wrapper**: the host script `chief-heavy-<hash>.sh` that admits a heavy command into a slot of its pool.
 
 ## Ownership and Entry Points
 
@@ -85,6 +88,9 @@ Callers interact with these entry points:
 - `onSpecChain(row)`: returns true for a plan chain with a Spec Writer on an unbypassed spec wave. It also returns true for an unplanned task chain that holds a Spec Writer.
 - `reusableEnvironment(threadId)`: returns the environment of an earlier reviewer if it is available for reuse.
 - `cleanupStep(job, eligible)`: executes lifecycle cleanup transitions and records environment claims.
+- `publishHeavy(hostId, slots)`: writes the host `slots` file and publishes the slot wrapper. It returns the script path.
+- `heavySlotCount(values)`: maps the `heavySlots` setting to a slot count from 1 to 8.
+- `heavyScript()`: returns the text of the slot wrapper.
 
 ## Flows and States
 
@@ -352,9 +358,9 @@ The plugin cannot check that an agent loaded its skills. The [decision on brief 
 A tester brief has these rules:
 
 - It omits `## Success criteria` and `## Constraints` when the list is empty. Other kinds always render both. Reason: an empty section adds only the text "None stated."
-- `## Verify command` keeps the command fence and has one rule. The tester lists the exit status under Automated Verification and never changes product code to make the command pass. Reason: the worker rule "Fix the work until it exits 0" contradicts the ban on product code.
+- `## Verify command` keeps the command fence and has one rule. The tester lists the exit status under Automated Verification and never changes product code to make the command pass. The wrapper fence of the [Heavy Command Slots](#heavy-command-slots) section also applies. Reason: the worker rule "Fix the work until it exits 0" contradicts the ban on product code.
 - A failure at the tester's Base commit is present before the tester's test edits, not proof the failure predates the feature. The tester lists it without changing product code. It does not waive an explicit exit-0 receipt. Reason: Base commit is the tester's starting checkout (after the feature commits), so a Base failure can be caused by the feature. A required exit-0 receipt still blocks ready.
-- The tester runs a command for the whole suite only when its mission or the `## Contracts to verify` of its plan file asks for it. Otherwise it lists the command as "not run: full suite not asked for". Reason: the full suite runs on request only. A contract such as `npx vitest run` exit 0 counts as a request.
+- The tester runs a command for the whole suite only when its mission or the `## Contracts to verify` of its plan file asks for it. Otherwise it lists the command as "not run: full suite not asked for". In a plan, only the last test wave (the highest-numbered) owns the one full-suite run. When the Verify command is that suite, its one run counts for both. A failure is rechecked by rerunning only the failing files at the chain's base commit. Unplanned work keeps the request-only rule. Reason: the full suite is slow, and one run per plan covers the contracts. A contract such as `npx vitest run` exit 0 counts as a request.
 - It tells the tester to record the synced `git rev-parse HEAD` as `Base commit` one time. With a branch, the sync sentence holds the instruction. Without a branch, `## Test work` holds it. A worker brief records it as `Local sync`. Reason: one commit needs one record.
 - `## Test work` holds the one procedure for a test that fails because product code is wrong. It recommends `chief_delegate (... kind: worker)`. The `## Spec` block points to that procedure for code that contradicts the docs. Reason: two procedures for one failure conflict.
 - The `## Spec` block keeps the route for wrong docs: report blocked and recommend `kind: spec-writer`. Reason: only a Spec Writer changes docs.
@@ -468,6 +474,38 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 - `chainOf` traverses backward to the head and forward to the tip. Reason: callers require the complete sequence of linked waves.
 - `planWavesFor` marks a waived test wave as absent when no worker executed on it. Reason: undelegated waived tests do not participate in active scheduling.
 
+### Heavy Command Slots
+
+A slot limits how many heavy commands run at once on one computer. The slot wrapper admits each heavy command into a slot. Reason: several threads on one computer can overload it.
+
+- `startWorker` publishes the slot wrapper and writes the `slots` file before it launches a worker, designer or tester. Reason: the brief must name a script that exists.
+- The `slots` file sits in `<BB data dir>/chief/heavy/`. It holds the `heavySlots` setting as one number. Reason: one host file gives one capacity for every script version.
+- `heavySlotCount` returns 1 to 8 for a valid setting. Any other value, or a missing value, returns 2. Reason: an invalid setting must not block delegation.
+- The wrapper reads the `slots` file at every admission round. A missing or invalid file means one slot. Reason: a lowered cap applies to new admissions at once.
+- The `sim` pool always has one slot. Reason: a simulator, emulator or device needs one owner at a time.
+- New admissions use only slots 1 to N, where N is the current capacity. Reason: after the holders above N exit, at most N heavy commands run.
+- A lowered cap does not stop current holders. Reason: stopping a running build wastes its work.
+- The wrapper records each admission with a private marker file. A started command exits with its own status, including 75. Reason: a status of 75 alone cannot tell a busy slot from a command that exits 75.
+- A marker that cannot be created or removed stops the command before it starts. The wrapper prints a `[chief-heavy]` line and exits non-zero. Reason: an unrecorded admission cannot count toward the cap.
+- A holder that dies, even by SIGKILL, frees its slot. Reason: the kernel releases the lock when the process ends.
+- A waiting call prints a heartbeat at most every 15 seconds. The heartbeat names each holder, or `unknown` when a holder has no note. Reason: the agent sees progress during a long wait.
+- After 480 seconds of waiting, the wrapper exits 75 with a run-again line, and the command never runs. Reason: an agent tool call times out on a long wait, and the agent then runs the command again.
+- A call with `CHIEF_HEAVY_HELD` set runs its command directly and takes no slot. Reason: a command inside a slot must not wait for a second slot.
+- A usage error exits 2 and runs nothing. Reason: an unknown pool must never run a command.
+- Chief adds `## Heavy commands` to worker, designer, and tester briefs only when a published slot wrapper path is available. This rule includes evidence-only testers and briefs without a Verify block. Reason: those agents run builds and tests through the wrapper.
+- Chief adds a wrapper fence under `## Verify command` only when the brief already includes that block and a wrapper path is available. The raw Verify fence stays unchanged. The wrapper fence wraps the exact Verify command. The agent fills in `<pool>`. Chief does not choose the pool from the command text. Reason: the plugin cannot know what a command does.
+- If Chief cannot read the heavy-slot setting or publish the wrapper, it logs a warning and continues delegation. The brief has neither `## Heavy commands` nor a wrapper fence. Any Verify block that the brief normally includes stays unchanged. Reason: heavy preparation must never block a delegation.
+- Spec Writers get neither `## Heavy commands` nor a wrapper fence. Reason: Spec Writers do not run builds or tests.
+- A published script is never removed or rewritten. Its file name carries the first 12 hex characters of its content hash. Reason: a running brief keeps a script that exists.
+- `artifactDir` keeps its paths and fallbacks. Heavy preparation reads the data directory through the same lookup. Reason: artifacts and heavy files must share one data root.
+
+Known limits:
+
+- Locks use macOS `lockf` only. Without `lockf` the wrapper runs the command unthrottled and prints one line. Upgrade when a Linux host runs Chief workers.
+- Locks are not FIFO. A newer waiter can win over an older one. Upgrade with a ticket queue when starvation appears.
+- An agent can bypass the wrapper. See the [decision on the slot wrapper](../decisions/2026-11-18-heavy-slots-host-capacity.md).
+- Two BB data roots on one computer do not share slots. The supported setup is one data root per host.
+
 ## Invariants
 
 - A task branch hosts at most one active implementation-lane thread, plus at most one side-lane Spec Writer for each spec wave of the same plan. Reason: only one thread checks out the task branch. Each writer uses its own side branch, and its fold is a fast-forward push.
@@ -492,3 +530,4 @@ A fix after a rejection is the riskiest change, and one review covers the whole 
 - [Retest after a fix round gates the review](../decisions/2026-11-10-retest-after-fix-round.md)
 - [Only a Spec Writer changes docs](../decisions/2026-11-10-docs-owned-by-spec-writer.md)
 - [Stacked chains use a stackOn field](../decisions/2026-11-14-stacked-chains-stackon.md)
+- [Heavy commands run through a host slot wrapper](../decisions/2026-11-18-heavy-slots-host-capacity.md)
