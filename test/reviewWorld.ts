@@ -5,6 +5,8 @@ import type { ManagedRow } from "../src/types";
 import { createReviewLedger } from "../src/review/reviewLedger";
 import { createReviewStart, type PinnedHead } from "../src/review/reviewStart";
 import type { PlanWave } from "../src/plan/waveSchedule";
+import { createWaveSchedule } from "../src/plan/waveSchedule";
+import { createPlanProgress } from "../src/plan/planProgress";
 import { createThreadStore } from "../src/db/threadStore";
 
 // A standalone review attempt over real SQLite and the real ThreadStore; only the host, the forge and spawn are doubles.
@@ -23,10 +25,11 @@ export function deferred<T>() {
 }
 
 let worlds = 0;
-export type Options = { projectPath?: string | null; heads?: Record<string, PinnedHead | null>; engine?: () => unknown; waves?: PlanWave[]; gitEnv?: NodeJS.ProcessEnv; planBaseOf?: (row: ManagedRow) => { base: string } | { skipped: string } | null };
+/** realPlan: plan P is a real planner row holding `waves`, and the plan deps are the real wave schedule and plan progress (gate actors hidden as in production), not stubs. */
+export type Options = { realPlan?: boolean; projectPath?: string | null; heads?: Record<string, PinnedHead | null>; engine?: () => unknown; waves?: PlanWave[]; gitEnv?: NodeJS.ProcessEnv; planBaseOf?: (row: ManagedRow) => { base: string } | { skipped: string } | null };
 
 /** A standalone review attempt over real SQLite and the real ThreadStore; only the host, the forge and spawn are doubles. */
-export function world({ projectPath = null, heads = {}, engine, waves = [], gitEnv, planBaseOf }: Options = {}) {
+export function world({ realPlan = false, projectPath = null, heads = {}, engine, waves = [], gitEnv, planBaseOf }: Options = {}) {
   const { bb, harness } = createFakePluginHost({ pluginId: `review-start-${++worlds}` });
   disposals.push(() => harness.lifecycle.dispose());
   const db = bb.storage.database();
@@ -77,9 +80,21 @@ export function world({ projectPath = null, heads = {}, engine, waves = [], gitE
 
   /** What the plan owner answers: the review covers these workers (default: the worker alone). */
   let covers: string[] | null = null;
+  const gateActor = (row: ManagedRow) => row.plan_wave == null && store.isGateActor(row.thread_id);
+  const schedule = createWaveSchedule<ManagedRow>(store.rows, gateActor);
+  const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal: (state) => ["complete", "archived", "deleted"].includes(state), busy: (status) => BUSY.has(status) });
+  if (realPlan) {
+    store.insert({ threadId: "P", role: "planner", projectId: "proj", chiefThreadId: "chief", title: "Plan P", state: "ready", status: "idle" });
+    db.prepare(`UPDATE managed_threads SET plan_waves=? WHERE thread_id='P'`).run(JSON.stringify(waves));
+    store.reload();
+  }
   const review = createReviewStart<ManagedRow>({
     db, store, ledger, managedSpawn: managedSpawn as any,
-    plan: {
+    plan: realPlan ? {
+      reviewRefusal: (worker) => { const block = progress.reviewBlock(worker); return block ? `The review is blocked: ${block.kind}.` : null; },
+      reviewTargetsFor: schedule.reviewTargetsFor, planWavesFor: schedule.planWavesFor, planBaseOf: schedule.planBaseOf,
+      specWriters: schedule.specWriters, taskWriters: schedule.taskWriters,
+    } : {
       reviewRefusal: () => null,
       reviewTargetsFor: (worker) => covers ? [worker, ...covers.filter((id) => id !== worker.thread_id).map((id) => store.get(id)!)] : [worker],
       planWavesFor: () => waves,
@@ -108,7 +123,7 @@ export function world({ projectPath = null, heads = {}, engine, waves = [], gitE
   /** review-context.md is written before the launch, to the attempt folder on the reviewer's host (host.writeArtifact), never to the reviewer's storage. */
   const contexts = () => host.writeArtifact.mock.calls.filter(([, , name]) => name.endsWith("/review-context.md")).map(([, , , content]) => content);
   return {
-    db, store, ledger, review, chief, managedSpawn, launches, events, forge, host, worker, nextReport, row, setState, targetRows, contexts,
+    db, store, ledger, schedule, progress, review, chief, managedSpawn, launches, events, forge, host, worker, nextReport, row, setState, targetRows, contexts,
     covering: (ids: string[]) => { covers = ids; },
   };
 }
