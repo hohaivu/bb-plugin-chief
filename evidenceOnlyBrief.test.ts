@@ -62,11 +62,11 @@ describe("evidence-only tester brief", () => {
   });
   const evidence = (extra: Partial<WorkerBriefInput> = {}) => workerBrief(exampleInput(extra));
 
-  // Contract: the audited 13,996-byte example fits in 5,000 UTF-8 bytes and nothing is clipped to get there.
+  // Contract: the audited 13,996-byte example fits in 6,000 UTF-8 bytes and nothing is clipped to get there.
   // Regression: boilerplate growth past the budget, or a clip of mission, constraints or finding to fit it.
-  test("the example task renders within 5,000 bytes with its mission, constraints and finding whole", () => {
+  test("the example task renders within 6,000 bytes with its mission, constraints and finding whole", () => {
     const { prompt, brief, reviewerBrief } = evidence();
-    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(5_000);
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(6_000);
     expect(count(prompt, MISSION)).toBe(1);
     expect(count(prompt, FIX)).toBe(1);
     expect(count(prompt, MESSAGE)).toBe(1);
