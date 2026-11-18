@@ -395,11 +395,9 @@ describe("admitDelegation: unplanned", () => {
 describe("waiveSpecs", () => {
   const specPlan: PlanWave[] = [{ path: "w1" }, { path: "w2", spec: true }, { path: "w3" }, { path: "w4", spec: true, design: true, dependsOn: [] }];
 
-  test("a wave that is not a spec implementation wave (no spec or design, or missing) is refused", () => {
-    const { lifecycle } = world({ [P]: specPlan });
-    for (const wave of [1, 3, 4, 9]) {
-      expect(() => lifecycle.waiveSpecs(P, wave), `wave ${wave}`).toThrow(`Wave ${wave} of planner ${P} is not a spec: true implementation wave.`);
-    }
+  test("a plan without a spec implementation wave is refused", () => {
+    const { lifecycle } = world({ [P]: specPlan.filter((_, i) => i !== 1) });
+    expect(() => lifecycle.waiveSpecs(P)).toThrow(/has no spec: true implementation wave/);
   });
 
   test("a plan waiver selects spec waves across chains without waiving an existing legacy writer", () => {
@@ -411,15 +409,15 @@ describe("waiveSpecs", () => {
 
   test("a spec wave that already has a Spec Writer row is refused, and one that only has its worker is waived", () => {
     const { lifecycle } = world({ [P]: specPlan }, [{ id: "sw", plan: P, wave: 2, kind: "spec-writer" }]);
-    expect(() => lifecycle.waiveSpecs(P, 2)).toThrow(/chief_skip_specs only bypasses a Spec Writer that was never delegated on the wave/);
+    expect(() => lifecycle.waiveSpecs(P)).toThrow(/fix its docs/i);
     const workerOnly = world({ [P]: specPlan }, [{ id: "w", plan: P, wave: 2 }]);
-    expect(workerOnly.lifecycle.waiveSpecs(P, 2)).toMatchObject({ outcome: "waive", parent: 1 });
+    expect(workerOnly.lifecycle.waiveSpecs(P)).toEqual({ outcome: "waive", waves: [2] });
   });
 
-  test("a repeat after the waiver is idempotent: already-waived, or already-waived-delegated once a worker followed", () => {
-    const waived: PlanWave[] = [{ path: "w1" }, { path: "w2", spec: true, specsSkipped: "docs exist" }];
-    expect(world({ [P]: waived }).lifecycle.waiveSpecs(P, 2)).toEqual({ outcome: "already-waived", parent: 1 });
-    expect(world({ [P]: waived }, [{ id: "w", plan: P, wave: 2 }]).lifecycle.waiveSpecs(P, 2)).toEqual({ outcome: "already-waived-delegated", parent: 1 });
+  test("a repeated chief_skip_specs remains a no-op with a retained ready legacy writer", () => {
+    const waived: PlanWave[] = [{ path: "w1", spec: true }, { path: "w2", spec: true, specsSkipped: "docs exist" }];
+    const { lifecycle } = world({ [P]: waived }, [{ id: "legacy", plan: P, wave: 1, kind: "spec-writer" }]);
+    expect(lifecycle.waiveSpecs(P)).toEqual({ outcome: "already-waived", waves: [] });
   });
 });
 

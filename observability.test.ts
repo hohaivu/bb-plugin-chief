@@ -147,12 +147,12 @@ describe("event ledger: one row at each detection point", () => {
     expect(events(state, "stopped")).toEqual([expect.objectContaining({ thread_id: worker.threadId, detail: "looping" })]);
   });
 
-  test("chief_skip_specs writes one row tagged with the plan and wave, and a repeat adds none", async () => {
+  test("chief_skip_specs writes one plan-scoped row, and a repeat adds none", async () => {
     const state = await setup();
     const { chief, planner } = await specPlan(state);
     await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
     await skipSpecs(state, chief.threadId, planner.threadId, "docs are unchanged");
-    expect(events(state, "specs_skipped")).toEqual([expect.objectContaining({ plan_thread_id: planner.threadId, plan_wave: 1, detail: "docs are unchanged" })]);
+    expect(events(state, "specs_skipped")).toEqual([expect.objectContaining({ plan_thread_id: planner.threadId, plan_wave: null, detail: "docs are unchanged" })]);
   });
 
   test("a nudge writes a chars=N row and never reaches Sentry; a stop does", async () => {
