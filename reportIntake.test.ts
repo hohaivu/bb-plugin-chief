@@ -681,6 +681,26 @@ describe("test wave bound", () => {
     expect(checkPlan([IMPL, wave2(contracts)])).toEqual([tooMany(9)]);
   });
 
+  // A heading inside a fence is not a section boundary: the item before the fence and the items after it are one list.
+  test("a fenced heading inside the Contracts list does not end it", async () => {
+    const fence = "```\n## Example\n- fake\n```";
+    await expect(submit([IMPL, wave2(`- first\n${fence}\n${items(8)}`)])).rejects.toThrow(refusal(tooMany(9)));
+  });
+
+  test("a fenced heading inside the Test files list does not end it", async () => {
+    const fence = "```\n## Example\n- fake\n```";
+    await expect(submit([IMPL, wave2(items(1), `- first.test.ts\n${fence}\n${items(5, (i) => `- f${i}.test.ts`)}`)])).rejects.toThrow(refusal(tooManyFiles(6)));
+  });
+
+  test("a fenced copy of the heading name does not start the section", () => {
+    const fenced = "```\n## Contracts to verify\n- fake\n```";
+    expect(checkPlan([IMPL, { body: `# Tests\n\n## Test files\n- a.test.ts\n\n${fenced}\n\n## Contracts to verify\n${items(9)}`, test: true }])).toEqual([tooMany(9)]);
+  });
+
+  test("contractsOf still stops at a fenced heading, as before the fence rule", () => {
+    expect(contractsOf("## Contracts to verify\n- a\n```\n## Example\n```\n- b")).toBe("- a\n```");
+  });
+
   test("test files count by the same rules", () => {
     const files = items(6, (i) => `- [ ] f${i}.test.ts\n  - note\n  wrapped`);
     expect(checkPlan([IMPL, wave2(items(1), `\`\`\`\n- fake\n\`\`\`\n${files}`)])).toEqual([tooManyFiles(6)]);
