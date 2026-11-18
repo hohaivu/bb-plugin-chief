@@ -19,18 +19,23 @@ export async function gateWorld(options: { /** cleanupApproved: completions stam
     dirty: "",
     /** Whether the builder's HEAD is in the pinned commit. */
     contained: true,
-    /** `state` that `gh pr view --json state,headRefOid` answers. */
+    /** `state` that `gh pr view --json state,headRefOid` answers; "fail" makes the call throw (forge unknown). */
     prState: "OPEN",
+    /** The same answer per github pull request URL, ahead of prState. */
+    prStates: new Map<string, string>(),
     /** Every git and gh call, oldest first. */
     calls: [] as string[][],
   };
   execFileMock.mockReset();
-  execFileMock.mockImplementation(async (file: string, args: string[]) => {
+  execFileMock.mockImplementation((file: string, args: string[]) => Object.assign((async () => {
     const out = (stdout = "") => ({ stdout, stderr: "" });
     git.calls.push([file, ...args]);
     if (file === "gh" && args[0] === "pr" && args[1] === "view") {
       if (args.includes("headRefName,headRefOid,baseRefName")) return out(ghHead("feature/from-forge"));
-      return out(JSON.stringify({ state: git.prState, headRefOid: HEAD_SHA }));
+      const repo = args[args.indexOf("--repo") + 1];
+      const prState = git.prStates.get(`https://github.com/${repo}/pull/${args[2]}`) ?? git.prState;
+      if (prState === "fail") throw new Error("gh: no answer");
+      return out(JSON.stringify({ state: prState, headRefOid: HEAD_SHA }));
     }
     if (file !== "git") throw new Error(`unexpected CLI ${file}`);
     if (args[0] === "ls-remote") {
@@ -42,7 +47,7 @@ export async function gateWorld(options: { /** cleanupApproved: completions stam
     if (args[0] === "status") return out(git.dirty);
     if (args[0] === "merge-base" && !git.contained) throw new Error("not an ancestor");
     return out();
-  });
+  })(), { child: { kill: () => undefined } }));
 
   const state = await setup({ projectPath: PROJECT_PATH, system: { usageLimits: async () => ({}), config: async () => ({ primaryHostId: "host_1" }) } });
   // The builder's checkout is a local path, so the gate checks its tree and its push as it does for a real worktree.
