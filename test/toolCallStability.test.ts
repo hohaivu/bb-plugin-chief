@@ -3,6 +3,7 @@ import { type PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import { approvePlan, completeWorker, configurationContext, delegate, disposeAll, planTwoWaves, setup, start, status } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
+import { researchLine, type ResearchSettings } from "../src/research/research";
 import { CHIEF_HOST_ORDER, toolConfigFixture } from "./toolConfigFixture";
 
 provideSdk(sdkTesting);
@@ -51,6 +52,7 @@ describe("tool-call stability", () => {
   // first line, before the roster instruction.
   test("the preload line comes before research, project rules and lessons, and before Chief's roster instruction", async () => {
     const entries = claudeEntries(await head()).filter((entry) => entry.key.startsWith("short rules") && entry.tools.length);
+    const counterpart = (key: string, from: string) => entries.find((entry) => entry.key === key.replace(/research (true|false)$/, from))!;
     for (const entry of entries) {
       const lines = entry.instructions!.split("\n");
       const at = lines.findIndex((line) => line.includes("ToolSearch"));
@@ -58,7 +60,21 @@ describe("tool-call stability", () => {
       if (entry.key.includes("| chief |")) {
         expect(at, entry.key).toBe(1);
         expect(at, entry.key).toBeLessThan(after("# Chief core rules (always apply)"));
-        if (entry.key.includes("research true")) expect(lines.findIndex((line, index) => index > at && line.includes("chief_research")), entry.key).toBeGreaterThan(at);
+        if (entry.key.includes("research true")) {
+          // The dedicated research cue is the lines this render has that the research-off render (same other inputs) lacks, once the
+          // shared lines whose tool lists change (same opening, different text) are set aside. It sits after the preload line, before the core heading.
+          const off = counterpart(entry.key, "research false").instructions!.split("\n");
+          const changed = off.filter((line) => !lines.includes(line)).map((line) => line.slice(0, 12));
+          const cue = lines.flatMap((line, index) => off.includes(line) || changed.includes(line.slice(0, 12)) ? [] : [index]);
+          expect(cue.length, entry.key).toBeGreaterThan(0);
+          // The research module's own line (its text is the module's, not pinned here) is part of the cue.
+          expect(cue.map((index) => lines[index]), entry.key).toContain(researchLine("chief", { enabled: true } as ResearchSettings));
+          for (const index of cue) {
+            expect(lines[index], entry.key).toContain("chief_research");
+            expect(index, entry.key).toBeGreaterThan(at);
+            expect(index, entry.key).toBeLessThan(after("# Chief core rules (always apply)"));
+          }
+        }
         continue;
       }
       expect(at, entry.key).toBe(2);
@@ -67,9 +83,8 @@ describe("tool-call stability", () => {
       // A planner and a researcher have no chief_research and no research line, whatever the switch says.
       if (entry.key.includes("| planner |") || entry.key.includes("| researcher |")) expect(entry.instructions, entry.key).not.toContain("chief_research");
     }
-    // The lines under test exist: Chief with research on has its research line after the preload line, and a reviewer shows its review lessons.
-    const researchChief = entries.find((entry) => entry.key.includes("| chief | claude-code | planner true | research true"))!.instructions!.split("\n");
-    expect(researchChief.findIndex((line, index) => index > researchChief.findIndex((l) => l.includes("ToolSearch")) && line.includes("chief_research"))).toBeGreaterThan(-1);
+    // The lines under test exist: Chief with research on shows the cue check above for both planner settings, and a reviewer shows its review lessons.
+    expect(entries.filter((entry) => entry.key.includes("| chief | claude-code |") && entry.key.endsWith("research true"))).toHaveLength(2);
     expect(entries.some((entry) => entry.key.includes("| planner | claude-code | planner true | research true"))).toBe(true);
     expect(entries.find((entry) => entry.key.includes("| reviewer |"))!.instructions).toContain("## Review lessons");
   });
