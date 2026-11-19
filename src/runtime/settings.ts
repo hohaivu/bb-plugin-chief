@@ -250,9 +250,10 @@ export function createSettingsRuntime(ctx: Ctx) {
   }
 
   /** The machine a role's thread will actually run on, or null when unknown. */
-  async function projectHostId(projectId: string) {
+  async function projectHostId(projectId: string, stopped?: () => boolean) {
     try {
       const project = await bb.sdk.projects.get({ projectId });
+      if (stopped?.()) return null; // an abandoned tick starts no host lookup
       const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
       return source?.hostId ?? await defaultHostId();
     } catch (error) {

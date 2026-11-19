@@ -182,10 +182,10 @@ export function createCore(ctx: Ctx) {
   ); // set once the state the sweep reads is initialised
   // The sweep follows a reload only once pendingReady, as before the store existed.
   const store = createThreadStore<ManagedRow>(db, {
-    onReload: () => {
+    onReload: (owner) => {
       if (!ctx.state.pendingReady) return;
       // ponytail: sweeps on every reload, O(planners × rows); index by plan_thread_id if rosters grow large.
-      void ctx.sweep();
+      void ctx.sweep(owner);
     },
   });
   const ledger = createReviewLedger<ManagedRow>(db, store.get, { busy: (status) => BUSY_STATUSES.has(status) });

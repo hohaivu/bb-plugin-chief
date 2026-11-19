@@ -37,21 +37,29 @@ export function createSweep(ctx: Ctx) {
     }
     return completed;
   }
-  /** Single-flight: a reload during a sweep queues exactly one more pass instead of a racing one.
-   * `signal` is the abandoned supervisor tick's: the pass it starts reads, writes and alerts no more once it aborts. A queued no-argument pass is not the tick's, so it still runs. */
+  /** Single-flight: a request during a flight queues exactly one more pass instead of a racing one, and each pass has its own owner.
+   * `signal` is an abandoned supervisor tick's: a pass only it asked for reads, writes and alerts no more once it aborts.
+   * A request without a signal is independent: its pass runs unsignalled, whoever else is queued with it. */
   function sweep(signal?: AbortSignal) {
-    if (ctx.state.sweeping) { ctx.state.sweepAgain = true; return ctx.state.sweeping; }
+    if (ctx.state.sweeping) {
+      const queued = ctx.state.sweepAgain ??= { independent: false };
+      if (signal) queued.signal = signal; else queued.independent = true;
+      return ctx.state.sweeping;
+    }
     ctx.state.sweeping = (async () => {
-      // Reset in the same microtask as the last loop check, so no queued pass is lost in between.
+      // Taking the queue in the same microtask as the loop check means no queued pass is lost in between.
       try {
-        let tick = signal;
-        do {
-          ctx.state.sweepAgain = false;
-          await completeAbsorbed(tick);
-          // An aborted tick stops here; a pass a no-argument caller queued meanwhile runs on, unbound from the tick.
-          if (tick?.aborted) { if (ctx.state.sweepAgain) tick = undefined; continue; }
-          for (const row of store.all()) ctx.alertCoordinator(row, { kind: "state" }, tick);
-        } while (ctx.state.sweepAgain);
+        let owner = signal;
+        for (;;) {
+          if (!owner?.aborted) {
+            await completeAbsorbed(owner);
+            if (!owner?.aborted) for (const row of store.all()) ctx.alertCoordinator(row, { kind: "state" }, owner);
+          }
+          const queued = ctx.state.sweepAgain;
+          ctx.state.sweepAgain = null;
+          owner = queued && !queued.independent ? queued.signal : undefined;
+          if (!queued) break;
+        }
       } catch (error) {
         bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`);
       } finally {

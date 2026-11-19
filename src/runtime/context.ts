@@ -33,7 +33,8 @@ export interface State {
   rulesCache: Map<string, string>;
   alertDeliveries: Map<string, Promise<boolean>>;
   sweeping: Promise<void> | null;
-  sweepAgain: boolean;
+  /** A sweep requested while a flight ran: `independent` when a caller without a signal asked, else the last abandonable tick's signal. */
+  sweepAgain: { independent: boolean; signal?: AbortSignal } | null;
   retroing: Promise<void> | null;
   sectionEnsuring: Promise<string> | null;
   chiefStarts: Map<string, Promise<{ threadId: string; created: boolean }>>;
@@ -54,7 +55,7 @@ export const createState = (): State => ({
   rulesCache: new Map(),
   alertDeliveries: new Map(),
   sweeping: null,
-  sweepAgain: false,
+  sweepAgain: null,
   retroing: null,
   sectionEnsuring: null,
   chiefStarts: new Map(),
@@ -138,6 +139,7 @@ export interface Ctx {
   ensureChief: ReturnType<typeof createChiefs>["ensureChief"];
   replaceChief: ReturnType<typeof createChiefs>["replaceChief"];
   handOver: ReturnType<typeof createChiefs>["handOver"];
+  adoptPendingHandovers: ReturnType<typeof createChiefs>["adoptPendingHandovers"];
   handoffSection: ReturnType<typeof createChiefs>["handoffSection"];
   managedSpawn: ReturnType<typeof createChiefs>["managedSpawn"];
   unpinPendingTab: ReturnType<typeof createChiefs>["unpinPendingTab"];

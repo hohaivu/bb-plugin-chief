@@ -79,7 +79,7 @@ const GATE_ACTORS: GateActor[] = ["reviewer_thread_id", "tester_thread_id", "fix
 
 export interface ThreadStoreHooks {
   /** Runs after every reload (not after refresh); the server gates its sweep and Pending publish on it. */
-  onReload: () => void;
+  onReload: (owner?: AbortSignal) => void;
 }
 
 /** SQL guard: the Chief row has no Coordinator link, or its link points at a Coordinator that is complete, archived or deleted. */
@@ -101,9 +101,9 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     rows = load();
     gates = loadGates();
   }
-  function reload() {
+  function reload(owner?: AbortSignal) {
     refresh();
-    hooks.onReload();
+    hooks.onReload(owner);
   }
   /** After a write: a batch defers to its single reload, anything else reloads at once. */
   function wrote() {
@@ -111,8 +111,9 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
   }
 
   /** Runs fn in one transaction, then reloads once, whatever fn wrote (the ledger's own writes touch rows too).
-   * A throw rolls back and leaves the cache as it was. */
-  function batch<T>(fn: () => T): T {
+   * A throw rolls back and leaves the cache as it was. `owner` is the signal of the caller whose write this is, handed to the sweep the reload starts;
+   * a nested batch's owner is ignored because only the outermost batch reloads. */
+  function batch<T>(fn: () => T, owner?: AbortSignal): T {
     batching += 1;
     let result: T;
     try {
@@ -120,7 +121,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     } finally {
       batching -= 1;
     }
-    if (!batching) reload();
+    if (!batching) reload(owner);
     return result;
   }
 
