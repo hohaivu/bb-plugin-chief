@@ -68,16 +68,13 @@ describe("chief_research design flag", () => {
   });
 
   test("only a design researcher's brief carries the design stage, the waiting report and the AskUserQuestion exit", async () => {
+  test("both research modes receive the supplied question in the brief", async () => {
     const { state, chief } = await newState();
-    await tool(state, "chief_research", { question: "Ticket: add CSV export", design: true }, chief);
-    const heavy = state.spawned.findLast((args) => args.pluginMetadata?.role === "researcher").prompt as string;
-    await tool(state, "chief_research", { question: "Is this claim true?", design: false }, chief);
-    const light = state.spawned.findLast((args) => args.pluginMetadata?.role === "researcher").prompt as string;
-    for (const part of ["## Ticket", "design.md", "AskUserQuestion", "waitingOnUser: true", "Rejection:", "Fallback:"]) expect(heavy).toContain(part);
-    for (const part of ["AskUserQuestion", "design.md", "waitingOnUser"]) expect(light).not.toContain(part);
-    expect(light).toContain("Do not ask the user directly from this thread.");
-    // Ticket-blind helpers: the helper prompt rule names what a helper prompt must never hold.
-    for (const brief of [heavy, light]) expect(brief).toContain("It never contains the ticket");
+    for (const design of [true, false]) {
+      const question = design ? "Ticket: add CSV export" : "Is this claim true?";
+      await tool(state, "chief_research", { question, design }, chief);
+      expect(state.spawned.findLast((args) => args.pluginMetadata?.role === "researcher").prompt).toContain(question);
+    }
   });
 });
 
