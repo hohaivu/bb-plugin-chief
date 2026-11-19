@@ -123,7 +123,8 @@ describe("Chief backend", () => {
     // rule, the full-read rule and the report split live in the skills the load line orders loaded.
     const prompt: string = state.spawned[1].prompt;
     expect(prompt).toContain("feature/fix-checkout-totals");
-    expect(prompt).toContain("https://github.com/acme/shop/issues/17");
+    expect(prompt).toContain("https://github.com/acme/shop/issues/7");
+    expect(prompt).toContain("https://github.com/acme/shop/pull/8");
   });
 
   test("keeps the project default base when a delegation names no branch", async () => {
