@@ -2,7 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { createPlanLifecycle } from "./src/plan/planLifecycle";
 import { createWaveSchedule, type PlanWave } from "./src/plan/waveSchedule";
 
-// Contract: the module is the long-term rule matrix for who may run which plan wave next (role, Spec Writer and tester
+// Contract: the module is the long-term rule matrix for who may run which plan wave next (role and Spec Writer
 // hand-off order, spec waivers). Cases are named after the wave 1 plan's case matrix. The caller oracle
 // (server.test.ts "plan admission oracle") owns bytes, routing and launch; this file owns each rule once.
 // The wave graph is the real createWaveSchedule over in-memory rows; only the task chain and the advisor-review gate are stubs.
