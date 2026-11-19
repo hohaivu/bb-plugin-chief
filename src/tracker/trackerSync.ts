@@ -59,6 +59,8 @@ export function createTrackerSync(deps: {
   /** Writes one outbox alert to the live Chief of that thread and returns its dedupe key; null when there is none. Synchronous: it runs inside a transaction. */
   answerAlert: (threadId: string, key: string, message: string) => string | null;
   deliver: (dedupeKey: string) => Promise<unknown>;
+  /** Records an owner answer in the live Chief's decisions file. Runs after the answer commits; a failure only logs. */
+  recordAnswer: (threadId: string, text: string, why: string) => void;
 }) {
   const { db, log, get, all } = deps;
   const polled = new Map<string, number>();
@@ -320,6 +322,7 @@ export function createTrackerSync(deps: {
         return;
       }
       void deps.deliver(outbox).catch((error) => log.warn(`Tracker answer alert ${outbox} not delivered; the outbox retries: ${errorText(error)}`));
+      if (match) deps.recordAnswer(source, text, `Owner answer to decision #${posted(match).number} on tracker task “${unit.title}”`);
     }
   }
 

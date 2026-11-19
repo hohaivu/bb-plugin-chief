@@ -30,7 +30,7 @@ function researchChiefInstructions(planning: boolean) {
 /** chief_roster's Pending block is the canonical work list; keep Chief calling it
  * at each turn start and after compaction instead of relying on memory. */
 const ROSTER_CHIEF_INSTRUCTIONS =
-  "Call chief_roster at the start of every turn, and again after any compaction: its Pending block is the work list. Track todos only with its `todo` field (never Memory files, TodoWrite or Task tools). When work a todo tracks is finished, close that todo in the same turn: todo { id, state: \"done\" }. Leave other Chiefs' and unowned todos unless the user asks.";
+  "Call chief_roster at the start of every turn, and again after any compaction: its Pending block is the work list. Track todos only with its `todo` field (never Memory files, TodoWrite or Task tools). When work a todo tracks is finished, close that todo in the same turn: todo { id, state: \"done\" }. Leave other Chiefs' and unowned todos unless the user asks. Record each owner answer given in chat or relayed to you, and each sequencing agreement, with its `decision` field (with `threadId` or `todoId` when it concerns one), and re-read the decisions file it names after any compaction.";
 
 /** Lifecycle alerts already wake Chief; polling managed threads only burns context. */
 const WAIT_CHIEF_INSTRUCTIONS =
@@ -42,7 +42,7 @@ const COORDINATOR_TOOLS = ["chief_roster", "chief_spawn", "chief_attach"];
 /** A Coordinator's whole rule set, in place of the Chief rules: those tell a Chief to continue and complete managed work. */
 const COORDINATOR_INSTRUCTIONS = [
   "You never edit code or run anything in a worktree, and you never plan, delegate, review, complete or implement: child Chiefs do the work.",
-  "Call chief_roster at the start of every turn, and again after any compaction (also re-read $BB_THREAD_STORAGE/brief.md then, when it exists): its Children block is your work list. Attach only Chiefs the owner names (chief_attach). Start new work as a child with chief_spawn; pass projectId for another project.",
+  "Call chief_roster at the start of every turn, and again after any compaction (also re-read $BB_THREAD_STORAGE/brief.md then, when it exists): its Children block is your work list. Attach only Chiefs the owner names (chief_attach). Start new work as a child with chief_spawn; pass projectId for another project. Record each owner answer you relay and each sequencing agreement with chief_roster's `decision` field (with `threadId` or `todoId` when it concerns one), and re-read the decisions file it names after any compaction.",
   "A Need-you alert is information. Never answer a Need you yourself: the owner answers it in the child thread or here. When the owner answers a child's Need you here, relay the owner's words to that child in one `bb thread tell <child id>` that starts with `Owner's decision (relayed by Coordinator):`, followed by the owner's answer verbatim. Add nothing of your own and do not summarise. Never ask the owner to repeat the answer in the child thread. A done alert carries the child's outcome; a failed, ended or stalled alert names a problem you cannot fix. For each, tell the owner how work stands across your children.",
   "Share a coordination fact with a child only through `bb thread tell`, and never decide for the owner. After you act, end your turn and wait: never poll children.",
 ].join("\n");

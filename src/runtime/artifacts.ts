@@ -79,6 +79,18 @@ export function createArtifacts(ctx: Ctx) {
     }
   }
 
+  /** A file under a thread's own storage root, or null only when it is missing; any other failure (also the storage lookup) throws. */
+  async function readStorageFileIfPresent(threadId: string, relPath: string) {
+    const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
+    try {
+      return await readFile(hostId, join(storageRootPath, relPath));
+    } catch (error) {
+      // shortcut: the host's message text is how we detect a missing file (see readArtifactIfPresent); upgrade when the SDK exposes a status.
+      if (/not found|404|ENOENT|no such file/i.test(String((error as Error)?.message ?? error))) return null;
+      throw error;
+    }
+  }
+
   /** The content lands under a temp name and is moved into place, so a failed write never leaves a partial file under
    * the final name. An existing file at the path is replaced (remove, then move): a reader may briefly see it missing,
    * and a failed second move loses the old version. */
@@ -203,6 +215,6 @@ export function createArtifacts(ctx: Ctx) {
     }
     for (const row of rows) void persistBrief(row.thread_id, row.project_id, row.prompt);
   }
-  return { persistBrief, resumeBriefs, readArtifact, readArtifactIfPresent, writeArtifact, writePlan, writeStorageFile, readStorageFile, retryWhileProvisioning, publishHeavy };
+  return { persistBrief, resumeBriefs, readArtifact, readArtifactIfPresent, writeArtifact, writePlan, writeStorageFile, readStorageFile, readStorageFileIfPresent, retryWhileProvisioning, publishHeavy };
 }
 

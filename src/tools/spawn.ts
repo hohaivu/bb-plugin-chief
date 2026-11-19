@@ -50,18 +50,14 @@ export function registerSpawnTool(ctx: Ctx) {
         const moved = db.prepare(`UPDATE chief_todos SET chief_thread_id=?, updated_at=? WHERE id=? AND project_id=? AND chief_thread_id=? AND state='open'`)
           .run(threadId, Date.now(), todo.id, caller.project_id, caller.thread_id).changes;
         store.reload();
+        if (moved) void ctx.copyDecisions(caller.thread_id, threadId, todo.id, target);
         lines.push(moved ? `Todo #${todo.id} moved to it.` : `Todo #${todo.id} was not moved because it changed in the meantime.`);
       }
       // Not persistBrief: its failure only reaches the log, and this one must show in the calling Chief's turn.
       let error: unknown;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
-        try {
-          await ctx.writeStorageFile(threadId, "brief.md", ctx.handoffSection(handoff));
-          error = undefined;
-          break;
-        } catch (caught) { error = caught; }
-      }
+      try {
+        await ctx.retryWhileProvisioning(() => ctx.writeStorageFile(threadId, "brief.md", ctx.handoffSection(handoff)));
+      } catch (caught) { error = caught; }
       if (error !== undefined) lines.push(`brief.md not saved (${String(error)}); the handoff is only in its first message.`);
       return lines.join("\n");
     },

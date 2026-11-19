@@ -847,7 +847,7 @@ describe("Coordinator", () => {
       expect(nearLines).not.toContain("Own todo");
       expect(nearLines).toContain("1 other-Chief todo (#2) hidden: not your work. chief_roster includeOthers: true lists them.");
       expect(farLines.slice(0, farLines.indexOf("\nPending:\n- todo"))).not.toContain("other-Chief todo (#2)");
-      expect(text.endsWith(`Pending:\n- todo #2: Own todo`)).toBe(true);
+      expect(text.replace(/\nDecisions: \S+$/, "").endsWith(`Pending:\n- todo #2: Own todo`)).toBe(true);
       // includeOthers: true expands every child block back to the tagged todo lines.
       const expanded = await call(state, "chief_roster", { includeOthers: true }, coord);
       const expandedNear = expanded.slice(expanded.indexOf(`(${near})`), expanded.indexOf(`(${far})`));
@@ -862,7 +862,7 @@ describe("Coordinator", () => {
       const child = (await spawnChild(state, coord, { title: "Only child" })).id;
       await call(state, "chief_roster", { todo: { text: "Child todo" } }, child);
       await call(state, "chief_roster", { todo: { text: "Coordinator todo" } }, coord);
-      const ownBlock = (text: string) => text.slice(text.lastIndexOf("\nPending:\n") + 1);
+      const ownBlock = (text: string) => text.slice(text.lastIndexOf("\nPending:\n") + 1).replace(/\nDecisions: \S+$/, "");
       const collapsed = ownBlock(await call(state, "chief_roster", {}, coord));
       expect(collapsed).toBe("Pending:\n- todo #2: Coordinator todo\n- 1 other-Chief todo (#1) hidden: not your work. chief_roster includeOthers: true lists them.");
       const expanded = ownBlock(await call(state, "chief_roster", { includeOthers: true }, coord));

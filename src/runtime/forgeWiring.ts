@@ -22,6 +22,12 @@ export function createForgeWiring(ctx: Ctx) {
     },
   });
 
+  /** The live Chief of the thread: its own, else the project's active one. */
+  function liveChiefId(threadId: string) {
+    const source = store.get(threadId);
+    const own = source?.chief_thread_id ? store.get(source.chief_thread_id) : undefined;
+    return { source, chiefId: ctx.isActiveChief(own) ? own.thread_id : source ? ctx.chiefForProject(source.project_id)?.thread_id : undefined };
+  }
   const selectTracker = trackerSelector({ execFileAsync, serverPath });
   const trackerSync = createTrackerSync({
     db, log: bb.log,
@@ -33,12 +39,13 @@ export function createForgeWiring(ctx: Ctx) {
     reviewTargets: (reviewerId) => ledger.targets(reviewerId).map((target) => target.worker_thread_id),
     planDone: (planner) => !!planner.plan_waves && progress.plannerAbsorbed(planner),
     prMerged: async (url, projectId) => (await prMerged(url, await ctx.projectPath(projectId)))?.merged ?? null,
-    // The live Chief of the thread: its own, else the project's active one.
     answerAlert: (threadId, key, message) => {
-      const source = store.get(threadId);
-      const own = source?.chief_thread_id ? store.get(source.chief_thread_id) : undefined;
-      const chiefId = ctx.isActiveChief(own) ? own.thread_id : source ? ctx.chiefForProject(source.project_id)?.thread_id : undefined;
+      const { source, chiefId } = liveChiefId(threadId);
       return source && chiefId ? ctx.writeAlert({ ...source, chief_thread_id: chiefId }, key, message) : null;
+    },
+    recordAnswer: (threadId, text, why) => {
+      const { chiefId } = liveChiefId(threadId);
+      if (chiefId) void ctx.recordDecision(chiefId, { kind: "owner-answer", text, why, threadId });
     },
     deliver: ctx.deliverAlert,
   });

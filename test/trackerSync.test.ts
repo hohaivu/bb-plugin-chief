@@ -78,6 +78,7 @@ function world() {
     prMerged: vi.fn(async (_url: string, _project: string): Promise<boolean | null> => null),
     answerAlert: vi.fn((_thread: string, key: string, _message: string): string | null => `out:${key}`),
     deliver: vi.fn(async (_key: string) => {}),
+    recordAnswer: vi.fn((_thread: string, _text: string, _why: string) => {}),
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     get maxInflight() { return maxInflight; },
     add(row: Partial<ManagedRow> & { thread_id: string; role: ManagedRow["role"] }) {
@@ -115,6 +116,7 @@ function world() {
     prMerged: (url, project) => w.prMerged(url, project),
     answerAlert: (thread, key, message) => w.answerAlert(thread, key, message),
     deliver: (key) => w.deliver(key),
+    recordAnswer: (thread, text, why) => w.recordAnswer(thread, text, why),
   });
   return w;
 }
@@ -576,6 +578,8 @@ describe("answers", () => {
       "The owner answered decision #1 on tracker task “Alpha”:\nUse option A.\nTreat this as the owner's answer to that Need you request.");
     expect(w.deliver).toHaveBeenCalledTimes(1);
     expect(w.deliver).toHaveBeenCalledWith(`out:decision-${sha12("Pick A or B.")}:answer`);
+    expect(w.recordAnswer).toHaveBeenCalledTimes(1);
+    expect(w.recordAnswer).toHaveBeenCalledWith("P1", "Use option A.", "Owner answer to decision #1 on tracker task “Alpha”");
     expect(w.receipts("answer")).toMatchObject([{ ref: "o1", state: "sent", result: sha12("Pick A or B.") }]);
     expect(w.receipts("decision")[0].answered_at).not.toBeNull();
     // The next pass closes the flag; seeing the same comment again does nothing.
@@ -608,6 +612,7 @@ describe("answers", () => {
     expect(message).toContain("Sounds fine to me.");
     expect(w.receipts("decision").map((d) => d.answered_at)).toEqual([null, null]);
     expect(w.receipts("answer")).toMatchObject([{ ref: "o1", result: null }]);
+    expect(w.recordAnswer).not.toHaveBeenCalled();
   });
 
   test("Chief's own decision comments are never answers, even though the tracker stores them as owner comments", async () => {

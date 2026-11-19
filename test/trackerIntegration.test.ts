@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { parseDecisions } from "../src/runtime/decisions";
 import { join } from "node:path";
 import { APPROVE, NO_DEVIATIONS, PLAN_FIXTURE, chiefReview, completeWorker, delegate, disposeAll, execFileMock, ghHead, setup, start, status, wave, withoutAlertMarker } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -293,6 +295,9 @@ describe("tracker integration", () => {
     for (let i = 0; i < 3; i += 1) { advance(61_000); await settled(state, tasks); }
     expect(answerAlerts(state).map((message) => [message.threadId, withoutAlertMarker(message.input[0].text)])).toEqual([[chief, `[Chief lifecycle alert]\n${ANSWERED(1, "Option A")}`]]);
     expect(tasks.of("update").filter((a) => a.includes("--remove-label"))).toHaveLength(1);
+    // The answer is also recorded in the live Chief's decisions.md, after the alert transaction.
+    await until(() => { try { return readFileSync(join(state.storageRoot, chief, "decisions.md"), "utf8").includes("kind=owner-answer"); } catch { return false; } });
+    expect(parseDecisions(readFileSync(join(state.storageRoot, chief, "decisions.md"), "utf8"))).toMatchObject([{ kind: "owner-answer", text: "Option A" }]);
   });
 
   // Contract (spec, Answers reasons): the answer rides the existing outbox, so a hand-off sends an undelivered answer to the replacement Chief.
