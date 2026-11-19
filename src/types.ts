@@ -80,11 +80,11 @@ export type FailEntry = z.infer<typeof failEntry>;
 export const reportFailEntry = z.object({
   text: z.string().trim().describe("at most 400 characters"),
   scope: z.string().trim().describe("at most 120 characters"),
-  basis: z.string().trim().describe("at most 200 characters: the command, test or input that reproduces it"),
+  basis: z.string().trim().describe("at most 200 characters: command, test or input that reproduces it"),
 });
 // A string is a JSON-encoded array some callers send; the report intake decodes it and checkReport refuses anything else.
 export const failsParam = z.union([z.string().trim(), z.array(reportFailEntry)]).optional().describe(
-  `Worker or reviewer only: approaches tried and ruled out, so a replacement worker does not retry them. At most ${MAX_REPORT_FAILS} per report.`,
+  `Worker or reviewer only: approaches ruled out, so a successor does not retry them. At most ${MAX_REPORT_FAILS} per report.`,
 );
 /** A reviewer's structured finding, published without limits; checkReport enforces them. */
 export const reportFinding = z.object({
@@ -96,29 +96,29 @@ export const reportFinding = z.object({
 });
 export type ReportFinding = z.infer<typeof reportFinding>;
 export const findingsParam = z.union([z.string().trim(), z.array(reportFinding)]).optional().describe(
-  `Ready only, reviewer only. Required on a reviewer's ready report ([] allowed for an approve with nothing to note). One entry per finding, at most ${MAX_FINDINGS}. request_changes iff at least one blocking. \`[AMBIGUOUS: …]\` items stay in result, not here.`,
+  `Reviewer's ready report only: the reviewer workflow requires it on every ready report, [] for an approve with nothing to note (the schema leaves it optional). At most ${MAX_FINDINGS}, one per finding. \`[AMBIGUOUS: …]\` items stay in result.`,
 );
 
 /** One wave of a planner's plan array, published without limits; checkReport enforces them. */
 export const waveShape = z.object({
   body: z.string().trim(),
   dependsOn: z.array(z.number().int()).optional().describe(
-    "1-based index of the earlier wave this one builds on, at most one. [] = independent: it starts its own branch and pull request on the default base. [k] = builds on wave k and continues on its branch. Omitted = depends on the previous wave (wave 1: none).",
+    "At most one: 1-based earlier wave built on. [] = independent, own branch and PR on the default base; [k] = builds on wave k, continues its branch; omitted = previous wave (wave 1: none).",
   ),
   stackOn: z.number().int().optional().describe(
-    "Chain heads only (dependsOn: []): the 1-based earlier implementation wave, on another chain, whose changes this chain builds on. Its branch and pull request stack on that chain's branch, and it starts once wave k is ready.",
+    "Chain heads only (dependsOn: []): 1-based earlier implementation wave k on another chain; this chain's branch and PR stack on that chain's branch, and it starts once wave k is ready.",
   ),
   design: z.boolean().optional().describe(
-    "true only for a design-only wave: a Designer draws the artboards in a design tool and writes no app code; the wave that builds on it implements them as a worker after the owner approves the artboards. Never on a chain tip.",
+    "true only for a design-only wave: a Designer draws artboards in a design tool, no app code; the wave building on it implements them as a worker after the owner approves. Never on a chain tip.",
   ),
   test: z.boolean().optional().describe(
     "Removed: a wave with test is refused.",
   ),
   spec: z.boolean().optional().describe(
-    "true only on an implementation wave that changes documented behaviour: the plan's one Spec Writer turns its `## Spec delta` into docs/ after the plan's last wave is ready. Never on a design wave.",
+    "true only on an implementation wave that changes documented behaviour: the plan's one Spec Writer turns its `## Spec delta` into docs/ after the last wave is ready. Never on a design wave.",
   ),
   feature: z.boolean().optional().describe(
-    "true on an implementation wave that adds new behaviour; its review runs the native-design check. Never on a design wave.",
+    "true on an implementation wave adding new behaviour; its review runs the native-design check. Never on a design wave.",
   ),
   reshape: z.boolean().optional().describe(
     "true on the reshape (make-native) wave of a big feature. Never on a design wave.",
@@ -129,31 +129,31 @@ export const waveShape = z.object({
 export const reportParams = z.object({
   state: z.enum(["active", "idle", "failed", "ready", "blocked"]),
   result: z.string().trim().optional().describe(
-    "The full report, any length; the plugin saves it to a per-report file. Required and non-empty when state is ready.",
+    "The full report, saved to a per-report file. Required and non-empty when state is ready.",
   ),
   summary: z.string().trim().optional().describe(
-    `Short summary Chief reads in the alert, at most ${SUMMARY_MAX} characters: outcome, changed files or verdict, verification commands with exit status, and next action. Put the full report in \`result\`; the plugin saves it to a file Chief can open. Leave this unset when \`result\` is already this short.`,
+    `Short summary Chief reads in the alert, at most ${SUMMARY_MAX} characters: outcome, changed files or verdict, verification commands with exit status, next action. Leave unset when \`result\` is that short.`,
   ),
   verdict: verdictSchema.optional().describe(
-    "Ready only. Required in a review thread: approve when the change can ship as it stands, request_changes only when at least one blocking finding exists; nits alone never reject. Workers leave this unset.",
+    "Ready only. The reviewer workflow requires it with findings, and a plan advisor's ready report requires it: approve when the change can ship as it stands, request_changes iff at least one blocking finding. Workers leave unset.",
   ),
   lesson: z.string().trim().optional().describe(
-    `Ready only, advisor or reviewer, at most ${LESSON_MAX} characters. An advisor records one durable, project-level rule future workers should follow so this class of rejection does not recur; a reviewer records a durable review rule or known false positive, shown to future reviewers only. Omit when the cause is task-specific.`,
+    `Ready only, advisor or reviewer, at most ${LESSON_MAX} characters. Advisor: one durable project-level rule for future workers. Reviewer: a durable review rule or known false positive, shown to future reviewers only. Omit when task-specific.`,
   ),
   regression: z.boolean().optional().describe(
-    "Ready only, reviewer only, with request_changes: true when the change introduced a new problem or regression that was not there before. Workers leave this unset.",
+    "Ready only, reviewer only, with request_changes: true when the change introduced a new problem. Workers leave unset.",
   ),
   plan: z.union([
     z.string().trim(),
     z.array(waveShape),
   ]).optional().describe(
-    `Ready only. A planner's ready report requires this: a string (one wave) or an array of 1 to ${MAX_WAVES} {body, dependsOn, stackOn?, design?, spec?, feature?, reshape?} (1-based) waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. dependsOn has at most one entry: the 1-based earlier wave this one builds on; [] = independent, omitted = depends on the previous wave. design: true marks a design-only wave; spec: true marks an implementation wave whose ## Spec delta the plan's one Spec Writer turns into docs/ after the plan's last wave is ready; feature: true marks an implementation wave that adds new behaviour; reshape: true marks a big feature's reshape wave. Chief receives each wave as its own file, not inline. No other role sets this.`,
+    `Ready only. Required on a planner's ready report, the full plan body: a string (one wave) or an array of 1 to ${MAX_WAVES} waves, each body at most ${MAX_PLAN_LENGTH.toLocaleString("en-US")} characters. Chief receives each wave as its own file. No other role sets this.`,
   ),
   blocker: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters; leave unset otherwise.`),
-  recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
+  recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: recommended decision or next action.`),
   fails: failsParam,
   findings: findingsParam,
-  waitingOnUser: z.boolean().optional().describe("Design researcher only, with state active or blocked: true while your design questions wait on the user."),
+  waitingOnUser: z.boolean().optional().describe("Design researcher only, state active or blocked: true while design questions wait on the user."),
 });
 
 export type ReportParams = z.infer<typeof reportParams>;
