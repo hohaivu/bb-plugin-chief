@@ -54,6 +54,15 @@ describe("deleteSafeBranch: the remote branch is gone", () => {
     expect(fx.hasBranch(BRANCH)).toBe(false);
   });
 
+  test("a stop raised while the forge lookup runs starts no further git command: the branch and its config stay", async () => {
+    const [tip] = squashMerged();
+    let stopped = false;
+    const result = await deleteSafeBranch({ cwd: fx.clone, env: gitEnv, branch: BRANCH, deadlineMs: 30_000, stopped: () => stopped, mergedHeads: async () => { stopped = true; return [tip!]; } });
+    expect(result).toHaveProperty("error");
+    expect(fx.hasBranch(BRANCH)).toBe(true);
+    expect(fx.git("config", "--get-regexp", `^branch\\.${BRANCH}\\.`)).not.toBe("");
+  });
+
   test("a head that does not contain the tip is skipped, a later head that does is still honoured", async () => {
     const [tip] = squashMerged();
     fx.git("checkout", "-q", "-b", "other-pr", "main");

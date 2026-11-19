@@ -150,12 +150,16 @@ describe("Chief backend", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const row = (key: string) => state.db.prepare("SELECT attempts, delivered_at, last_error FROM alert_outbox WHERE dedupe_key=?").get(key) as any;
     // The hung send's deadline ended with the tick: unsent, not acknowledged, and no second delivery started.
-    expect(row("test:hung")).toMatchObject({ delivered_at: null, last_error: "abandoned" });
+    expect(row("test:hung")).toMatchObject({ attempts: 0, delivered_at: null, last_error: "abandoned" });
     expect(row("test:skipped")).toMatchObject({ attempts: 0, delivered_at: null });
     expect(texts.filter((text) => text.includes("skipped alert"))).toHaveLength(0);
 
+    // The abandoned row keeps its attempt budget, is flagged uncertain, and is retried by the next supervisor.
+    expect(state.db.prepare("SELECT uncertain FROM alert_outbox WHERE dedupe_key='test:hung'").get()).toMatchObject({ uncertain: 1 });
+    state.harness.sdk.stub("threads.send", async () => ({ ok: true, delivery: "sent" }));
     await state.supervisorCycle();
     expect(row("test:skipped").delivered_at).not.toBeNull();
+    expect(row("test:hung").delivered_at).not.toBeNull();
   }, STOP_GRACE_MS + 5_000);
 
   test("alerts a stalled thread once with evidence and a ladder, then once to stop it at twice the threshold", async () => {

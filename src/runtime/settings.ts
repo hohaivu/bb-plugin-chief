@@ -15,7 +15,16 @@ export function createSettingsRuntime(ctx: Ctx) {
   const { activeChiefForProject, anyCooldown, bb, cooldownFor, db, roleModelRow, settings, store } = ctx;
   /** `stopped` is the abandoned supervisor tick's check: the flight it starts creates and records nothing once it reads true (a caller that joins that flight then gets the rejection). */
   async function ensureSection(stopped?: () => boolean): Promise<string> {
-    if (ctx.state.sectionEnsuring) return ctx.state.sectionEnsuring;
+    const joined = ctx.state.sectionEnsuring;
+    if (joined) {
+      try { return await joined; }
+      catch (error) {
+        // A flight the abandoned tick owned is not this caller's: run its own, unless it is stopped too.
+        if (!(error instanceof Error && error.message === "abandoned") || stopped?.()) throw error;
+        if (ctx.state.sectionEnsuring === joined) ctx.state.sectionEnsuring = null;
+        return ensureSection(stopped);
+      }
+    }
     const abandoned = () => { if (stopped?.()) throw new Error("abandoned"); };
     ctx.state.sectionEnsuring = (async () => {
       const sections = await bb.sdk.threadSections.list();
@@ -37,9 +46,11 @@ export function createSettingsRuntime(ctx: Ctx) {
     return (db.prepare(`SELECT value FROM plugin_meta WHERE key='section_id'`).get() as { value: string } | undefined)?.value ?? null;
   }
 
-  async function readRules(projectId: string) {
+  /** `stopped` is the abandoned supervisor tick's check: a read already dispatched writes no cache once it reads true. */
+  async function readRules(projectId: string, stopped?: () => boolean) {
     try {
       const file = await bb.sdk.projects.fileContent({ projectId, path: RULES_FILE });
+      if (stopped?.()) return BUILT_IN_RULES;
       const content = file.contentEncoding === "base64"
         ? Buffer.from(file.content, "base64").toString("utf8")
         : file.content;
@@ -47,7 +58,7 @@ export function createSettingsRuntime(ctx: Ctx) {
       ctx.state.rulesCache.set(projectId, rules);
       return rules;
     } catch {
-      ctx.state.rulesCache.set(projectId, BUILT_IN_RULES);
+      if (!stopped?.()) ctx.state.rulesCache.set(projectId, BUILT_IN_RULES);
       return BUILT_IN_RULES;
     }
   }

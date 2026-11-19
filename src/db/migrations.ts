@@ -461,4 +461,6 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN research_report_seq INTEGER`,
     // Tester row: 1 for an evidence-only tester, so configure leaves out the test-writing rules; NULL/0 is not.
     `ALTER TABLE managed_threads ADD COLUMN evidence_only INTEGER`,
+    // Alert row: 1 when a send abandoned in flight may still arrive, so the retry probes for its marker even though its attempt was refunded.
+    `ALTER TABLE alert_outbox ADD COLUMN uncertain INTEGER NOT NULL DEFAULT 0`,
 ];

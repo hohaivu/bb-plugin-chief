@@ -10,13 +10,14 @@ export async function bounded<T>(call: () => Promise<T>, ms: number, signal?: Ab
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort = () => {};
   try {
+    // The deadline and abort listener come first in the array so a call that aborts synchronously is heard.
     return await Promise.race([
-      (async () => call())(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("deadline passed")), Math.max(ms, 0));
         onAbort = () => reject(new Error("abandoned"));
         signal?.addEventListener("abort", onAbort, { once: true });
       }),
+      (async () => call())(),
     ]);
   } finally {
     clearTimeout(timer);

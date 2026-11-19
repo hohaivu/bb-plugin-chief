@@ -60,7 +60,7 @@ export function createCleanup(ctx: Ctx) {
 
   /** Moves a job to its next step in one UPDATE, with the alert that goes with the move in the same transaction. Delivery is
    * not awaited: the outbox row is durable and retryAlerts re-sends it. */
-  function cleanupMove(job: CleanupJob, step: CleanupStep, change: { outcome?: string; archivedAt?: number; environmentId?: string | null; branch?: string | null } = {}, alert?: { key: string; message: string }) {
+  function cleanupMove(signal: AbortSignal | undefined, job: CleanupJob, step: CleanupStep, change: { outcome?: string; archivedAt?: number; environmentId?: string | null; branch?: string | null } = {}, alert?: { key: string; message: string }) {
     const key = db.transaction(() => {
       const now = Date.now();
       db.prepare(`UPDATE cleanup_jobs SET step=?, step_at=?, attempts=0, last_error=NULL, outcome=COALESCE(?, outcome), archived_at=COALESCE(?, archived_at),
@@ -69,11 +69,11 @@ export function createCleanup(ctx: Ctx) {
       );
       return alert ? ctx.writeAlert(store.get(job.thread_id)!, alert.key, alert.message) : null;
     })();
-    if (key) void ctx.deliverAlert(key).catch((error) => bb.log.warn(`Cleanup alert ${key} will be retried: ${String(error)}`));
+    if (key) void ctx.deliverAlert(key, signal).catch((error) => bb.log.warn(`Cleanup alert ${key} will be retried: ${String(error)}`));
   }
 
   /** Counts a failed attempt; the third moves the job to the step's safe outcome and tells Chief, in one transaction. */
-  function cleanupFail(job: CleanupJob, error: unknown) {
+  function cleanupFail(job: CleanupJob, error: unknown, signal?: AbortSignal) {
     const detail = clip(error instanceof Error ? error.message : String(error), 500);
     if (job.step === "done") return;
     if (job.attempts + 1 < CLEANUP_ATTEMPTS) {
@@ -85,7 +85,7 @@ export function createCleanup(ctx: Ctx) {
       : job.step === "teardown" ? `bb environment show ${job.environment_id ?? "<environment id>"}`
       : job.step === "branch" ? `git branch -D ${job.branch ?? "<branch>"} (only after confirming origin holds its commits)`
       : `bb storage clear-thread --thread ${job.thread_id} --yes${/plugin|method/i.test(detail) && /not found|unknown|not installed|disabled/i.test(detail) ? " (enable the storage-retention plugin first)" : ""}`;
-    cleanupMove(job, failure.next, { outcome: failure.outcome }, {
+    cleanupMove(signal, job, failure.next, { outcome: failure.outcome }, {
       key: `cleanup-${job.step}-failed:alert`,
       message: `Cleanup of ${job.thread_id} failed at the ${job.step} step after ${CLEANUP_ATTEMPTS} attempts: ${clip(detail, 200)}. Left in place: ${failure.left}. Recover by hand: ${recover}.`,
     });
@@ -119,7 +119,10 @@ export function createCleanup(ctx: Ctx) {
       const insert = db.prepare(`INSERT OR IGNORE INTO cleanup_jobs (thread_id, chief_thread_id, project_id, step, step_at, created_at, updated_at) VALUES (?, ?, ?, 'archive', ?, ?, ?)`);
       const now = Date.now();
       for (const id of eligible) {
-        if (!(await prsMerged(id, rows, null, signal))) continue;
+        if (signal?.aborted) return;
+        const merged = await prsMerged(id, rows, null, signal);
+        if (signal?.aborted) return; // an interrupted lookup answers "not merged" or "no pull request": enqueue nothing from it
+        if (!merged) continue;
         const row = store.get(id)!;
         insert.run(id, row.chief_thread_id, row.project_id, now, now, now);
       }
@@ -130,13 +133,18 @@ export function createCleanup(ctx: Ctx) {
     try {
       const jobs = db.prepare(`SELECT * FROM cleanup_jobs WHERE step <> 'done' ORDER BY created_at ASC, rowid ASC`).all() as CleanupJob[];
       for (const job of jobs) {
+        if (signal?.aborted) return;
         try {
           // Archive and branch deletion wait for the forge to report every tied pull request merged; unknown keeps the job for a later pass.
-          if ((job.step === "archive" || job.step === "branch") && !(await prsMerged(job.thread_id, rows, null, signal))) continue;
+          if ((job.step === "archive" || job.step === "branch") && !(await prsMerged(job.thread_id, rows, null, signal))) {
+            if (signal?.aborted) return;
+            continue;
+          }
+          if (signal?.aborted) return;
           await cleanupStep(job, eligible, signal);
         } catch (error) {
           if (signal?.aborted) return;
-          try { cleanupFail(job, error); }
+          try { cleanupFail(job, error, signal); }
           catch (inner) { bb.log.error(`Cleanup of ${job.thread_id} could not record a failure at the ${job.step} step (${String(error)}): ${String(inner)}`); }
         }
       }
@@ -148,10 +156,10 @@ export function createCleanup(ctx: Ctx) {
   async function cleanupStep(job: CleanupJob, eligible: Set<string>, signal?: AbortSignal) {
     const id = job.thread_id;
     const row = store.get(id);
-    if (!row) return cleanupMove(job, "done", { outcome: "kept: no managed row" });
+    if (!row) return cleanupMove(signal, job, "done", { outcome: "kept: no managed row" });
     const label = `${row.role} “${row.title}” (${id})`;
     const waited = Date.now() - job.step_at;
-    const finish = (outcome: string, alert?: { key: string; message: string }) => cleanupMove(job, "done", { outcome }, alert);
+    const finish = (outcome: string, alert?: { key: string; message: string }) => cleanupMove(signal, job, "done", { outcome }, alert);
 
     if (job.step === "archive") {
       const live = await cleanupRead(id, signal);
@@ -179,7 +187,7 @@ export function createCleanup(ctx: Ctx) {
         const extra = archived.archivedThreadIds.filter((other) => other !== id);
         if (extra.length) {
           const key = ctx.enqueueAlert(row, "cleanup-scope-extra:alert", `Cleaning up ${label} archived ${extra.length} other thread(s) with it: ${extra.join(", ")}. Restore each with: ${extra.map((other) => `bb thread unarchive ${other}`).join("; ")}.`);
-          void ctx.deliverAlert(key).catch((error) => bb.log.warn(`Cleanup alert ${key} will be retried: ${String(error)}`));
+          void ctx.deliverAlert(key, signal).catch((error) => bb.log.warn(`Cleanup alert ${key} will be retried: ${String(error)}`));
         }
         const after = await bounded(() => bb.sdk.threads.get({ threadId: id }), CLEANUP_READ_MS, signal);
         if (after.archivedAt === null) throw new Error("the archive call returned but the thread is not archived");
@@ -197,7 +205,7 @@ export function createCleanup(ctx: Ctx) {
         } catch (error) { unreadable = clip(String(error), 200); }
       }
       if (signal?.aborted) return; // an abandoned read is not "unreadable": record nothing
-      return cleanupMove(job, branch ? "teardown" : "storage", { archivedAt, environmentId, branch, outcome: unreadable ? "branch kept: environment unreadable" : undefined }, unreadable ? {
+      return cleanupMove(signal, job, branch ? "teardown" : "storage", { archivedAt, environmentId, branch, outcome: unreadable ? "branch kept: environment unreadable" : undefined }, unreadable ? {
         key: "cleanup-branch-kept:alert",
         message: `Cleanup of ${label} archived it but could not read its environment ${environmentId} (${unreadable}), so its bb/ branch was not touched. Left in place: the branch. Inspect: bb environment show ${environmentId}.`,
       } : undefined);
@@ -225,19 +233,19 @@ export function createCleanup(ctx: Ctx) {
           return db.prepare(`SELECT thread_id FROM cleanup_environment_claims WHERE environment_id=? AND action=?`).get(job.environment_id, action) as { thread_id: string };
         })();
         if (claim.thread_id === id) return false;
-        cleanupMove(job, "storage", { outcome: `worktree shared: ${action} handled by ${claim.thread_id}` });
+        cleanupMove(signal, job, "storage", { outcome: `worktree shared: ${action} handled by ${claim.thread_id}` });
         return true;
       };
-      if (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return shared("branch") ? undefined : cleanupMove(job, "branch");
+      if (!environment || environment.status === "destroyed" || environment.lifecycle.phase === "destroyed" || environment.hostLifecycle === "removed") return shared("branch") ? undefined : cleanupMove(signal, job, "branch");
       const teardown = environment.lifecycle.teardown;
       const trouble = teardown?.message?.startsWith("Needs recovery:") ? teardown.message
         : environment.hostLifecycle === "cleanup-failed" && teardown?.status !== "running" ? `bb reports cleanup-failed${teardown?.message ? `: ${teardown.message}` : ""}` : null;
       const left = `Left in place: the bb/ branch ${job.branch} and the worktree. Inspect: bb environment show ${job.environment_id}.`;
-      if (trouble) return shared("trouble") ? undefined : cleanupMove(job, "storage", { outcome: "branch kept: teardown trouble" }, { key: "cleanup-teardown-trouble:alert", message: `Cleanup of ${label}: bb could not remove its worktree environment: ${clip(trouble, 300)}. ${left}` });
+      if (trouble) return shared("trouble") ? undefined : cleanupMove(signal, job, "storage", { outcome: "branch kept: teardown trouble" }, { key: "cleanup-teardown-trouble:alert", message: `Cleanup of ${label}: bb could not remove its worktree environment: ${clip(trouble, 300)}. ${left}` });
       if (Date.now() - generation <= TEARDOWN_LIMIT_MS) return;
-      if (environment.lifecycle.phase === "active") return cleanupMove(job, "storage", { outcome: "branch kept: environment in use" });
+      if (environment.lifecycle.phase === "active") return cleanupMove(signal, job, "storage", { outcome: "branch kept: environment in use" });
       if (shared("stuck")) return;
-      return cleanupMove(job, "storage", { outcome: "branch kept: teardown stuck" }, { key: "cleanup-teardown-stuck:alert", message: `Cleanup of ${label}: bb has not removed its worktree environment 60 minutes after the archive (${environment.lifecycle.phase}/${environment.hostLifecycle}). ${left}` });
+      return cleanupMove(signal, job, "storage", { outcome: "branch kept: teardown stuck" }, { key: "cleanup-teardown-stuck:alert", message: `Cleanup of ${label}: bb has not removed its worktree environment 60 minutes after the archive (${environment.lifecycle.phase}/${environment.hostLifecycle}). ${left}` });
     }
 
     if (job.step === "branch") {
@@ -246,7 +254,7 @@ export function createCleanup(ctx: Ctx) {
         bounded(() => bb.sdk.system.config(), CLEANUP_READ_MS, signal),
       ]);
       const source = project.sources?.find((candidate) => candidate.isDefault) ?? project.sources?.[0];
-      const kept = (reason: string, alert = false) => cleanupMove(job, "storage", { outcome: `branch kept: ${reason}` }, alert ? {
+      const kept = (reason: string, alert = false) => cleanupMove(signal, job, "storage", { outcome: `branch kept: ${reason}` }, alert ? {
         key: "cleanup-branch-kept:alert",
         message: `Cleanup of ${label} kept its bb/ branch ${job.branch}: ${reason}. Left in place: the local branch. Delete it yourself with git branch -D ${job.branch} once you have confirmed origin holds its commits.`,
       } : undefined);
@@ -258,10 +266,10 @@ export function createCleanup(ctx: Ctx) {
       const mergedHeads = urls.length
         ? async () => (await Promise.all(urls.map((url) => mergeOf(url, source.path!, signal)))).flatMap((merged) => merged?.merged && merged.head ? [merged.head] : [])
         : undefined;
-      const result = await bounded(() => deleteSafeBranch({ cwd: source.path!, env: forgeEnv(), branch: job.branch!, deadlineMs: CLEANUP_CALL_MS, mergedHeads }), 2 * CLEANUP_CALL_MS + 5_000, signal);
+      const result = await bounded(() => deleteSafeBranch({ cwd: source.path!, env: forgeEnv(), branch: job.branch!, deadlineMs: CLEANUP_CALL_MS, mergedHeads, stopped: () => !!signal?.aborted }), 2 * CLEANUP_CALL_MS + 5_000, signal);
       if ("error" in result) throw new Error(result.error);
       if ("kept" in result) return kept(result.kept, true);
-      return cleanupMove(job, "storage", { outcome: "deleted" in result ? `branch deleted${result.note ? ` (${result.note})` : ""}` : "branch already gone" });
+      return cleanupMove(signal, job, "storage", { outcome: "deleted" in result ? `branch deleted${result.note ? ` (${result.note})` : ""}` : "branch already gone" });
     }
 
     // storage

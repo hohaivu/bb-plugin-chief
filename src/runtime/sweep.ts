@@ -23,12 +23,12 @@ export function createSweep(ctx: Ctx) {
   }
   /** Completes absorbed rows, each only after a fresh threads.get shows it live and not busy.
    * A failed or busy read leaves the row alone (fail closed); a later reload retries. */
-  async function completeAbsorbed(stopped?: () => boolean) {
+  async function completeAbsorbed(signal?: AbortSignal) {
     let completed = 0;
     for (const id of store.all().filter(absorbed).map((row) => row.thread_id)) {
-      if (stopped?.()) break;
+      if (signal?.aborted) break;
       const live = await bb.sdk.threads.get({ threadId: id }).catch(() => null);
-      if (stopped?.()) break;
+      if (signal?.aborted) break;
       if (!live || BUSY_STATUSES.has(live.status) || live.deletedAt !== null || live.archivedAt !== null) continue;
       const row = store.get(id);
       if (!row || !absorbed(row)) continue; // changed while the read was in flight
@@ -38,17 +38,19 @@ export function createSweep(ctx: Ctx) {
     return completed;
   }
   /** Single-flight: a reload during a sweep queues exactly one more pass instead of a racing one.
-   * `stopped` is the abandoned supervisor tick's check: the pass it starts reads, writes and alerts no more once it reads true. */
-  function sweep(stopped?: () => boolean) {
+   * `signal` is the abandoned supervisor tick's: the pass it starts reads, writes and alerts no more once it aborts. A queued no-argument pass is not the tick's, so it still runs. */
+  function sweep(signal?: AbortSignal) {
     if (ctx.state.sweeping) { ctx.state.sweepAgain = true; return ctx.state.sweeping; }
     ctx.state.sweeping = (async () => {
       // Reset in the same microtask as the last loop check, so no queued pass is lost in between.
       try {
+        let tick = signal;
         do {
           ctx.state.sweepAgain = false;
-          await completeAbsorbed(stopped);
-          if (stopped?.()) break;
-          for (const row of store.all()) ctx.alertCoordinator(row, { kind: "state" });
+          await completeAbsorbed(tick);
+          // An aborted tick stops here; a pass a no-argument caller queued meanwhile runs on, unbound from the tick.
+          if (tick?.aborted) { if (ctx.state.sweepAgain) tick = undefined; continue; }
+          for (const row of store.all()) ctx.alertCoordinator(row, { kind: "state" }, tick);
         } while (ctx.state.sweepAgain);
       } catch (error) {
         bb.log.warn(`Absorbed-thread sweep failed: ${String(error)}`);

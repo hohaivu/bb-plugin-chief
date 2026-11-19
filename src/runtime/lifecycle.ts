@@ -136,7 +136,7 @@ export function createLifecycle(ctx: Ctx) {
     if (configured) projects.add(configured);
     for (const projectId of projects) {
       if (stopped?.()) return;
-      await ctx.readRules(projectId);
+      await ctx.readRules(projectId, stopped);
     }
   }
 
@@ -232,7 +232,7 @@ export function registerLifecycle(ctx: Ctx) {
       if (stopped()) return;
       await ctx.reconcile(stopped);
       if (stopped()) return;
-      await ctx.sweep(stopped); // safety net for idle events missed across a reload, or a blocker archived without idling
+      await ctx.sweep(abandon); // safety net for idle events missed across a reload, or a blocker archived without idling
       if (stopped()) return;
       const values = await settings.get();
       if (stopped()) return;
@@ -268,7 +268,7 @@ export function registerLifecycle(ctx: Ctx) {
         }
       }
       if (stopped()) return;
-      for (const row of store.all()) if (ctx.isLinkedChild(row)) ctx.alertCoordinator(row, { kind: "stalled", thresholdMs: threshold });
+      for (const row of store.all()) if (ctx.isLinkedChild(row)) ctx.alertCoordinator(row, { kind: "stalled", thresholdMs: threshold }, abandon);
       // Hand an archived or deleted Chief's open work to the project's live Chief, starting
       // one if none is left. A failed Chief is not replaced: a failed turn is recoverable
       // (touchCallerChief), and its next event returns it to idle or active. Alerts from
@@ -280,16 +280,16 @@ export function registerLifecycle(ctx: Ctx) {
       if (stopped()) return;
       for (const orphaned of orphanedChiefs) {
         if (stopped()) return;
-        const next = await ctx.ensureChief(orphaned.project_id);
+        const next = await ctx.ensureChief(orphaned.project_id, stopped);
         if (stopped()) return;
         if (next.threadId === orphaned.thread_id) continue;
         // Work never moves to a Chief of another Coordinator: that case gets a dedicated successor.
         if (ctx.compatibleSuccessor(orphaned, store.get(next.threadId))) ctx.handOver(orphaned.thread_id, next.threadId, orphaned.project_id);
-        else await ctx.replaceChief(orphaned);
+        else await ctx.replaceChief(orphaned, stopped);
         if (stopped()) return;
       }
       if (stopped()) return;
-      if (values.autoSpawn && values.chiefProject) await ctx.ensureChief(values.chiefProject);
+      if (values.autoSpawn && values.chiefProject) await ctx.ensureChief(values.chiefProject, stopped);
       // Replace terminal Chiefs and retarget their queued alerts before any
       // pending delivery is attempted.
       if (stopped()) return;

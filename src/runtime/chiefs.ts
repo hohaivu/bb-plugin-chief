@@ -7,12 +7,18 @@ interface ChiefHandoff { fromChiefThreadId: string; title: string; request: stri
 export function createChiefs(ctx: Ctx) {
   const { bb, chiefCountForProject, db, latestChiefForProject, settings, store } = ctx;
   // Not on managedSpawn: it picks the model after building its prompt, skips the cooldown check, hands over between spawn and insert, and has no parent or brief file.
-  async function spawnChief(target: string, previous?: ManagedRow, handoff?: ChiefHandoff) {
-    const sectionId = await ctx.ensureSection();
+  // `stopped` is the abandoned supervisor tick's check: no call starts once it reads true. A spawn already dispatched is still recorded, or the next tick would spawn a second Chief.
+  async function spawnChief(target: string, previous?: ManagedRow, handoff?: ChiefHandoff, stopped?: () => boolean) {
+    const abandoned = () => { if (stopped?.()) throw new Error("abandoned"); };
+    abandoned();
+    const sectionId = await ctx.ensureSection(stopped);
+    abandoned();
     const name = await ctx.projectName(target);
+    abandoned();
     // Only to warm rulesCache: bb.agents.configure reads it synchronously and puts
     // the rules into every Chief turn, so the spawn prompt does not repeat them.
-    await ctx.readRules(target);
+    await ctx.readRules(target, stopped);
+    abandoned();
     const count = (chiefCountForProject.get(target) as { count: number }).count;
     const title = handoff ? `Chief · ${name} · ${handoff.title}` : count === 0 ? `Chief · ${name}` : `Chief · ${name} · ${count + 1}`;
     const prompt = [
@@ -28,13 +34,18 @@ export function createChiefs(ctx: Ctx) {
     const permissionMode = handoff
       ? (await bb.sdk.threads.defaultExecutionOptions({ threadId: handoff.fromChiefThreadId }).catch(() => null))?.permissionMode
       : undefined;
+    abandoned();
+    const hostId = await ctx.projectHostId(target);
+    abandoned();
+    const execution = await ctx.execution("chief", hostId);
+    abandoned();
     const thread = await bb.sdk.threads.spawn({
       projectId: target,
       environment: { type: "project-default" },
       sectionId,
       visibility: "visible",
       title,
-      ...(await ctx.execution("chief", await ctx.projectHostId(target))),
+      ...execution,
       ...(permissionMode ? { permissionMode } : {}),
       prompt,
       pluginMetadata: { role: "chief" },
@@ -102,26 +113,37 @@ export function createChiefs(ctx: Ctx) {
     return spawnChief(projectId, undefined, handoff);
   }
   /** A dedicated successor for an orphan whose project Chief belongs to another Coordinator: it hands over from the orphan and inherits its live link. */
-  function replaceChief(orphaned: ManagedRow) {
-    return spawnChief(orphaned.project_id, orphaned);
+  function replaceChief(orphaned: ManagedRow, stopped?: () => boolean) {
+    return spawnChief(orphaned.project_id, orphaned, undefined, stopped);
   }
-  async function ensureChief(projectId?: string) {
+  async function ensureChief(projectId?: string, stopped?: () => boolean): Promise<{ threadId: string; created: boolean }> {
+    if (stopped?.()) throw new Error("abandoned");
     const values = await settings.get();
+    if (stopped?.()) throw new Error("abandoned");
     const target = projectId ?? values.chiefProject;
     if (!target) throw new Error("Configure a default Chief project first: bb plugin config chief set chiefProject <proj-id>");
     const inFlight = ctx.state.chiefStarts.get(target);
-    if (inFlight) return inFlight;
+    if (inFlight) {
+      try { return await inFlight; }
+      catch (error) {
+        // A flight the abandoned tick owned is not this caller's: run its own, unless it is stopped too.
+        if (!(error instanceof Error && error.message === "abandoned") || stopped?.()) throw error;
+        if (ctx.state.chiefStarts.get(target) === inFlight) ctx.state.chiefStarts.delete(target);
+        return ensureChief(projectId, stopped);
+      }
+    }
     const start = (async () => {
       const existing = ctx.chiefForProject(target);
       if (existing) {
-        await ctx.reconcileThread(existing, await ctx.ensureSection());
+        await ctx.reconcileThread(existing, await ctx.ensureSection(stopped), stopped);
+        if (stopped?.()) throw new Error("abandoned");
         const reconciled = store.get(existing.thread_id);
         if (reconciled && !["failed", "deleted", "archived", "complete"].includes(reconciled.state)) {
           return { threadId: existing.thread_id, created: false };
         }
       }
       const previous = latestChiefForProject.get(target) as ManagedRow | undefined;
-      return spawnChief(target, previous);
+      return spawnChief(target, previous, undefined, stopped);
     })();
     ctx.state.chiefStarts.set(target, start);
     try {
