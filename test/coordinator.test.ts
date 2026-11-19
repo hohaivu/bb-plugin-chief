@@ -895,6 +895,26 @@ describe("Coordinator", () => {
       expect(failed.startsWith(path)).toBe(true);
       expect(failed).toMatch(/Note: decisions\.md was not updated \(see the plugin log\)\.\nPending:\n- todo #\d+: Own todo/);
     });
+
+    // The Children block is clipped to what the own Pending block and the failure note leave. Each child line is clipped to its share of 4,000 characters,
+    // so the blocks fit 6,000 at any size up to 4,000 children. At 4,001 the share is 0, clip() then keeps every line whole, and only that clip keeps the output in the cap.
+    test("a Coordinator's own Pending block and failure note survive an overflowing Children block", { timeout: 30_000 }, async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      await spawnChild(state, coord, { title: "Seed child" });
+      const insert = state.db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, coordinator_thread_id, created_at, updated_at) VALUES (?, 'chief', 'proj_1', ?, 'active', 'idle', ?, 1, 1)");
+      for (let index = 0; index < 4_001; index += 1) insert.run(`thr_crowd${index}`, `Crowd ${index}`, coord);
+      for (let item = 0; item < 3; item += 1) await call(state, "chief_roster", { todo: { text: `Own todo ${item} ${"x".repeat(80)}` } }, coord);
+      state.failWritesMatching(/decisions\.md/);
+      const text = await call(state, "chief_roster", { todo: { text: "Last own todo" } }, coord);
+      state.failWritesMatching(null);
+      const own = text.slice(text.lastIndexOf("\nPending:\n") + 1);
+      expect(text.length).toBeLessThanOrEqual(6_000);
+      expect(text.startsWith("Decisions: $BB_THREAD_STORAGE/decisions.md\n## Children\n")).toBe(true);
+      expect(text).toContain(`\nNote: decisions.md was not updated (see the plugin log).\nPending:\n`);
+      // The own block fits whole: all three todos and the last one, exactly as the Pending block renders them.
+      expect(own).toBe(`Pending:\n${[1, 2, 3].map((n) => `- todo #${n}: Own todo ${n - 1} ${"x".repeat(80)}`).join("\n")}\n- todo #4: Last own todo`);
+    });
   });
 
   describe("plain Chief chief_spawn is unchanged from base 95aa7df", () => {

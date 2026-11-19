@@ -29,7 +29,9 @@ const LAST = /^<!-- chief-last-id=(\d+) -->$/;
 export function parseDecisions(text: string) {
   const entries: (DecisionEntry & { body: string[] })[] = [];
   let last = 0;
-  for (const line of text.split("\n")) {
+  const lines = text.split("\n");
+  if (lines.at(-1) === "") lines.pop(); // the file's own final newline
+  for (const line of lines) {
     if (line === AFTER_HEADING) break;
     const marker = MARKER.exec(line);
     if (marker) {
@@ -42,7 +44,7 @@ export function parseDecisions(text: string) {
   return {
     last: Math.max(last, ...entries.map((entry) => entry.id!)),
     entries: entries.map(({ body, ...entry }) => {
-      while (body.length && !body.at(-1)!.trim()) body.pop();
+      if (body.at(-1) === "") body.pop(); // render ends every entry with one separator line; any other trailing blank line is payload
       const why: string[] = [];
       while (body.at(-1)?.startsWith("Why: ")) why.unshift(body.pop()!.slice(5));
       return { ...entry, text: body.map((line) => line.startsWith("\\") ? line.slice(1) : line).join("\n"), ...(why.length ? { why: why.join("\n") } : {}) };
@@ -50,10 +52,10 @@ export function parseDecisions(text: string) {
   };
 }
 
-/** The file text for entries that all have ids, the id high-water mark, plus the generated after-section. Text and reasons survive parseDecisions
- * except trailing blank lines: structural text lines are escaped, and every reason line carries its own Why prefix. */
+/** The file text for entries that all have ids, the id high-water mark, plus the generated after-section. Text and reasons survive parseDecisions exactly:
+ * structural text lines are escaped, every reason line carries its own Why prefix, and each entry ends with one separator line. */
 export function renderDecisions(entries: DecisionEntry[], last: number, afterLines: string[] = []) {
-  const after = afterLines.length ? `\n${AFTER_HEADING}\n${afterLines.join("\n")}\n` : "";
+  const after = afterLines.length ? `${AFTER_HEADING}\n${afterLines.join("\n")}\n` : "";
   const render = (entry: DecisionEntry) => {
     const text = entry.text.split("\n").map((line) => STRUCTURAL.test(line) ? `\\${line}` : line).join("\n");
     const why = entry.why === undefined ? "" : `${entry.why.split("\n").map((line) => `Why: ${line}`).join("\n")}\n`;
@@ -65,38 +67,44 @@ export function renderDecisions(entries: DecisionEntry[], last: number, afterLin
 export function createDecisions(ctx: Ctx) {
   const { bb, store, todoById, todosForProject } = ctx;
 
-  /** One read-modify-write of the owner's decisions.md, serialized per owner. Never rejects: resolves false (and logs) when the file was not written. */
-  function writeDecisions(ownerId: string, change: (entries: DecisionEntry[]) => DecisionEntry[], projectId?: string): Promise<boolean> {
-    const step = async () => {
-      try {
-        return await ctx.retryWhileProvisioning(async () => {
-          const project = projectId ?? store.get(ownerId)?.project_id;
-          // A read failure other than "missing" throws here: writing over a file we could not read would lose its entries.
-          const parsed = parseDecisions((await ctx.readStorageFileIfPresent(ownerId, FILE)) ?? "");
-          // New entries (also copied ones) take ids above the file's high-water mark, which pruning never lowers.
-          let last = parsed.last;
-          let entries = change(parsed.entries).map((entry) => entry.id === undefined ? { ...entry, id: ++last } : entry);
-          entries = entries.filter((entry) => {
-            if (entry.thread && terminal(store.get(entry.thread)?.state ?? "")) return false;
-            if (entry.todo === undefined || !project) return true;
-            return (todoById.get(entry.todo, project) as TodoRow | undefined)?.state === "open";
-          });
-          const todos = project ? (todosForProject.all(project) as TodoRow[]).filter((todo) => todo.chief_thread_id === ownerId && todo.after) : [];
-          const afterLines = fitLines(todos.map((todo) => ctx.todoLine(todo, ownerId)), MAX_AFTER - AFTER_HEADING.length - 3).lines;
-          // The newest entry always stays: an entry is far smaller than the cap.
-          while (entries.length > 1 && renderDecisions(entries, last, afterLines).length > MAX_FILE) entries = entries.slice(1);
-          await ctx.writeStorageFile(ownerId, FILE, renderDecisions(entries, last, afterLines));
-          return true;
-        });
-      } catch (error) {
-        bb.log.warn(`Could not update ${ownerId}'s ${FILE}: ${String(error)}`);
-        return false;
-      }
-    };
-    const run = (ctx.state.decisionWrites.get(ownerId) ?? Promise.resolve()).then(step);
+  /** Queues work behind the owner's pending writes. The work never rejects. */
+  function enqueue(ownerId: string, work: () => Promise<boolean>): Promise<boolean> {
+    const run = (ctx.state.decisionWrites.get(ownerId) ?? Promise.resolve()).then(work);
     ctx.state.decisionWrites.set(ownerId, run);
     void run.then(() => { if (ctx.state.decisionWrites.get(ownerId) === run) ctx.state.decisionWrites.delete(ownerId); });
     return run;
+  }
+
+  /** One read-modify-write of the owner's decisions.md; run it inside the owner's queue. Never rejects: resolves false (and logs) when the file was not written. */
+  async function step(ownerId: string, change: (entries: DecisionEntry[]) => DecisionEntry[], projectId?: string) {
+    try {
+      return await ctx.retryWhileProvisioning(async () => {
+        const project = projectId ?? store.get(ownerId)?.project_id;
+        // A read failure other than "missing" throws here: writing over a file we could not read would lose its entries.
+        const parsed = parseDecisions((await ctx.readStorageFileIfPresent(ownerId, FILE)) ?? "");
+        // New entries (also copied ones) take ids above the file's high-water mark, which pruning never lowers.
+        let last = parsed.last;
+        let entries = change(parsed.entries).map((entry) => entry.id === undefined ? { ...entry, id: ++last } : entry);
+        entries = entries.filter((entry) => {
+          if (entry.thread && terminal(store.get(entry.thread)?.state ?? "")) return false;
+          if (entry.todo === undefined || !project) return true;
+          return (todoById.get(entry.todo, project) as TodoRow | undefined)?.state === "open";
+        });
+        const todos = project ? (todosForProject.all(project) as TodoRow[]).filter((todo) => todo.chief_thread_id === ownerId && todo.after) : [];
+        const afterLines = fitLines(todos.map((todo) => ctx.todoLine(todo, ownerId)), MAX_AFTER - AFTER_HEADING.length - 3).lines;
+        // The newest entry always stays: an entry is far smaller than the cap.
+        while (entries.length > 1 && renderDecisions(entries, last, afterLines).length > MAX_FILE) entries = entries.slice(1);
+        await ctx.writeStorageFile(ownerId, FILE, renderDecisions(entries, last, afterLines));
+        return true;
+      });
+    } catch (error) {
+      bb.log.warn(`Could not update ${ownerId}'s ${FILE}: ${String(error)}`);
+      return false;
+    }
+  }
+
+  function writeDecisions(ownerId: string, change: (entries: DecisionEntry[]) => DecisionEntry[], projectId?: string) {
+    return enqueue(ownerId, () => step(ownerId, change, projectId));
   }
 
   /** Appends one entry to the owner's file. Never rejects. */
@@ -111,18 +119,22 @@ export function createDecisions(ctx: Ctx) {
     return writeDecisions(ownerId, (entries) => [...entries, entry]);
   }
 
-  /** Copies entries of one owner's file into another's own storage: all of them, or only those tied to todoId. Writes nothing for an empty selection. Never rejects. */
-  async function copyDecisions(fromId: string, toId: string, projectId: string, todoId?: number) {
-    try {
-      await ctx.state.decisionWrites.get(fromId); // never rejects
-      const source = parseDecisions((await ctx.readStorageFileIfPresent(fromId, FILE)) ?? "").entries
-        .filter((entry) => todoId === undefined || entry.todo === todoId);
-      if (!source.length) return true;
-      return await writeDecisions(toId, (entries) => [...entries, ...source.map(({ id: _, ...entry }) => entry)], projectId);
-    } catch (error) {
-      bb.log.warn(`Could not copy ${fromId}'s ${FILE} to ${toId}: ${String(error)}`);
-      return false;
-    }
+  /** Copies entries of one owner's file into another's own storage: all of them, or only those tied to todoId. A todo-specific copy that selects nothing writes nothing; a whole-file copy still rewrites the destination, so its generated after-section reflects moved todos. Never rejects.
+   * The destination's queue slot is taken now, so a later hand-over from that destination waits for this copy; the source's queue is read now too, so two owners copying to each other cannot wait on each other. */
+  function copyDecisions(fromId: string, toId: string, projectId: string, todoId?: number) {
+    const sourceWrites = ctx.state.decisionWrites.get(fromId); // never rejects
+    return enqueue(toId, async () => {
+      try {
+        await sourceWrites;
+        const source = parseDecisions((await ctx.readStorageFileIfPresent(fromId, FILE)) ?? "").entries
+          .filter((entry) => todoId === undefined || entry.todo === todoId);
+        if (!source.length && todoId !== undefined) return true;
+        return await step(toId, (entries) => [...entries, ...source.map(({ id: _, ...entry }) => entry)], projectId);
+      } catch (error) {
+        bb.log.warn(`Could not copy ${fromId}'s ${FILE} to ${toId}: ${String(error)}`);
+        return false;
+      }
+    });
   }
 
   return { writeDecisions, recordDecision, copyDecisions };

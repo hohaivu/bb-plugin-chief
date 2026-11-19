@@ -40,6 +40,24 @@ describe("decisions file: format", () => {
     expect(text.split("\n").filter((line) => line.startsWith("<!-- chief-decision"))).toHaveLength(3 + 1); // the three entries and the generated section's own marker-looking line
   });
 
+  // Regression: parse used to strip every trailing blank line of an entry, so text ending in a structural line plus blank lines came back shorter.
+  test("parse(render(entries)) keeps trailing empty and whitespace-only lines of text and reasons, with and without a reason, last entry or not", () => {
+    const at = "2026-01-01T00:00:00.000Z";
+    const tails = ["", "\n", "\n\n", "\n  ", "\n \t\n", "  "];
+    const input: DecisionEntry[] = [];
+    for (const lead of ["plain", HEADING, MARKER, "Why: looks like a reason", "\\"]) {
+      for (const tail of tails) {
+        input.push({ id: input.length + 1, kind: "decision", at, text: `before\n${lead}${tail}` });
+        input.push({ id: input.length + 1, kind: "decision", at, text: `before\n${lead}${tail}`, why: `${lead}${tail}` });
+      }
+    }
+    input.push({ id: input.length + 1, kind: "decision", at, text: "" }, { id: input.length + 2, kind: "decision", at, text: "\n\n", why: "\n" });
+    for (const after of [[], ["- todo #1: x (after: y)"]]) {
+      expect(parseDecisions(renderDecisions(input, input.length, after)).entries).toEqual(input);
+      for (const entry of input) expect(parseDecisions(renderDecisions([entry], entry.id!, after)).entries).toEqual([entry]);
+    }
+  });
+
   test("the id high-water mark survives a file with no entries and never drops below an entry's id", () => {
     expect(parseDecisions(renderDecisions([], 7))).toEqual({ last: 7, entries: [] });
     expect(parseDecisions(renderDecisions([{ id: 9, kind: "decision", at: "2026-01-01T00:00:00.000Z", text: "x" }], 4)).last).toBe(9);
@@ -47,7 +65,7 @@ describe("decisions file: format", () => {
 });
 
 describe("decisions file: unit", () => {
-  const unit = (read: () => Promise<string | null>, write = vi.fn(async () => "/p")) => {
+  const unit = (read: (ownerId: string) => Promise<string | null>, write = vi.fn(async (..._args: unknown[]) => "/p")) => {
     const warn = vi.fn();
     const ctx = {
       bb: { log: { warn } }, state: { decisionWrites: new Map() }, store: { get: () => ({ project_id: "proj_1" }) },
@@ -64,6 +82,26 @@ describe("decisions file: unit", () => {
     expect(await decisions.copyDecisions("thr_1", "thr_2", "proj_1")).toBe(false);
     expect(decisions.write).not.toHaveBeenCalled();
     expect(decisions.warn).toHaveBeenCalled();
+  });
+
+  // Regression: a copy took its place in the destination's queue only after reading the source, so a hand-over from the destination
+  // (A to B, then B to C while A's file is still being read) read B's old file, and A's entries stayed in the ended B.
+  test("a hand-over from a destination waits for the copy still reading into it", async () => {
+    const at = "2026-01-01T00:00:00.000Z";
+    const files = new Map([["thr_a", renderDecisions([{ id: 1, kind: "decision", at, text: "from a" }], 1)]]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const decisions = unit(async (id) => { if (id === "thr_a") await gate; return files.get(id) ?? null; }, vi.fn(async (...[id, , text]: unknown[]) => { files.set(id as string, text as string); return "/p"; }));
+    const first = decisions.copyDecisions("thr_a", "thr_b", "proj_1");
+    const second = decisions.copyDecisions("thr_b", "thr_c", "proj_1");
+    release();
+    expect(await Promise.all([first, second])).toEqual([true, true]);
+    expect(parseDecisions(files.get("thr_c")!).entries.map((entry) => entry.text)).toEqual(["from a"]);
+  });
+
+  test("two owners copying to each other do not wait on each other", async () => {
+    const decisions = unit(async () => null);
+    expect(await Promise.all([decisions.copyDecisions("thr_a", "thr_b", "proj_1"), decisions.copyDecisions("thr_b", "thr_a", "proj_1")])).toEqual([true, true]);
   });
 
   test("a failed write resolves false and warns", async () => {
@@ -272,6 +310,19 @@ describe("decisions file: hand-over and spawn", () => {
     for (let i = 0; i < 200 && (await entries(state, b).catch(() => [])).length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     expect(await entries(state, b)).toMatchObject([{ id: 1, text: "own to b" }, { id: 2, text: "from a", why: "reason" }]);
     expect(await entries(state, a)).toHaveLength(1); // the predecessor's file stays as it was
+  });
+
+  // Regression: a predecessor with only todos that wait on a condition and no entries left the successor's file unwritten, so its after-section was missing.
+  test("a hand-over of todos that only wait on a condition still writes the successor's after-section", async () => {
+    const state = await setup();
+    const a = (await start(state)).threadId;
+    const b = await make(state);
+    await delegate(state, a, "Open work keeps the hand-over due");
+    await call(state, "chief_roster", { todo: { text: "Wait for merge", after: "PR #42 merges" } }, a);
+    await archive(state, a);
+    for (let i = 0; i < 200 && !(await read(state, b).catch(() => "")).includes("PR #42 merges"); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(await read(state, b)).toContain("- todo #1: Wait for merge (after: PR #42 merges)");
+    expect(await entries(state, b)).toEqual([]);
   });
 
   test("chief_spawn with a moved todo carries only that todo's entries; without a todo the new Chief has no file; the caller's file is unchanged", async () => {

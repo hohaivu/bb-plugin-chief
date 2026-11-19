@@ -572,8 +572,9 @@ describe("answers", () => {
   test("one owner comment becomes one alert for the concerned thread, delivered once, and the flag clears", async () => {
     const { w } = await asked("Pick A or B.");
     owner(w, "o1", "Use option A.");
-    let seen: { receipts: number; alerts: number } | undefined;
-    w.recordAnswer.mockImplementation(() => { seen = { receipts: w.receipts("answer").length, alerts: w.answerAlert.mock.calls.length }; });
+    let seen: { inTransaction: boolean; alerts: number } | undefined;
+    // better-sqlite3's own flag: a same-connection read would see an uncommitted insert, this does not.
+    w.recordAnswer.mockImplementation(() => { seen = { inTransaction: (w.db as unknown as { inTransaction: boolean }).inTransaction, alerts: w.answerAlert.mock.calls.length }; });
     await w.sync.sync();
     expect(w.answerAlert).toHaveBeenCalledTimes(1);
     expect(w.answerAlert).toHaveBeenCalledWith("P1", `decision-${sha12("Pick A or B.")}:answer`,
@@ -582,7 +583,7 @@ describe("answers", () => {
     expect(w.deliver).toHaveBeenCalledWith(`out:decision-${sha12("Pick A or B.")}:answer`);
     expect(w.recordAnswer).toHaveBeenCalledTimes(1);
     expect(w.recordAnswer).toHaveBeenCalledWith("P1", "Use option A.", "Owner answer to decision #1 on tracker task “Alpha”");
-    expect(seen).toEqual({ receipts: 1, alerts: 1 }); // recording runs after the receipt and the alert are committed
+    expect(seen).toEqual({ inTransaction: false, alerts: 1 }); // recording runs after the receipt and the alert transaction has committed
     expect(w.receipts("answer")).toMatchObject([{ ref: "o1", state: "sent", result: sha12("Pick A or B.") }]);
     expect(w.receipts("decision")[0].answered_at).not.toBeNull();
     // The next pass closes the flag; seeing the same comment again does nothing.
