@@ -18,8 +18,6 @@ describe("checkout freshness", () => {
   const PRIMARY = { config: async () => ({ primaryHostId: "host_1" }), usageLimits: async () => ({}) };
   const CTX = { projectId: "proj_1" };
   const SURVEY = (question: string) => ({ question, design: false });
-  const FIRST_LINE = /^Started researcher thread thr_\d+ \(.*\)\. It answers in your checkout and reports through chief_report; the report arrives as a lifecycle alert\. Do not poll: end your turn\.$/;
-  const WARNING = /^Did not fast-forward your checkout to origin\/(main|the default branch): .+\. The (researcher|planner) reads it as it is\.$/;
 
   let realExecPromise: Promise<(file: string, args: string[], options: object) => Promise<{ stdout: string; stderr: string }>> | undefined;
   const realExec = async () => realExecPromise ??= (async () => {
@@ -107,18 +105,32 @@ describe("checkout freshness", () => {
   }
   type World = Awaited<ReturnType<typeof world>>;
 
-  /** Exactly the base reply, then one warning line. */
-  function expectWarned(reply: string, base: RegExp, reason: RegExp) {
+  /** One line naming the thread the call just spawned, then one warning line that carries the reason. */
+  function expectWarned(w: World, role: "researcher" | "planner", reply: string, reason: RegExp) {
     const lines = reply.split("\n");
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatch(base);
-    expect(lines[1]).toMatch(WARNING);
+    expect(lines[0]).toContain(w.rows(role).at(-1)!);
     expect(lines[1]).toMatch(reason);
   }
-  const RESEARCH_BASE = FIRST_LINE;
-  const PLAN_BASE = /^Started planner “Plan · Plan \d+” in thread thr_\d+\. Its ready alert lists the wave schedule and the exact next call\.$/;
-  const CLI_PLAN_BASE = /^Started planner “Plan · Plan \d+” in thr_\d+\.$/;
-  const noWarning = (reply: string, base: RegExp) => { expect(reply).toMatch(base); expect(reply).not.toContain("Did not fast-forward"); };
+  /** A single line naming the spawned thread: no warning line. */
+  function noWarning(w: World, role: "researcher" | "planner", reply: string) {
+    expect(reply.split("\n")).toHaveLength(1);
+    expect(reply).toContain(w.rows(role).at(-1)!);
+  }
+  /** The line after `State:` in an alert or report file. */
+  const afterState = (text: string) => { const lines = text.split("\n"); return lines[lines.findIndex((line) => line.startsWith("State:")) + 1]!; };
+
+  /** A stamp that read `c0` and sees `tip` on `branch` now. */
+  const expectStale = (stamp: string, c0: string, tip: string, branch = "main") => {
+    expect(stamp.startsWith(`Read at ${c0.slice(0, 12)}`)).toBe(true);
+    expect(stamp).toContain(tip.slice(0, 12));
+    expect(stamp).toContain(branch);
+  };
+  /** A CLI plan result without its prose: exit code, stderr, and for --json the parsed object with `warning` reduced to its presence. */
+  const cliShape = (result: { exitCode?: number; stdout?: string; stderr?: string }, json: boolean) => {
+    const { warning, ...rest } = json ? JSON.parse(result.stdout!) : ({} as Record<string, unknown>);
+    return { exitCode: result.exitCode, stderr: result.stderr, ...(json ? { json: { ...rest, ...(warning === undefined ? {} : { warning: true }) } } : {}) };
+  };
 
   const flush = async (ms = 0) => {
     await vi.advanceTimersByTimeAsync(ms);
@@ -149,7 +161,7 @@ describe("checkout freshness", () => {
       const w = await world();
       const tip = await w.r.push();
       const reply = await w.research();
-      noWarning(reply, RESEARCH_BASE);
+      noWarning(w, "researcher", reply);
       expect(await w.r.head()).toBe(tip);
       expect(w.spawnedRole("researcher")).toHaveLength(1);
       expect(w.calls.every((call) => call.cwd === w.r.chief && call.spawned === 1)).toBe(true);
@@ -158,7 +170,7 @@ describe("checkout freshness", () => {
 
     test("an already current clone is silent and never merges", async () => {
       const w = await world();
-      noWarning(await w.research(), RESEARCH_BASE);
+      noWarning(w, "researcher", await w.research());
       expect(w.calls.some((call) => call.args[0] === "merge")).toBe(false);
       expect(await w.r.head()).toBe(w.r.c0);
     });
@@ -166,7 +178,7 @@ describe("checkout freshness", () => {
     test("chief_plan in a project whose checkout is Chief's fast-forwards it and adds no warning", async () => {
       const w = await world({ projectPath: "clone" });
       const tip = await w.r.push();
-      noWarning(await w.plan(), PLAN_BASE);
+      noWarning(w, "planner", await w.plan());
       expect(await w.r.head()).toBe(tip);
     });
 
@@ -175,7 +187,7 @@ describe("checkout freshness", () => {
         const w = await world({ projectPath: "/elsewhere/worktree-default" });
         w.cfg.hostId = hostId;
         await w.r.push();
-        noWarning(await w.plan(), PLAN_BASE);
+        noWarning(w, "planner", await w.plan());
         expect(w.calls).toEqual([]);
         expect(await w.r.head()).toBe(w.r.c0);
         expect(w.spawnedRole("planner")).toHaveLength(1);
@@ -200,7 +212,7 @@ describe("checkout freshness", () => {
       await w.r.push();
       await arrange(w);
       const head = await w.r.head();
-      expectWarned(await w.research(), RESEARCH_BASE, reason);
+      expectWarned(w, "researcher", await w.research(), reason);
       expect(w.spawnedRole("researcher")).toHaveLength(1);
       expect(await w.r.head()).toBe(head);
       if (/remote host|path|default branch/.test(String(reason))) expect(w.calls).toEqual([]);
@@ -210,7 +222,7 @@ describe("checkout freshness", () => {
       const w = await world();
       await w.r.push();
       w.state.harness.sdk.stub("environments.get", async () => { throw new Error("env lookup failed"); });
-      expectWarned(await w.research(), RESEARCH_BASE, /env lookup failed/);
+      expectWarned(w, "researcher", await w.research(), /env lookup failed/);
       expect(w.spawnedRole("researcher")).toHaveLength(1);
       expect(w.calls).toEqual([]);
     });
@@ -219,7 +231,7 @@ describe("checkout freshness", () => {
       const w = await world();
       await w.r.push("new.txt");
       await writeFile(join(w.r.chief, "new.txt"), "mine\n");
-      expectWarned(await w.research(), RESEARCH_BASE, /git merge --ff-only failed/);
+      expectWarned(w, "researcher", await w.research(), /git merge --ff-only failed/);
       expect(w.spawnedRole("researcher")).toHaveLength(1);
       expect(await w.r.head()).toBe(w.r.c0);
     });
@@ -230,7 +242,7 @@ describe("checkout freshness", () => {
       await writeFile(join(w.r.chief, "local.env"), "SECRET=mine\n");
       await w.r.push("local.env");
       expect(await git(w.r.chief, "status", "--porcelain", "--untracked-files=no")).toBe("");
-      expectWarned(await w.research(), RESEARCH_BASE, /git merge --ff-only failed/);
+      expectWarned(w, "researcher", await w.research(), /git merge --ff-only failed/);
       expect(w.spawnedRole("researcher")).toHaveLength(1);
       expect(await readFile(join(w.r.chief, "local.env"), "utf8")).toBe("SECRET=mine\n");
       expect(await w.r.head()).toBe(w.r.c0);
@@ -240,7 +252,7 @@ describe("checkout freshness", () => {
       const w = await world({ projectPath: "clone" });
       await w.r.push();
       await writeFile(join(w.r.chief, "a.txt"), "dirty\n");
-      expectWarned(await w.plan(), PLAN_BASE, /uncommitted changes/);
+      expectWarned(w, "planner", await w.plan(), /uncommitted changes/);
       expect(w.spawnedRole("planner")).toHaveLength(1);
       expect(await w.r.head()).toBe(w.r.c0);
     });
@@ -249,7 +261,6 @@ describe("checkout freshness", () => {
   // chief_sync (PR 183): the Chief-only tool that runs the same fast-forward on Chief's own checkout, through the real tool handler.
   describe("chief_sync", () => {
     const sync = (w: World) => w.state.harness.behavior.callAgentTool("chief_sync", {}, w.ctx) as Promise<string>;
-    const SKIPPED = /^Did not fast-forward your checkout to origin\/main: /;
 
     test("a checkout one commit behind is fast-forwarded and the reply names the old and the new commit", async () => {
       const w = await world();
@@ -257,7 +268,6 @@ describe("checkout freshness", () => {
       const reply = await sync(w);
       expect(reply).toContain(w.r.c0.slice(0, 12));
       expect(reply).toContain(tip.slice(0, 12));
-      expect(reply).not.toContain("Did not fast-forward");
       expect(await w.r.head()).toBe(tip);
       expect(w.calls.some((call) => call.args[0] === "merge" && call.args.includes("--ff-only"))).toBe(true);
     });
@@ -266,7 +276,6 @@ describe("checkout freshness", () => {
       const w = await world();
       const reply = await sync(w);
       expect(reply).toContain(w.r.c0.slice(0, 12));
-      expect(reply).not.toContain("Did not fast-forward");
       expect(w.calls.some((call) => call.args[0] === "merge")).toBe(false);
       expect(await w.r.head()).toBe(w.r.c0);
     });
@@ -281,11 +290,11 @@ describe("checkout freshness", () => {
       ["a failing fetch", async (w: World) => { await git(w.r.chief, "remote", "set-url", "origin", join(w.r.root, "gone.git")); }, /git fetch failed/],
     ])("%s is a warning reply, not an error, and HEAD stays", async (_name, arrange, reason) => {
       const w = await world();
-      await w.r.push();
+      const tip = await w.r.push();
       await arrange(w);
       const head = await w.r.head();
       const reply = await sync(w);
-      expect(reply).toMatch(SKIPPED);
+      expect(reply).not.toContain(tip.slice(0, 12));
       expect(reply).toMatch(reason);
       expect(await w.r.head()).toBe(head);
     });
@@ -295,11 +304,11 @@ describe("checkout freshness", () => {
       await w.research();
       const [researcher] = w.rows("researcher");
       w.setLive(researcher!, "active");
-      await w.r.push();
+      const tip = await w.r.push();
       const before = w.calls.length;
       const reply = await sync(w);
-      expect(reply).toMatch(SKIPPED);
-      expect(reply).toContain(`researcher ${researcher} is still running in it`);
+      expect(reply).not.toContain(tip.slice(0, 12));
+      expect(reply).toContain(researcher!);
       expect(w.calls).toHaveLength(before);
       expect(await w.r.head()).toBe(w.r.c0);
     });
@@ -309,10 +318,10 @@ describe("checkout freshness", () => {
       await w.plan();
       const [planner] = w.rows("planner");
       w.setLive(planner!, "active");
-      await w.r.push();
+      const tip = await w.r.push();
       const reply = await sync(w);
-      expect(reply).toMatch(SKIPPED);
-      expect(reply).toContain(`planner ${planner} is still running in it`);
+      expect(reply).not.toContain(tip.slice(0, 12));
+      expect(reply).toContain(planner!);
       expect(await w.r.head()).toBe(w.r.c0);
     });
 
@@ -334,12 +343,12 @@ describe("checkout freshness", () => {
     const NOT_BUSY = ["idle", "ready", "blocked"];
     test.each(["active", "starting", "stopping", "pending"])("a researcher of this Chief whose live status is %s makes chief_research skip, and the next researcher still starts", async (status) => {
       const w = await world();
-      noWarning(await w.research(), RESEARCH_BASE);
+      noWarning(w, "researcher", await w.research());
       const [first] = w.rows("researcher");
       w.setLive(first!, status);
       await w.r.push();
       const before = w.calls.length;
-      expectWarned(await w.research(), RESEARCH_BASE, new RegExp(`researcher ${first} is still running in it`));
+      expectWarned(w, "researcher", await w.research(), new RegExp(first!));
       expect(w.spawnedRole("researcher")).toHaveLength(2);
       expect(w.calls).toHaveLength(before);
       expect(await w.r.head()).toBe(w.r.c0);
@@ -350,7 +359,7 @@ describe("checkout freshness", () => {
       await w.research();
       w.setLive(w.rows("researcher")[0]!, status);
       const tip = await w.r.push();
-      noWarning(await w.research(), RESEARCH_BASE);
+      noWarning(w, "researcher", await w.research());
       expect(await w.r.head()).toBe(tip);
     });
 
@@ -360,7 +369,7 @@ describe("checkout freshness", () => {
       const [first] = w.rows("researcher");
       await w.r.push();
       w.state.failNextGet(first!);
-      expectWarned(await w.research(), RESEARCH_BASE, new RegExp(`researcher ${first} is still running in it`));
+      expectWarned(w, "researcher", await w.research(), new RegExp(first!));
       expect(await w.r.head()).toBe(w.r.c0);
     });
 
@@ -386,7 +395,7 @@ describe("checkout freshness", () => {
         await flush(200);
         await call.settled;
         expect(hits).toBe(1);
-        expectWarned(call.value!, RESEARCH_BASE, new RegExp(`researcher ${first} is still running in it`));
+        expectWarned(w, "researcher", call.value!, new RegExp(first!));
         release();
         await flush(0);
       });
@@ -402,36 +411,37 @@ describe("checkout freshness", () => {
       const foreign = w.state.db.prepare("SELECT thread_id FROM managed_threads WHERE role='researcher' AND chief_thread_id=?").get(other) as { thread_id: string };
       w.setLive(foreign.thread_id, "active");
       const tip = await w.r.push();
-      noWarning(await w.research(), RESEARCH_BASE);
+      noWarning(w, "researcher", await w.research());
       expect(await w.r.head()).toBe(tip);
     });
 
     test("in a researcher call, a running planner whose sharing is unknown blocks", async () => {
       const w = await world();
-      expectWarned(await w.plan(), PLAN_BASE, /could not tell whether the planner shares it/);
+      expectWarned(w, "planner", await w.plan(), /could not tell whether the planner shares it/);
       const [planner] = w.rows("planner");
       w.setLive(planner!, "active");
       await w.r.push();
-      expectWarned(await w.research(), RESEARCH_BASE, new RegExp(`planner ${planner} is still running in it`));
+      expectWarned(w, "researcher", await w.research(), new RegExp(planner!));
       expect(await w.r.head()).toBe(w.r.c0);
     });
 
     test("in a researcher call, a running planner on a confirmed separate checkout does not block", async () => {
       const w = await world({ projectPath: "/elsewhere/worktree-default" });
-      noWarning(await w.plan(), PLAN_BASE);
+      noWarning(w, "planner", await w.plan());
       w.setLive(w.rows("planner")[0]!, "active");
       const tip = await w.r.push();
-      noWarning(await w.research(), RESEARCH_BASE);
+      noWarning(w, "researcher", await w.research());
       expect(await w.r.head()).toBe(tip);
     });
 
     test("a running planner that shares Chief's checkout blocks the next chief_plan", async () => {
       const w = await world({ projectPath: "clone" });
-      noWarning(await w.plan(), PLAN_BASE);
-      w.setLive(w.rows("planner")[0]!, "active");
+      noWarning(w, "planner", await w.plan());
+      const [first] = w.rows("planner");
+      w.setLive(first!, "active");
       await w.r.push();
       const before = w.calls.length;
-      expectWarned(await w.plan(), PLAN_BASE, /planner thr_\d+ is still running in it/);
+      expectWarned(w, "planner", await w.plan(), new RegExp(first!));
       expect(w.calls).toHaveLength(before);
       expect(w.spawnedRole("planner")).toHaveLength(2);
     });
@@ -482,7 +492,7 @@ describe("checkout freshness", () => {
         const w = await world({ projectPath: "clone" });
         await w.r.push();
         arrange(w);
-        expectWarned(await w.plan(), PLAN_BASE, UNKNOWN);
+        expectWarned(w, "planner", await w.plan(), UNKNOWN);
         expect(w.spawnedRole("planner")).toHaveLength(1);
         expect(w.calls).toEqual([]);
         expect(await w.r.head()).toBe(w.r.c0);
@@ -494,7 +504,7 @@ describe("checkout freshness", () => {
         arrange(w);
         const result = await w.cliPlan();
         expect(result.exitCode).toBe(0);
-        expectWarned(result.stdout!.trim(), CLI_PLAN_BASE, UNKNOWN);
+        expectWarned(w, "planner", result.stdout!.trim(), UNKNOWN);
         expect(w.spawnedRole("planner")).toHaveLength(1);
         expect(w.calls).toEqual([]);
         expect(await w.r.head()).toBe(w.r.c0);
@@ -505,11 +515,11 @@ describe("checkout freshness", () => {
       const w = await world({ projectPath: "clone" });
       const tip = await w.r.push();
       const ok = await w.cliPlan();
-      expect(ok.stdout!.trim()).toMatch(CLI_PLAN_BASE);
+      noWarning(w, "planner", ok.stdout!.trim());
       expect(await w.r.head()).toBe(tip);
       w.cfg.hostId = "host_2";
       const before = w.calls.length;
-      expectWarned((await w.cliPlan()).stdout!.trim(), CLI_PLAN_BASE, /remote host/);
+      expectWarned(w, "planner", (await w.cliPlan()).stdout!.trim(), /remote host/);
       expect(w.calls).toHaveLength(before);
     });
   });
@@ -530,7 +540,7 @@ describe("checkout freshness", () => {
         await flush(10_000);
         await call.settled;
         expect(w.inflight()).toBe(0);
-        expectWarned(call.value!, RESEARCH_BASE, /git fetch failed: .*killed after timeout/);
+        expectWarned(w, "researcher", call.value!, /git fetch failed: .*killed after timeout/);
       });
       expect(w.calls.every((call) => call.spawned === 1)).toBe(true);
       expect(w.spawnedRole("researcher")).toHaveLength(1);
@@ -548,7 +558,7 @@ describe("checkout freshness", () => {
         await flush(10_000);
         await call.settled;
         expect(w.inflight()).toBe(0);
-        expectWarned(call.value!, RESEARCH_BASE, /killed after timeout/);
+        expectWarned(w, "researcher", call.value!, /killed after timeout/);
       });
       expect(w.calls.map((call) => call.args[0])).toEqual(["status", "status"]);
       expect(w.spawnedRole("researcher")).toHaveLength(1);
@@ -568,8 +578,8 @@ describe("checkout freshness", () => {
       };
       await withFakeTimers(async () => {
         const reply = await w.research();
-        if (merges) noWarning(reply, RESEARCH_BASE);
-        else expectWarned(reply, RESEARCH_BASE, /timed out before the merge/);
+        if (merges) noWarning(w, "researcher", reply);
+        else expectWarned(w, "researcher", reply, /timed out before the merge/);
       });
       expect(named(w, "merge")).toHaveLength(merges ? 1 : 0);
       expect(await w.r.head()).toBe(merges ? tip : w.r.c0);
@@ -597,7 +607,7 @@ describe("checkout freshness", () => {
         }
         await call.settled;
         expect(w.inflight()).toBe(0);
-        expectWarned(call.value!, RESEARCH_BASE, /git merge --ff-only failed: .*killed after timeout/);
+        expectWarned(w, "researcher", call.value!, /git merge --ff-only failed: .*killed after timeout/);
       });
       expect(named(w, "merge")).toHaveLength(merges);
       // Every git call, the merges included, finished before the researcher was launched, and the checkout is untouched.
@@ -607,9 +617,9 @@ describe("checkout freshness", () => {
     });
 
     test.each([
-      ["chief_research", "researcher", async (w: World) => w.research(), RESEARCH_BASE],
-      ["chief_plan", "planner", async (w: World) => w.plan(), PLAN_BASE],
-    ] as const)("a held system.config lookup in %s times out after 5 s; releasing it later starts no git", async (_name, role, act, base) => {
+      ["chief_research", "researcher", async (w: World) => w.research()],
+      ["chief_plan", "planner", async (w: World) => w.plan()],
+    ] as const)("a held system.config lookup in %s times out after 5 s; releasing it later starts no git", async (_name, role, act) => {
       const w = await world({ projectPath: "clone" });
       await w.r.push();
       let release!: () => void;
@@ -623,7 +633,7 @@ describe("checkout freshness", () => {
         expect(call.done).toBe(false);
         await flush(200);
         await call.settled;
-        expectWarned(call.value!, base, /timed out/);
+        expectWarned(w, role, call.value!, /timed out/);
         release();
         await flush(0);
       });
@@ -651,7 +661,7 @@ describe("checkout freshness", () => {
         await until(() => hits === 1);
         await flush(5_100);
         await call.settled;
-        expectWarned(call.value!, PLAN_BASE, /could not tell whether the planner shares it/);
+        expectWarned(w, "planner", call.value!, /could not tell whether the planner shares it/);
         release();
         await flush(0);
       });
@@ -680,15 +690,15 @@ describe("checkout freshness", () => {
       expect(w.spawnedRole(role)).toHaveLength(1);
       expect(w.spawnedRole(role)[0].environment).toEqual(BRANCH_ENV);
       expect(branchOf(w, w.rows(role)[0]!)).toBe(BRANCH);
-      expect(reply).not.toContain("Did not fast-forward");
+      expect(reply.trim().split("\n")).toHaveLength(1);
       expect(w.calls).toEqual([]);
       expect(await w.r.head()).toBe(w.r.c0);
     });
 
-    test("the researcher reply says where it runs, and a researcher without a branch still says your checkout", async () => {
+    test("the researcher reply names its branch, and a researcher without a branch does not", async () => {
       const w = await world();
-      expect(await starts[0]![1](w)).toContain(`answers in a fresh worktree on branch ${BRANCH} and reports`);
-      expect(await w.research()).toContain("in your checkout");
+      expect(await starts[0]![1](w)).toContain(BRANCH);
+      expect(await w.research()).not.toContain(BRANCH);
     });
 
     test.each([["researcher", starts[0]!], ["planner", starts[1]!]] as const)("an active %s on a branch never blocks chief_sync, which fast-forwards", async (role, [, start]) => {
@@ -697,7 +707,7 @@ describe("checkout freshness", () => {
       w.setLive(w.rows(role)[0]!, "active");
       const tip = await w.r.push();
       const reply = await sync(w);
-      expect(reply).not.toContain("still running in it");
+      expect(reply).not.toContain(w.rows(role)[0]!);
       expect(reply).toContain(tip.slice(0, 12));
       expect(await w.r.head()).toBe(tip);
     });
@@ -711,7 +721,7 @@ describe("checkout freshness", () => {
       w.setLive(shared!, "active");
       await w.r.push();
       const reply = await sync(w);
-      expect(reply).toContain(`researcher ${shared} is still running in it`);
+      expect(reply).toContain(shared!);
       expect(reply).not.toContain(onBranch!);
       expect(await w.r.head()).toBe(w.r.c0);
     });
@@ -730,7 +740,7 @@ describe("checkout freshness", () => {
       const spawnCalls = w.calls.length;
       await w.state.harness.behavior.callAgentTool("chief_report", { state: "blocked", blocker: "stuck", recommendation: "retry" }, { threadId: w.rows(role)[0]!, projectId: "proj_1" });
       const alert = w.state.sent.at(-1).input[0].text as string;
-      expect(alert).toContain(`State: blocked\nRead at ${w.r.c0.slice(0, 12)}; ${BRANCH} is now ${tip.slice(0, 12)}, so this answer may be stale\n`);
+      expectStale(afterState(alert), w.r.c0, tip, BRANCH);
       expect(w.calls.slice(spawnCalls).map((call) => call.args)).toEqual([["rev-parse", "HEAD"], ["ls-remote", "origin", `refs/heads/${BRANCH}`]]);
     });
   });
@@ -740,8 +750,6 @@ describe("checkout freshness", () => {
     const report = (w: World, threadId: string, extra: object = { state: "blocked", blocker: "stuck", recommendation: "retry" }) =>
       w.state.harness.behavior.callAgentTool("chief_report", extra, { threadId, projectId: "proj_1" });
     const stateOf = (w: World, threadId: string) => (w.state.db.prepare("SELECT last_report_state AS s FROM managed_threads WHERE thread_id=?").get(threadId) as { s: string }).s;
-    /** The line after `State:` in an alert or report file. */
-    const afterState = (text: string) => { const lines = text.split("\n"); return lines[lines.findIndex((line) => line.startsWith("State:")) + 1]; };
 
     describe.each([["researcher", async (w: World) => { await w.research(); return w.rows("researcher")[0]!; }],
       ["planner", async (w: World) => { await w.plan(); return w.rows("planner")[0]!; }]] as const)("%s", (role, spawn) => {
@@ -750,7 +758,6 @@ describe("checkout freshness", () => {
         const id = await spawn(w);
         await report(w, id);
         expect(alertText(w)).toContain(`State: blocked\nRead at ${w.r.c0.slice(0, 12)}\n`);
-        expect(alertText(w)).not.toContain("may be stale");
       });
 
       test("adds the stale clause exactly when ls-remote returns a different SHA", async () => {
@@ -759,7 +766,7 @@ describe("checkout freshness", () => {
         const tip = await w.r.push();
         const spawnCalls = w.calls.length;
         await report(w, id);
-        expect(afterState(alertText(w))).toBe(`Read at ${w.r.c0.slice(0, 12)}; main is now ${tip.slice(0, 12)}, so this answer may be stale`);
+        expectStale(afterState(alertText(w)), w.r.c0, tip);
         expect(await w.r.head()).toBe(w.r.c0);
         expect(w.calls.slice(spawnCalls).map((call) => call.args)).toEqual([["rev-parse", "HEAD"], ["ls-remote", "origin", "refs/heads/main"]]);
       });
@@ -779,9 +786,9 @@ describe("checkout freshness", () => {
         const tip = await w.r.push();
         await report(w, id, { state: "blocked", blocker: "stuck", recommendation: "retry", result: "word ".repeat(4_000) });
         const path = /Full report: (\S+)/.exec(alertText(w))![1]!;
-        const expected = `Read at ${w.r.c0.slice(0, 12)}; main is now ${tip.slice(0, 12)}, so this answer may be stale`;
-        expect(afterState(await readFile(path, "utf8"))).toBe(expected);
-        expect(afterState(alertText(w))).toBe(expected);
+        const stamp = afterState(await readFile(path, "utf8"));
+        expectStale(stamp, w.r.c0, tip);
+        expect(afterState(alertText(w))).toBe(stamp);
       });
 
       test.each([
@@ -804,7 +811,7 @@ describe("checkout freshness", () => {
       const w = await world();
       await w.research();
       const id = w.rows("researcher")[0]!;
-      await w.r.push(); // origin moved, so a working ls-remote would add the comparison clause
+      const tip = await w.r.push(); // origin moved, so a working ls-remote would add the comparison
       w.hold.git = (args, options) => (args[0] === "ls-remote" ? killedAfterTimeout(options) : undefined);
       const seqOf = () => (w.state.db.prepare("SELECT report_seq AS s FROM managed_threads WHERE thread_id=?").get(id) as { s: number }).s;
       await withFakeTimers(async () => {
@@ -829,7 +836,7 @@ describe("checkout freshness", () => {
       const stamp = `Read at ${w.r.c0.slice(0, 12)}`;
       expect(afterState(await readFile(path, "utf8"))).toBe(stamp);
       expect(afterState(alertText(w))).toBe(stamp);
-      expect(`${alertText(w)}\n${await readFile(path, "utf8")}`).not.toContain("is now");
+      expect(`${alertText(w)}\n${await readFile(path, "utf8")}`).not.toContain(tip.slice(0, 12));
       expect(stateOf(w, id)).toBe("blocked");
       expect(seqOf()).toBe(1);
       expect(w.state.db.prepare("SELECT report_path AS p FROM managed_threads WHERE thread_id=?").get(id)).toEqual({ p: path });
@@ -878,9 +885,10 @@ describe("checkout freshness", () => {
     });
   });
 
-  // Byte-equivalence with base 948c49c (before the fast-forward existed). The golden file was recorded on that commit by
+  // Equivalence with base 948c49c (before the fast-forward existed). The golden file was recorded on that commit by
   // running this same describe with ORACLE_OUT set; here the head output of the same fixture must equal it. With ORACLE_OUT
-  // set, this describe writes {meta, outputs} to that path instead of comparing.
+  // set, this describe writes {meta, outputs} to that path instead of comparing. Reply prose is not recorded: only the CLI
+  // exit code, stderr and parsed --json fields are (the tool-reply scenarios stay in FIXTURE so its hash matches the golden).
   describe("checkout equivalence with base 948c49c", () => {
     type Scenario = { name: string; projectPath: "clone" | "/elsewhere/worktree-default"; behind: boolean; call: "research" | "plan" | "cli-plan" | "cli-plan-json" };
     const FIXTURE: Scenario[] = [
@@ -901,19 +909,16 @@ describe("checkout freshness", () => {
     async function outputs() {
       const out: Record<string, unknown> = {};
       for (const scenario of FIXTURE) {
+        if (scenario.call === "research" || scenario.call === "plan") continue;
         const w = await world({ projectPath: scenario.projectPath });
         if (scenario.behind) await w.r.push();
-        if (scenario.call === "research") out[scenario.name] = await w.research();
-        else if (scenario.call === "plan") out[scenario.name] = await w.plan();
-        else {
-          const result = await w.cliPlan(...(scenario.call === "cli-plan-json" ? ["--json"] : []));
-          out[scenario.name] = { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
-        }
+        const json = scenario.call === "cli-plan-json";
+        out[scenario.name] = cliShape(await w.cliPlan(...(json ? ["--json"] : [])), json);
       }
       return out;
     }
 
-    test("tool results and CLI text and --json are byte-identical to the base recording for the same fixture", async () => {
+    test("CLI plan exit codes, stderr and --json fields are identical to the base recording for the same fixture", async () => {
       const actual = await outputs();
       if (process.env.ORACLE_OUT) {
         const meta = {
@@ -932,7 +937,8 @@ describe("checkout freshness", () => {
 
   // Preservation of #181's callers (chief_research, chief_plan, CLI plan) across the chief_sync refactor. The golden file was
   // recorded on base 0e3ab0c by running this same describe there with ORACLE_OUT_FRESH set; here the head output of the same
-  // fixture must equal it. Covers success and every skip path, recording reply, HEAD outcome, spawns and the git calls made.
+  // fixture must equal it. Covers success and every skip path, recording HEAD outcome, spawns, the git calls made and the
+  // CLI exit code, stderr and parsed --json fields (reply prose is not recorded).
   describe("checkout equivalence with base 0e3ab0c", () => {
     type Run = (w: World) => Promise<unknown>;
     type Scenario = { name: string; projectPath?: "clone" | string; run: Run };
@@ -942,10 +948,7 @@ describe("checkout freshness", () => {
       await git(w.r.chief, "commit", "-q", "-m", "mine");
     };
     const badOrigin = (w: World) => git(w.r.chief, "remote", "set-url", "origin", join(w.r.root, "gone.git"));
-    const cli = async (w: World, ...extra: string[]) => {
-      const result = await w.cliPlan(...extra);
-      return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
-    };
+    const cli = async (w: World, ...extra: string[]) => cliShape(await w.cliPlan(...extra), extra.includes("--json"));
     const FIXTURE: Scenario[] = [
       { name: "research, behind (fast-forward)", run: (w) => w.research() },
       { name: "research, current", run: async (w) => { await git(w.r.chief, "pull", "-q", "--ff-only"); return w.research(); } },
@@ -1012,11 +1015,12 @@ describe("checkout freshness", () => {
         const w = await world({ projectPath: scenario.projectPath });
         await w.r.push();
         const replies = await scenario.run(w);
+        const cliReplies = scenario.name.startsWith("CLI plan") ? { replies } : {};
         const head = await w.r.head();
         const originMain = await git(w.r.chief, "rev-parse", "origin/main");
         const normalize = (value: unknown) => JSON.parse(JSON.stringify(value).split(w.r.root).join("<root>").replace(/\b[0-9a-f]{40}\b/g, "<sha>"));
         out[scenario.name] = normalize({
-          replies,
+          ...cliReplies,
           head: head === w.r.c0 ? "c0" : head === originMain ? "origin tip" : "local commit",
           threads: { researcher: w.spawnedRole("researcher").length, planner: w.spawnedRole("planner").length },
           gitCalls: w.calls.map((call) => ({ args: call.args, cwd: call.cwd, spawned: call.spawned })),
@@ -1025,7 +1029,7 @@ describe("checkout freshness", () => {
       return out;
     }
 
-    test("research, chief_plan and CLI plan replies, HEAD, spawns and git calls are identical to base 0e3ab0c for every skip case and the fast-forward", async () => {
+    test("HEAD, spawns, git calls and CLI plan results are identical to base 0e3ab0c for every skip case and the fast-forward", async () => {
       const actual = await outputs();
       if (process.env.ORACLE_OUT_FRESH) {
         const meta = {

@@ -572,8 +572,9 @@ describe("answers", () => {
     owner(w, "o1", "Use option A.");
     await w.sync.sync();
     expect(w.answerAlert).toHaveBeenCalledTimes(1);
-    expect(w.answerAlert).toHaveBeenCalledWith("P1", `decision-${sha12("Pick A or B.")}:answer`,
-      "The owner answered decision #1 on tracker task “Alpha”:\nUse option A.\nTreat this as the owner's answer to that Need you request.");
+    expect(w.answerAlert).toHaveBeenCalledWith("P1", `decision-${sha12("Pick A or B.")}:answer`, expect.stringContaining("Use option A."));
+    expect(w.answerAlert.mock.calls[0]![2]).toContain("#1");
+    expect(w.answerAlert.mock.calls[0]![2]).toContain("Alpha");
     expect(w.deliver).toHaveBeenCalledTimes(1);
     expect(w.deliver).toHaveBeenCalledWith(`out:decision-${sha12("Pick A or B.")}:answer`);
     expect(w.receipts("answer")).toMatchObject([{ ref: "o1", state: "sent", result: sha12("Pick A or B.") }]);

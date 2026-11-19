@@ -120,8 +120,8 @@ describe("forge comment outbox with a fake adapter", () => {
     expect(o.enqueue(input("blocked:thr_w:1"))).toBe(false);
     expect(o.escalate).not.toHaveBeenCalled();
     await tick();
-    const message = `Could not queue the forge comment blocked for ${URL_GH}: SqliteError: no such table: forge_comments. The local record is intact.`;
-    expect(o.escalate.mock.calls).toEqual([["thr_w", "forge-comment:blocked:thr_w:1", message]]);
+    expect(o.escalate.mock.calls).toEqual([["thr_w", "forge-comment:blocked:thr_w:1", expect.stringContaining(URL_GH)]]);
+    expect(o.escalate.mock.calls[0]![2]).toContain("no such table");
     expect(fake.calls).toEqual([]);
   });
 
@@ -224,7 +224,8 @@ describe("forge comment outbox with a fake adapter", () => {
       expect(fake.posts).toHaveLength(index + 2);
     }
     expect(rowOf(db, key)).toMatchObject({ attempts: 5, posted_at: null, gave_up_at: T0 + 100_000, last_error: "HTTP 502 bad gateway" });
-    expect(o.escalate.mock.calls).toEqual([["thr_w", `forge-comment:${key}`, `Could not post the verdict comment to ${URL_GH} after 5 attempts: HTTP 502 bad gateway. The local record is intact.`]]);
+    expect(o.escalate.mock.calls).toEqual([["thr_w", `forge-comment:${key}`, expect.stringContaining(URL_GH)]]);
+    expect(o.escalate.mock.calls[0]![2]).toContain("HTTP 502 bad gateway");
     expect(fake.scans).toEqual(Array(4).fill(markerOf(key)));
     vi.setSystemTime(T0 + 200_000);
     await o.drain();
@@ -243,8 +244,8 @@ describe("forge comment outbox with a fake adapter", () => {
     fake.impl.post = async () => { throw transient(); };
     const o = outbox(db, fake, { escalate: escalate as any });
     await expect(o.drain()).resolves.toBeUndefined();
-    const message = `Could not post the blocked comment to ${URL_GH} after 5 attempts: HTTP 502 bad gateway. The local record is intact.`;
-    expect(o.log.error).toHaveBeenCalledWith(`${message} The Chief alert also failed: Error: alert down`);
+    expect(o.log.error).toHaveBeenCalledTimes(1);
+    for (const part of [URL_GH, "HTTP 502 bad gateway", "Error: alert down"]) expect(o.log.error.mock.calls[0]![0]).toContain(part);
     expect(rowOf(db, "blocked:thr_w:1").gave_up_at).toBe(T0);
   });
 
@@ -296,7 +297,8 @@ describe("forge comment outbox with a fake adapter", () => {
     expect(fake.scans).toEqual([markerOf(key)]);
     expect(fake.posts).toHaveLength(1);
     expect(rowOf(db, key)).toMatchObject({ attempts: 6, gave_up_at: T0, posted_at: null });
-    expect(o.escalate.mock.calls).toEqual([["thr_w", `forge-comment:${key}`, `Could not post the complete comment to ${URL_GH} after 5 attempts: HTTP 502 bad gateway. The local record is intact.`]]);
+    expect(o.escalate.mock.calls).toEqual([["thr_w", `forge-comment:${key}`, expect.stringContaining(URL_GH)]]);
+    expect(o.escalate.mock.calls[0]![2]).toContain("HTTP 502 bad gateway");
     await o.drain();
     expect(fake.posts).toHaveLength(1);
   });

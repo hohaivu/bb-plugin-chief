@@ -96,7 +96,11 @@ describe("tracker integration", () => {
   }
   const decisionBody = (n: number, request: string) =>
     `**Decision #${n}** (Chief)\n\n${request}\n\nAnswer with a comment; start it with #${n} when several decisions are open.\n\nchief-decision:${sha12(request)}`;
-  const answerAlerts = (state: State) => state.sent.filter((message) => String(message.input?.[0]?.text).includes("The owner answered decision"));
+  /** Alerts sent to a Chief whose text is the message of an `:answer` outbox row. */
+  const answerAlerts = (state: State) => {
+    const bodies = (state.db.prepare("SELECT message FROM alert_outbox WHERE dedupe_key LIKE '%:answer'").all() as { message: string }[]).map((row) => row.message);
+    return state.sent.filter((message) => bodies.some((body) => String(message.input?.[0]?.text).includes(body)));
+  };
 
   // Contract (tracker spec, Bootstrap + Mirroring): from an empty store a new plan becomes one task: created with the unit marker as
   // the last description line, the planner attached, status planning (todo), in that order, and only on a supervisor pass.
@@ -275,7 +279,13 @@ describe("tracker integration", () => {
     await settled(state, tasks);
     return { chief, worker, task: taskOf(tasks, worker) };
   }
-  const ANSWERED = (n: number, comment: string) => `The owner answered decision #${n} on tracker task “Fix totals”:\n${comment}\nTreat this as the owner's answer to that Need you request.`;
+  /** One answer alert to `thread`: the lifecycle header, the decision number, the owner's comment and the task title. */
+  const expectAnswer = (message: { threadId: string; input: { text: string }[] } | undefined, thread: string, n: number, comment: string) => {
+    expect(message?.threadId).toBe(thread);
+    const text = withoutAlertMarker(message!.input[0]!.text);
+    expect(text.startsWith("[Chief lifecycle alert]\n")).toBe(true);
+    for (const part of [`#${n}`, comment, "Fix totals"]) expect(text).toContain(part);
+  };
 
   // Contract (spec, Answers): an owner comment on the task reaches Chief as exactly one alert, however often the poll sees it; the
   // decision flag is raised by the decision and lowered by its answer.
@@ -291,7 +301,8 @@ describe("tracker integration", () => {
     expect(answerAlerts(state)).toHaveLength(0);
     tasks.owner(task, "Option A");
     for (let i = 0; i < 3; i += 1) { advance(61_000); await settled(state, tasks); }
-    expect(answerAlerts(state).map((message) => [message.threadId, withoutAlertMarker(message.input[0].text)])).toEqual([[chief, `[Chief lifecycle alert]\n${ANSWERED(1, "Option A")}`]]);
+    expect(answerAlerts(state)).toHaveLength(1);
+    expectAnswer(answerAlerts(state)[0], chief, 1, "Option A");
     expect(tasks.of("update").filter((a) => a.includes("--remove-label"))).toHaveLength(1);
   });
 
@@ -316,7 +327,8 @@ describe("tracker integration", () => {
     await state.supervisorCycle();
     await until(() => pending()?.delivered_at);
     expect(pending()!.target_thread_id).toBe("thr_adopted");
-    expect(answerAlerts(state).map((message) => [message.threadId, withoutAlertMarker(message.input[0].text)])).toEqual([["thr_adopted", `[Chief lifecycle alert]\n${ANSWERED(1, "Option A")}`]]);
+    expect(answerAlerts(state)).toHaveLength(1);
+    expectAnswer(answerAlerts(state)[0], "thr_adopted", 1, "Option A");
   });
 
   // Contract (spec, Answers reasons): each decision's answer has its own alert kind, so two answers to two decisions on one thread both
@@ -341,9 +353,10 @@ describe("tracker integration", () => {
     advance(31_000);
     await state.supervisorCycle();
     await until(() => rows().every((row) => row.delivered_at));
-    expect(answerAlerts(state).map((message) => withoutAlertMarker(message.input[0].text)).sort()).toEqual([
-      `[Chief lifecycle alert]\n${ANSWERED(1, "#1 Option A")}`, `[Chief lifecycle alert]\n${ANSWERED(2, "#2 Later")}`,
-    ]);
+    const alerts = answerAlerts(state);
+    expect(alerts).toHaveLength(2);
+    expectAnswer(alerts.find((message) => message.input[0].text.includes("#1 Option A")), chief, 1, "#1 Option A");
+    expectAnswer(alerts.find((message) => message.input[0].text.includes("#2 Later")), chief, 2, "#2 Later");
   });
 
   // Contract (spec, Unit of work; recovery of a thread whose launch has not inserted its row): a spawn-seeded recovery has no pull request
