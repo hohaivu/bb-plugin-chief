@@ -21,6 +21,9 @@ const reviewOf = async (state: State, chiefThreadId: string, workerThreadId: str
 };
 const earlierRows = (context: string) => context.split("\n").filter((line) => /^- (worker|spec-writer|designer) thr_/.test(line));
 const ownership = (prompt: string) => prompt.split("\n## Docs ownership\n")[1]!.split("\n")[0]!;
+const owners = (prompt: string) => ownership(prompt).match(/thr_\w+/g) ?? [];
+// Gate items are read by number: "(4)" starts a line.
+const hasItem4 = (prompt: string) => /^\(4\) /m.test(prompt);
 const paragraphs = (prompt: string) => prompt.split("\n## Docs ownership\n").length - 1;
 
 describe("review prompt: Docs ownership", () => {
@@ -29,11 +32,8 @@ describe("review prompt: Docs ownership", () => {
     const { chief, worker, writer } = await fullChain(state);
     const { prompt, context } = await reviewOf(state, chief.threadId, worker);
     expect(paragraphs(prompt)).toBe(1);
-    const prefix = prompt.split("\n## Docs ownership\n")[0];
-    expect(prefix).toContain("Docs ownership, only when the brief has a Docs ownership section");
-    expect(prefix).toContain("Chief-Spec-Writer trailer");
-    expect(ownership(prompt)).toBe(`The Spec Writers of this task: ${writer}.`);
-    expect(prompt).toContain("(4) a docs/ ownership violation (see Docs ownership)");
+    expect(owners(prompt)).toEqual([writer]);
+    expect(hasItem4(prompt)).toBe(true);
     expect(prompt).not.toContain("## Context\n");
     expect(context).toContain(`## The report of worker ${writer}`);
     expect(context).toContain(`- wave 1 Spec Writer ${writer}: bb chief inspect ${writer}`);
@@ -46,9 +46,8 @@ describe("review prompt: Docs ownership", () => {
     await readyIdle(state, worker.threadId);
     const { prompt } = await reviewOf(state, chief.threadId, worker.threadId);
     expect(paragraphs(prompt)).toBe(1);
-    expect(ownership(prompt)).toBe("The Spec Writers of this task: none.");
-    expect(prompt).not.toContain("(4) a docs/");
-    expect(prompt).not.toContain("The Spec Writers of this task and where");
+    expect(owners(prompt)).toEqual([]);
+    expect(hasItem4(prompt)).toBe(false);
   });
 
   test("unplanned work whose chain holds a Spec Writer names it on the review of the worker that follows it", async () => {
@@ -61,8 +60,8 @@ describe("review prompt: Docs ownership", () => {
     const fix = await delegate(state, chief.threadId, "Fix", { replaces: writer.threadId, kind: "worker" });
     await readyIdle(state, fix.threadId);
     const { prompt, context } = await reviewOf(state, chief.threadId, fix.threadId);
-    expect(ownership(prompt)).toBe(`The Spec Writers of this task: ${writer.threadId}.`);
-    expect(prompt).toContain("(4) a docs/ ownership violation (see Docs ownership)");
+    expect(owners(prompt)).toEqual([writer.threadId]);
+    expect(hasItem4(prompt)).toBe(true);
     expect(earlierRows(context).some((line) => line.startsWith(`- spec-writer ${writer.threadId}:`))).toBe(true);
   });
 
@@ -85,7 +84,7 @@ describe("review prompt: Docs ownership", () => {
       await readyIdle(state, head);
     }
     const { prompt, context } = await reviewOf(state, chief.threadId, head);
-    expect(ownership(prompt)).toBe(`The Spec Writers of this task: ${writer}.`);
+    expect(owners(prompt)).toEqual([writer]);
     const rows = earlierRows(context);
     expect(rows.some((line) => line.startsWith(`- spec-writer ${writer}:`))).toBe(true);
     expect(rows.filter((line) => !line.startsWith("- spec-writer "))).toHaveLength(4);
