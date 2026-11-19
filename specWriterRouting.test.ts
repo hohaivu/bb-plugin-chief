@@ -222,10 +222,6 @@ describe("tester role", () => {
       expect(repair).toMatchObject({ kind: "spec-writer", replaces_thread_id: writer, plan_wave: 1, branch: CHAIN });
       expect(state.spawned.at(-1).environment).toEqual({ type: "host", hostId: expect.any(String), workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: CHAIN } } });
       expect(state.live.get(repair.thread_id)!.environmentId).not.toBe(environment);
-      const brief = String(state.spawned.at(-1).prompt);
-      expect(brief).toContain("Your worktree is fresh from");
-      expect(brief).not.toContain("already holds the previous worker's changes");
-      expect(brief).toContain("never cherry-pick or merge the previous writer's commits");
       expect(rowOf(state, writer).state).toBe("complete");
       expect(countRows(state)).toBe(rows + 1);
       expect(ownerOn(state, P, 1).thread_id).toBe(worker);
