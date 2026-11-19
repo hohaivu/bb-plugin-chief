@@ -107,6 +107,7 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - `sweep()` runs after each store reload once `pendingReady` is set, on `idle` and `failed` events, and after `reconcile()` in the supervisor loop.
 - `reconcileThread` reads the live thread. It records a deleted or archived thread. It moves the thread to the Chief section. It syncs the row state and status with the live thread.
 - An unchanged row causes no write and no reload. A changed row writes through `store.syncLive`, which reloads the store and starts the sweep.
+- An abandoned supervisor tick starts no new `sweep()` read or write. See COORD-12b.
 
 ### Alerts (`writeAlert`, `insertAlert`, `deliverAlert`)
 
@@ -355,6 +356,28 @@ Every row gets `skills: []`. The `coordinator` skill no longer exists. The `chie
 - `stillDue` does not invalidate an ended receipt. This exemption does not override target restrictions, backoff or the attempt cap.
 - A legacy need-you row (`<child>:coordinator-need-you:<sha12>`) remains due as long as the child remains linked to the same live Coordinator.
 
+### COORD-12b Supervisor stop
+
+The supervisor is the plugin service that reconciles managed rows, sends the problem alerts of COORD-12 and retries the alert outbox. This contract keeps the service within BB's stop window.
+
+- Code: `src/runtime/lifecycle.ts` (`registerLifecycle`, `supervisorTick`, `STOP_GRACE_MS`), `src/runtime/exec.ts` (`bounded`), `src/runtime/alerts.ts` (`deliverAlert`, `alertChief`, `retryAlerts`), `src/runtime/cleanup.ts` (`observeCleanup`), `src/runtime/sweep.ts` (`sweep`), `src/runtime/settings.ts` (`ensureSection`).
+- On abort, supervisor `start()` promise settles within `STOP_GRACE_MS`, which is 3 seconds.
+- Reason: BB marks the plugin `degraded (service supervisor did not stop)` when a service has not settled 5 seconds after the abort.
+- BB then refuses to load the new generation, so the `chief_*` tools disappear.
+- A tick that finishes within the grace runs every step to its end, in the same order.
+- A tick still running after the grace is abandoned.
+- An abandoned tick starts no new operation. It starts no further top-level step, reconcile row, `readRules` call, stall or orphan iteration, alert attempt or alert send, cleanup read or archive call.
+- An operation that the tick dispatched before abandonment may finish. The abandoned tick writes no state from its result.
+- The supervisor passes its stop check into `sweep(stopped)` and `ensureSection(stopped)`. Each one starts no new read, dispatch or write once the check returns true. Reason: an unchecked read keeps the tick running past the stop window.
+- The supervisor passes its `AbortSignal` into `observeCleanup(signal)`. Its `bounded` calls start no new call under an aborted signal. Reason: the cleanup reads and archive calls run past the stop window otherwise.
+- An alert send in flight at abandonment ends its wait at once. Its last error becomes `abandoned`. The abandoned tick counts no new attempt.
+- The abandoned send may still reach its target. The next retry checks the target for the alert marker before it sends again.
+- `reconcile(stopped?)` takes an optional stop check. `retryAlerts(signal?)` takes an optional `AbortSignal`.
+- Both end their serial loops when the stop is requested. `bounded` in `src/runtime/exec.ts` ends its race when the signal aborts. It rejects at once for an already aborted signal, without calling its operation.
+- A caller that passes no argument sees no change.
+- Abandonment clears the supervisor's own deadlines. No timer stays pending after `start()` settles, except an `unref`'d grace timer. Reason: a pending timer can fire after BB disposes the service.
+- Decision: [Abandon a stuck supervisor tick after a grace](../decisions/2026-11-19-supervisor-abandon-tick-after-grace.md).
+
 ### COORD-13 Notices to children
 
 - Notices to children use the label `[Coordinator notice]` and send via `alertSelf` with no sender thread id.
@@ -391,3 +414,4 @@ Every row gets `skills: []`. The `coordinator` skill no longer exists. The `chie
 - [Coordinator stays a Chief row with two nullable columns](../decisions/2026-11-10-coordinator-stays-chief-row.md)
 - [Owner answers reach a child through a marked relay](../decisions/2026-11-16-owner-answer-relay-marker.md)
 - [Decisions file is the only store](../decisions/2026-11-19-decisions-file-only-store.md)
+- [Abandon a stuck supervisor tick after a grace](../decisions/2026-11-19-supervisor-abandon-tick-after-grace.md)
