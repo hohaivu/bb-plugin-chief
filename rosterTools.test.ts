@@ -413,9 +413,11 @@ describe("Chief backend", () => {
     const worker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(workerId));
     const ordinary = await state.harness.behavior.resolveAgentConfiguration(configurationContext("thr_other"));
     expect(chief.tools.map((tool) => tool.name)).toEqual(["chief_forge_init", "chief_delegate", "chief_plan", "chief_spawn", "chief_coordinate", "chief_attach", "chief_consult", "chief_roster", "chief_inspect", "chief_continue", "chief_stop", "chief_review", "chief_complete", "chief_owner_approval", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research"]);
-    expect(chief.skills).toEqual(["chief", "coordinator"]);
+    expect(chief.skills).toEqual([]);
+    expect(chief.instructions).toContain("# Chief procedure");
     expect(worker.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
-    expect(worker.skills).toEqual(["chief-worker", "chief-role-worker"]);
+    expect(worker.skills).toEqual([]);
+    expect(worker.instructions).not.toContain("# Chief procedure");
     for (const tool of [...chief.tools, ...worker.tools] as any[]) {
       expect(tool.presentation?.label, tool.name).toMatchObject({ pending: expect.any(String), completed: expect.any(String) });
     }
@@ -453,7 +455,7 @@ describe("Chief backend", () => {
       pluginMetadata: { role: "reviewer", chiefThreadId: chief.threadId },
     });
     expect(resolved.tools.map((tool: any) => tool.name)).toContain("chief_report");
-    expect(resolved.skills).toEqual(["chief-worker", "chief-role-reviewer"]);
+    expect(resolved.skills).toEqual([]);
   });
 
   test("persists a reviewer's verdict even if chief_report races the row insert", async () => {
