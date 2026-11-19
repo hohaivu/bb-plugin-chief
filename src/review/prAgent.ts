@@ -89,7 +89,6 @@ export function prAgentScript(dir: string, limits = PR_AGENT_LIMITS): string {
 # shortcut: GitHub only (gh head check); add glab when a GitLab project needs pr-agent.
 # shortcut: a SIGKILL of the wrapper itself cannot be trapped; pr-agent then runs to its own end, still with publishing off.
 set -u
-set -m
 SECONDS=0
 TOTAL=${limits.totalSeconds}
 CHECK=${limits.checkSeconds}
@@ -130,6 +129,7 @@ budget() {
 # run_bounded <seconds> <cmd...>: runs the command in its own process group; TERM to the group at the
 # deadline, KILL 5 s later. Sets RB_STATUS (exit status) and RB_TIMEOUT (1 at the deadline).
 # Redirections on the call apply to the command.
+# Job control only while a step and its watcher start, so foreground commands never print setpgid noise.
 run_bounded() {
   RB_TIMEOUT=0
   RB_STATUS=0
@@ -137,10 +137,12 @@ run_bounded() {
   shift
   if [ "$rb_limit" -le 0 ]; then RB_TIMEOUT=1; RB_STATUS=124; return 0; fi
   rm -f "$TMP/timeout"
+  set -m
   "$@" &
   CUR_PID=$!
   ( trap "exit 0" TERM; sleep "$rb_limit"; : > "$TMP/timeout"; kill -TERM -- "-$CUR_PID" 2>/dev/null; sleep 5; kill -KILL -- "-$CUR_PID" 2>/dev/null ) >/dev/null 2>&1 &
   WATCH_PID=$!
+  set +m
   wait "$CUR_PID" 2>/dev/null
   RB_STATUS=$?
   if [ -e "$TMP/timeout" ]; then
