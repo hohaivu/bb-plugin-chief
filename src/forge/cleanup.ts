@@ -105,11 +105,15 @@ export type BranchDelete = { deleted: true; note?: string } | { gone: true } | {
 
 /** Deletes a local branch when no worktree has it checked out and either freshly fetched origin heads hold every commit on it,
  * or a merged task pull request's head (from `mergedHeads`, asked only when origin holds nothing) is the tip or contains it.
- * Local-only checks run before the network. Never throws. */
-export async function deleteSafeBranch(opts: { cwd: string; env: NodeJS.ProcessEnv; branch: string; deadlineMs: number; mergedHeads?: () => Promise<string[]> }): Promise<BranchDelete> {
+ * Local-only checks run before the network. Never throws. A `stopped` that turns true starts no further git command; one already running finishes. */
+export async function deleteSafeBranch(opts: { cwd: string; env: NodeJS.ProcessEnv; branch: string; deadlineMs: number; mergedHeads?: () => Promise<string[]>; stopped?: () => boolean }): Promise<BranchDelete> {
   const ref = `refs/heads/${opts.branch}`;
   try {
-    let git = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs);
+    let run = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs);
+    const git = (...args: Parameters<typeof run>) => {
+      if (opts.stopped?.()) throw new Error("abandoned");
+      return run(...args);
+    };
     const tip = (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], true)).trim();
     if (!tip) return { gone: true };
     const checkedOut = (await git(["for-each-ref", "--format=%(worktreepath)", ref])).trim();
@@ -122,7 +126,7 @@ export async function deleteSafeBranch(opts: { cwd: string; env: NodeJS.ProcessE
       let proved = false;
       if (opts.mergedHeads) {
         const heads = await opts.mergedHeads();
-        git = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs); // the forge call must not use up the git deadline
+        run = gitWithin(opts.cwd, opts.env, Date.now() + opts.deadlineMs); // the forge call must not use up the git deadline
         for (const head of heads) {
           if (!(await git(["rev-parse", "--verify", "--quiet", `${head}^{commit}`], true)).trim()) continue; // object not local: no proof
           // rev-list, not merge-base --is-ancestor: noMatchOk maps exit 1 to "" and would lose the answer.

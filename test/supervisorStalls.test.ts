@@ -5,6 +5,7 @@ import { delegate, disposals, disposeAll, setup, start, status } from "./harness
 import { forgeAnswers, forged } from "./gateForge";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
+import { STOP_GRACE_MS } from "../src/runtime/lifecycle";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
@@ -96,6 +97,70 @@ describe("Chief backend", () => {
     service.controller.abort();
     await expect(service.done).resolves.toBeUndefined();
   });
+
+  test("an abandoned supervisor tick starts no further rule read after its in-flight read settles", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    // A second project, so a read remains after the first one.
+    await state.harness.behavior.setSettings({ chiefProject: "proj_second" });
+    let reads = 0;
+    let release!: () => void;
+    let reached!: () => void;
+    const first = new Promise<void>((resolve) => { reached = resolve; });
+    state.harness.sdk.stub("projects.fileContent", async () => {
+      reads += 1;
+      if (reads > 1) throw new Error("no rules file");
+      reached();
+      await new Promise<void>((resolve) => { release = resolve; });
+      throw new Error("no rules file");
+    });
+    const service = state.harness.behavior.runService("supervisor");
+    await first;
+    const aborted = Date.now();
+    service.controller.abort();
+    await service.done;
+    const settledIn = Date.now() - aborted;
+    expect(settledIn).toBeGreaterThanOrEqual(STOP_GRACE_MS - 50);
+    expect(settledIn).toBeLessThan(5_000);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(reads).toBe(1);
+  }, STOP_GRACE_MS + 5_000);
+
+  test("an abandoned supervisor tick drops its hung alert send and starts no other; the next supervisor delivers the skipped row", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const insert = state.db.prepare("INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, created_at, attempts) VALUES (?, ?, ?, ?, ?, 0)");
+    insert.run("test:hung", chief.threadId, chief.threadId, "hung alert", Date.now() - 120_000);
+    insert.run("test:skipped", chief.threadId, chief.threadId, "skipped alert", Date.now() - 120_000);
+    const texts: string[] = [];
+    let reached!: () => void;
+    const first = new Promise<void>((resolve) => { reached = resolve; });
+    state.harness.sdk.stub("threads.send", async (args: any) => {
+      const text = args.input[0].text as string;
+      texts.push(text);
+      if (text.includes("hung alert")) { reached(); return new Promise(() => {}); }
+      return { ok: true, delivery: "sent" };
+    });
+    const service = state.harness.behavior.runService("supervisor");
+    await first;
+    service.controller.abort();
+    await service.done;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const row = (key: string) => state.db.prepare("SELECT attempts, delivered_at, last_error FROM alert_outbox WHERE dedupe_key=?").get(key) as any;
+    // The hung send's deadline ended with the tick: unsent, not acknowledged, and no second delivery started.
+    expect(row("test:hung")).toMatchObject({ attempts: 0, delivered_at: null, last_error: "abandoned" });
+    expect(row("test:skipped")).toMatchObject({ attempts: 0, delivered_at: null });
+    expect(texts.filter((text) => text.includes("skipped alert"))).toHaveLength(0);
+
+    // The abandoned row keeps its attempt budget, is flagged uncertain, and is retried by the next supervisor.
+    expect(state.db.prepare("SELECT uncertain FROM alert_outbox WHERE dedupe_key='test:hung'").get()).toMatchObject({ uncertain: 1 });
+    state.harness.sdk.stub("threads.send", async () => ({ ok: true, delivery: "sent" }));
+    await state.supervisorCycle();
+    expect(row("test:skipped").delivered_at).not.toBeNull();
+    expect(row("test:hung").delivered_at).not.toBeNull();
+  }, STOP_GRACE_MS + 5_000);
 
   test("alerts a stalled thread once with evidence and a ladder, then once to stop it at twice the threshold", async () => {
     const state = await setup();

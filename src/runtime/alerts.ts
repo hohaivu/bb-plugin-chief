@@ -17,6 +17,7 @@ interface AlertRow {
   last_error: string | null;
   created_at: number;
   last_attempt_at: number | null;
+  uncertain: number;
 }
 
 export function createAlerts(ctx: Ctx) {
@@ -112,7 +113,7 @@ export function createAlerts(ctx: Ctx) {
     }
   }
 
-  async function deliverAlert(key: string) {
+  async function deliverAlert(key: string, signal?: AbortSignal) {
     const existing = ctx.state.alertDeliveries.get(key);
     if (existing) return existing;
     const delivery = (async () => {
@@ -121,9 +122,10 @@ export function createAlerts(ctx: Ctx) {
       // Every direct caller meets the same backoff and cap as the batch; a deferred row is not sent and not counted as delivered.
       // A Coordinator receipt whose target is dead can never land: it is settled stale when it no longer applies, else left unsent.
       const deadTarget = key.includes(":coordinator-") && ["complete", "archived", "deleted"].includes(store.get(alert.target_thread_id)?.state ?? "");
-      if (alert.attempts > 0 || deadTarget) {
+      if (alert.attempts > 0 || alert.uncertain || deadTarget) {
         if (alert.attempts > 0 && !retryDue(alert, Date.now())) return false;
         const stale = await stillDue(alert);
+        if (signal?.aborted) return false;
         if (stale) {
           db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=? WHERE dedupe_key=?`).run(Date.now(), clip(`stale: ${stale}`, 1_000), key);
           return true;
@@ -134,11 +136,11 @@ export function createAlerts(ctx: Ctx) {
           const text = clip(alert.message);
           const marker = `[alert ${createHash("sha1").update(key).digest("hex").slice(0, 10)}]`;
           const matches = (part: { type: string; text?: string }) => part.type === "text" && !!part.text && (part.text.includes(marker) || part.text === text);
-          const queued = await bounded(() => bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id }), ALERT_CALL_MS);
+          const queued = await bounded(() => bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id }), ALERT_CALL_MS, signal);
           const alreadySent = queued.some((message) => message.content.some(matches))
             || (await bounded(() => bb.sdk.threads.events.list({
               threadId: alert.target_thread_id, types: ["item/completed"], order: "desc", limit: "50",
-            }), ALERT_CALL_MS)).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
+            }), ALERT_CALL_MS, signal)).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
               && event.data.item.content.some(matches));
           if (alreadySent) {
             db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
@@ -148,19 +150,26 @@ export function createAlerts(ctx: Ctx) {
           // Fall through to the send below.
         }
       }
+      // An abandoned tick counts no attempt and starts no send: the row stays retryable.
+      if (signal?.aborted) return false;
       // Counted before the send: a crash after it leaves attempts > 0, so the retry checks for the marker.
-      db.prepare(`UPDATE alert_outbox SET attempts=attempts+1, last_attempt_at=? WHERE dedupe_key=?`).run(Date.now(), key);
+      db.prepare(`UPDATE alert_outbox SET attempts=attempts+1, last_attempt_at=?, uncertain=0 WHERE dedupe_key=?`).run(Date.now(), key);
       try {
         await bounded(() => bb.sdk.threads.send({
           threadId: alert.target_thread_id,
           ...(alert.source_thread_id !== alert.target_thread_id ? { senderThreadId: alert.source_thread_id } : {}),
           mode: "queue-if-active",
           input: [{ type: "text", text: clip(alert.message), mentions: [] }],
-        }), ALERT_CALL_MS);
+        }), ALERT_CALL_MS, signal);
         db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
         return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        // An abandoned send may still arrive: refund its attempt so the cap does not drop the row, and flag it so the retry probes for the marker first.
+        if (signal?.aborted && message === "abandoned") {
+          db.prepare(`UPDATE alert_outbox SET attempts=MAX(attempts-1, 0), uncertain=1, last_error=? WHERE dedupe_key=?`).run(message, key);
+          return false;
+        }
         db.prepare(`UPDATE alert_outbox SET last_error=? WHERE dedupe_key=?`).run(clip(message, 1_000), key);
         bb.log.warn(`Could not deliver Chief alert ${key}: ${message}`);
         return false;
@@ -175,15 +184,15 @@ export function createAlerts(ctx: Ctx) {
   }
 
   /** An alert from a Chief to itself, once per key. Sent without a sender: a thread cannot message itself as its own sender. */
-  async function alertSelf(chiefThreadId: string, key: string, message: string, label?: string) {
+  async function alertSelf(chiefThreadId: string, key: string, message: string, label?: string, signal?: AbortSignal) {
     const dedupeKey = `${chiefThreadId}:${key}`;
     insertAlert(chiefThreadId, chiefThreadId, dedupeKey, message, label);
-    return deliverAlert(dedupeKey);
+    return deliverAlert(dedupeKey, signal);
   }
 
-  async function alertChief(row: ManagedRow, key: string, message: string) {
+  async function alertChief(row: ManagedRow, key: string, message: string, signal?: AbortSignal) {
     const outboxKey = enqueueAlert(row, key, message);
-    return deliverAlert(outboxKey);
+    return deliverAlert(outboxKey, signal);
   }
 
   /** The managed rows a Chief owns. */
@@ -236,11 +245,12 @@ export function createAlerts(ctx: Ctx) {
 
   /** The one door to a Coordinator's alerts. Each kind has one receipt key, so a repeat adds nothing; a retried row is re-checked by stillDue.
    * A child whose Coordinator is archived or deleted gets a notice instead. A failure is logged, never thrown: retryAlerts redelivers the row. */
-  function alertCoordinator(child: ManagedRow, alert: { kind: "state" } | { kind: "stalled"; thresholdMs: number } | { kind: "need-you"; request: string; concerned?: ManagedRow; url?: string }) {
+  function alertCoordinator(child: ManagedRow, alert: { kind: "state" } | { kind: "stalled"; thresholdMs: number } | { kind: "need-you"; request: string; concerned?: ManagedRow; url?: string }, signal?: AbortSignal) {
+    if (signal?.aborted) return;
     try {
       const dead = deadCoordinator(child);
       if (dead && ctx.isActiveChief(child)) {
-        void alertSelf(child.thread_id, `coordinator-gone:${dead.thread_id}`, `Your Coordinator ${dead.thread_id} was ${dead.state}: it gets no more alerts. Tell the owner here; another Coordinator can take you over with chief_attach.`, "Coordinator notice")
+        void alertSelf(child.thread_id, `coordinator-gone:${dead.thread_id}`, `Your Coordinator ${dead.thread_id} was ${dead.state}: it gets no more alerts. Tell the owner here; another Coordinator can take you over with chief_attach.`, "Coordinator notice", signal)
           .catch((error) => bb.log.warn(`Could not notify ${child.thread_id} of its gone Coordinator: ${String(error)}`));
         return;
       }
@@ -284,7 +294,7 @@ export function createAlerts(ctx: Ctx) {
       }
       const dedupeKey = `${child.thread_id}:${receipt}`;
       if (insertAlert(child.thread_id, coordinatorId, dedupeKey, message, "Coordinator alert")) {
-        void deliverAlert(dedupeKey).catch((error) => bb.log.warn(`Could not deliver Coordinator alert ${dedupeKey}: ${String(error)}`));
+        void deliverAlert(dedupeKey, signal).catch((error) => bb.log.warn(`Could not deliver Coordinator alert ${dedupeKey}: ${String(error)}`));
       }
     } catch (error) {
       bb.log.warn(`Could not alert Coordinator of ${child.thread_id}: ${String(error)}`);
@@ -301,8 +311,11 @@ export function createAlerts(ctx: Ctx) {
     }
   }
 
-  async function retryAlerts() {
-    for (const alert of pendingAlerts.all(Date.now() - 60_000, Date.now()) as AlertRow[]) await deliverAlert(alert.dedupe_key);
+  async function retryAlerts(signal?: AbortSignal) {
+    for (const alert of pendingAlerts.all(Date.now() - 60_000, Date.now()) as AlertRow[]) {
+      if (signal?.aborted) break;
+      await deliverAlert(alert.dedupe_key, signal);
+    }
   }
   return { alertChief, alertCoordinator, alertSelf, baselineDone, deliverAlert, enqueueAlert, insertAlert, needYouAt, recordFailure, retryAlerts, writeAlert };
 }
