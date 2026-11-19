@@ -118,12 +118,14 @@ describe("planner ready alert: plan files appear once", () => {
   const paths = [1, 2, 3].map((n) => `/s/chief/proj_1/thr_4/plan-${n}.md`);
   const waveLines = paths.map((path, index) => `Wave ${index + 1} of 3: ${path}`);
   const params = { state: "ready", result: "A three-wave plan." } as ReportParams;
-  const INTRO = "Plan files, wave 1 first. To show the plan to the user, put each line below alone on its own line in your reply (not in a code block):";
 
   test("with the mirror written, the inline lines carry each path once and no `Wave n of N:` line shows", () => {
     const result = reportAlert(input({ role: "planner", params, waveLines, inlinePlans: paths }))(null);
     expect(lines(result.text)).toContain("Plan: 3 wave(s)");
-    expect(lines(result.text).slice(lines(result.text).indexOf(INTRO))).toEqual(expect.arrayContaining([INTRO, ...paths]));
+    const alert = lines(result.text);
+    for (const path of paths) expect(alert).toContain(path);
+    const at = paths.map((path) => alert.indexOf(path));
+    expect(at).toEqual([...at].sort((a, b) => a - b));
     expect(result.text).not.toMatch(/^Wave \d of 3:/m);
     for (const path of paths) expect(result.text.split(path)).toHaveLength(2);
   });
@@ -131,7 +133,8 @@ describe("planner ready alert: plan files appear once", () => {
   test("with no inline lines (the mirror failed), the `Wave n of N:` lines show once each and there is no intro", () => {
     const result = reportAlert(input({ role: "planner", params, waveLines, inlinePlans: [] }))(null);
     for (const line of waveLines) expect(lines(result.text)).toContain(line);
-    expect(result.text).not.toContain("Plan files, wave 1 first.");
+    // Each path shows only inside its `Wave n of 3:` line, never as a bare line.
+    for (const path of paths) expect(lines(result.text)).not.toContain(path);
     for (const path of paths) expect(result.text.split(path)).toHaveLength(2);
   });
 

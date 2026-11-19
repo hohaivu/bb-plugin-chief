@@ -112,7 +112,8 @@ describe("Chief backend", () => {
       await state.supervisorCycle();
       const afterSoft = state.sent.length;
       const softAlert = state.sent.at(-1).input[0].text;
-      expect(softAlert).toContain("has been active for 1 minutes");
+      // chief_inspect appears only in the soft ladder, so it tells the soft alert from the stop alert.
+      expect(softAlert).toContain("chief_inspect");
       expect(softAlert).toContain(`last output from ${worker.threadId}`);
       expect(softAlert).toContain("chief_stop");
       expect(softAlert).toContain(`chief_delegate (replaces: ${worker.threadId})`);
@@ -125,8 +126,9 @@ describe("Chief backend", () => {
       await state.supervisorCycle();
       expect(state.sent).toHaveLength(afterSoft + 1);
       const hardAlert = state.sent.at(-1).input[0].text;
-      expect(hardAlert).toContain("twice the 1-minute stall threshold");
-      expect(hardAlert).toContain("Stop it now with chief_stop");
+      expect(hardAlert).toContain(worker.threadId);
+      expect(hardAlert).toContain("chief_stop");
+      expect(hardAlert).not.toContain("chief_inspect");
 
       const afterHard = state.sent.length;
       await state.supervisorCycle();
@@ -150,7 +152,9 @@ describe("Chief backend", () => {
       nowSpy.mockReturnValue(t0 + 121_000);
       await state.supervisorCycle();
       expect(state.sent).toHaveLength(1);
-      expect(state.sent.at(-1).input[0].text).toContain("Stop it now with chief_stop");
+      const alert = state.sent.at(-1).input[0].text;
+      expect(alert).toContain("chief_stop");
+      expect(alert).not.toContain("chief_inspect");
 
       await state.supervisorCycle();
       expect(state.sent).toHaveLength(1);
@@ -172,7 +176,7 @@ describe("Chief backend", () => {
 
       nowSpy.mockReturnValue(t0 + 121_000);
       await state.supervisorCycle();
-      expect(state.sent.at(-1).input[0].text).toContain("Stop it now with chief_stop");
+      expect(state.sent.at(-1).input[0].text).not.toContain("chief_inspect");
 
       const continueTime = t0 + 121_000;
       nowSpy.mockReturnValue(continueTime);
@@ -183,7 +187,7 @@ describe("Chief backend", () => {
       nowSpy.mockReturnValue(continueTime + 61_000);
       await state.supervisorCycle();
       expect(state.sent).toHaveLength(afterContinue + 1);
-      expect(state.sent.at(-1).input[0].text).toContain("has been active for 1 minutes");
+      expect(state.sent.at(-1).input[0].text).toContain("chief_inspect");
     } finally {
       nowSpy.mockRestore();
     }

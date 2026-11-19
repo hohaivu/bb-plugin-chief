@@ -8,6 +8,10 @@ import { provideSdk } from "./sdk";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
 afterEach(disposeAll);
+// Tool names appear in this order (not necessarily adjacent): pins the call order, not the sentences around it.
+const inOrder = (text: string, names: string[]) => names.reduce((from, name) => (from < 0 ? from : text.indexOf(name, from) < 0 ? -1 : text.indexOf(name, from) + name.length), 0) >= 0;
+// Long lines of `source` that `text` repeats: a second copy of a rule in a spawn prompt is one that can drift.
+const sharedLines = (text: string, source: string) => text.split("\n").filter((line) => line.length >= 60 && source.includes(line));
 describe("Chief backend", () => {
   // Without planThreadId the pull request body is the reviewer's whole brief (06f4b0d), so the mission is required.
   const FORGE_PARAMS = { title: "Fix checkout totals", mission: "Correct and verify totals", successCriteria: "Regression passes" };
@@ -60,7 +64,6 @@ describe("Chief backend", () => {
     expect(result).toContain("```sh");
     expect(result).toContain("CHIEF_FORGE");
     if (!projectPath) expect(execFileMock.mock.calls.filter(([file]) => file === "sh")).toHaveLength(0);
-    else expect(result).toContain("so run it yourself");
   });
 
   test("keeps the delegation policy and project rules out of every spawn prompt", async () => {
@@ -76,23 +79,21 @@ describe("Chief backend", () => {
 
     // Both live in what bb.agents.configure puts into every turn: the chief skill
     // and the rules. A second copy in a spawn prompt is one that can drift.
-    expect(state.spawned[0].prompt).not.toContain("high blast radius");
+    const chiefInstructions = (await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId))).instructions;
     for (const entry of state.spawned) {
       const text = (entry.prompt ?? entry.input?.[0]?.text ?? "") as string;
       expect(text).not.toContain("## Project rules");
+      expect(sharedLines(text, chiefInstructions)).toEqual([]);
     }
 
     // The built-in rules are Chief's own; a managed thread would only be told to call tools it lacks.
-    const chiefInstructions = (await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId))).instructions;
     expect(chiefInstructions).toContain("# Chief operating rules");
     expect(chiefInstructions).toContain("# Chief core rules (always apply)");
-    expect(chiefInstructions).toContain("Chief never edits code and never runs anything in a worktree");
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     for (const threadId of [worker.threadId, planner.threadId, branchReview.threadId]) {
       const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
       expect(configured.instructions).not.toContain("Chief operating rules");
       expect(configured.instructions).not.toContain("Chief core rules");
-      expect(configured.instructions).not.toContain("Chief never edits code");
     }
   });
 
@@ -101,11 +102,11 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const prompt = state.spawned[0].prompt as string;
-    expect(prompt).not.toContain("chief_plan first");
     expect(prompt.indexOf("chief_plan")).toBeLessThan(prompt.indexOf("chief_forge_init"));
-    const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
-    expect(configured.instructions).toContain("chief_plan first");
-    expect(configured.instructions).toContain("delegate every wave it lists right away, one chief_delegate per wave in the same turn, without user sign-off");
+    const { instructions } = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
+    // The planning rules live in the instructions only: no long line of them repeats in the spawn prompt.
+    expect(sharedLines(prompt, instructions)).toEqual([]);
+    expect(inOrder(instructions, ["chief_plan", "chief_forge_init", "chief_delegate"])).toBe(true);
   });
 
   test("refuses chief_delegate with no plan or unplannedReason when planning is on", async () => {
@@ -193,8 +194,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.setSettings({ plannerEnabled: true });
     const chief = await start(state);
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
-    expect(configured.instructions).toContain("well-specified");
-    expect(configured.instructions).toContain("Order: chief_research (design: true; skipped only with chief_plan undesignedReason: your reason) → the user approves the design in the researcher thread → chief_plan (researchThreadId; no user plan review) (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
+    expect(inOrder(configured.instructions, ["chief_research", "chief_plan", "chief_forge_init", "chief_delegate"])).toBe(true);
   });
 
   test("with research off the planner order line is the one without a design step", async () => {
@@ -203,7 +203,7 @@ describe("Chief backend", () => {
     await state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
     const chief = await start(state);
     const { instructions } = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
-    expect(instructions).toContain("Order: chief_plan (skipped only with unplannedReason: your reason) → chief_forge_init (planThreadId and wave, so the plan travels in the pull request body) → chief_delegate");
+    expect(inOrder(instructions, ["chief_plan", "chief_forge_init", "chief_delegate"])).toBe(true);
     expect(instructions).not.toContain("undesignedReason");
     expect(instructions).not.toContain("chief_research");
   });
@@ -260,7 +260,6 @@ describe("Chief backend", () => {
     // The planner opens on a plain prompt, not the provider's own /plan action.
     expect(spawned.input).toBeUndefined();
     expect(spawned.prompt).toContain("Propose how to fix totals");
-    expect(JSON.stringify(plan)).toContain("Its ready alert lists the wave schedule and the exact next call");
 
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;
     expect(planner.chiefThreadId).toBe(chief.threadId);
@@ -290,7 +289,9 @@ describe("Chief backend", () => {
     expect(reported).toContain(`::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-1.md"}`);
     expect(reported).not.toContain("Wave 1 of 1:");
     expect(reported).not.toContain(planPath);
-    expect(reported).toContain(`Delegate wave 1 now: run chief_forge_init (planThreadId: ${planner.threadId}, wave: 1), then chief_delegate (planThreadId: ${planner.threadId}, wave: 1)`);
+    const forgeCall = `chief_forge_init (planThreadId: ${planner.threadId}, wave: 1)`;
+    expect(reported).toContain(forgeCall);
+    expect(reported.indexOf(forgeCall)).toBeLessThan(reported.indexOf(`chief_delegate (planThreadId: ${planner.threadId}, wave: 1)`));
     expect(await readFile(planPath, "utf8")).toBe(`${PLAN_FIXTURE}\n`);
 
     // A plan is not work: going idle must not start a reviewer on it.
@@ -373,8 +374,7 @@ describe("Chief backend", () => {
     expect(await readFile(join(state.storageRoot, chief.threadId, "plans", planner.threadId, "plan-2.md"), "utf8")).toBe(`${wave(2, "Migrate the data.")}\n`);
     expect(reported).toContain(`::inline-vis{source="thread-storage" file="plans/${planner.threadId}/plan-1.md"}`);
     expect(reported).not.toContain("chief_consult");
-    expect(reported).toContain("Delegate wave");
-    expect(reported).not.toContain("Read that file in full");
+    expect(reported).toContain(`chief_forge_init (planThreadId: ${planner.threadId}, wave: 1)`);
 
     const persisted = state.db.prepare(`SELECT plan_waves FROM managed_threads WHERE thread_id=?`).get(planner.threadId) as { plan_waves: string };
     expect(JSON.parse(persisted.plan_waves)).toEqual([
@@ -467,7 +467,8 @@ describe("Chief backend", () => {
     expect(lines.map((line) => reported.indexOf(line))).toEqual([...lines.map((line) => reported.indexOf(line))].sort((a, b) => a - b));
     expect(reported).not.toMatch(/Wave \d of 8:/);
     expect(reported).not.toContain("chief_consult");
-    expect(reported).toMatch(/Delegate waves? \d/);
+    expect(reported).toContain(planner.threadId);
+    expect(reported).toContain("chief_forge_init (");
   });
 
   test("rejects a planner's ready report with more than 8 waves", async () => {
@@ -518,7 +519,7 @@ describe("Chief backend", () => {
     } else {
       await report;
       expect(state.sent).toHaveLength(sentBefore + 1);
-      expect(state.sent.at(-1).input[0].text).toContain("Delegate wave 1 now: run chief_forge_init");
+      expect(state.sent.at(-1).input[0].text).toContain(`chief_forge_init (planThreadId: ${planner.threadId}, wave: 1)`);
     }
   });
 

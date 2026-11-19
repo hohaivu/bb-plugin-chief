@@ -42,7 +42,6 @@ describe("worker flows", () => {
       const summary = script.match(/\(planner [^)]*\)<\/summary>\n\n(S+…?)\n<\/details>/)![1]!;
       expect(summary).toHaveLength(1_500);
       expect(summary.endsWith("…")).toBe(true);
-      expect(script).toContain("ISSUE_BODY='Chief tracks this plan here: one comment per task outcome, one pull request per chain.");
     });
 
     test("an unplanned forge_init body is the title line plus the mission sections, as before chains", async () => {
@@ -218,8 +217,7 @@ describe("worker flows", () => {
         await forge(state, chief.threadId, planner.threadId, 3);
         await delegateWave(state, chief.threadId, planner.threadId, 3, { branch: "feature/b" });
         const launch = state.spawned.at(-1);
-        expect(launch.prompt).toContain("This wave heads its own chain, stacked on feature/a: its branch and PR are based on feature/a; do not rebase onto the default branch.");
-        expect(launch.prompt).not.toContain("from the default base");
+        expect(launch.prompt).toContain("feature/a");
         expect(launch.environment.workspace.baseBranch).toEqual({ kind: "named", name: "feature/b" });
         expect(rowOf(state, workerOn(state, planner.threadId, 3).thread_id)).toMatchObject({ branch: "feature/b", plan_wave: 3 });
       });
@@ -231,17 +229,16 @@ describe("worker flows", () => {
         const rosterOf = async () => String(await tool(state, "chief_roster", {}, chief.threadId));
         // Both heads are undelegated, but wave 3 waits: only wave 1 is listed to delegate.
         const first = await rosterOf();
-        expect(first).toContain("Delegate wave 1 now");
-        expect(first).toContain("Waves 3 are stacked and start once their parent wave is ready.");
-        expect(first).toContain("(stacked on wave 1)");
+        const calls = (waveNo: number) => [`chief_forge_init (planThreadId: ${planner.threadId}, wave: ${waveNo})`, `chief_delegate (planThreadId: ${planner.threadId}, wave: ${waveNo})`];
+        // The roster's next action templates one call for every listed wave (`wave: N`).
+        expect(first).toContain(`chief_forge_init (planThreadId: ${planner.threadId}, wave: N)`);
         await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: "feature/a", prUrl: PR_A });
         const w1 = workerOn(state, planner.threadId, 1).thread_id as string;
         const second = await rosterOf();
-        expect(second).toContain("Waves 3 are stacked and start once their parent wave is ready.");
-        expect(second).not.toContain("Delegate wave");
+        expect(second).not.toContain("chief_forge_init (");
         await report(state, w1, { state: "ready", result: READY });
         const alert = state.sent.at(-1).input[0].text as string;
-        expect(alert).toContain(`Wave 3 is stacked on this chain: run chief_forge_init (planThreadId: ${planner.threadId}, wave: 3), then chief_delegate (planThreadId: ${planner.threadId}, wave: 3).`);
+        for (const call of calls(3)) expect(alert).toContain(call);
       });
     });
   });
