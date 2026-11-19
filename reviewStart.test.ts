@@ -68,7 +68,7 @@ describe("impact slice: optional enrichment never refuses the review", () => {
     const out = await w.review.startReview(w.chief, "W1");
 
     expect(out).toMatchObject({ threadId: w.reviewerLaunch()!.id, created: true });
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2); // the reviewer and the tester
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
     expect(w.targetRows(w.reviewerLaunch()!.id)).toHaveLength(1);
     expect(w.contexts()).toHaveLength(1);
     expect(w.contexts()[0]).toContain("Skipped: Error: host down.");
@@ -87,13 +87,13 @@ describe("impact slice: optional enrichment never refuses the review", () => {
     await vi.advanceTimersByTimeAsync(29_000);
     // The retained, bounded wait: nothing launched, nothing written, not settled.
     expect(settled).toBe(false);
-    expect(w.launches.map(({ row }) => row.kind)).toEqual(["tester"]);
+    expect(w.launches).toEqual([]);
     expect(w.contexts()).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1_000);
     const out = await run;
 
     expect(out).toMatchObject({ threadId: w.reviewerLaunch()!.id, created: true });
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2);
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
     expect(w.targetRows(w.reviewerLaunch()!.id)).toHaveLength(1);
     expect(w.contexts()[0]).toContain("Skipped: deadline (30 s) passed.");
   });
@@ -115,7 +115,7 @@ describe("review-context.md: written before the launch; a failed write inlines t
 
     await w.review.startReview(w.chief, "W1");
 
-    expect(w.events.filter((event) => event !== "launch:tester")).toEqual([`artifact:${nameOf(w)}`, "launch:reviewer"]);
+    expect(w.events).toEqual([`artifact:${nameOf(w)}`, "launch:reviewer"]);
     expect(nameOf(w)).toMatch(FOLDER);
     const path = `/data/host_proj/chief/proj/W1/${nameOf(w)}`;
     const prompt: string = w.reviewerLaunch()!.args.prompt;
@@ -153,12 +153,12 @@ describe("review-context.md: written before the launch; a failed write inlines t
     await vi.advanceTimersByTimeAsync(1_999);
     expect(w.host.writeArtifact).toHaveBeenCalledTimes(2);
     // The reviewer does not start while a context write is still being retried.
-    expect(w.launches.map(({ row }) => row.kind)).toEqual(["tester"]);
+    expect(w.launches).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     const out = await run;
 
     expect(w.host.writeArtifact).toHaveBeenCalledTimes(3);
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2); // the reviewer and the tester
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
     expect(w.host.alertChief).toHaveBeenCalledTimes(1);
     const name = nameOf(w);
     expect(name).toMatch(FOLDER);
@@ -191,7 +191,7 @@ describe("review-context.md: written before the launch; a failed write inlines t
     expect(w.host.writeArtifact).toHaveBeenCalledTimes(3);
     expect(w.host.alertChief.mock.calls[0]![2]).toBe(MESSAGE(nameOf(w), "Error: sync disk"));
     expect(out).toMatchObject({ threadId: w.reviewerLaunch()!.id, created: true });
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2); // the reviewer and the tester
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
   });
 
   test("one failed attempt that then succeeds writes once, sends no alert, and names the path", async () => {
@@ -230,7 +230,7 @@ describe("review-context.md: written before the launch; a failed write inlines t
     expect(w.host.logError).toHaveBeenCalledTimes(1);
     expect(w.host.logError).toHaveBeenCalledWith(`${MESSAGE(nameOf(w), "Error: disk full")} The Chief alert also failed: Error: chief down`);
     expect(out).toMatchObject({ threadId: w.reviewerLaunch()!.id, created: true });
-    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(2); // the reviewer and the tester
+    expect(w.managedSpawn.launch).toHaveBeenCalledTimes(1);
   });
 
   test("a branch review has no context: nothing is written, and the prompt has no read line and no inline section", async () => {
@@ -452,7 +452,7 @@ describe("engine modes: the section and the wrapper reach the reviewer", () => {
     await w.review.startReview(w.chief, "W1");
 
     const folder = folderOfStart(w.host.writeArtifact.mock.calls as any);
-    expect(w.events.filter((event) => event !== "launch:tester")).toEqual([
+    expect(w.events).toEqual([
       `artifact:${folder}/review-context.md`,
       `artifact:${folder}/pr-agent-review.sh`,
       ...(mode === "both" ? [`artifact:${folder}/review-helper.md`] : []),
@@ -633,7 +633,7 @@ describe("engine modes: the section and the wrapper reach the reviewer", () => {
   // Contract (docs/specs/review-engine.md, Engine folder): the folder holds a fresh attempt id for each review start, so a repeat review of the
   // same worker and report never reads another attempt's files. Regression: one folder per worker and report lets attempt 2 run attempt 1's prompt.
   describe("per-attempt engine folder", () => {
-    /** One pinned worker; attempt 1's reviewer fails, so a second chief_review starts a new reviewer for the same gate (the tester stays). */
+    /** One pinned worker; attempt 1's reviewer fails, so a second chief_review starts a new reviewer for the same gate. */
     async function twoAttempts(mode: "pr-agent" | "both", second?: (w: ReturnType<typeof world>) => void) {
       const w = world({ heads: heads1, engine: engineOf(mode) });
       pinnedOne(w);
