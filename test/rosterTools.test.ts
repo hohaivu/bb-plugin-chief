@@ -10,6 +10,8 @@ import { provideSdk } from "./sdk";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
 afterEach(disposeAll);
+// chief_roster opens with the decisions path line (DEC-8, COORD-8); the Pending block follows.
+const PATH = "Decisions: $BB_THREAD_STORAGE/decisions.md\n";
 describe("Chief backend", () => {
   test("enforces agent-tool authorization at execution time", async () => {
     const state = await setup();
@@ -67,7 +69,7 @@ describe("Chief backend", () => {
     expect(bigRoster.length).toBeLessThanOrEqual(6_000);
     expect(bigRoster.indexOf(lastTitle)).toBeLessThan(bigRoster.indexOf("First worker"));
     // The Pending block is built first and survives the cap even behind 12 rows of detail.
-    expect(bigRoster.startsWith("Pending:")).toBe(true);
+    expect(bigRoster.startsWith(`${PATH}Pending:`)).toBe(true);
     expect(bigRoster).toContain(`“${lastTitle}”`);
   });
 
@@ -91,7 +93,8 @@ describe("Chief backend", () => {
     // its "…and N more pending" suffix instead of searching for what follows it.
     const suffixMatch = roster.match(/^…and \d+ more pending$/m);
     expect(suffixMatch).not.toBeNull();
-    const pendingBlock = roster.slice(0, suffixMatch!.index! + suffixMatch![0].length);
+    expect(roster.startsWith(PATH)).toBe(true);
+    const pendingBlock = roster.slice(PATH.length, suffixMatch!.index! + suffixMatch![0].length);
     expect(pendingBlock.length).toBeLessThanOrEqual(6_000);
     const lines = pendingBlock.split("\n");
     expect(lines[0]).toBe("Pending:");
@@ -111,7 +114,7 @@ describe("Chief backend", () => {
     const roster = String(await state.harness.behavior.callAgentTool(
       "chief_roster", {}, { threadId: chief.threadId, projectId: "proj_1" },
     ));
-    expect(roster.startsWith("Pending: none.")).toBe(true);
+    expect(roster.startsWith(`${PATH}Pending: none.`)).toBe(true);
   });
 
   test("chief_roster todos add, update, and close in the shared Pending block", async () => {
@@ -121,7 +124,7 @@ describe("Chief backend", () => {
     const roster = async (params: object) => String(await state.harness.behavior.callAgentTool("chief_roster", params, opts));
 
     const added = await roster({ todo: { text: "Rebase onto main", after: "PR #42 merges" } });
-    expect(added.startsWith("Pending:\n- 1 waiting todo (#1) hidden")).toBe(true);
+    expect(added.startsWith(`${PATH}Pending:\n- 1 waiting todo (#1) hidden`)).toBe(true);
     expect(await roster({ includeWaiting: true })).toContain("- todo #1: Rebase onto main (after: PR #42 merges)");
     const cli = await state.harness.behavior.runCli(["status", "--project", "proj_1"]);
     // The operator shell has no viewing Chief, so the todo carries its owner.
@@ -151,7 +154,7 @@ describe("Chief backend", () => {
     for (const line of ["- todo #1: Alpha", "- todo #2: Bravo (after: user signs)", "- todo #3: Charlie (after: PR #42 merges)"]) expect(full).toContain(line);
     expect(full).not.toContain("waiting todos");
     const onlyWaiting = await roster({ todo: { id: 1, state: "done" } });
-    expect(onlyWaiting.startsWith("Pending:\n- 2 waiting todos")).toBe(true);
+    expect(onlyWaiting.startsWith(`${PATH}Pending:\n- 2 waiting todos`)).toBe(true);
   });
 
   describe("other-Chief todo collapse", () => {
@@ -162,7 +165,8 @@ describe("Chief backend", () => {
       const b = (await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string }).threadId;
       // The Pending block alone: the roster text goes on with the thread table after it.
       const roster = async (threadId: string, params: object = {}) => {
-        const lines = String(await state.harness.behavior.callAgentTool("chief_roster", params, { threadId, projectId: "proj_1" })).split("\n");
+        const [path, ...lines] = String(await state.harness.behavior.callAgentTool("chief_roster", params, { threadId, projectId: "proj_1" })).split("\n");
+        expect(`${path}\n`).toBe(PATH);
         const end = lines.findIndex((line, index) => index > 0 && !/^(- |Other Chiefs' todos)/.test(line));
         return lines.slice(0, end < 0 ? lines.length : end).join("\n");
       };
@@ -252,7 +256,7 @@ describe("Chief backend", () => {
     ))).toContain(`Other Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief ${chief.threadId}): Ship docs`);
     // By default the same todo is one count line, with neither its text nor the section header.
     const collapsedDefault = String(await state.harness.behavior.callAgentTool("chief_roster", {}, replacementOpts));
-    expect(collapsedDefault.startsWith("Pending:\n- 1 other-Chief todo (#1) hidden: not your work. chief_roster includeOthers: true lists them.")).toBe(true);
+    expect(collapsedDefault.startsWith(`${PATH}Pending:\n- 1 other-Chief todo (#1) hidden: not your work. chief_roster includeOthers: true lists them.`)).toBe(true);
     expect(collapsedDefault).not.toContain("Ship docs");
 
     const other = await start(state, "proj_2");
@@ -299,7 +303,7 @@ describe("Chief backend", () => {
     // Once Chief completes the worker, nothing keeps advertising it.
     await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, opts);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster.startsWith("Pending: none.")).toBe(true);
+    expect(roster.startsWith(`${PATH}Pending: none.`)).toBe(true);
   });
 
   test("the Pending block shows a blocked worker and a rejected review the same way its alert does", async () => {
