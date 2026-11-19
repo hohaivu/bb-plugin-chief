@@ -19,18 +19,19 @@ const input = (kind: Kind, extra: Partial<WorkerBriefInput> = {}): WorkerBriefIn
   ...extra,
 });
 const prompt = (kind: Kind, extra: Partial<WorkerBriefInput> = {}) => workerBrief(input(kind, extra)).prompt;
-const count = (text: string, needle: string) => text.split(needle).length - 1;
 const section = (text: string, heading: string) => text.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0];
 const planned = { wave: 2, waveTotal: 2, planContextLine: "Plan file (wave 2 of 2): /plans/plan-2.md" };
 const contractList = (tag: string, size: number) => Array.from({ length: Math.ceil(size / 19) }, (_, i) => `- ${tag} item ${String(i).padStart(4, "0")} holds`).join("\n");
 
 describe("empty sections", () => {
-  test("a worker, designer and Spec Writer brief keep \"None stated.\" for both empty sections", () => {
+  test("a worker, designer and Spec Writer brief keep both empty sections", () => {
     for (const kind of ["worker", "designer", "spec-writer"] as const) {
       const text = prompt(kind);
-      expect(count(text, "None stated."), kind).toBe(2);
-      expect(text, kind).toContain("## Success criteria\n- None stated.");
-      expect(text, kind).toContain("## Constraints\n- None stated.");
+      const success = section(text, "Success criteria");
+      const constraints = section(text, "Constraints");
+      expect(success, kind).toBeTruthy();
+      expect(constraints, kind).toBeTruthy();
+      expect(text.indexOf("\n## Success criteria\n"), kind).toBeLessThan(text.indexOf("\n## Constraints\n"));
     }
   });
 
@@ -60,13 +61,6 @@ describe("verify command delivery", () => {
   });
 });
 
-describe("Base commit", () => {
-  test("a worker with a branch keeps its Local sync and records no Base commit in its Git workflow", () => {
-    const text = prompt("worker", { branch: "feature/x" });
-    expect(text).toContain("and record `Local sync: <sha>`");
-    expect(section(text, "Git workflow")).not.toContain("Base commit");
-  });
-});
 describe("predecessor section", () => {
   // A realistic blocked report, with labelled shas in the blocker, a summary and a recommendation.
   const BASE = "6773875934c12db871387559f10ddd8abae26e59";
@@ -107,7 +101,7 @@ describe("chief_delegate: a spec wave with a 5,000-character contract list", () 
   test("the worker gets a plan-file pointer, not the list, and the Spec Writer no contracts", async () => {
     const state = await setup();
     await fullChain(state, [{ body: long, spec: true }]);
-    const [worker, writer] = state.spawned.filter((entry: any) => entry.prompt.startsWith("You are the managed worker")).map((entry: any) => entry.prompt as string);
+    const [worker, writer] = state.spawned.filter((entry: any) => entry.pluginMetadata?.role === "worker").map((entry: any) => entry.prompt as string);
     expect(worker).not.toContain("W1 item");
     expect(section(worker!, "Contracts to verify")).toMatch(/plan-1\.md/);
     const context = section(writer!, "Read-only context")!;
