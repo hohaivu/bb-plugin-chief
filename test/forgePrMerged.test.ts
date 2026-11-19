@@ -68,4 +68,36 @@ describe("prMerged", () => {
     forges(replies);
     expect(await prMerged("#12", null)).toBeNull();
   });
+
+  test("an aborted signal starts no CLI at all, and one that aborts after the first lookup starts no fallback", async () => {
+    forges({ gh: { state: "MERGED", headRefOid: SHA } });
+    const stopped = new AbortController();
+    stopped.abort();
+    expect(await prMerged(GITHUB_PR, "/repo", stopped.signal)).toBeNull();
+    expect(await prMerged("#12", null, stopped.signal)).toBeNull();
+    expect(execFileMock).not.toHaveBeenCalled();
+
+    const late = new AbortController();
+    execFileMock.mockImplementation(async (file: string) => {
+      if (file === "gh") { late.abort(); throw new Error("gh failed"); }
+      return { stdout: JSON.stringify({ state: "merged", sha: SHA }), stderr: "" };
+    });
+    expect(await prMerged("#12", null, late.signal)).toBeNull();
+    expect(calls("gh")).toHaveLength(1);
+    expect(calls("glab")).toHaveLength(0);
+  });
+
+  test("a lookup that aborts while its command runs accepts that command's merged answer as no answer, and an aborted unqualified lookup skips git discovery", async () => {
+    const late = new AbortController();
+    execFileMock.mockImplementation(async () => { late.abort(); return { stdout: JSON.stringify({ state: "MERGED", headRefOid: SHA }), stderr: "" }; });
+    expect(await prMerged(GITHUB_PR, "/repo", late.signal)).toBeNull();
+    expect(calls("gh")).toHaveLength(1);
+
+    execFileMock.mockReset();
+    forges({ gh: { state: "MERGED", headRefOid: SHA } });
+    const stopped = new AbortController();
+    stopped.abort();
+    expect(await prMerged("#12", "/repo", stopped.signal)).toBeNull();
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
 });

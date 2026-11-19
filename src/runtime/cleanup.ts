@@ -30,7 +30,7 @@ export function createCleanup(ctx: Ctx) {
     if (known && (known.merged || Date.now() - known.at < MERGE_RECHECK_MS)) return known;
     if (lookupsLeft <= 0) return null;
     lookupsLeft--;
-    const answer = await bounded(() => prMerged(url, cwd), CLEANUP_CALL_MS, signal).catch(() => null);
+    const answer = await bounded(() => prMerged(url, cwd, signal), CLEANUP_CALL_MS, signal).catch(() => null);
     if (signal?.aborted) return null; // an abandoned lookup caches nothing
     mergeCache.delete(url);
     mergeCache.set(url, { merged: answer?.merged ?? false, head: answer?.head ?? null, at: Date.now() });

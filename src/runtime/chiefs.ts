@@ -2,14 +2,17 @@ import { createManagedSpawn } from "../research/managedSpawn";
 import { type ManagedRow } from "../types";
 import type { Ctx } from "./context";
 
+const PENDING_HANDOVER = "pending_handover:";
+
 interface ChiefHandoff { fromChiefThreadId: string; title: string; request: string; context: string; /** Set when a Coordinator hands the task off: the new Chief becomes its child. */ coordinatorThreadId?: string }
 
 export function createChiefs(ctx: Ctx) {
   const { bb, chiefCountForProject, db, latestChiefForProject, settings, store } = ctx;
   // Not on managedSpawn: it picks the model after building its prompt, skips the cooldown check, hands over between spawn and insert, and has no parent or brief file.
-  // `stopped` is the abandoned supervisor tick's check: no call starts once it reads true. A spawn already dispatched is still recorded, or the next tick would spawn a second Chief.
-  async function spawnChief(target: string, previous?: ManagedRow, handoff?: ChiefHandoff, stopped?: () => boolean) {
-    const abandoned = () => { if (stopped?.()) throw new Error("abandoned"); };
+  // `signal` is the abandoned supervisor tick's: no call starts once it aborts. A spawn already dispatched still records its row and a pending-handover marker, or the next tick would spawn a second Chief; that live tick does the handover.
+  async function spawnChief(target: string, previous?: ManagedRow, handoff?: ChiefHandoff, signal?: AbortSignal) {
+    const stopped = () => !!signal?.aborted;
+    const abandoned = () => { if (stopped()) throw new Error("abandoned"); };
     abandoned();
     const sectionId = await ctx.ensureSection(stopped);
     abandoned();
@@ -35,7 +38,7 @@ export function createChiefs(ctx: Ctx) {
       ? (await bb.sdk.threads.defaultExecutionOptions({ threadId: handoff.fromChiefThreadId }).catch(() => null))?.permissionMode
       : undefined;
     abandoned();
-    const hostId = await ctx.projectHostId(target);
+    const hostId = await ctx.projectHostId(target, stopped);
     abandoned();
     const execution = await ctx.execution("chief", hostId);
     abandoned();
@@ -50,11 +53,21 @@ export function createChiefs(ctx: Ctx) {
       prompt,
       pluginMetadata: { role: "chief" },
     });
-    if (previous && previous.thread_id !== thread.id) handOver(previous.thread_id, thread.id, target);
-    store.insert({
-      threadId: thread.id, role: "chief", projectId: target, title, state: "starting", status: thread.status,
+    const replaced = previous && previous.thread_id !== thread.id ? previous : undefined;
+    const row = {
+      threadId: thread.id, role: "chief" as const, projectId: target, title, state: "starting" as const, status: thread.status,
       coordinatorThreadId: handoff?.coordinatorThreadId ?? (previous ? ctx.liveCoordinatorId(previous) : undefined),
-    });
+    };
+    if (signal?.aborted) {
+      // The abandoned tick moves no work: it records the row (no second Chief) and who it replaces; the next live tick hands over.
+      store.batch(() => {
+        store.insert(row);
+        if (replaced) db.prepare(`INSERT OR REPLACE INTO plugin_meta (key, value) VALUES (?, ?)`).run(`${PENDING_HANDOVER}${thread.id}`, replaced.thread_id);
+      }, signal);
+      throw new Error("abandoned");
+    }
+    if (replaced) handOver(replaced.thread_id, thread.id, target, signal);
+    store.batch(() => store.insert(row), signal);
     return { threadId: thread.id, created: true as const };
   }
 
@@ -77,7 +90,7 @@ export function createChiefs(ctx: Ctx) {
   }
 
   /** Supersedes a Chief: marks it complete and moves its open work, todos and undelivered alerts to its successor. */
-  function handOver(previousId: string, nextId: string, projectId: string) {
+  function handOver(previousId: string, nextId: string, projectId: string, owner?: AbortSignal) {
     if (ctx.isCoordinator(store.get(previousId)) || ctx.isCoordinator(store.get(nextId))) throw new Error("A Coordinator owns no managed work: it cannot hand work over or take it.");
     if (!ctx.compatibleSuccessor(store.get(previousId), store.get(nextId))) throw new Error(`Chief ${nextId} belongs to another Coordinator: work from ${previousId} cannot move to it.`);
     const now = Date.now();
@@ -88,9 +101,38 @@ export function createChiefs(ctx: Ctx) {
       db.prepare(`UPDATE alert_outbox SET target_thread_id=?
         WHERE target_thread_id=? AND delivered_at IS NULL`).run(nextId, previousId);
       db.prepare(`UPDATE chief_todos SET chief_thread_id=? WHERE chief_thread_id=?`).run(nextId, previousId);
-    });
+    }, owner);
     // Best effort and async (never rejects); the successor's row may not exist yet, so the project comes from the caller.
     void ctx.copyDecisions(previousId, nextId, projectId);
+  }
+
+  /** The live tick's half of a spawn the abandoned tick only recorded: hands over from the recorded previous Chief when the late Chief is live and compatible, and drops each marker either way.
+   * Idempotent: a marker is gone in the same transaction as its handover. */
+  async function adoptPendingHandovers(signal: AbortSignal) {
+    const stopped = () => signal.aborted;
+    const markers = db.prepare(`SELECT key, value FROM plugin_meta WHERE key LIKE ?`).all(`${PENDING_HANDOVER}%`) as { key: string; value: string }[];
+    // The cache may predate the old generation's late commit: read both rows from persisted state (no reload, so no sweep) before judging a marker.
+    if (markers.length) store.refresh();
+    const dead = ["failed", "deleted", "archived", "complete"];
+    for (const marker of markers) {
+      if (stopped()) return;
+      const nextId = marker.key.slice(PENDING_HANDOVER.length);
+      const drop = () => db.prepare(`DELETE FROM plugin_meta WHERE key=?`).run(marker.key);
+      const candidate = store.get(nextId);
+      if (candidate?.role === "chief" && !dead.includes(candidate.state)) {
+        // The insert recorded `starting`: an archive or delete that raced it was missed by the events and by reconcile (the row was not cached then), so read the live thread.
+        const read = await ctx.reconcileThread(candidate, await ctx.ensureSection(stopped), signal);
+        if (stopped()) return;
+        if (!read) continue; // transient lookup failure: the marker stays for the next tick
+      }
+      const next = store.get(nextId);
+      const previous = store.get(marker.value);
+      if (next && previous && next.role === "chief" && !dead.includes(next.state)
+        && previous.state !== "complete" && !ctx.isCoordinator(previous) && !ctx.isCoordinator(next) && ctx.compatibleSuccessor(previous, next)) {
+        // handOver nests its own batch inside this one: the outermost reloads once, and owns the signal.
+        store.batch(() => { handOver(previous.thread_id, next.thread_id, previous.project_id); drop(); }, signal);
+      } else store.batch(drop, signal);
+    }
   }
 
   /** Best-effort: drops the pending panel tab an earlier version pinned on a Chief thread. Never throws. */
@@ -113,13 +155,14 @@ export function createChiefs(ctx: Ctx) {
     return spawnChief(projectId, undefined, handoff);
   }
   /** A dedicated successor for an orphan whose project Chief belongs to another Coordinator: it hands over from the orphan and inherits its live link. */
-  function replaceChief(orphaned: ManagedRow, stopped?: () => boolean) {
-    return spawnChief(orphaned.project_id, orphaned, undefined, stopped);
+  function replaceChief(orphaned: ManagedRow, signal?: AbortSignal) {
+    return spawnChief(orphaned.project_id, orphaned, undefined, signal);
   }
-  async function ensureChief(projectId?: string, stopped?: () => boolean): Promise<{ threadId: string; created: boolean }> {
-    if (stopped?.()) throw new Error("abandoned");
+  async function ensureChief(projectId?: string, signal?: AbortSignal): Promise<{ threadId: string; created: boolean }> {
+    const stopped = () => !!signal?.aborted;
+    if (stopped()) throw new Error("abandoned");
     const values = await settings.get();
-    if (stopped?.()) throw new Error("abandoned");
+    if (stopped()) throw new Error("abandoned");
     const target = projectId ?? values.chiefProject;
     if (!target) throw new Error("Configure a default Chief project first: bb plugin config chief set chiefProject <proj-id>");
     const inFlight = ctx.state.chiefStarts.get(target);
@@ -127,23 +170,23 @@ export function createChiefs(ctx: Ctx) {
       try { return await inFlight; }
       catch (error) {
         // A flight the abandoned tick owned is not this caller's: run its own, unless it is stopped too.
-        if (!(error instanceof Error && error.message === "abandoned") || stopped?.()) throw error;
+        if (!(error instanceof Error && error.message === "abandoned") || stopped()) throw error;
         if (ctx.state.chiefStarts.get(target) === inFlight) ctx.state.chiefStarts.delete(target);
-        return ensureChief(projectId, stopped);
+        return ensureChief(projectId, signal);
       }
     }
     const start = (async () => {
       const existing = ctx.chiefForProject(target);
       if (existing) {
-        await ctx.reconcileThread(existing, await ctx.ensureSection(stopped), stopped);
-        if (stopped?.()) throw new Error("abandoned");
+        await ctx.reconcileThread(existing, await ctx.ensureSection(stopped), signal);
+        if (stopped()) throw new Error("abandoned");
         const reconciled = store.get(existing.thread_id);
         if (reconciled && !["failed", "deleted", "archived", "complete"].includes(reconciled.state)) {
           return { threadId: existing.thread_id, created: false };
         }
       }
       const previous = latestChiefForProject.get(target) as ManagedRow | undefined;
-      return spawnChief(target, previous, undefined, stopped);
+      return spawnChief(target, previous, undefined, signal);
     })();
     ctx.state.chiefStarts.set(target, start);
     try {
@@ -154,6 +197,6 @@ export function createChiefs(ctx: Ctx) {
   }
 
   const managedSpawn = createManagedSpawn({ bb, db, spawnExecution: ctx.spawnExecution, ensureSection: ctx.ensureSection, readRules: ctx.readRules, lifecycleOwner: ctx.lifecycleOwner, insertThread: store.insert, persistBrief: (...a) => ctx.persistBrief(...a) });
-  return { createChief, ensureChief, replaceChief, handOver, handoffSection, managedSpawn, unpinPendingTab };
+  return { adoptPendingHandovers, createChief, ensureChief, replaceChief, handOver, handoffSection, managedSpawn, unpinPendingTab };
 }
 

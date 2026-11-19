@@ -73,7 +73,8 @@ export function createLifecycle(ctx: Ctx) {
     return "idle";
   }
 
-  async function reconcileThread(row: ManagedRow, sectionId: string, stopped?: () => boolean) {
+  async function reconcileThread(row: ManagedRow, sectionId: string, signal?: AbortSignal) {
+    const stopped = () => !!signal?.aborted;
     let thread;
     try {
       thread = await bb.sdk.threads.get({ threadId: row.thread_id });
@@ -82,15 +83,15 @@ export function createLifecycle(ctx: Ctx) {
       return false;
     }
     // An abandoned supervisor tick writes nothing from a read that settled after it was abandoned.
-    if (stopped?.()) return false;
+    if (stopped()) return false;
     const now = Date.now();
     if (thread.deletedAt !== null) {
-      store.markDeleted(row.thread_id, now);
+      store.batch(() => store.markDeleted(row.thread_id, now), signal);
       return true;
     }
     if (thread.archivedAt !== null) {
       if (row.state === "archived") return true;
-      store.markArchived(row.thread_id, thread.status, now);
+      store.batch(() => store.markArchived(row.thread_id, thread.status, now), signal);
       return true;
     }
     if (thread.sectionId !== sectionId || thread.visibility !== "visible") {
@@ -100,7 +101,7 @@ export function createLifecycle(ctx: Ctx) {
         bb.log.warn(`Transient thread filing failure for ${row.thread_id}; will retry: ${String(error)}`);
       }
     }
-    if (stopped?.()) return false;
+    if (stopped()) return false;
     // The reads above may have spanned a report or lifecycle event: decide from the row as it is now (#127), never the one captured before them.
     const current = store.get(row.thread_id);
     if (!current) return true;
@@ -118,24 +119,25 @@ export function createLifecycle(ctx: Ctx) {
         activeSince: nextState === "active" ? (row.state === "active" ? row.active_since ?? now : now) : null,
         enteringActive, now,
       });
-    });
+    }, signal);
     return true;
   }
 
-  async function reconcile(stopped?: () => boolean) {
+  async function reconcile(signal?: AbortSignal) {
+    const stopped = () => !!signal?.aborted;
     const sectionId = await ctx.ensureSection(stopped);
     // A complete or deleted row never changes state again (stateFromLive), so only open rows cost a read.
     for (const row of store.all()) {
-      if (stopped?.()) return;
-      if (row.state !== "deleted" && row.state !== "complete") await reconcileThread(row, sectionId, stopped);
+      if (stopped()) return;
+      if (row.state !== "deleted" && row.state !== "complete") await reconcileThread(row, sectionId, signal);
     }
-    if (stopped?.()) return;
+    if (stopped()) return;
     const projects = new Set(store.all().map((row) => row.project_id));
     const configured = (await settings.get()).chiefProject;
-    if (stopped?.()) return;
+    if (stopped()) return;
     if (configured) projects.add(configured);
     for (const projectId of projects) {
-      if (stopped?.()) return;
+      if (stopped()) return;
       await ctx.readRules(projectId, stopped);
     }
   }
@@ -230,9 +232,11 @@ export function registerLifecycle(ctx: Ctx) {
     const stopped = () => abandon.aborted;
     try {
       if (stopped()) return;
-      await ctx.reconcile(stopped);
+      await ctx.reconcile(abandon);
       if (stopped()) return;
       await ctx.sweep(abandon); // safety net for idle events missed across a reload, or a blocker archived without idling
+      if (stopped()) return;
+      await ctx.adoptPendingHandovers(abandon); // a Chief an abandoned tick spawned: its handover belongs to this live tick, before the orphan loop would spawn another
       if (stopped()) return;
       const values = await settings.get();
       if (stopped()) return;
@@ -264,7 +268,7 @@ export function registerLifecycle(ctx: Ctx) {
         ].join("\n"), abandon);
         if (stopped()) return;
         if (sent) {
-          store.markStallAlerted(row.thread_id, row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle);
+          store.batch(() => store.markStallAlerted(row.thread_id, row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle), abandon);
         }
       }
       if (stopped()) return;
@@ -280,16 +284,16 @@ export function registerLifecycle(ctx: Ctx) {
       if (stopped()) return;
       for (const orphaned of orphanedChiefs) {
         if (stopped()) return;
-        const next = await ctx.ensureChief(orphaned.project_id, stopped);
+        const next = await ctx.ensureChief(orphaned.project_id, abandon);
         if (stopped()) return;
         if (next.threadId === orphaned.thread_id) continue;
         // Work never moves to a Chief of another Coordinator: that case gets a dedicated successor.
-        if (ctx.compatibleSuccessor(orphaned, store.get(next.threadId))) ctx.handOver(orphaned.thread_id, next.threadId, orphaned.project_id);
-        else await ctx.replaceChief(orphaned, stopped);
+        if (ctx.compatibleSuccessor(orphaned, store.get(next.threadId))) ctx.handOver(orphaned.thread_id, next.threadId, orphaned.project_id, abandon);
+        else await ctx.replaceChief(orphaned, abandon);
         if (stopped()) return;
       }
       if (stopped()) return;
-      if (values.autoSpawn && values.chiefProject) await ctx.ensureChief(values.chiefProject, stopped);
+      if (values.autoSpawn && values.chiefProject) await ctx.ensureChief(values.chiefProject, abandon);
       // Replace terminal Chiefs and retarget their queued alerts before any
       // pending delivery is attempted.
       if (stopped()) return;

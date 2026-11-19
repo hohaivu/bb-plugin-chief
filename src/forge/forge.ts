@@ -174,11 +174,11 @@ export function parsePullRequestRef(input: string): { target: string; repo: stri
 }
 
 /** The forge targets a pull request reference could live on, with its number and repo. */
-export async function pullRequestForges(pullRequest: string, cwd: string | null) {
+export async function pullRequestForges(pullRequest: string, cwd: string | null, signal?: AbortSignal) {
   const { target, repo, forge } = parsePullRequestRef(pullRequest);
   let forges: Forge[] = forge ? [forge] : [];
   if (!forges.length) {
-    const remote = cwd
+    const remote = cwd && !signal?.aborted
       ? await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() })
           .then((result) => result.stdout.trim())
           .catch(() => "")
@@ -257,15 +257,17 @@ export async function markBranchReady(branch: string, cwd: string): Promise<{ re
 }
 
 /** Whether a pull request is merged and its head commit (null when the forge gave no valid sha), with whichever forge CLI hosts it. Null when no forge CLI could say. */
-export async function prMerged(pullRequest: string, cwd: string | null): Promise<{ merged: boolean; open: boolean; head: string | null } | null> {
+export async function prMerged(pullRequest: string, cwd: string | null, signal?: AbortSignal): Promise<{ merged: boolean; open: boolean; head: string | null } | null> {
   try {
-    const { target, repo, forges } = await pullRequestForges(pullRequest, cwd);
+    const { target, repo, forges } = await pullRequestForges(pullRequest, cwd, signal);
     for (const candidate of forges) {
+      if (signal?.aborted) return null; // an abandoned lookup starts no further forge command
       const [cli, args] = candidate === "github"
         ? ["gh", ["pr", "view", target, "--json", "state,headRefOid", ...(repo ? ["--repo", repo] : [])]]
         : ["glab", ["mr", "view", target, "-F", "json", ...(repo ? ["--repo", repo] : [])]];
       try {
         const { stdout } = await execFileAsync(cli as string, args as string[], { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
+        if (signal?.aborted) return null; // a lookup abandoned while its command ran accepts no answer
         const parsed = JSON.parse(stdout) as { state?: unknown; headRefOid?: unknown; sha?: unknown; diff_refs?: { head_sha?: unknown } };
         const sha = String((candidate === "github" ? parsed.headRefOid : parsed.sha ?? parsed.diff_refs?.head_sha) ?? "").trim().toLowerCase();
         return { merged: String(parsed.state).toLowerCase() === "merged", open: /^open(ed)?$/i.test(String(parsed.state)), head: SHA_PATTERN.test(sha) ? sha : null };

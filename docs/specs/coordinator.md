@@ -107,7 +107,10 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - `sweep()` runs after each store reload once `pendingReady` is set, on `idle` and `failed` events, and after `reconcile()` in the supervisor loop.
 - `reconcileThread` reads the live thread. It records a deleted or archived thread. It moves the thread to the Chief section. It syncs the row state and status with the live thread.
 - An unchanged row causes no write and no reload. A changed row writes through `store.syncLive`, which reloads the store and starts the sweep.
-- An abandoned supervisor tick starts no new `sweep()` read or write. A queued no-argument `sweep()` pass still runs, without the tick's stop check. See COORD-12b.
+- Each sweep pass has its own owner. A store write that the supervisor tick makes passes the tick's signal to the sweep its reload starts.
+- A pass queued only by the tick is skipped once the tick is abandoned.
+- A pass queued by any caller without a signal runs unsignalled and is never cut off by abandonment.
+- Reason: work belongs to whoever asked for it. A tick may neither leak work after abandonment nor cancel someone else's work. See COORD-12b.
 
 ### Alerts (`writeAlert`, `insertAlert`, `deliverAlert`)
 
@@ -360,18 +363,21 @@ Every row gets `skills: []`. The `coordinator` skill no longer exists. The `chie
 
 The supervisor is the plugin service that reconciles managed rows, sends the problem alerts of COORD-12 and retries the alert outbox. This contract keeps the service within BB's stop window.
 
-- Code: `src/runtime/lifecycle.ts` (`registerLifecycle`, `supervisorTick`, `STOP_GRACE_MS`), `src/runtime/exec.ts` (`bounded`), `src/runtime/alerts.ts` (`deliverAlert`, `alertChief`, `retryAlerts`), `src/runtime/cleanup.ts` (`observeCleanup`), `src/runtime/sweep.ts` (`sweep`), `src/runtime/settings.ts` (`ensureSection`).
+- Code: `src/runtime/lifecycle.ts` (`registerLifecycle`, `supervisorTick`, `STOP_GRACE_MS`), `src/runtime/exec.ts` (`bounded`), `src/runtime/alerts.ts` (`deliverAlert`, `alertChief`, `retryAlerts`), `src/runtime/cleanup.ts` (`observeCleanup`), `src/runtime/sweep.ts` (`sweep`), `src/runtime/settings.ts` (`ensureSection`, `projectHostId`), `src/forge/forge.ts` (`prMerged`), `src/runtime/chiefs.ts` (`spawnChief`, `adoptPendingHandovers`).
 - On abort, supervisor `start()` promise settles within `STOP_GRACE_MS`, which is 3 seconds.
 - Reason: BB marks the plugin `degraded (service supervisor did not stop)` when a service has not settled 5 seconds after the abort.
 - BB then refuses to load the new generation, so the `chief_*` tools disappear.
 - A tick that finishes within the grace runs every step to its end, in the same order.
 - A tick still running after the grace is abandoned.
 - An abandoned tick starts no new operation. It starts no further top-level step, reconcile row, `readRules` call, stall or orphan iteration, alert attempt or alert send, Chief spawn, cleanup job, git command, cleanup read or archive call.
-- An operation that the tick dispatched before abandonment may finish. The abandoned tick writes no state from its result, except a Chief spawn already dispatched. Reason: the spawned Chief exists, and recording it stops the next tick from spawning a second Chief.
-- A Chief spawn already dispatched still inserts its row and hands over from the previous Chief after the spawn returns.
-- The supervisor passes its stop check into `sweep(stopped)` and `ensureSection(stopped)`. Each one starts no new read, dispatch or write once the check returns true. Reason: an unchecked read keeps the tick running past the stop window.
+- An operation that the tick dispatched before abandonment may finish. The abandoned tick writes no state from its result, except the Chief spawn record below. Reason: the spawned Chief exists, and recording it stops the next tick from spawning a second Chief.
+- An abandoned tick starts no project host lookup (`projectHostId` in `src/runtime/settings.ts`, `hosts.list`) and no forge command (`prMerged` in `src/forge/forge.ts`: `gh`, `glab` or `git`). `mergeOf` caches no answer from an aborted lookup. Reason: these calls run past the stop window otherwise.
+- A Chief spawn that returns after abandonment records its Chief row in one transaction. When it replaces a different Chief, the same transaction also writes a `pending_handover:<new thread id>` marker in `plugin_meta`. A first Chief spawn, or a spawn that replaces the same Chief, writes no marker. The spawn performs no handover, no decisions copy and no sweep read. Reason: the row stops a duplicate Chief, and a handover moves work, so a live tick owns it.
+- The next live supervisor tick adopts each pending marker after its sweep and before the stall and orphan steps. Adoption first refreshes the persisted rows. It hands over from the recorded previous Chief to the late Chief only when all of these hold: both rows exist, the late Chief is a Chief that is not `failed`, `deleted`, `archived` or `complete`, the previous Chief is not `complete`, neither Chief is a Coordinator, and the pair is compatible. Otherwise the tick drops the marker with no handover. It drops the marker in every case. Reason: a handover to an ineligible Chief moves work to a Chief that cannot take it.
+- A sweep pass queued only by an abandoned tick is skipped. The pass does not read, write or alert. Reason: the pass belongs to the tick that asked for it.
+- The supervisor passes its `AbortSignal` into `sweep(signal)` and its stop check into `ensureSection(stopped)`. Each one starts no new read, dispatch or write once it is stopped. Reason: an unchecked read keeps the tick running past the stop window.
 - A caller that joins an abandoned `ensureSection` flight starts its own flight. Reason: the flight belongs to the abandoned tick, not to the joiner.
-- A queued no-argument `sweep()` pass still runs, unbound from the abandoned tick. Reason: the pass belongs to its caller, not to the tick.
+- A `sweep()` pass queued by a caller without a signal still runs, unsignalled, after the tick is abandoned. Reason: the pass belongs to its caller, not to the tick.
 - The supervisor passes its `AbortSignal` into `observeCleanup(signal)`. Its `bounded` calls start no new call under an aborted signal. Reason: the cleanup reads and archive calls run past the stop window otherwise.
 - An alert send in flight at abandonment ends its wait at once. Its last error becomes `abandoned`.
 - The abandoned send refunds its attempt, so the attempt count does not drop the row. The row is marked `uncertain`.
