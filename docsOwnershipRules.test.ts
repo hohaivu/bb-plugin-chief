@@ -14,7 +14,7 @@ afterEach(disposeAll);
 //      and the `skipReview` text names the docs/ refusal and the skipped-check reply.
 describe("docs ownership in Chief's configuration", () => {
   const MARKER = "# Project rules marker";
-  /** The core-rules budget: the SDK cuts instructions at 32768 chars, so a linked Chief's rules must end inside the first 4096. */
+  /** Budget for the core block, separate from the Chief procedure and project rules. */
   const CORE_RULES_BUDGET = 4096;
 
   async function chiefConfiguration(planner: boolean, research: boolean) {
@@ -27,9 +27,10 @@ describe("docs ownership in Chief's configuration", () => {
   }
   const coreRules = (instructions: string) => {
     const from = instructions.indexOf("# Chief core rules (always apply)");
-    const to = instructions.indexOf(`\n\n${MARKER}`);
+    const to = instructions.indexOf("\n\n# Chief procedure");
     expect(from).toBeGreaterThanOrEqual(0);
     expect(to).toBeGreaterThan(from);
+    expect(instructions.indexOf(`\n\n${MARKER}`)).toBeGreaterThan(to);
     return instructions.slice(from, to);
   };
 
