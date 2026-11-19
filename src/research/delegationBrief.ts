@@ -1,5 +1,5 @@
 import { MAX_WAVES, findingLines } from "../report/reportIntake";
-import { ADVISE_ONLY, READ_ONLY, managedSkills, type WorkerKind } from "../core/roles";
+import { type WorkerKind } from "../core/roles";
 import { isWriter } from "../plan/waveSchedule";
 import type { FailEntry } from "../types";
 import { bullets, clip, clipMiddle } from "../core/text";
@@ -157,8 +157,7 @@ function fixRunLines(fix: FixRunInput, heavy: string): string[] {
       "", "## Fix run",
       "You continue completed work on its unmerged pull request; your mission is the change the user asked for in chat. No review follows: your green run completes it.",
       `- Before editing, on a clean tree run \`git fetch origin && git merge --ff-only origin/${fix.branch ?? "<branch>"}\`; if it fails, report blocked.`,
-      "- Never write, edit, skip or delete a test, fixture or test config. Never change docs/: list a docs need under `## Docs needed`.",
-      `- Commit, then \`git push origin HEAD:${fix.branch ?? "<branch>"}\` (never force). Run the tests of the files you touched${heavy}, then lint, build and the Verify command.`,
+      `- Commit, then \`git push origin HEAD:${fix.branch ?? "<branch>"}\`. Run the tests of the files you touched${heavy}, then lint, build and the Verify command.`,
       `- ${report} A failing test is yours to fix in product code; report blocked only with wrong-test evidence (test file:line, the text it contradicts, command output).`,
     ];
   }
@@ -178,7 +177,7 @@ function fixRunLines(fix: FixRunInput, heavy: string): string[] {
       "", "## Fix run",
       `You are the review gate's corrector. Fix run ${fix.fixerThreadId} reported a wrong test${fix.fixerReport ? ` (${fix.fixerReport})` : ""}. Fix only the test(s) it names, on the branch, and only where its evidence holds; never product code or docs/. This section wins over \`## Test work\`.`,
       "### Gate targets", ...targets, ...evidence,
-      `- Per branch: \`git fetch origin && git checkout --detach origin/<branch>\`, edit, commit, \`git push origin HEAD:<branch>\` (never force; stacked targets: the tip branch only).`,
+      `- Per branch: \`git fetch origin && git checkout --detach origin/<branch>\`, edit, commit, \`git push origin HEAD:<branch>\` (stacked targets: the tip branch only).`,
       `- Then rerun every failing test command above${heavy}. Report ready with \`testsPassed\` (true only when every one passed), with each command and its exit status.`,
     ];
   }
@@ -187,17 +186,11 @@ function fixRunLines(fix: FixRunInput, heavy: string): string[] {
     "You are the review gate's one fix run. There is no second fix: make the tests pass. The gate passes on your green run; any re-review is advisory.",
     "### Gate targets", ...targets, ...evidence,
     "- Verify each code finding against the code and the plan; fix every blocking one that holds, and the product code behind each failing test. List a finding that does not hold under `## Disputed findings` with evidence.",
-    "- Never write, edit, skip or delete a test, fixture or test config. Never change docs/: list a docs need under `## Docs needed`.",
-    `- Per branch: \`git fetch origin && git checkout --detach origin/<branch>\`, commit, \`git push origin HEAD:<branch>\` (never force; stacked targets: the tip branch only).`,
+    `- Per branch: \`git fetch origin && git checkout --detach origin/<branch>\`, commit, \`git push origin HEAD:<branch>\` (stacked targets: the tip branch only).`,
     `- Run each failing test command and the tests of the files you touched${heavy} until each exits 0, then lint, build and the Verify command.`,
     `- ${report} Report blocked ONLY with wrong-test evidence: the test file:line, the plan or docs text it contradicts, and the command output; recommend \`chief_delegate (replaces: <your thread id>, kind: tester)\`.`,
   ];
 }
-
-/** The first Working contract item of a worker or planner brief: the plugin only offers a thread its skills, so the brief orders the load.
- * One wording for every provider: the Skill tool, or a full read of each offered SKILL.md. */
-const loadLine = (skills: string[], holds = "") =>
-  `- Before any task or repository file read or other task action, load these skills in full: ${skills.map((name) => `\`${name}\``).join(", ")}. Use your Skill tool; without one, read each offered SKILL.md file in full (these reads are the only exception to the sync-first rule). If one cannot be found or loaded, report blocked before any repository work. They hold this thread's working contract${holds}.`;
 
 const deviationsLine = "- Your ready result must contain a `## Deviations from plan` heading listing each place you departed from the plan file and why, or `None`.";
 
@@ -213,7 +206,7 @@ export type DocsWorkItem = { id: string; kind: string; wave: number | null; bloc
  * point to `file`, the full list written to the repair's thread storage; `file` is then that text. */
 function docsWorkSection(wave: number | undefined, items: DocsWorkItem[]): { lines: string[]; file?: string } {
   const heading = `## Docs work list (wave ${wave})`;
-  const closing = "Fix every item that still holds, together with the Spec delta and the docs findings your mission assigns, then fold once (section 10). List an item already true in the docs at your HEAD under `## Already done`, and one that does not hold under `## Disputed findings`.";
+  const closing = "Fix every item that still holds, together with the Spec delta and the docs findings your mission assigns, then fold once (the Fold steps in your rules). List an item already true in the docs at your HEAD under `## Already done`, and one that does not hold under `## Disputed findings`.";
   const lines = items.map((item) => `${item.id} ${item.blocker ? "(blocker)" : `(wave ${item.wave})`}: ${item.text}`);
   const n = items.length;
   const itemsLen = [0];
@@ -298,7 +291,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ...(wave !== undefined && waveTotal !== undefined ? [
       "", "## Wave",
       specWriter
-        ? `Wave ${wave} of ${waveTotal}: ${side ? `you are the plan's one Spec Writer. You run after every wave of the plan is ready, in your own worktree on a side branch cut from ${branch}. Your work is the \`## Spec delta\` of every spec: true wave in the plan files below, the docs work list when present, and the docs rules in the \`chief-role-spec-writer\` skill.` : "its worker continues from your branch once you report ready. Your work is only its `## Spec delta` and the docs rules in the `chief-role-spec-writer` skill."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`
+        ? `Wave ${wave} of ${waveTotal}: ${side ? `you are the plan's one Spec Writer. You run after every wave of the plan is ready, in your own worktree on a side branch cut from ${branch}. Your work is the \`## Spec delta\` of every spec: true wave in the plan files below, the docs work list when present, and your Spec Writer rules.` : "its worker continues from your branch once you report ready. Your work is only its `## Spec delta` and your Spec Writer rules."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`
         : `Wave ${wave} of ${waveTotal}.${evidence ? "" : " Implement only this wave's plan file."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
       waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
       ...(stackBase ? [`This wave heads its own chain, stacked on ${stackBase}: its branch and PR are based on ${stackBase}; do not rebase onto the default branch.`] : waveIndependent ? ["This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch."] : []),
@@ -327,7 +320,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       ...specDocs,
       ...(tester ? [
         "- Before you derive tests, for each Spec Writer listed above run `git merge-base --is-ancestor <Fold head> HEAD`, using the Fold head from that writer's report. If it fails, report blocked: that writer's docs are not in your HEAD. A report with no Fold head (an implementation-lane writer) needs no check.",
-        "- Code that contradicts the docs is product code that is wrong: follow the product-code rule in `## Test work`. Docs that are wrong: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.",
+        "- Code that contradicts the docs is product code that is wrong: follow the product-code rule in your rules. Docs that are wrong: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.",
         ...(baseline ? ["- A new spec's baseline (the current behaviour a Spec Writer documented, listed in its report) is a source for regression tests, the same as the Spec delta's contracts. When the Spec delta changes a baseline statement, test only the delta's value. Behaviour under a Spec Writer's Open questions is not a contract."] : []),
       ] : [
         specWave
@@ -344,7 +337,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Verify command",
       ...fenced(verifyCommand),
       ...(tester ? [
-        "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure at your Base commit is present before your test edits, not proof it predates the feature. List it without changing product code. It does not waive an explicit exit-0 receipt. Any other failure in product code follows the product-code rule in `## Test work`. If this command runs the whole test suite, run it only when your mission or your plan file's `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".",
+        "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure at your Base commit is present before your test edits, not proof it predates the feature. List it without changing product code. It does not waive an explicit exit-0 receipt. Any other failure in product code follows the product-code rule in your rules. If this command runs the whole test suite, run it only when your mission or your plan file's `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".",
       ] : [
         "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
         "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
@@ -356,12 +349,12 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(heavyPath && !specWriter ? [
       "", "## Heavy commands",
-      `Slot wrapper: ${span(`bash ${quote(heavyPath)} <sim|test|build> -- <command>`)}. Run every build and test command through it in the foreground, choosing the pool as your role skill says.`,
+      `Slot wrapper: ${span(`bash ${quote(heavyPath)} <sim|test|build> -- <command>`)}. Run every build and test command through it in the foreground, choosing the pool as your rules say.`,
     ] : []),
     ...(evidence ? (branch ? ["", "## Git workflow", `Before you read any file, on a clean tree run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`; if either fails, report blocked.`] : []) : branch || issueUrl || prUrl ? [
       "", "## Git workflow",
       ...(side ? [`Side branch cut from ${branch}: commit only docs/ on it and push only through the \`## Fold\` steps.`]
-        : branch ? [`Task branch: ${branch}. After loading your skills and before any other file read, sync and record \`${tester ? "Base commit" : "Local sync"}: <sha>\`; push every commit with \`git push origin HEAD:${branch}\`; follow the git workflow in your loaded skills.`] : []),
+        : branch ? [`Task branch: ${branch}. Before any file read, sync and record \`${tester ? "Base commit" : "Local sync"}: <sha>\`; push every commit with \`git push origin HEAD:${branch}\`.`] : []),
       ...(prior ? [`${side
         ? `Your worktree is fresh from ${branch}; it does not hold the previous Spec Writer's (${prior.thread_id}) commits. Write the Spec delta again on the current docs of ${branch}; never cherry-pick or merge the previous writer's commits.`
         : `This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them.`}${prior.result ? "" : ` Its last report: bb chief inspect ${prior.thread_id}`}`] : []),
@@ -370,7 +363,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(side ? [
       "", "## Fold",
-      `Fold your docs/ commits onto ${branch}: follow section 10 (Fold) of the \`chief-role-spec-writer\` skill with <branch> = ${branch}, and record Fold base and Fold head.`,
+      `Fold your docs/ commits onto ${branch}: follow the Fold steps in your rules with <branch> = ${branch}, and record Fold base and Fold head.`,
     ] : []),
     ...(prior?.result ? [
       "", "## Predecessor's last report",
@@ -390,31 +383,23 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(evidence ? [
       "", "## Evidence work",
-      "- This brief overrides the `chief-role-tester` skill: write no tests. Run only the commands your mission names, on the commits it names, in this worktree. Commit nothing, push nothing, edit no tracked file; never use stash, autostash or another worktree. Chief owns the forge.",
+      "- Run only the commands your mission names, on the commits it names, in this worktree. Commit nothing, push nothing, edit no tracked file; never use stash, autostash or another worktree. Chief owns the forge.",
       "- Record `git rev-parse HEAD` as `Head commit: <sha>` before any run.",
       "- Base runs: `git switch --detach <base>` on a clean tree; afterwards `git switch -` and check HEAD equals Head commit. After each switch, reinstall dependencies if the lockfile differs, and reset any database or state the suites write.",
       "- Run each command alone and record `echo exit=$?` right after it (before a pipe, `set -o pipefail`), with per-file pass counts.",
       "- Ready: per command, base and head side by side (commit, exit status, pass counts); explain every difference, since an unexplained one is a regression. Before you report, HEAD equals Head commit and `git status --porcelain` prints nothing.",
       "- Blocked: name the command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: tester)` for a wrong test, `kind: worker` for product code.",
     ] : []),
-    "", "## Working contract",
-    ...(evidence ? [
+    // Static rules are in the role's instructions; the Working contract holds only mode lines. An empty one goes.
+    ...((contract) => contract.length ? ["", "## Working contract", ...contract] : [])(evidence ? [
       ...(findings?.result && findings.verdict_path ? ["- Read the verdict file in full."] : []),
       "- Report with chief_report: state ready and a `result` listing each command, its commit and exit status under Automated Verification, and under Manual what only a human can confirm; also a `summary` of at most 800 characters. Only Chief can mark it complete.",
       ...(planContextLine !== undefined ? [deviationsLine] : []),
-      "- A blocked report must include the blocker and your recommended decision or next action.",
     ] : [
-      loadLine(managedSkills("worker", kind), side ? ", git workflow and fold steps" : " and git workflow"),
-      tester
-        ? "- Change only test files, fixtures, helpers and test config; never product code or docs/."
-        : specWriter
-          ? "- Change only files under docs/; every commit carries the trailer Chief-Spec-Writer: $BB_THREAD_ID."
-          : fixRun
-            ? "- Never write or edit tests, and never change docs/: list a docs need under \"## Docs needed\". This is a fix run: run the tests as `## Fix run` says."
-            : "- Never write, edit or run tests, and never change docs/: list a docs need under \"## Docs needed\".",
-      ...(planContextLine !== undefined ? [deviationsLine] : []),
+      ...(fixRun && !tester && !specWriter ? ["- This is a fix run: run the tests as `## Fix run` says."] : []),
+      // A worker or designer gets the deviations rule in its instructions.
+      ...(planContextLine !== undefined && (tester || specWriter) ? [deviationsLine] : []),
     ]),
-    "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
     ...(kind === "designer" ? [
       "", "## Design work",
       "- Pick the mode the brief describes; if it describes none, use No spec. Design tool: create or edit in a design tool (Paper, Figma, or similar). Design in code: implement a design-tool artboard in the UI files the brief names. No spec: decide and implement the look within the project's existing design system, in the UI files the brief names or, when it names none, the files that render that UI.",
@@ -429,7 +414,6 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(tester && !evidence ? [
       "", "## Test work",
-      "- Follow the `chief-role-tester` skill: it is your testing policy and wins over the shared skill's verification lines.",
       "- Change only test files, fixtures, test helpers and test config; never product code.",
       ...(branch === undefined ? ["- When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report."] : []),
       "- Ready: tests committed and pushed; Automated Verification lists each filtered test command with its exit status and maps each test to the contract it proves and, per new test, the regression it catches.",
@@ -438,10 +422,9 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(specWriter ? [
       "", "## Spec work",
-      "- Follow the `chief-role-spec-writer` skill.",
       "- Planned: the `## Spec delta` of each spec: true wave is your work list. Unplanned: Chief's mission is your Spec delta; it names the docs and domains to change.",
       "- Inputs: the plan file, docs/INDEX.md first, then only the specs the delta names and the decisions they link. Read code only to check a name or path the delta states; a gap goes under `## Open questions`.",
-      ...(baseline ? ["- Baseline: a spec wave's plan file has a `## Spec baseline` heading. It names each new docs/specs file and the code paths it covers. For each named file that does not exist at your Base commit, first document the current behaviour of that code as the `chief-role-spec-writer` skill's baseline section says, then apply the Spec delta. Behaviour that looks like a bug goes under `## Open questions` in your report, never into the docs as a contract."] : []),
+      ...(baseline ? ["- Baseline: a spec wave's plan file has a `## Spec baseline` heading. It names each new docs/specs file and the code paths it covers. For each named file that does not exist at your Base commit, first document the current behaviour of that code as the Baseline steps in your rules say, then apply the Spec delta. Behaviour that looks like a bug goes under `## Open questions` in your report, never into the docs as a contract."] : []),
       ...(prior && !isWriter(prior.kind) ? [`- Repair: Chief's mission is the docs fix. Read the report of the ${prior.kind ?? "worker"} you replace: bb chief inspect ${prior.thread_id}.`] : []),
       "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
       side
@@ -503,8 +486,6 @@ export function plannerBrief(input: PlannerBriefInput): string {
       "- If the advisor named a decision, resolve it from the context above, or report blocked with it.",
     ] : []),
     "", "## Working contract",
-    loadLine(managedSkills("planner", undefined)),
-    `- Remain read-only: ${READ_ONLY}.`,
     `- Split the work into at most ${MAX_WAVES} waves.`,
   ].join("\n");
 }
@@ -547,14 +528,6 @@ export function advisorBrief(input: AdvisorBriefInput): string {
     "- UI whose look no approved design or explicit visual spec fixes with no `design: true` wave before the wave that builds it, or app code inside a design wave.",
     "- A big feature (3+ modules or 10+ files of new behaviour) whose chain does not end with a reshape wave, a reshape wave on a bug fix, refactor or smaller change, or a reshape wave that writes or runs tests.",
     "- A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.",
-    "", "## Working contract",
-    `- ${ADVISE_ONLY}`,
-    "- Read every file this brief names in full before concluding anything: no partial reads, no limit or offset.",
-    "- Verify each claim against the code; run read-only commands only and report each exit status.",
-    "- Report ready with verdict: approve when the plan can be delegated as is (nits go in result); request_changes only for blocking problems, each with a concrete fix. Report blocked only for a product decision the owner must make; that also counts as the plan's one review. There is one review round: the planner revises once and nobody re-reviews.",
-    "- A ready report gives the root cause, the evidence, what earlier rounds missed, and the recommended next step for a fresh worker. Put the full advice in `result` and a short `summary` (at most 800 characters: root cause, recommended fix, evidence command).",
-    "- A blocked report must include the blocker and your recommended decision or next action.",
-    "- Do not ask the user directly from this thread. Chief decides whether a question needs escalation.",
   ].join("\n");
 }
 
@@ -569,9 +542,7 @@ export function gateTesterBrief(input: {
   return [
     `You are the review gate's tester for “${input.title}” (gate ${input.gateKey}). Report to Chief thread ${input.chiefThreadId ?? "Chief"}.`,
     "", "## Working contract",
-    loadLine(managedSkills("worker", "tester")),
     "- You run in parallel with the gate's reviewer. Never wait for it, address it, or read its verdict.",
-    "- Never change product code or docs/. Only tests, fixtures, test helpers and test config.",
     "", "## Gate targets",
     ...targets.map((target) => `- ${target.threadId}: branch ${target.branch}${target.prUrl ? `, ${target.prUrl}` : ""}, pinned ${target.headSha}, base ${target.base}`),
     "", "## Test scope",

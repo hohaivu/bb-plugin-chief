@@ -19,16 +19,17 @@ export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer:
 
 /** The role skill each managed role loads next to the shared chief-worker core. */
 export const ROLE_SKILLS: Record<Exclude<Role, "chief">, string[]> = {
-  planner: ["chief-role-read-only"],
-  advisor: ["chief-role-read-only"],
-  worker: ["chief-role-worker"],
+  planner: [],
+  advisor: [],
+  worker: [],
   reviewer: ["chief-role-reviewer"],
   researcher: [],
 };
 
-/** Every skill a managed thread loads: the shared core, its role's skills, and the designer, tester or spec-writer skill for that worker kind. */
+/** Every skill a managed thread loads: the shared core and its role's skills. */
 export function managedSkills(role: Exclude<Role, "chief">, kind: WorkerKind | null | undefined): string[] {
-  return ["chief-worker", ...ROLE_SKILLS[role], ...(role === "worker" && kind && kind !== "worker" ? [`chief-role-${kind}`] : [])];
+  // Only the reviewer still loads skills (until its rules move into reviewerPrompt); every other role gets its rules in instructions.
+  return ["chief-worker", ...ROLE_SKILLS[role]];
 }
 
 /** The one read-only rule every non-implementing role shares. Untracked build/test output is not a change. */

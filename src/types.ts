@@ -251,6 +251,8 @@ export interface ManagedRow {
   research_thread_id: string | null;
   /** Planner row: the bound researcher ready report's report_seq. */
   research_report_seq: number | null;
+  /** Worker row, kind tester: 1 for an evidence-only tester; NULL (every row from before the column) is not. */
+  evidence_only: number | null;
   /** Design researcher: 1 while its design questions wait on the user. */
   waiting_on_user: number;
   /** Worker or reviewer row: JSON FailEntry[] (oldest first, at most 12) its reports ruled out, or null. */

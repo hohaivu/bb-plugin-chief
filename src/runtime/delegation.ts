@@ -397,7 +397,7 @@ export function createDelegation(ctx: Ctx) {
     }, {
       role: "worker", chiefThreadId: chief.thread_id, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
-      kind: kind === "worker" ? null : kind, plannerOn, verifyCommand,
+      kind: kind === "worker" ? null : kind, plannerOn, verifyCommand, evidenceOnly: kind === "tester" && params.evidenceOnly ? true : null,
     }, fix && ((threadId) => store.batch(() => {
       if (fix.run !== "chat") store.setGateActor(fix.gate!.gate_key, fix.run === "gate" ? "fixer_thread_id" : "corrector_thread_id", threadId);
       if (fix.run !== "corrector") store.setFixRun(threadId, fix.run);

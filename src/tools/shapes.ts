@@ -14,6 +14,7 @@ export const spawnMetadataSchema = z.object({
   chiefThreadId: z.string().nullable().optional(),
   kind: workerKindSchema.optional(),
   planThreadId: z.string().optional(),
+  evidenceOnly: z.boolean().optional(),
 });
 
 const delegateShape = z.object({

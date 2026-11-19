@@ -459,4 +459,6 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN waiting_on_user INTEGER NOT NULL DEFAULT 0`,
     // Planner row: the researcher ready report (report_seq) whose design snapshots the plan is bound to; revisions inherit it.
     `ALTER TABLE managed_threads ADD COLUMN research_report_seq INTEGER`,
+    // Tester row: 1 for an evidence-only tester, so configure leaves out the test-writing rules; NULL/0 is not.
+    `ALTER TABLE managed_threads ADD COLUMN evidence_only INTEGER`,
 ];
