@@ -6,7 +6,7 @@ BB waits 5 seconds for a plugin service to settle after an abort. If the service
 
 ## Decision
 
-The supervisor waits 3 seconds after an abort. It then abandons a tick that still runs. An abandoned tick starts no new operation: no further step, reconcile row, stall or orphan iteration, alert attempt, Chief spawn, cleanup job or read, or git command. A call dispatched before abandonment may finish. The tick writes no state from its result, except one exception: a dispatched Chief spawn that replaces a different Chief records only its row and a pending-handover marker, in one transaction. The next live tick adopts the marker only when both Chiefs stay eligible, and otherwise drops it with no handover.
+The supervisor waits 3 seconds after an abort. It then abandons a tick that still runs. An abandoned tick starts no new operation: no further step, reconcile row, stall or orphan iteration, alert attempt, Chief spawn, cleanup job or read, or git command. A call dispatched before abandonment may finish. The tick writes no state from its result, except one exception: a dispatched Chief spawn records its Chief row. When it replaces a different Chief, it also records a pending-handover marker, in the same transaction. The next live tick adopts the marker only when both Chiefs stay eligible, and otherwise drops it with no handover.
 
 ## Consequence
 
