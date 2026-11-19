@@ -316,6 +316,8 @@ For each candidate, one `db.transaction` does these steps:
 
 After the commit, the sync runs `void deliver(key)`.
 
+**Decisions file.** After the commit, a matched answer also records one `owner-answer` entry in the live Chief's decisions file. Its `thread` is the concerned thread of the decision, and its reason names the decision number and the task title. A comment that names no decision records nothing. A failed record logs a warning and changes nothing else. See `decisions-file.md`.
+
 | Case | Alert key | Alert source | Alert text |
 | --- | --- | --- | --- |
 | Matched | `decision-<ref>:answer` | The concerned thread of the decision | Names the decision number and the task title, quotes the comment (4,000 characters), and says to treat it as the answer to that **Need you** request. |
@@ -371,6 +373,8 @@ The only change of a tool schema is the optional `merge` parameter of `chief_esc
 | The answer receipt and the answer alert commit in one transaction. | See Answer poll. |
 | The plugin poll is the only delivery path of an answer. | Two senders would give Chief two alerts for one answer. |
 | Alerts follow hand-offs. | `handOver` re-targets undelivered outbox rows. |
+| A matched owner answer is also recorded in the live Chief's decisions file, after the commit. | The file keeps the answer for the Chief after a context compaction. A file write cannot run inside the transaction. |
+| A failed decisions-file record never rolls back the answer or the alert. | The alert already delivers the answer. |
 
 ## Known Limits
 

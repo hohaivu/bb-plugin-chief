@@ -65,6 +65,7 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - When `previous` exists, `spawnChief` calls `handOver` before it inserts the new row.
 - `handOver` runs in one `store.batch`. It completes the previous Chief and moves its open rows. It retargets undelivered outbox rows. It moves its `chief_todos`.
 - Reason: a successor must keep the open work, the alerts and the todos.
+- `handOver` also starts a copy of the predecessor's decisions file to the successor. The copy does not block `handOver`. See `decisions-file.md`.
 
 ### `chief_spawn` (execute)
 
@@ -72,7 +73,8 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - It validates `todoId` before it spawns. The todo must be an open todo of the caller.
 - It starts the new Chief in the caller's project through `createChief`.
 - The result says that the new Chief "is not your managed work": it is not in the roster, sends no alerts, and the caller cannot inspect or steer it.
-- It writes `brief.md` with the handoff section. It retries up to 3 times and reports a failure in the result.
+- It writes `brief.md` with the handoff section. It retries while the new environment provisions (HTTP 409), for about 60 s, and reports a failure in the result.
+- When the todo moves to the new Chief, the tool copies that todo's decision entries to the new Chief's decisions file. See `decisions-file.md`.
 
 ### `chief_escalate` (execute)
 
@@ -125,6 +127,13 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - The skills are `[]`. Reason: the Chief procedure arrives in the instructions.
 - The instructions hold the greeting, then the preload line for `claude-code`, then the Chief rules. The project rules come last. Reason: the SDK cuts instructions at 32,768 characters.
 - The preload line is `select:` followed by the exact `mcp__bb-bridge__` names of the row's tools, in the host's selected order.
+
+## Decisions file (this change)
+
+- A Coordinator keeps its own decisions file, as a Chief does. See `decisions-file.md`.
+- The Coordinator records each owner answer it relays to a child, and each sequencing agreement, with the `decision` field of `chief_roster`.
+- The Coordinator instructions name the `decision` field. Reason: the server cannot see chat answers or relays.
+- The record stays in the Coordinator's file. The child gets the answer through its `bb thread tell` relay. See the relay decision below.
 
 ## Contracts
 
@@ -235,7 +244,8 @@ Each contract has an identifier. Tests and reviews cite it.
 - With no children, the roster instructs how to attach or spawn Chiefs.
 - The Coordinator's own todos follow the block.
 - Each child entry and the Coordinator's own block collapse the todos of other, ended or no Chiefs into one count line, as `work-list.md` states. `includeOthers: true` expands all of them. Reason: a Chief reads its own work first.
-- The roster of a plain Chief equals the base output for the same state.
+- The output opens with the `Decisions:` path line. See `decisions-file.md`.
+- The roster of a plain Chief equals the base output for the same state, apart from the path line that opens it.
 
 ### COORD-9 Configure
 
@@ -380,3 +390,4 @@ Every row gets `skills: []`. The `coordinator` skill no longer exists. The `chie
 
 - [Coordinator stays a Chief row with two nullable columns](../decisions/2026-11-10-coordinator-stays-chief-row.md)
 - [Owner answers reach a child through a marked relay](../decisions/2026-11-16-owner-answer-relay-marker.md)
+- [Decisions file is the only store](../decisions/2026-11-19-decisions-file-only-store.md)
