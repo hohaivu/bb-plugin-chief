@@ -541,23 +541,14 @@ export function gateTesterBrief(input: {
   const { targets, heavyPath } = input;
   return [
     `You are the review gate's tester for “${input.title}” (gate ${input.gateKey}). Report to Chief thread ${input.chiefThreadId ?? "Chief"}.`,
-    "", "## Working contract",
-    "- You run in parallel with the gate's reviewer. Never wait for it, address it, or read its verdict.",
     "", "## Gate targets",
     ...targets.map((target) => `- ${target.threadId}: branch ${target.branch}${target.prUrl ? `, ${target.prUrl}` : ""}, pinned ${target.headSha}, base ${target.base}`),
     "", "## Test scope",
-    "- Read `git diff origin/<base>...<pinned sha>` for each target, the plan files, the docs the Spec Writers changed, and the repository's test rules. Decide which tests to write and at which level.",
     ...(input.planFiles.length ? [`- Plan files: ${input.planFiles.join(", ")}`] : []),
     ...input.writers.map((writer) => `- Spec Writer ${writer.threadId}${writer.reportPath ? `: report ${writer.reportPath}` : ""}`),
-    "- Per branch: `git fetch origin && git checkout --detach origin/<branch>`, write the tests, run them filtered, commit, then `git push origin HEAD:<branch>`. Never force-push. When a push is rejected, run `git fetch origin && git rebase origin/<branch>` once and push again; if it is rejected again, report blocked.",
-    "- When targets stack on each other, put the tests on the stack's tip branch only.",
-    "- Run the full suite once on each branch head you pushed.",
     ...(input.verifyCommand ? [`- Verify command: ${span(input.verifyCommand)}.`] : []),
     ...(heavyPath ? [`- Slot wrapper: ${span(`bash ${quote(heavyPath)} <sim|test|build> -- <command>`)}. Run every build and test command through it in the foreground.`] : []),
-    "", "## Report",
-    "- Report ready with `testsPassed` (true only when every test you ran passed) and a `## Failing tests` section: per failure the test file:line, the command, its exit status, an output excerpt and the product file:line behind it.",
-    ...(input.planFiles.length ? [deviationsLine] : []),
-    "- Report blocked only for an environment problem, with your recommended next action.",
+    ...(input.planFiles.length ? ["", "## Report", deviationsLine] : []),
   ].join("\n");
 }
 

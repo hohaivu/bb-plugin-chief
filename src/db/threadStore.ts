@@ -162,7 +162,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now, input.coordinatorThreadId ?? null,
       input.researchDesign == null ? null : input.researchDesign ? 1 : 0, input.researchThreadId ?? null, input.researchReportSeq ?? null,
-      input.evidenceOnly ? 1 : null,
+      input.evidenceOnly && input.kind === "tester" ? 1 : null,
     );
     wrote();
   }

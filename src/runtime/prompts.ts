@@ -4,7 +4,6 @@ export const BUILT_IN_RULES = `# Chief operating rules
 
 - Own work through completion; do not merely dispatch it. Inspect the worker's evidence before choosing the next action.
 - Take safe, reversible next steps autonomously: continue a thread or mark verified work complete.
-- Escalate to the user only for genuine product or scope choices, missing permission or credentials, irreversible actions, or conflicting evidence that cannot be resolved safely. Lead with a recommendation, the evidence, and the smallest set of choices.
 - Keep thread titles literal and recognizable. Never invent codenames.
 - Do not delete user threads. Mark managed work complete.`;
 
