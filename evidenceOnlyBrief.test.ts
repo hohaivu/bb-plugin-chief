@@ -206,7 +206,10 @@ describe("evidence-only through chief_delegate", () => {
     expect(prompt).toContain("## Evidence work");
     expect(prompt).toContain("`## Deviations from plan` heading");
     for (const gone of ["## Test work", "## Contracts to verify", "## Source of truth for test cases", "Commit and push"]) expect(prompt).not.toContain(gone);
-    const tester = workerOn(state, planner.threadId, 1).thread_id as string;
+    const testerRow = workerOn(state, planner.threadId, 1);
+    expect(state.spawned.at(-1).pluginMetadata).toMatchObject({ kind: "tester", evidenceOnly: true });
+    expect(testerRow.evidence_only).toBe(1);
+    const tester = testerRow.thread_id as string;
     await report(state, tester, { state: "ready", result: READY });
     expect(rowOf(state, tester).last_report_state).toBe("ready");
   });
@@ -220,9 +223,11 @@ describe("evidence-only through chief_delegate", () => {
     const first = workerOn(state, planner.threadId, 1).thread_id as string;
     await readyIdle(state, first);
     await delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: first, kind: "tester" });
-    const prompt = state.spawned.at(-1).prompt as string;
-    expect(prompt).toContain("## Test work");
-    expect(prompt).not.toContain("## Evidence work");
+    const spawn = state.spawned.at(-1);
+    expect(spawn.pluginMetadata).not.toHaveProperty("evidenceOnly");
+    expect(workerOn(state, planner.threadId, 1).evidence_only).toBeNull();
+    expect(spawn.prompt).toContain("## Test work");
+    expect(spawn.prompt).not.toContain("## Evidence work");
   });
 
   // Contract: CLI --evidence-only maps to evidenceOnly: true, and an absent flag to undefined (a normal brief).
