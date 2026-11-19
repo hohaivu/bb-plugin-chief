@@ -105,6 +105,7 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - `sweep()` runs after each store reload once `pendingReady` is set, on `idle` and `failed` events, and after `reconcile()` in the supervisor loop.
 - `reconcileThread` reads the live thread. It records a deleted or archived thread. It moves the thread to the Chief section. It syncs the row state and status with the live thread.
 - An unchanged row causes no write and no reload. A changed row writes through `store.syncLive`, which reloads the store and starts the sweep.
+- An abandoned supervisor tick starts no new `sweep()` read or write. See COORD-12b.
 
 ### Alerts (`writeAlert`, `insertAlert`, `deliverAlert`)
 
@@ -354,14 +355,15 @@ The supervisor is the plugin service that reconciles managed rows, sends the pro
 - BB then refuses to load the new generation, so the `chief_*` tools disappear.
 - A tick that finishes within the grace runs every step to its end, in the same order.
 - A tick still running after the grace is abandoned.
-- An abandoned tick starts no further top-level step.
-- An abandoned tick starts no further reconcile row, `readRules` call, stall or orphan iteration, or alert delivery.
-- An alert send in flight at abandonment ends its wait at once. Its last error becomes `abandoned`.
+- An abandoned tick starts no new operation. It starts no further top-level step, reconcile row, `readRules` call, stall or orphan iteration, alert attempt or alert send, cleanup read or archive call.
+- An operation that the tick dispatched before abandonment may finish. The abandoned tick writes no state from its result.
+- The supervisor passes its stop check into `sweep()`, `observeCleanup()` and `ensureSection()`. Each one starts no new read, dispatch or write after abandonment. Reason: an unchecked read keeps the tick running past the stop window.
+- An alert send in flight at abandonment ends its wait at once. Its last error becomes `abandoned`. The abandoned tick counts no new attempt.
 - The abandoned send may still reach its target. The next retry checks the target for the alert marker before it sends again.
 - `reconcile` takes an optional stop check. `retryAlerts` takes an optional `AbortSignal`.
-- Both end their serial loops when the stop is requested. `bounded` in `src/runtime/exec.ts` ends its race when the signal aborts.
+- Both end their serial loops when the stop is requested. `bounded` in `src/runtime/exec.ts` ends its race when the signal aborts. It rejects at once for an already aborted signal, without calling its operation.
 - A caller that passes no argument sees no change.
-- `sweep()` and `observeCleanup()` take no stop check. An abandoned tick can still start their later reads. Reason: not stated in the code.
+- Abandonment clears the supervisor's own deadlines. No timer stays pending after `start()` settles, except an `unref`'d grace timer. Reason: a pending timer can fire after BB disposes the service.
 - Decision: [Abandon a stuck supervisor tick after a grace](../decisions/2026-11-19-supervisor-abandon-tick-after-grace.md).
 
 ### COORD-13 Notices to children
