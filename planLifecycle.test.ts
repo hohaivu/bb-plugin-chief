@@ -211,7 +211,7 @@ describe("admitDelegation: spec flow", () => {
   test("a docs repair replaces a side writer with kind spec-writer; another kind is refused naming the chain owner", () => {
     const { admit } = world({ [P]: specPlan }, [{ id: "w", plan: P, wave: 1 }, { id: "sw", plan: P, wave: 1, kind: "spec-writer", state: "blocked", last: "blocked" }]);
     expect(admit({ ...writer, wave: 1, prior: "sw" })).toMatchObject({ kind: "spec-writer", lane: "side" });
-    for (const kind of ["worker", "designer", "tester"] as const) {
+    for (const kind of ["worker", "designer"] as const) {
       expect(() => admit({ ...planned, wave: 1, prior: "sw", kind, resolvedKind: kind }), kind).toThrow(/replaces: w\b/);
     }
   });

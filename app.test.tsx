@@ -195,7 +195,7 @@ describe("SDK header actions", () => {
   test("labels each visible managed thread by role and leaves unmanaged threads unbadged", async () => {
     const cases = [
       ["chief", "Chief supervisor"], ["planner", "Chief Planner"], ["worker", "Chief Worker"],
-      ["designer", "Chief Designer"], ["tester", "Chief Tester"], ["spec-writer", "Chief Spec Writer"],
+      ["designer", "Chief Designer"], ["spec-writer", "Chief Spec Writer"],
       ["reviewer", "Chief Reviewer"], ["advisor", "Chief Advisor"], ["researcher", "Chief Researcher"],
       [null, null],
     ] as const;
@@ -286,18 +286,18 @@ test("picks a scanned model per role and clears back to the BB default", async (
   expect(rendered.getAllByText("Not set · BB picks the model")).toHaveLength(6);
 });
 
-// Contract (Settings > Models, Spec Writer row): the row sits after Tester, an unset Spec Writer is described as using the
+// Contract (Settings > Models, Spec Writer row): the row sits after Designer, an unset Spec Writer is described as using the
 // Worker model, a stored pick offers "Use Worker model" (not "Use BB default"), and clearing it saves role "spec-writer" with
 // a null selection. Regression: dropping spec-writer from the inherit-Worker roles shows "BB picks the model" and the wrong
 // button; a wrong role string in the row clears another role's pick.
-test("the Spec Writer row follows Tester, inherits the Worker model, and clears its own pick", async () => {
+test("the Spec Writer row follows Designer, inherits the Worker model, and clears its own pick", async () => {
   const section = app.settingsSections.find((candidate) => candidate.id === "models")!;
   const pick = { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" as const };
   const configuration = {
     hosts: [{
       hostId: "host_1", hostName: "Local", connected: true, error: null,
       fallback: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, designer: null, tester: null, "spec-writer": pick, reviewer: null, advisor: null, researcher: null },
+      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": pick, reviewer: null, advisor: null, researcher: null },
       unusable: [],
     }],
   };
@@ -307,17 +307,15 @@ test("the Spec Writer row follows Tester, inherits the Worker model, and clears 
   unmounts.push(() => rendered.lifecycle.unmount());
   await vi.waitFor(() => expect(rendered.getByText("Local")).toBeTruthy());
 
-  const labels = ["Chief", "Planner", "Worker", "Designer", "Tester", "Spec Writer", "Reviewer", "Advisor"];
+  const labels = ["Chief", "Planner", "Worker", "Designer", "Spec Writer", "Reviewer", "Advisor"];
   const rows = labels.map((label) => rendered.getByText(label, { selector: "div" }).closest("div.mt-3") as HTMLElement);
   expect(rows.every(Boolean)).toBe(true);
   expect(new Set(rows).size).toBe(labels.length);
   expect(rows.every((row, i) => i === 0 || rows[i - 1]!.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
 
-  const specRow = within(rows[5]!);
+  const specRow = within(rows[4]!);
   expect(specRow.queryByText("Not set · uses the Worker model")).toBeNull();
   expect(specRow.queryByRole("button", { name: "Use BB default" })).toBeNull();
-  // Tester has no pick: it inherits the Worker model, not BB's default.
-  expect(within(rows[4]!).getByText("Not set · uses the Worker model")).toBeTruthy();
 
   fireEvent.click(specRow.getByRole("button", { name: "Use Worker model" }));
 
@@ -335,7 +333,7 @@ test("a picker re-reporting a service tier saves no role model", async () => {
     hosts: [{
       hostId: "host_1", hostName: "Local", connected: true, error: null,
       fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, designer: null, tester: null, "spec-writer": null, reviewer: null, advisor: null, researcher: null },
+      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": null, reviewer: null, advisor: null, researcher: null },
       unusable: [],
     }],
   };
@@ -360,7 +358,7 @@ test("the Researcher row follows Advisor, uses the BB default, and clears its ow
     hosts: [{
       hostId: "host_1", hostName: "Local", connected: true, error: null,
       fallback: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, designer: null, tester: null, "spec-writer": null, reviewer: null, advisor: null, researcher: pick },
+      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": null, reviewer: null, advisor: null, researcher: pick },
       unusable: [],
     }],
   };
