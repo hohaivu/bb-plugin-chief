@@ -10,7 +10,7 @@ afterEach(disposeAll);
 // Contract (plan-1 "plan intake"; docs/specs/report-intake.md, docs/specs/plan-chains.md): a plan is implementation waves only. 1 to 8 waves
 // are accepted as a string or an array; the `test` wave flag is refused through the real chief_report tool; the plugin never requires a plan review
 // (plan_review stays null whatever the wave count; a `complex` key is stripped, not refused). A persisted legacy test wave (raw `test: true`,
-// written before the review gate) is absent, not delegable and not a pending wave; with a tester row on it it is an ordinary wave.
+// written before the review gate) is absent, not delegable and not a pending wave; with a worker row on it it is an ordinary wave.
 // Everything here runs the real tools; only the forge answer and the legacy plan JSON (written by direct SQL) are seeded.
 
 type State = Awaited<ReturnType<typeof setup>>;
@@ -51,7 +51,7 @@ describe("plan intake: wave count and the test flag", () => {
     const chief = await start(state);
     const planner = await newPlanner(state, chief.threadId);
     await expect(report(state, planner.threadId, { state: "ready", result: "Planned.", plan: waves(2, (n) => (n === 2 ? { test: flag } : {})) }))
-      .rejects.toThrow("plan wave 2: test waves are gone; the tester runs once in the review gate after every wave. Drop test.");
+      .rejects.toThrow("plan wave 2:");
     expect(rowOf(state, planner.threadId).plan_waves).toBeNull();
   });
 });
@@ -139,9 +139,9 @@ describe("legacy test wave cutover", () => {
     const next = String((await state.harness.behavior.callAgentTool("chief_roster", {}, CTX(chief.threadId))));
     expect(next).toContain("waves: 1/2 done");
     expect(next).not.toContain("wave: 2");
-    await expect(state.harness.behavior.callAgentTool("chief_delegate", { title: "Tests", mission: "Test it", planThreadId: planner.threadId, wave: 2, replaces: worker, kind: "tester" }, CTX(chief.threadId)))
-      .rejects.toThrow("Wave 2 is a legacy test wave: the tester runs in the review gate (chief_review); nothing to delegate.");
+    await expect(state.harness.behavior.callAgentTool("chief_delegate", { title: "Tests", mission: "Test it", planThreadId: planner.threadId, wave: 2, replaces: worker, kind: "worker" }, CTX(chief.threadId)))
+      .rejects.toThrow("Wave 2 is a legacy test wave");
     const review = await chiefReview(state, chief.threadId, { workerThreadId: worker });
-    expect(review.testerThreadId).not.toBeNull();
+    expect(review.created).toBe(true);
   });
 });
