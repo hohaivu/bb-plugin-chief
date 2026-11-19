@@ -49,7 +49,7 @@ Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` 
 
 ### Reviewer prompt
 
-`reviewerPrompt` builds one prompt for a worker's reviewer and for a branch reviewer. It holds the reviewer rules, such as the gate role and the doc-text tests. The reviewer loads no skill. `prAgent.ts` no longer restates the rule that a reviewer runs no checks.
+`reviewerPrompt` builds one prompt for a worker's reviewer and for a branch reviewer. It holds the reviewer rules, such as the gate rule, the docs-ownership policy and the read-in-full policy. The reviewer loads no skill. `prAgent.ts` no longer restates the rule that a reviewer runs no checks.
 
 CHANGED: the invariant prefix of `reviewerPrompt` holds the gate rule, the docs-ownership policy (the `Chief-Spec-Writer` trailer) and the read-in-full policy for `review-context.md`. The docs-ownership policy applies only when the brief has a `## Docs ownership` section. The read-in-full policy renders only when the brief names a context file. `reviewBrief` carries only the conditional Spec Writer list and the per-run context path or inline context.
 
