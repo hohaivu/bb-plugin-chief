@@ -278,8 +278,7 @@ describe("Chief backend", () => {
     expect(othersLines[header + 1]).toBe(`- todo #1 (Chief ${chief.threadId}): Ship docs`);
     // By default the same todo is one count line, with neither its text nor the section header.
     const collapsedDefault = String(await state.harness.behavior.callAgentTool("chief_roster", {}, replacementOpts));
-    expect(collapsedDefault.startsWith(`${PATH}Pending:
-- 1 other-Chief todo (#1) hidden`)).toBe(true);
+    expect(collapsedDefault.startsWith(`${PATH}Pending:\n- 1 other-Chief todo (#1) hidden`)).toBe(true);
     expect(collapsedDefault).not.toContain("Ship docs");
 
     const other = await start(state, "proj_2");
