@@ -272,6 +272,36 @@ describe("an abandoned supervisor tick", () => {
     expect(researcherStates(state)).toEqual([{ thread_id: "thr_r1", state: "ready" }, { thread_id: "thr_r2", state: "complete" }]);
   }, STOP_GRACE_MS + 5_000);
 
+  test("an independent request and the tick's request queued in the same pass run it unsignalled after abandonment", async () => {
+    const reads: string[] = [];
+    const first = parked();
+    const state = await setup({ seed: ({ db }) => { absorbedResearcher(db, "thr_r1"); absorbedResearcher(db, "thr_r2"); } });
+    const base = state.live.values().next().value;
+    let calls = 0;
+    let released = false;
+    state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      if (threadId !== "thr_r1" && threadId !== "thr_r2") return state.live.get(threadId);
+      if (released) reads.push(threadId);
+      const busy = ++calls === 1;
+      if (busy) await first.hold();
+      return { ...base, id: threadId, status: busy ? "active" : "idle", archivedAt: null, deletedAt: null };
+    });
+    const idle = () => state.harness.behavior.emitThreadEvent("thread.idle", { thread: base, lastAssistantText: "done" });
+    await idle();
+    await first.hit;
+    const service = state.harness.behavior.runService("supervisor");
+    await pause(100); // the tick's sweep joined the flight and queued its pass
+    await idle(); // an independent request joins the same queued pass
+    service.controller.abort();
+    await service.done;
+    released = true;
+    first.release();
+    await pause(100);
+    // The shared queued pass is independent work: it ran to the end and completed thr_r1 as well.
+    expect(reads).toEqual(["thr_r2", "thr_r1"]);
+    expect(researcherStates(state)).toEqual([{ thread_id: "thr_r1", state: "complete" }, { thread_id: "thr_r2", state: "complete" }]);
+  }, STOP_GRACE_MS + 5_000);
+
   test("requests during a flight collapse into one more pass, and only one flight runs at a time", async () => {
     let active = 0;
     let peak = 0;
@@ -419,7 +449,7 @@ describe("an abandoned supervisor tick's Chief spawn", () => {
   /** A harness whose spawns wait on `gate.current` while it is set; make it only after the setup spawns. */
   const gated = async (autoSpawn = true) => {
     const gate: { current: ReturnType<typeof parked> | null } = { current: null };
-    const state = await setup({ onSpawn: () => gate.current?.hold() });
+    const state = await setup({ onSpawn: async () => { await gate.current?.hold(); } });
     if (autoSpawn) {
       // chiefProject first, then autoSpawn: the settings change itself starts no Chief.
       await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
