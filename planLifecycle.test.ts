@@ -45,15 +45,13 @@ const P = "plan";
 const planned = { planThreadId: P };
 
 describe("admitDelegation: explicitKind and planner gates (order)", () => {
-  test("a prior tester or Spec Writer with kind omitted must name the kind", () => {
-    for (const kind of ["tester", "spec-writer"]) {
-      const { admit } = world({ [P]: [{ path: "w1" }] }, [{ id: "prior", kind }]);
-      expect(() => admit({ prior: "prior", resolvedKind: "worker" })).toThrow(/^Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs\/\.$/);
-    }
+  test("a prior Spec Writer with kind omitted must name the kind", () => {
+    const { admit } = world({ [P]: [{ path: "w1" }] }, [{ id: "prior", kind: "spec-writer" }]);
+    expect(() => admit({ prior: "prior", resolvedKind: "worker" })).toThrow(/^Name the kind/);
   });
 
-  test("double fault: prior tester, kind omitted and a foreign planner gives explicitKind, and the review gate is never called", () => {
-    const { rows, admit, review } = world({ [P]: [{ path: "w1" }] }, [{ id: "prior", kind: "tester" }]);
+  test("double fault: prior Spec Writer, kind omitted and a foreign planner gives explicitKind, and the review gate is never called", () => {
+    const { rows, admit, review } = world({ [P]: [{ path: "w1" }] }, [{ id: "prior", kind: "spec-writer" }]);
     rows.set("foreign", base("foreign", { role: "planner", chief_thread_id: "other-chief", plan_waves: "[]" }));
     expect(() => admit({ prior: "prior", planThreadId: "foreign", wave: 1, resolvedKind: "worker" })).toThrow(/^Name the kind/);
     expect(() => admit({ prior: "prior", planThreadId: P, wave: 1, resolvedKind: "worker" })).toThrow(/^Name the kind/);
@@ -84,9 +82,9 @@ describe("admitDelegation: wave range and absent waves", () => {
     expect(() => admit({ ...planned, wave })).toThrow(`Wave ${shown} is out of range: planner ${P} scheduled 2 wave(s).`);
   });
 
-  test("a legacy test wave with no row is absent: the tester runs in the review gate, nothing to delegate", () => {
+  test("a legacy test wave with no row is absent: nothing to delegate", () => {
     const { admit } = world({ [P]: [{ path: "w1" }, { path: "w2", test: true }] }, [{ id: "w", plan: P, wave: 1 }]);
-    expect(() => admit({ ...planned, wave: 2, prior: "w" })).toThrow("Wave 2 is a legacy test wave: the tester runs in the review gate (chief_review); nothing to delegate.");
+    expect(() => admit({ ...planned, wave: 2, prior: "w" })).toThrow("Wave 2 is a legacy test wave");
   });
 });
 
@@ -295,27 +293,16 @@ describe("admitDelegation: spec flow", () => {
   });
 });
 
-describe("admitDelegation: tester kind", () => {
-  const tester = { kind: "tester" as const, resolvedKind: "tester" as const };
-  const plan: PlanWave[] = [{ path: "w1" }, { path: "w2" }];
-
-  test("a tester on a plan needs replaces: of the worker whose branch it tests; a completed prior is replaced without a terminal-row refusal", () => {
-    const { admit } = world({ [P]: plan }, [{ id: "w", plan: P, wave: 1, state: "complete" }]);
-    expect(() => admit({ ...planned, wave: 1, ...tester })).toThrow("kind: tester on a plan needs replaces: of the worker whose branch it tests.");
-    expect(() => admit({ ...planned, wave: 1, branch: "b", ...tester })).toThrow("kind: tester on a plan needs replaces: of the worker whose branch it tests.");
-    expect(admit({ ...planned, wave: 1, prior: "w", ...tester })).toMatchObject({ kind: "tester", lane: "implementation" });
-  });
-
-  test("a worker fix replacing a tester needs an explicit kind, and kind: worker is admitted there", () => {
-    const { admit } = world({ [P]: plan }, [{ id: "w", plan: P, wave: 1 }, { id: "t", plan: P, wave: 1, kind: "tester" }]);
-    expect(() => admit({ ...planned, wave: 1, prior: "t" })).toThrow(/^Name the kind/);
-    expect(admit({ ...planned, wave: 1, prior: "t", kind: "worker", resolvedKind: "worker" }).kind).toBe("worker");
+describe("admitDelegation: legacy tester rows", () => {
+  test("a fix replacing an old kind=tester row needs no kind and is admitted as a worker", () => {
+    const { admit } = world({ [P]: [{ path: "w1" }, { path: "w2" }] }, [{ id: "w", plan: P, wave: 1 }, { id: "t", plan: P, wave: 1, kind: "tester" }]);
+    expect(admit({ ...planned, wave: 1, prior: "t" }).kind).toBe("worker");
   });
 });
 
 describe("admitDelegation: specSources", () => {
   // Contract (docs/specs/plan-chains.md: one Spec Writer per plan): the plan's Spec Writer lists every wave's path and no wave's contracts,
-  // which belong to the worker and the tester. Regression: a contracts clip, or only the writer's own wave, comes back.
+  // which belong to the worker. Regression: a contracts clip, or only the writer's own wave, comes back.
   test("the plan's Spec Writer lists every wave's path of a four-wave chain and no contracts", () => {
     const chain: PlanWave[] = [1, 2, 3, 4].map((n) => ({ path: `w${n}`, contracts: `contracts of wave ${n} ${"x".repeat(4_000)}`, spec: true }));
     const rows: Worker[] = [1, 2, 3, 4].map((n) => ({ id: `w${n}`, plan: P, wave: n, ...(n > 1 ? { replaces: `w${n - 1}` } : {}) }));
@@ -340,28 +327,19 @@ describe("admitDelegation: unplanned", () => {
     expect(ready.admit({ prior: "sw", kind: "worker", resolvedKind: "worker" }).kind).toBe("worker");
     expect(writer("idle", "ready").admit({ prior: "sw", kind: "designer", resolvedKind: "designer" }).kind).toBe("designer");
     expect(ready.admit({ prior: "sw", kind: "spec-writer", resolvedKind: "spec-writer" }).kind).toBe("spec-writer");
-    expect(() => ready.admit({ prior: "sw", kind: "tester", resolvedKind: "tester" })).toThrow("Spec Writer sw hands off to its worker: chief_delegate (replaces: sw, kind: worker).");
     const notReady = writer("active", null);
     expect(() => notReady.admit({ prior: "sw", kind: "worker", resolvedKind: "worker" })).toThrow("Spec Writer sw has not reported ready: retry it with the fix — chief_delegate (replaces: sw, kind: spec-writer) — or start a fresh chief_plan with its report in context.");
-    expect(() => notReady.admit({ prior: "sw", kind: "tester", resolvedKind: "tester" })).toThrow(/^Spec Writer sw has not reported ready/);
   });
 
-  test("a tester without a prior is refused", () => {
-    const { admit } = world({});
-    expect(() => admit({ kind: "tester", resolvedKind: "tester" })).toThrow(/replaces:.*or branch/);
-    expect(() => admit({ kind: "tester", resolvedKind: "tester", branch: "feature/existing" })).not.toThrow();
-  });
-
-  test("a tester or Spec Writer reads the chain head's brief as its spec source; a worker does not", () => {
+  test("a Spec Writer reads the chain head's brief as its spec source; a worker does not", () => {
     const { admit } = world({}, [{ id: "head", brief: "the original mission" }, { id: "tip" }], { tip: ["tip", "head"] });
-    expect(admit({ prior: "tip", kind: "tester", resolvedKind: "tester" }).specSources).toEqual(["the original mission"]);
     expect(admit({ prior: "tip", kind: "spec-writer", resolvedKind: "spec-writer" }).specSources).toEqual(["the original mission"]);
     expect(admit({ prior: "tip", kind: "worker", resolvedKind: "worker" }).specSources).toEqual([]);
   });
 
   test("a long head brief is clipped to about 4000 characters", () => {
     const { admit } = world({}, [{ id: "head", brief: "y".repeat(20_000) }, { id: "tip" }], { tip: ["tip", "head"] });
-    expect(admit({ prior: "tip", kind: "tester", resolvedKind: "tester" }).specSources[0]!.length).toBeLessThan(4_100);
+    expect(admit({ prior: "tip", kind: "spec-writer", resolvedKind: "spec-writer" }).specSources[0]!.length).toBeLessThan(4_100);
   });
 
   test("specDocs lists the chain's Spec Writer reports, none for a Spec Writer's own brief", () => {
