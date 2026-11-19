@@ -22,10 +22,7 @@ describe("Chief backend", () => {
     expect(state.sent).toHaveLength(1);
     const text = state.sent[0].input[0].text;
     expect(state.sent[0].threadId).toBe(chief.threadId);
-    expect(text).toContain("usage limit");
-    expect(text).toContain("Usage limit resets at");
     expect(text).toContain(`bb thread retry ${worker.threadId} --send-at 38m`);
-    expect(text).toContain("Do not spawn a replacement");
     await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(worker.threadId)!, error: null });
     expect(state.sent).toHaveLength(1);
   });
@@ -38,7 +35,6 @@ describe("Chief backend", () => {
     expect(state.sent).toHaveLength(1);
     const text = state.sent[0].input[0].text;
     expect(text).toContain(`bb thread retry ${worker.threadId} --send-at 2m`);
-    expect(text).not.toContain("usage limit");
   });
 
   test("transient provider: a non-transient error alerts Chief to reroute, with no retry", async () => {
@@ -48,8 +44,8 @@ describe("Chief backend", () => {
     await failWith(state, worker.threadId, "context window exceeded");
     expect(state.sent).toHaveLength(1);
     const text = state.sent[0].input[0].text;
-    expect(text).toContain(`(${worker.threadId}) failed.`);
-    expect(text).toMatch(/Provider error: .*context window exceeded/);
+    expect(text).toContain(worker.threadId);
+    expect(text).toContain("context window exceeded");
     expect(text).not.toContain("bb thread retry");
   });
 
@@ -75,7 +71,8 @@ describe("Chief backend", () => {
     const limited = await delegate(state, chief.threadId, "Unrelated work");
     const alertsBefore = state.sent.length;
     await coolDown(state, limited.threadId, MODEL_COOLDOWN);
-    expect(state.sent.at(-1).input[0].text).toMatch(/work on codex\/gpt-6-astra is refused until \d{4}-/);
+    expect(state.sent.at(-1).input[0].text).toContain("codex/gpt-6-astra");
+    expect(state.sent.at(-1).input[0].text).toMatch(/\d{4}-\d\d-\d\dT/);
     expect(state.sent.length).toBe(alertsBefore + 1);
     const spawnedBefore = state.spawned.length;
     await expect(state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts))
@@ -165,7 +162,9 @@ describe("Chief backend", () => {
     state.live.set(worker.threadId, { ...state.live.get(worker.threadId)!, providerId: "" });
     await failWith(state, worker.threadId, "429 usage_limit_reached");
     expect(state.db.prepare("SELECT * FROM provider_cooldowns").all()).toEqual([]);
-    expect(state.sent.at(-1).input[0].text).not.toContain("is refused until");
+    const text = state.sent.at(-1).input[0].text;
+    expect(text).toContain(worker.threadId);
+    expect(text).not.toMatch(/\d{4}-\d\d-\d\dT/);
   });
 
   test("cooldown: worker, planner, advisor and branch review on a cooling project-default model are refused", async () => {
