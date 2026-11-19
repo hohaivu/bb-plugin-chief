@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { PLAN_FIXTURE, disposeAll, wave } from "./test/harness";
 import { type GateWorld, gateWorld } from "./test/gateWorld";
-import { delegateWave, plan } from "./test/testerHelpers";
+import { delegateWave, plan } from "./test/flowHelpers";
 import { provideSdk } from "./test/sdk";
 
 provideSdk(sdkTesting);

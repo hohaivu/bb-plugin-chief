@@ -5,7 +5,7 @@ import { approvePlan, delegate, disposeAll, status, wave } from "./test/harness"
 import { PR, type World, git, world } from "./test/docsGateWorld";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { READY, delegateWave, passGate, readyIdle, refusal, report, workerOn } from "./test/testerHelpers";
+import { READY, delegateWave, passGate, readyIdle, refusal, report, workerOn } from "./test/flowHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());

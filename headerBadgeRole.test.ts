@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { plan, planWave } from "./test/testerHelpers";
+import { plan, planWave } from "./test/flowHelpers";
 import { delegate, disposeAll, execFileMock, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";

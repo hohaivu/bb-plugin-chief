@@ -70,7 +70,7 @@ describe("retro eligibility", () => {
     ["the plan finished before retros_since", async (state: Awaited<ReturnType<typeof setup>>) => { state.db.prepare(`UPDATE plugin_meta SET value=? WHERE key='retros_since'`).run(String(Date.now() + 3_600_000)); }, undefined],
     ["no worker of the plan completed", undefined, (state: Awaited<ReturnType<typeof setup>>, ids: { worker: string }) => { state.db.prepare(`UPDATE managed_threads SET state='blocked' WHERE thread_id=?`).run(ids.worker); }],
     ["a revised planner superseded it", undefined, async (state: Awaited<ReturnType<typeof setup>>, ids: { chief: string; planner: string }) => {
-      const { plan } = await import("./test/testerHelpers");
+      const { plan } = await import("./test/flowHelpers");
       const revision = await plan(state, ids.chief);
       state.db.prepare(`UPDATE managed_threads SET replaces_thread_id=? WHERE thread_id=?`).run(ids.planner, revision.threadId);
     }],

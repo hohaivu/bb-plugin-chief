@@ -5,7 +5,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
 import { checkPlan } from "./src/report/reportIntake";
 import { CHAIN, CHAIN_B, CHAIN_B_PR, CHAIN_PR, NOT_DOING, SPEC_DELTA, type WriterState, delegateWriter, docsChains, docsWorkList, lastPrompt, fullChain, lastAlert, ownerOn, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withBoth, withWorker, writerOn } from "./test/specWriterHelpers";
-import { READY, type State, ctxOf, delegateWave, followRoute, plan, planWave, planWaves, forgeAnswers, openGate, readyIdle, refusal, reviewerVerdict, report, reviewerCount, review, reviewed, rowOf, setLive, tick, tool, workerOn } from "./test/testerHelpers";
+import { READY, type State, ctxOf, delegateWave, followRoute, plan, planWave, planWaves, forgeAnswers, openGate, readyIdle, refusal, reviewerVerdict, report, reviewerCount, review, reviewed, rowOf, setLive, tick, tool, workerOn } from "./test/flowHelpers";
 import { TEST_FILES, approvePlan, delegate, disposals, disposeAll, latestReviewContext, legacyWave, planFile, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -325,8 +325,8 @@ describe("worker kinds", () => {
       expect(state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads WHERE kind='spec-writer'`).get()).toEqual({ n: 0 });
     });
 
-    // Wave 1 contract 13 (legacy data), through the real owners: S1→W1→S2→W2 with S2 complete makes no wave pending (the tester is
-    // admitted and the review runs); a ready legacy head S1 with no worker is replaced by a worker or designer; a ready legacy S2 that
+    // Wave 1 contract 13 (legacy data), through the real owners: S1→W1→S2→W2 with S2 complete makes no wave pending (the
+    // review runs); a ready legacy head S1 with no worker is replaced by a worker or designer; a ready legacy S2 that
     // replaced W1 is handed off as the implementation row and keeps the implementation-lane completion refusal.
     // Regression: the writer-pending rule reads the old sequential shape as pending (stranding finished chains), the legacy head can
     // no longer reach its worker, or a legacy implementation-lane writer is treated as a side-lane one.
@@ -524,7 +524,7 @@ describe("docs work list", () => {
   };
 
   // plan-chains.md (one Spec Writer per plan): the plan's Spec Writer owns every wave, so its first brief and its same-plan repair list every
-  // wave's Docs needed, from both chains, worker and tester rows alike, tagged with thread id and wave in wave order; never a None.
+  // wave's Docs needed, from both chains, every worker row alike, tagged with thread id and wave in wave order; never a None.
   // Regression: the list keeps the old per-chain owned range and drops chain A's items, or a None is listed.
   test("the plan's Spec Writer and its repair list every wave's Docs needed, tagged with id and wave", async () => {
     const state = await setup();
@@ -591,7 +591,7 @@ describe("docs work list", () => {
   const noFile = (state: State, ctx: { P: string }, waveNo: number) => expect(existsSync(docsFile(state, writerOn(state, ctx.P, waveNo).thread_id))).toBe(false);
 
   // Contract 4 (4,000 characters), medium cardinality: whole items in order while the section fits; the overflow line names the count and every
-  // remaining source id inline. Three sources of about 2,000 characters each (worker, tester, blocker) fit one item, so two sources remain.
+  // remaining source id inline. Three sources of about 2,000 characters each (wave 5 worker, wave 6 worker, blocker) fit one item, so two sources remain.
   // Regression: an item cut mid-text, a section over the cap, or a dropped item with no pointer.
   test("over 4,000 characters the list keeps whole items and the overflow line names every remaining source", async () => {
     const state = await setup();
@@ -609,7 +609,7 @@ describe("docs work list", () => {
   });
 
   // Contract 4 at higher cardinality: there is no lifetime row cap, so a chain can own far more rows than the 4,000 characters hold. Clones of the
-  // tester row (14-character ids, as real ones) stand for rows retained over many repairs. Inline first: the section shows the LARGEST whole-item
+  // wave 6 worker row (14-character ids, as real ones) stand for rows retained over many repairs. Inline first: the section shows the LARGEST whole-item
   // prefix that leaves room for the exact omitted count and every omitted id; a shorter prefix that fits is never traded for a pointer.
   // Regression (thr_y999sbnauy): at 150 retained rows the section took the status pointer although a shorter prefix fit inline.
   const cloneRows = async (state: State, ctx: { chief: { threadId: string }; w6: string }, count: number, text?: (n: number) => string) => {
@@ -665,7 +665,7 @@ describe("docs work list", () => {
   // Extreme cardinality: even the ids cannot fit. The section shows the exact omitted count and points to one file in the repair's thread storage
   // that holds every item of the owned waves in full, each once: a designer's and the blocked prior writer's among them (both outside the shown
   // prefix: the designer is the newest row, the blocker is always last). A None section is absent.
-  // Regression (thr_y999sbnauy): the fallback pointed only at worker and tester reports, so an omitted designer item or the blocker was unreachable.
+  // Regression (thr_y999sbnauy): the fallback pointed only at worker reports, so an omitted designer item or the blocker was unreachable.
   test("when even the ids cannot fit, the section gives the exact count and a file that holds every omitted item once, designer and blocker included", async () => {
     const state = await setup();
     const blocker = `Delta names no domain. ${"why ".repeat(200)}END-BLOCKER`;
@@ -690,7 +690,7 @@ describe("docs work list", () => {
 
     const file = readFileSync(docsFile(state, writerOn(state, ctx.P, 5).thread_id), "utf8");
     const once = (needle: string) => expect(file.split(needle)).toHaveLength(2);
-    // Every item (shown or omitted) once, with its source: the designer's, the worker's, the tester's and each clone's full text, then the whole blocker.
+    // Every item (shown or omitted) once, with its source: the designer's, each worker's and each clone's full text, then the whole blocker.
     once(`## ${ctx.w5}: worker, wave 5\n\n- W5NOTE\n`);
     once(`## ${ctx.w6}: worker, wave 6\n\n- T6NOTE\n`);
     once(`## ${designer}: designer, wave 6\n\n- CLONE-400-END\n`);
@@ -822,7 +822,7 @@ describe("docs work list", () => {
     const lane = writerOn(state, ctx.P, 4);
     expect(lane).toMatchObject({ replaces_thread_id: ctx.w4 });
 
-    // The old plan's chain B ends: its tester stops holding the branch (forced, as putWriter does, then the row cache reloads).
+    // The old plan's chain B ends: its wave 6 worker stops holding the branch (forced, as putWriter does, then the row cache reloads).
     state.db.prepare(`UPDATE managed_threads SET state='complete' WHERE thread_id=?`).run(ctx.w6);
     await tool(state, "chief_roster", { todo: { text: "reload the row cache" } }, ctx.chief.threadId);
     const fresh = await plan(state, ctx.chief.threadId, [specImpl(1)]);

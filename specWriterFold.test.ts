@@ -212,19 +212,19 @@ describe("docs work list: a same-plan repair folds every known docs item once", 
     expect(fold(first, firstBase)).toMatchObject({ status: "conflict", U: tip });
     expect(git(w.origin, "rev-parse", BRANCH)).toBe(tip);
 
-    // The repair: one fresh checkout from the branch writes the Spec delta plus the worker's and the tester's `## Docs needed` items, then folds once.
+    // The repair: one fresh checkout from the branch writes the Spec delta plus two workers' `## Docs needed` items, then folds once.
     const repair = w.clone("repair");
     const base = git(repair, "rev-parse", "HEAD");
     expect(base).toBe(tip);
     w.commit(repair, "docs/shared.md", "merged edit\n", "docs: spec delta and the blocked fold's edit", true);
     w.commit(repair, "docs/specs/worker-item.md", "worker item\n", "docs: worker Docs needed item", true);
-    w.commit(repair, "docs/specs/tester-item.md", "tester item\n", "docs: tester Docs needed item", true);
+    w.commit(repair, "docs/specs/second-item.md", "second item\n", "docs: second worker Docs needed item", true);
     const result = fold(repair, base);
     expect(result).toMatchObject({ status: "pushed", attempts: 1, U: tip });
     const pushed = result as Extract<Fold, { status: "pushed" }>;
     expect(git(w.origin, "rev-parse", BRANCH)).toBe(pushed.pushed);
-    expect(w.subjects(w.origin, `${tip}..${BRANCH}`)).toEqual(["docs: tester Docs needed item", "docs: worker Docs needed item", "docs: spec delta and the blocked fold's edit"]);
-    expect(git(repair, "diff", "--name-only", `${tip}..${pushed.pushed}`).split("\n")).toEqual(["docs/shared.md", "docs/specs/tester-item.md", "docs/specs/worker-item.md"]);
+    expect(w.subjects(w.origin, `${tip}..${BRANCH}`)).toEqual(["docs: second worker Docs needed item", "docs: worker Docs needed item", "docs: spec delta and the blocked fold's edit"]);
+    expect(git(repair, "diff", "--name-only", `${tip}..${pushed.pushed}`).split("\n")).toEqual(["docs/shared.md", "docs/specs/second-item.md", "docs/specs/worker-item.md"]);
     expect(git(w.origin, "log", "--format=%(trailers:key=Chief-Spec-Writer,valueonly)", `${tip}..${BRANCH}`).split("\n").filter(Boolean)).toEqual(["thr_writer", "thr_writer", "thr_writer"]);
   });
 

@@ -19,7 +19,7 @@ const prior = { thread_id: "thr_prev", result: "Done.", summary: null, blocker: 
 describe("dynamic values stay in the prompt", () => {
   const full = (kind: Kind, extra: Partial<WorkerBriefInput> = {}) => brief(kind, { ...PLANNED, branch: "feature/totals", issueUrl: "https://example.com/issues/7", prUrl: "https://example.com/pull/8", prior, ...extra }).prompt;
 
-  test.each(["worker", "designer", "tester"] as const)("a %s Git workflow includes the branch, prior thread, issue and PR", (kind) => {
+  test.each(["worker", "designer"] as const)("a %s Git workflow includes the branch, prior thread, issue and PR", (kind) => {
     const git = section(full(kind), "Git workflow");
     expect(git).toContain("feature/totals");
     expect(git).toContain("thr_prev");
@@ -36,7 +36,7 @@ describe("dynamic values stay in the prompt", () => {
 
 describe("sections that depend on the input", () => {
   test("no branch, issue or PR: no Git workflow; a non-side brief has no Fold", () => {
-    for (const kind of ["worker", "designer", "tester", "spec-writer"] as const) {
+    for (const kind of ["worker", "designer", "spec-writer"] as const) {
       const text = brief(kind).prompt;
       expect(text, kind).not.toContain("## Git workflow");
       expect(text, kind).not.toContain("## Fold");
@@ -54,8 +54,8 @@ describe("sections that depend on the input", () => {
 });
 
 describe("brief size", () => {
-  // Regression: the static rules, or the contract list, come back into the worker or tester brief.
-  test.each(["worker", "tester"] as const)("a %s brief with branch, issue, PR and a 3,000-character contract list is at least 2,500 characters shorter than at 6534bea", async (kind) => {
+  // Regression: the static rules, or the contract list, come back into the worker brief.
+  test.each(["worker"] as const)("a %s brief with branch, issue, PR and a 3,000-character contract list is at least 2,500 characters shorter than at 6534bea", async (kind) => {
     const old = JSON.parse(await readFile(join(dirname(fileURLToPath(import.meta.url)), "test", "fixtures", "brief-sizes-6534bea.json"), "utf8")) as Record<string, string>;
     const now = brief(kind, { ...PLANNED, contracts: contractList("W2", 3_000), branch: "feature/totals", issueUrl: "https://example.com/issues/7", prUrl: "https://example.com/pull/8", verifyCommand: "npx tsc --noEmit" }).prompt;
     expect(old[kind]!.length - now.length).toBeGreaterThanOrEqual(2_500);

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { MIGRATIONS } from "./src/db/migrations";
-import { plan, planWave } from "./test/testerHelpers";
+import { plan, planWave } from "./test/flowHelpers";
 import { configurationContext, delegate, disposals, elapse, disposeAll, execFileMock, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";

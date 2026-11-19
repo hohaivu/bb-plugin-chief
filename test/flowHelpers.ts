@@ -85,7 +85,7 @@ export const forgeAnswers = (prs: Record<string, string> = { [PR_URL]: "feature/
     const branch = url ? prs[url] : undefined;
     return Promise.resolve({ stdout: branch ? (state && args.includes("state,headRefOid") ? JSON.stringify({ state, headRefOid: HEAD_SHA }) : ghHead(branch)) : "", stderr: "" });
   });
-export type Gate = { gate_key: string; reviewer_thread_id: string; tester_thread_id: string; fixer_thread_id: string | null; corrector_thread_id: string | null; targets: string };
+export type Gate = { gate_key: string; reviewer_thread_id: string; fixer_thread_id: string | null; targets: string };
 /** The review gate that pinned `threadId`. */
 export const gateOf = (state: State, threadId: string) =>
   (state.db.prepare(`SELECT * FROM review_gates`).all() as Gate[]).find((gate) => (JSON.parse(gate.targets) as { threadId: string }[]).some((target) => target.threadId === threadId));

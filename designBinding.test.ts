@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { PLAN_FIXTURE, delegate, disposeAll, execFileMock, setup, start, status } from "./test/harness";
-import { planWave, report, rowOf, tool } from "./test/testerHelpers";
+import { planWave, report, rowOf, tool } from "./test/flowHelpers";
 import { provideSdk } from "./test/sdk";
 
 provideSdk(sdkTesting);

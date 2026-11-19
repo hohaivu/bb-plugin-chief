@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { READY, type State, ctxOf, delegateWave, plan, readyIdle, refusal, report, rowOf, tool, workerOn } from "./test/testerHelpers";
+import { READY, type State, ctxOf, delegateWave, plan, readyIdle, refusal, report, rowOf, tool, workerOn } from "./test/flowHelpers";
 import { approvePlan, delegate, disposeAll, setup, start, status, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -7,7 +7,7 @@ import { provideSdk } from "./test/sdk";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
-describe("tester role", () => {
+describe("worker flows", () => {
   // Contracts (plan chains, wave 1): a plan chain has one branch, one pull request and one worker worktree, opened by
   // chief_forge_init on its head only and continued with chief_delegate (replaces:). Independent heads get their own.
   describe("plan chains", () => {

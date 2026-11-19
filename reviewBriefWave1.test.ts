@@ -40,36 +40,36 @@ describe("reviewBrief: one line per pull request", () => {
   // Contract: each distinct prUrl is in exactly one target line, with one sha and one scope, and every worker of the PR is named on it.
   // Regression: grouping by worker (one line per target) gives 2 lines and "2 pull requests" for one PR.
   test("one pull request with two workers: one line, one sha, both workers, header says 1 pull request", () => {
-    const { prompt } = reviewBrief(brief([pinned("thr_a", PR1), pinned("thr_t", PR1, { kind: "tester" })]));
+    const { prompt } = reviewBrief(brief([pinned("thr_a", PR1), pinned("thr_t", PR1, { kind: "designer" })]));
     const lines = targetLines(prompt);
     expect(lines).toHaveLength(1);
     expect(count(lines[0]!, "sha1")).toBeGreaterThan(0);
     expect(lines[0]!.match(/sha1\w*/g)!.every((sha) => sha === "sha1".padEnd(12, "0"))).toBe(true);
-    expect(lines[0]).toContain("Workers: worker thr_a “Task thr_a”; tester thr_t “Task thr_t”.");
+    expect(lines[0]).toContain("Workers: worker thr_a “Task thr_a”; designer thr_t “Task thr_t”.");
     expect(subjectOf(prompt)).toContain("the whole plan: 1 pull request, started after every wave was ready");
     expect(count(prompt, "pull requests")).toBe(0);
   });
 
   test("two pull requests with four workers: two lines, each worker named once, header says 2 pull requests", () => {
-    const targets = [pinned("thr_a", PR1), pinned("thr_b", PR1, { kind: "designer" }), pinned("thr_c", PR2), pinned("thr_t", PR2, { kind: "tester" })];
+    const targets = [pinned("thr_a", PR1), pinned("thr_b", PR1, { kind: "designer" }), pinned("thr_c", PR2), pinned("thr_t", PR2, { kind: "designer" })];
     const { prompt } = reviewBrief(brief(targets));
     const lines = targetLines(prompt);
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain(PR1);
     expect(lines[1]).toContain(PR2);
     expect(lines[0]).toContain("designer thr_b");
-    expect(lines[1]).toContain("tester thr_t");
+    expect(lines[1]).toContain("designer thr_t");
     for (const id of ["thr_a", "thr_b", "thr_c", "thr_t"]) expect(count(lines.join("\n"), `${id} “`)).toBe(1);
     expect(subjectOf(prompt)).toContain("the whole plan: 2 pull requests, started");
   });
 
   // Contract: unpinned targets get one line per distinct branch, the header never calls them a pull request, and the line keeps "the verdict binds to its report N" per worker.
   test("an unpinned branch with two workers: one branch line, header says 1 branch, each worker keeps its report number", () => {
-    const { prompt } = reviewBrief(brief([loose("thr_a", "feature/x"), loose("thr_t", "feature/x", { kind: "tester", reportSeq: 3 })]));
+    const { prompt } = reviewBrief(brief([loose("thr_a", "feature/x"), loose("thr_t", "feature/x", { kind: "designer", reportSeq: 3 })]));
     const lines = targetLines(prompt);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("- branch feature/x, head not readable, not pinned:");
-    expect(lines[0]).toContain("worker thr_a “Task thr_a” (the verdict binds to its report 2); tester thr_t “Task thr_t” (the verdict binds to its report 3).");
+    expect(lines[0]).toContain("worker thr_a “Task thr_a” (the verdict binds to its report 2); designer thr_t “Task thr_t” (the verdict binds to its report 3).");
     expect(subjectOf(prompt)).toContain("the whole plan: 1 branch, started");
     expect(subjectOf(prompt)).not.toMatch(/whole plan: [^,]*pull request/);
   });
@@ -81,7 +81,7 @@ describe("reviewBrief: one line per pull request", () => {
   });
 
   test("a mix: the header counts the pull request and the unpinned branch separately, and a PR with no readable head still counts as its branch", () => {
-    const { prompt } = reviewBrief(brief([pinned("thr_a", PR1), pinned("thr_t", PR1, { kind: "tester" }), loose("thr_b", "feature/x"), loose("thr_c", "feature/x")]));
+    const { prompt } = reviewBrief(brief([pinned("thr_a", PR1), pinned("thr_t", PR1, { kind: "designer" }), loose("thr_b", "feature/x"), loose("thr_c", "feature/x")]));
     expect(targetLines(prompt)).toHaveLength(2);
     expect(subjectOf(prompt)).toContain("the whole plan: 1 pull request and 1 branch without a pinned pull request, started");
     const unreadable = reviewBrief(brief([pinned("thr_a", PR1), loose("thr_b", "feature/y", { prUrl: PR2 })])).prompt;
@@ -253,7 +253,7 @@ describe("review-context.md: one read line or one inline copy", () => {
 
 describe("a merged rule is stated once", () => {
   const SIDE = pinned("thr_s", PR2, { kind: "spec-writer", lane: "side" });
-  const planReview = () => reviewBrief(brief([pinned("thr_a", PR1, { earlier: [{ threadId: "thr_e", kind: "tester", reportPath: "/r/e.md" }] }), pinned("thr_t", PR1, { kind: "tester" }), SIDE], {
+  const planReview = () => reviewBrief(brief([pinned("thr_a", PR1, { earlier: [{ threadId: "thr_e", kind: "designer", reportPath: "/r/e.md" }] }), pinned("thr_t", PR1, { kind: "designer" }), SIDE], {
     specWaves: [1], writers: [{ threadId: "thr_s", reportPath: "/r/s.md" }], sideWriters: [{ threadId: "thr_s", wave: 1, reportPath: "/r/s.md" }],
   })).prompt;
 

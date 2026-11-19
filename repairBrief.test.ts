@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { HEAD_SHA, delegate, disposeAll, setup, start } from "./test/harness";
-import { PR_URL, forgeAnswers, openGate, readyIdle, reviewerVerdict, rowOf, spawnOf, tool, workerOn, delegateWave, plan, type Gate, type State } from "./test/testerHelpers";
+import { PR_URL, forgeAnswers, openGate, readyIdle, reviewerVerdict, rowOf, spawnOf, tool, workerOn, delegateWave, plan, type Gate, type State } from "./test/flowHelpers";
 import { section } from "./test/specWriterHelpers";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";

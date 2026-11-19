@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { PLAN_FIXTURE, disposeAll, setup, start, status, wave } from "./test/harness";
-import { type State, plan, refusal, report, rowOf, tool } from "./test/testerHelpers";
+import { type State, plan, refusal, report, rowOf, tool } from "./test/flowHelpers";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 

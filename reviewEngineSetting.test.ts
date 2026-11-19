@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { PR_AGENT_DIR } from "./src/review/prAgent";
-import { readyIdle, report, tool } from "./test/testerHelpers";
+import { readyIdle, report, tool } from "./test/flowHelpers";
 import { disposeAll, execFileMock, setup, start } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -10,7 +10,7 @@ import { provideSdk } from "./test/sdk";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
-describe("tester role", () => {
+describe("worker flows", () => {
   // Contracts (review engine): the stored reviewEngine / prAgentDir settings are read when the review starts and reach the
   // launched prompt and the reviewer's storage; an unset or unrecognised value is the base reviewer behaviour.
   describe("reviewEngine setting reaches a started review", () => {

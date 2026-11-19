@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { CHAIN, CHAIN_PR, NOT_DOING, SPEC_DELTA, baseImpl, fullChain, lastAlert, putWriter, roster, section, skipSpecs, specImpl, specPlan, storedWave, swap, withBoth } from "./test/specWriterHelpers";
-import { type State, delegateWave, forgeAnswers, openGate, plan, planWaves, readyIdle, rowOf, spawnOf, tool, workerOn } from "./test/testerHelpers";
+import { type State, delegateWave, forgeAnswers, openGate, plan, planWaves, readyIdle, rowOf, spawnOf, tool, workerOn } from "./test/flowHelpers";
 import { disposeAll, planFile, reviewContextOf, setup, wave } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -19,7 +19,7 @@ describe("Spec Writer role", () => {
     const gate = await openGate(state, chiefThreadId, targetId);
     return { prompt: spawnOf(state, gate.reviewer_thread_id).prompt as string, context: await reviewContextOf(state, gate.reviewer_thread_id) };
   };
-  const rowsOf = (context: string) => context.split("\n").filter((line) => /^- (worker|tester|spec-writer|designer) thr_/.test(line));
+  const rowsOf = (context: string) => context.split("\n").filter((line) => /^- (worker|spec-writer|designer) thr_/.test(line));
   const gateOf = (prompt: string) => prompt.split("Block only on:\n")[1]!.split("\n\n")[0]!.split("\nRead each worker report")[0]!.split("\n");
   const numbers = (items: string[]) => items.map((line) => line.slice(0, 3));
   const hop = async (state: State, chiefThreadId: string, planThreadId: string, waveNo: number, extra: object = {}) => {

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { vi } from "vitest";
 import { delegate, execFileMock, setup, start } from "./harness";
-import { readyIdle, tool } from "./testerHelpers";
+import { readyIdle, tool } from "./flowHelpers";
 
 // The docs/ ownership gate world: a bare origin with main, the project's clone `work`, and a `peer` clone that pushes the task branch the way a worker does.
 // Git runs for real (recorded); gh answers from a stub. Shared by docsGate.test.ts and docsOwnershipCrossPlan.test.ts.

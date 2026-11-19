@@ -12,7 +12,7 @@ import { execFileMock } from "./execMock";
 export { execFileMock };
 
 // Every skill dir the plugin ships: managedSkills (roles.ts) selects from these, and the fake host throws on an unknown id.
-export const AGENT_SKILL_IDS = ["chief", "coordinator", "chief-worker", "chief-role-read-only", "chief-role-worker", "chief-role-reviewer", "chief-role-designer", "chief-role-tester", "chief-role-spec-writer"];
+export const AGENT_SKILL_IDS = ["chief", "coordinator", "chief-worker", "chief-role-read-only", "chief-role-worker", "chief-role-reviewer", "chief-role-designer", "chief-role-spec-writer"];
 
 // gh pr view --json headRefName,headRefOid,baseRefName: the pull request's head branch, pinned commit and base.
 export const HEAD_SHA = "a".repeat(40);

@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { gateDecision, type ProgressRow } from "./src/plan/planProgress";
 import type { GateTarget, ReviewGate } from "./src/db/threadStore";
 
-// Contract: the review gate's decision, reviewer only (the tester role is gone). `gateDecision` is pure: it reads the gate row, the rows it names, the
+// Contract: the review gate's decision, reviewer only. `gateDecision` is pure: it reads the gate row, the rows it names, the
 // reviewer's newest verdict with its findings, and the Spec Writer rows. Blocking findings whose `file` starts with `docs/` are docs findings; the rest are code
 // findings. The first matching rule wins.
 type Row = ProgressRow;

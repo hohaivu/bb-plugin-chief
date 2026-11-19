@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { disposeAll, setup } from "./test/harness";
-import { type State, delegateWave, planWave, readyIdle, refusal, rowOf, tool, workerOn } from "./test/testerHelpers";
+import { type State, delegateWave, planWave, readyIdle, refusal, rowOf, tool, workerOn } from "./test/flowHelpers";
 import { skipSpecs, specPlan, withBoth } from "./test/specWriterHelpers";
 
 provideSdk(sdkTesting);

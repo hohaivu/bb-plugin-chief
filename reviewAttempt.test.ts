@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { readyIdle, tool } from "./test/testerHelpers";
+import { readyIdle, tool } from "./test/flowHelpers";
 import { HEAD_SHA, disposeAll, execFileMock, reviewContextOf, setup, start } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -7,7 +7,7 @@ import { provideSdk } from "./test/sdk";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
-describe("tester role", () => {
+describe("worker flows", () => {
   describe("Spec Writer role", () => {
     // A host lookup that never answers does not hold chief_review (#177): the impact slice's 30 s deadline covers its own
     // lookup, and the gate launches with the skip reason in review-context.md. Regression: a host lookup without a deadline holds the call forever (no reviewer).

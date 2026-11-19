@@ -7,7 +7,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { provideSdk } from "./test/sdk";
 import { gateWorld } from "./test/gateWorld";
-import { ctxOf, readyIdle, rowOf, tool, report } from "./test/testerHelpers";
+import { ctxOf, readyIdle, rowOf, tool, report } from "./test/flowHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
