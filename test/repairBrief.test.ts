@@ -1,0 +1,90 @@
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { HEAD_SHA, delegate, disposeAll, setup, start } from "./harness";
+import { PR_URL, forgeAnswers, openGate, readyIdle, reviewerVerdict, rowOf, spawnOf, tool, workerOn, delegateWave, plan, type Gate, type State } from "./flowHelpers";
+import { section } from "./specWriterHelpers";
+import * as sdkTesting from "@get-bb/plugin-sdk/testing";
+import { provideSdk } from "./sdk";
+
+provideSdk(sdkTesting);
+vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
+afterEach(disposeAll);
+
+const BRANCH = "feature/x";
+const FINDING = "Totals go negative.";
+const targetLine = (id: string) => `- ${id}: branch ${BRANCH}, ${PR_URL}, pinned ${HEAD_SHA}`;
+
+/** A one-wave plan whose worker is ready on a pull request, with the review gate open on it. */
+async function gated(state: State) {
+  forgeAnswers(undefined, "OPEN");
+  const chief = await start(state);
+  const planner = await plan(state, chief.threadId);
+  await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: BRANCH, prUrl: PR_URL });
+  const worker = workerOn(state, planner.threadId, 1).thread_id as string;
+  await readyIdle(state, worker);
+  return { chief, planner, worker, gate: (await openGate(state, chief.threadId, worker)) as Gate };
+}
+/** Chief closes the gate by override (the user accepted it): reviewer, then the target. */
+async function closeGate(state: State, chiefThreadId: string, gate: Gate, worker: string) {
+  for (const id of [gate.reviewer_thread_id, worker]) await tool(state, "chief_complete", { threadId: id, override: "user accepted the gate" }, chiefThreadId);
+  expect(rowOf(state, worker).state).toBe("complete");
+}
+const fixRunSection = (state: State, threadId: string) => section(spawnOf(state, threadId).prompt as string, "Fix run");
+
+describe("repair briefs", () => {
+  // Contract (gate fix run): after a request_changes verdict, Chief's one fix run replaces the gate's first target and its
+  // brief carries every gate target (branch, PR, pinned sha) and the reviewer's verdict file and findings.
+  // Regression: a target, the verdict path or a finding is dropped from the brief, so the fix run starts blind.
+  test("a gate fix run's brief names every gate target and the reviewer verdict file and findings", async () => {
+    const state = await setup();
+    const { chief, worker, gate } = await gated(state);
+    await reviewerVerdict(state, gate, "request_changes");
+    const fixRun = (await delegate(state, chief.threadId, "Fix the gate", { replaces: worker, kind: "worker" })).threadId;
+    expect(rowOf(state, fixRun)).toMatchObject({ fix_run: "gate" });
+    const brief = fixRunSection(state, fixRun);
+    expect(brief).toContain(targetLine(worker));
+    expect(brief).toContain(rowOf(state, gate.reviewer_thread_id).verdict_path);
+    expect(brief).toContain("totals.ts:4");
+    expect(brief).toContain(FINDING);
+  });
+
+  // Contract (evidence outlives the reviewer row): the reviewer row is complete by the time Chief starts the fix run; its verdict
+  // path and findings still reach the brief. Regression: the brief reads findings only from an open reviewer row.
+  test("a gate fix run's brief keeps the reviewer's findings when the reviewer row is complete", async () => {
+    const state = await setup();
+    const { chief, worker, gate } = await gated(state);
+    await reviewerVerdict(state, gate, "request_changes");
+    await tool(state, "chief_complete", { threadId: gate.reviewer_thread_id, override: "verdict recorded" }, chief.threadId);
+    expect(rowOf(state, gate.reviewer_thread_id).state).toBe("complete");
+    const fixRun = (await delegate(state, chief.threadId, "Fix the gate", { replaces: worker, kind: "worker" })).threadId;
+    const brief = fixRunSection(state, fixRun);
+    expect(brief).toContain(rowOf(state, gate.reviewer_thread_id).verdict_path);
+    expect(brief).toContain(FINDING);
+  });
+
+  // plan-5 contract (chat fix): a change the user asks for on completed work is a chat fix: the same Fix run rules, but no verdict, no
+  // findings from the old gate are replayed. Regression: a chat fix inherits the old findings and fixes them again.
+  test("a chat fix's brief has the fix run rules and replays no old findings", async () => {
+    const state = await setup();
+    const { chief, worker, gate } = await gated(state);
+    await reviewerVerdict(state, gate, "request_changes");
+    await closeGate(state, chief.threadId, gate, worker);
+    const chat = (await delegate(state, chief.threadId, "Change the label", { replaces: worker, kind: "worker" })).threadId;
+    expect(rowOf(state, chat)).toMatchObject({ fix_run: "chat" });
+    const prompt = spawnOf(state, chat).prompt as string;
+    const brief = section(prompt, "Fix run");
+    expect(brief).toContain(`origin/${BRANCH}`);
+    for (const replayed of [FINDING, "totals.ts:4", gate.reviewer_thread_id, rowOf(state, gate.reviewer_thread_id).verdict_path, "Gate targets"]) expect(brief).not.toContain(replayed);
+    expect(prompt).not.toContain(FINDING);
+  });
+
+  // Contract: only a fix run's brief carries the Fix run section. Regression: a plain worker gets fix-run rules, or a fix run loses them.
+  test("only the fix run brief has a Fix run section", async () => {
+    const state = await setup();
+    const { chief, worker, gate } = await gated(state);
+    const plain = spawnOf(state, (await delegate(state, chief.threadId, "Plain work")).threadId).prompt as string;
+    await closeGate(state, chief.threadId, gate, worker);
+    const fixPrompt = spawnOf(state, (await delegate(state, chief.threadId, "Change the label", { replaces: worker, kind: "worker" })).threadId).prompt as string;
+    expect(plain).not.toContain("## Fix run");
+    expect(fixPrompt).toContain("## Fix run");
+  });
+});
