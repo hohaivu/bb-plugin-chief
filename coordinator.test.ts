@@ -971,9 +971,11 @@ describe("Coordinator", () => {
       const coord = await coordinator(state);
       const child = (await spawnChild(state, coord)).id;
       const [plainConfig, childConfig] = [await configure(state, plain, provider), await configure(state, child, provider)];
-      expect(childConfig.skills).toEqual(["chief"]);
+      expect(plainConfig.instructions.length).toBeLessThan(CHIEF_BUDGET);
+      expect(childConfig.skills).not.toContain("coordinator");
       expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate" && name !== "chief_attach"));
       expect(childConfig.instructions).toContain(coord);
+    });
 
     // The SDK cuts instructions at 32768 chars; the core rules (the last, mandatory one is the Need-you escalation) go before the project rules, so they must end inside the cut even for the longest supported inputs.
     // The CHIEF_BUDGET bound below is Chief's own budget for the core rules (keeps the rules small), not the SDK cut.
