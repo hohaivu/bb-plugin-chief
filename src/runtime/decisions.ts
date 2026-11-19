@@ -11,7 +11,7 @@ export interface DecisionEntry {
   text: string;
   why?: string;
 }
-export type DecisionInput = { kind: DecisionEntry["kind"]; text: string; why?: string; threadId?: string; todoId?: number };
+type DecisionInput = { kind: DecisionEntry["kind"]; text: string; why?: string; threadId?: string; todoId?: number };
 
 const FILE = "decisions.md";
 const HEADER = "# Decisions\n";
@@ -40,13 +40,12 @@ export function parseDecisions(text: string): DecisionEntry[] {
   });
 }
 
-const renderEntry = (entry: DecisionEntry) =>
-  `<!-- chief-decision id=${entry.id} kind=${entry.kind} thread=${entry.thread ?? "-"} todo=${entry.todo ?? "-"} at=${entry.at} -->\n${entry.text}\n${entry.why === undefined ? "" : `Why: ${entry.why}\n`}`;
-
 /** The file text for entries that all have ids, plus the generated after-section. */
 export function renderDecisions(entries: DecisionEntry[], afterLines: string[] = []) {
   const after = afterLines.length ? `\n${AFTER_HEADING}\n${afterLines.join("\n")}\n` : "";
-  return `${HEADER}\n${entries.map((entry) => `${renderEntry(entry)}\n`).join("")}${after}`;
+  const render = (entry: DecisionEntry) =>
+    `<!-- chief-decision id=${entry.id} kind=${entry.kind} thread=${entry.thread ?? "-"} todo=${entry.todo ?? "-"} at=${entry.at} -->\n${entry.text}\n${entry.why === undefined ? "" : `Why: ${entry.why}\n`}\n`;
+  return `${HEADER}\n${entries.map(render).join("")}${after}`;
 }
 
 /** A line that would parse as structure (marker, generated heading, Why line) gets a leading space, so parse(render(x)) returns x. */
@@ -71,8 +70,7 @@ export function createDecisions(ctx: Ctx) {
             return (todoById.get(entry.todo, project) as TodoRow | undefined)?.state === "open";
           });
           const todos = project ? (todosForProject.all(project) as TodoRow[]).filter((todo) => todo.chief_thread_id === ownerId && todo.after) : [];
-          const afterLines = fitLines(todos.map((todo) => `- #${todo.id} ${clip(todo.text.replace(/\s+/g, " "), 120)} — after: ${todo.after!.replace(/\s+/g, " ")}`),
-            MAX_AFTER - AFTER_HEADING.length - 3).lines;
+          const afterLines = fitLines(todos.map((todo) => ctx.todoLine(todo, ownerId)), MAX_AFTER - AFTER_HEADING.length - 3).lines;
           // The newest entry always stays: an entry is far smaller than the cap.
           while (entries.length > 1 && renderDecisions(entries, afterLines).length > MAX_FILE) entries = entries.slice(1);
           await ctx.writeStorageFile(ownerId, FILE, renderDecisions(entries, afterLines));
@@ -101,11 +99,8 @@ export function createDecisions(ctx: Ctx) {
     return writeDecisions(ownerId, (entries) => [...entries, entry]);
   }
 
-  /** Prunes the owner's file and rebuilds its after-section. Never rejects. */
-  const refreshDecisions = (ownerId: string) => writeDecisions(ownerId, (entries) => entries);
-
   /** Copies entries of one owner's file into another's own storage: all of them, or only those tied to todoId. Writes nothing for an empty selection. Never rejects. */
-  async function copyDecisions(fromId: string, toId: string, todoId?: number, projectId?: string) {
+  async function copyDecisions(fromId: string, toId: string, projectId: string, todoId?: number) {
     try {
       await ctx.state.decisionWrites.get(fromId); // never rejects
       const source = parseDecisions((await ctx.readStorageFileIfPresent(fromId, FILE)) ?? "")
@@ -118,5 +113,5 @@ export function createDecisions(ctx: Ctx) {
     }
   }
 
-  return { recordDecision, refreshDecisions, copyDecisions };
+  return { writeDecisions, recordDecision, copyDecisions };
 }

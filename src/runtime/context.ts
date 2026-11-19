@@ -200,9 +200,9 @@ export interface Ctx {
   readStorageFileIfPresent: ReturnType<typeof createArtifacts>["readStorageFileIfPresent"];
   retryWhileProvisioning: ReturnType<typeof createArtifacts>["retryWhileProvisioning"];
   publishHeavy: ReturnType<typeof createArtifacts>["publishHeavy"];
-  copyDecisions: ReturnType<typeof createDecisions>["copyDecisions"];
+  writeDecisions: ReturnType<typeof createDecisions>["writeDecisions"];
   recordDecision: ReturnType<typeof createDecisions>["recordDecision"];
-  refreshDecisions: ReturnType<typeof createDecisions>["refreshDecisions"];
+  copyDecisions: ReturnType<typeof createDecisions>["copyDecisions"];
   intake: ReturnType<typeof createLifecycle>["intake"];
   lifecycle: ReturnType<typeof createLifecycle>["lifecycle"];
   managedRow: ReturnType<typeof createLifecycle>["managedRow"];

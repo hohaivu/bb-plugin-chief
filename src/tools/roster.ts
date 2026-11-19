@@ -49,7 +49,7 @@ export function registerRosterTool(ctx: Ctx) {
         store.reload();
       }
       // A todo change rebuilds the after-section; a failed write only adds a note.
-      const written = decision ? await ctx.recordDecision(caller.thread_id, { kind: "decision", ...decision }) : todo ? await ctx.refreshDecisions(caller.thread_id) : true;
+      const written = decision ? await ctx.recordDecision(caller.thread_id, { kind: "decision", ...decision }) : todo ? await ctx.writeDecisions(caller.thread_id, (entries) => entries) : true;
       if (!written) note += "Note: decisions.md was not updated (see the plugin log).\n";
       const tail = "\nDecisions: $BB_THREAD_STORAGE/decisions.md";
       if (ctx.isCoordinator(caller)) {

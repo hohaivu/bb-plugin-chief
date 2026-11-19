@@ -51,8 +51,8 @@ describe("decisions file: unit", () => {
   test("a read failure other than a missing file writes nothing and warns; no function rejects", async () => {
     const decisions = unit(async () => { throw new Error("HTTP 500: host unreachable"); });
     expect(await decisions.recordDecision("thr_1", { kind: "decision", text: "x" })).toBe(false);
-    expect(await decisions.refreshDecisions("thr_1")).toBe(false);
-    expect(await decisions.copyDecisions("thr_1", "thr_2")).toBe(false);
+    expect(await decisions.writeDecisions("thr_1", (entries) => entries)).toBe(false);
+    expect(await decisions.copyDecisions("thr_1", "thr_2", "proj_1")).toBe(false);
     expect(decisions.write).not.toHaveBeenCalled();
     expect(decisions.warn).toHaveBeenCalled();
   });
@@ -112,7 +112,7 @@ describe("decisions file: chief_roster", () => {
     await decide(state, chief, { text: "Tied to one", todoId: 1 });
     await decide(state, chief, { text: "Tied to two", todoId: 2 });
     const first = await read(state, chief);
-    expect(first).toContain("- #1 Wait for merge — after: PR #42 merges");
+    expect(first).toContain("- todo #1: Wait for merge (after: PR #42 merges)");
     await call(state, "chief_roster", { todo: { id: 1 } }, chief);
     const again = await read(state, chief);
     await call(state, "chief_roster", { todo: { id: 1 } }, chief);
