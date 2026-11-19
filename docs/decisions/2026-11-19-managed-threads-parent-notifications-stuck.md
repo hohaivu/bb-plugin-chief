@@ -6,11 +6,10 @@ BB sends the parent a `completed` notice for each managed thread under the defau
 
 ## Decision
 
-Each managed thread spawns with `parentNotifications: "stuck"`. The plugin's alerts cover completion and a turn that ends without a report. BB keeps the failed, interrupted and needs-attention notices.
+Each thread spawned through `launch` gets `parentNotifications: "stuck"`. The plugin's alerts cover completion and a turn that ends without a report. BB keeps the failed, interrupted and needs-attention notices.
 
 ## Consequence
 
-- Chief gets one no-report alert for each turn that ends without `chief_report`.
-- Chief receives no BB `completed` notice for a managed thread.
-- Live threads keep `auto` until they are replaced.
-- Chief threads have no parent and keep their own setting.
+- Chief gets one no-report alert for each turn that ends idle without a report receipt. This covers managed threads that a Chief owns, not Chief threads. A ready, blocked or complete row sends none.
+- Threads spawned with `stuck` get no BB `completed` notice. Threads spawned earlier keep `auto` and their notice until they are replaced.
+- Chief threads have no parent and keep their own setting. The pr-agent helper keeps `off`.
