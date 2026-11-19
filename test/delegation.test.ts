@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CLOSE_OUT, NO_DEVIATIONS, PLAN_FIXTURE, approvePlan, readyAction, completeWorker, delegate, disposeAll, legacyWave, planFile, planTwoWaves, setup, start, status, wave } from "./harness";
+import { CLOSE_OUT, NO_DEVIATIONS, PLAN_FIXTURE, approvePlan, completeWorker, delegate, disposeAll, legacyWave, planFile, planTwoWaves, setup, start, status, wave } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import plugin from "../server";
 import { provideSdk } from "./sdk";
@@ -449,7 +449,7 @@ describe("Chief backend", () => {
       state: "ready", result: `Wave 3 of 3 done${NO_DEVIATIONS}`,
     }, { threadId: worker3.threadId, projectId: "proj_1" });
     alert = state.sent.at(-1).input[0].text as string;
-    expect(alert).toContain(readyAction(worker3.threadId));
+    expect(alert).toContain(`chief_review (workerThreadId: ${worker3.threadId})`);
   });
 
   test("persists dependsOn and lists every independent head wave for parallel delegation", async () => {

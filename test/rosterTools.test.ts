@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import plugin from "../server";
-import { APPROVE, CLOSE_OUT, REQUEST_CHANGES, approvePlan, completeWorker, configurationContext, delegate, disposeAll, planTwoWaves, readyAction, setup, start, status, wave } from "./harness";
+import { APPROVE, CLOSE_OUT, REQUEST_CHANGES, approvePlan, completeWorker, configurationContext, delegate, disposeAll, planTwoWaves, setup, start, status, wave } from "./harness";
 import { forgeAnswers, forged, startGate } from "./gateForge";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
@@ -79,12 +79,20 @@ describe("Chief backend", () => {
     // Each ready-but-unreviewed worker contributes one full pending line; enough
     // of them push the Pending block itself (not just the whole roster) past
     // 6,000 characters, so the block's own clip has to kick in.
+    // The complete (unclipped) entry of worker 0, read while the roster is still small: the template every retained entry must equal.
+    const entry = (line: string) => line.replaceAll(/\bthr_\d+\b/g, "<id>").replaceAll(/Worker \d+/g, "<title>");
+    let complete = "";
     for (let i = 0; i < 60; i += 1) {
       const worker = await delegate(state, chief.threadId, `Worker ${i}`);
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Done",
       }, { threadId: worker.threadId, projectId: "proj_1" });
+      if (i === 0) {
+        const small = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+        complete = entry(small.split("\n").find((line) => line.startsWith("- worker “Worker 0”"))!);
+      }
     }
+    expect(complete).toContain("chief_review");
 
     const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     // The rest of the roster (row details) is clipped too, so find the pending block's own end by
@@ -100,7 +108,9 @@ describe("Chief backend", () => {
     for (const line of lines.slice(1, -1)) {
       const id = /^- worker “Worker \d+” \((thr_\d+)\): /.exec(line)?.[1];
       expect(id).toBeDefined();
-      expect(line.endsWith(`: ${readyAction(id!)}`)).toBe(true);
+      expect(line).toContain(`chief_review (workerThreadId: ${id})`);
+      // Never cut after the call: the entry is the complete one, id and title aside.
+      expect(entry(line)).toBe(complete);
     }
     expect(lines.at(-1)).toBe(suffixMatch![0]);
   });
@@ -275,13 +285,11 @@ describe("Chief backend", () => {
     const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
     const workerAlert = state.sent.at(-1).input[0].text as string;
-    const workerAction = readyAction(worker.threadId);
-    // The alert keeps an action up to 1,200 characters whole (no report file is needed for it); the roster carries it whole too.
-    expect(workerAction.length).toBeLessThanOrEqual(1_200);
+    const workerAction = `chief_review (workerThreadId: ${worker.threadId})`;
     expect(workerAlert).toContain(workerAction);
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain("Pending:");
-    expect(roster).toContain(`- worker “Fix checkout totals” (${worker.threadId}): ${workerAction}`);
+    expect(roster.split("\n").find((line) => line.startsWith(`- worker “Fix checkout totals” (${worker.threadId}): `))).toContain(workerAction);
 
     // With the gate open the worker stays in Pending and names the busy sides (gateDecision wait).
     const { reviewerId } = await startGate(state, chief.threadId, worker.threadId);

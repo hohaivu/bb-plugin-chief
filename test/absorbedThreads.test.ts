@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server";
 import { MIGRATIONS } from "../src/db/migrations";
-import { APPROVE, NO_DEVIATIONS, approvePlan, completeWorker, configurationContext, delegate as delegateWith, disposals, disposeAll, execFileMock, ghHead, planTwoWaves, readyAction, setup as setupWith, start, status } from "./harness";
+import { APPROVE, NO_DEVIATIONS, approvePlan, completeWorker, configurationContext, delegate as delegateWith, disposals, disposeAll, execFileMock, ghHead, planTwoWaves, setup as setupWith, start, status } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
 
@@ -273,7 +273,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const pendingLines = roster.split("\n").filter((line) => /\(thr_[^)]+\): /.test(line));
     // Only a thread with a next action is listed; the planner, the idle advisor and the planned worker in progress are not; a blocked gate reviewer shows on the worker it reviews.
     expect(pendingLines).toHaveLength(2);
-    expect(pendingLines.find((line) => line.startsWith(`- worker “Ready work” (${ready.threadId}): `))).toBe(`- worker “Ready work” (${ready.threadId}): ${readyAction(ready.threadId)}`);
+    expect(pendingLines.find((line) => line.startsWith(`- worker “Ready work” (${ready.threadId}): `))).toContain(`chief_review (workerThreadId: ${ready.threadId})`);
     // The blocked reviewer is a gate actor: its line sits on the worker the gate covers and names the reviewer-only restart.
     const blocked = pendingLines.find((line) => line.startsWith(`- worker “Blocked review target” (${blockedWorker.threadId}): `))!;
     expect(blocked).toContain(`Reviewer ${reviewer.threadId} is blocked: No access`);

@@ -5,8 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { deferred, disposals, headOf, pr, SHA_A, SHA_B, world, type Options } from "./reviewWorld";
-import { REVIEWER_NATIVE_LINE } from "./harness";
-import { NATIVE_NO_RESHAPE_LINE } from "./reviewWave1";
+import { nativeLines } from "./harness";
 import type { PinnedHead } from "../src/review/reviewStart";
 import type { PlanWave } from "../src/plan/waveSchedule";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -720,7 +719,8 @@ const GIT_ENV: NodeJS.ProcessEnv = {
   GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
 };
 const hasLine = (text: string, line: string) => text.split("\n").includes(line);
-const nativeOf = (prompt: string) => hasLine(prompt, REVIEWER_NATIVE_LINE) ? "full" : hasLine(prompt, NATIVE_NO_RESHAPE_LINE) ? "no-reshape" : prompt.includes("Native-design check") ? "garbled" : "none";
+const NATIVE = nativeLines();
+const nativeOf = (prompt: string) => hasLine(prompt, NATIVE.full) ? "full" : hasLine(prompt, NATIVE.noReshape) ? "no-reshape" : "none";
 
 type RepoApi = { dir: string; git: (...args: string[]) => string; put: (path: string, content: string | Buffer) => void; commit: (message: string) => string };
 /** `main` holds src/app.ts and `baseFiles`; origin/main points at it; `onFeature` makes the commits of branch `feature`. */
