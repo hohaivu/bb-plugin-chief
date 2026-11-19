@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import plugin from "../server";
 import { bounded } from "../src/runtime/exec";
-import { HEAD_SHA, disposeAll, execFileMock, setup, start } from "./harness";
+import { HEAD_SHA, configurationContext, delegate, disposeAll, execFileMock, rowOf, setup, start } from "./harness";
 import { gateWorld } from "./gateWorld";
 import { provideSdk } from "./sdk";
 import { STOP_GRACE_MS } from "../src/runtime/lifecycle";
@@ -131,13 +133,16 @@ describe("an abandoned supervisor tick", () => {
 
   test("writes no rules cache when a rules read returns after abandonment", async () => {
     const state = await setup();
-    await start(state);
+    const chief = await start(state);
     const reading = parked();
     let reads = 0;
-    state.harness.sdk.stub("projects.fileContent", async () => { reads += 1; await reading.hold(); return { content: "custom rules" }; });
+    state.harness.sdk.stub("projects.fileContent", async () => { reads += 1; await reading.hold(); return { content: "custom rules LATE_RULES_MARKER" }; });
     await abandon(state, reading.hit);
     reading.release();
     await pause();
+    // Right away, before any other refresh: the synchronous configuration read must not see the late rules.
+    const instructions = (await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId)) as { instructions: string }).instructions;
+    expect(instructions).not.toContain("LATE_RULES_MARKER");
     // A later ordinary read must reach the SDK again: the abandoned read cached nothing.
     const before = reads;
     state.harness.sdk.stub("projects.fileContent", async () => { reads += 1; throw new Error("no rules file"); });
@@ -210,6 +215,86 @@ describe("an abandoned supervisor tick", () => {
     await pause(100);
     expect(reads).toEqual(["thr_r1", "thr_r1"]);
   }, STOP_GRACE_MS + 5_000);
+
+  const absorbedResearcher = (db: any, id: string) => db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, created_at, updated_at) VALUES (?, 'researcher', 'proj_1', ?, 'ready', 'idle', 1, 1)").run(id, id);
+  const researcherStates = (state: Awaited<ReturnType<typeof setup>>) => state.db.prepare("SELECT thread_id, state FROM managed_threads WHERE role='researcher' ORDER BY thread_id").all();
+
+  test("a sweep started by the tick's own reconcile write reads and completes nothing after abandonment", async () => {
+    const reads: string[] = [];
+    const first = parked();
+    const state = await setup({ seed: ({ db }) => { absorbedResearcher(db, "thr_t"); absorbedResearcher(db, "thr_r2"); } });
+    const base = state.live.values().next().value;
+    let tReads = 0;
+    // Live thr_t reports another parent, so the tick's reconcile writes it; that write's reload starts the sweep, whose first read (the second read of thr_t) is parked.
+    state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      if (threadId !== "thr_t" && threadId !== "thr_r2") return state.live.get(threadId);
+      reads.push(threadId);
+      if (threadId === "thr_t" && ++tReads === 2) await first.hold();
+      return { ...base, id: threadId, status: "idle", archivedAt: null, deletedAt: null, parentThreadId: "thr_other_parent" };
+    });
+    await abandon(state, first.hit);
+    const readsAtAbandon = reads.length;
+    const alertsAtAbandon = state.db.prepare("SELECT COUNT(*) AS n FROM alert_outbox").get();
+    first.release();
+    await pause(100);
+    expect(reads).toHaveLength(readsAtAbandon);
+    expect(researcherStates(state)).toEqual([{ thread_id: "thr_r2", state: "ready" }, { thread_id: "thr_t", state: "ready" }]);
+    expect(state.db.prepare("SELECT COUNT(*) AS n FROM alert_outbox").get()).toEqual(alertsAtAbandon);
+  }, STOP_GRACE_MS + 5_000);
+
+  test("the tick joining an independent sweep flight queues no pass that reads after abandonment, and the independent pass is not cut off", async () => {
+    const reads: string[] = [];
+    const first = parked();
+    const state = await setup({ seed: ({ db }) => { absorbedResearcher(db, "thr_r1"); absorbedResearcher(db, "thr_r2"); } });
+    const base = state.live.values().next().value;
+    let calls = 0;
+    let released = false;
+    state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      if (threadId !== "thr_r1" && threadId !== "thr_r2") return state.live.get(threadId);
+      if (released) reads.push(threadId);
+      // The very first read is the independent flight's: held, and answered busy, so thr_r1 stays open.
+      const busy = ++calls === 1;
+      if (busy) await first.hold();
+      return { ...base, id: threadId, status: busy ? "active" : "idle", archivedAt: null, deletedAt: null };
+    });
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: base, lastAssistantText: "done" });
+    await first.hit;
+    const service = state.harness.behavior.runService("supervisor");
+    await pause(100); // the tick's reconcile finished and its sweep joined the flight, queueing a tick-only pass
+    service.controller.abort();
+    await service.done;
+    released = true;
+    first.release();
+    await pause(100);
+    // The independent pass ran to the end (it read and completed thr_r2); the tick-only queued pass was skipped (thr_r1 was not read again).
+    expect(reads).toEqual(["thr_r2"]);
+    expect(researcherStates(state)).toEqual([{ thread_id: "thr_r1", state: "ready" }, { thread_id: "thr_r2", state: "complete" }]);
+  }, STOP_GRACE_MS + 5_000);
+
+  test("requests during a flight collapse into one more pass, and only one flight runs at a time", async () => {
+    let active = 0;
+    let peak = 0;
+    const reads: string[] = [];
+    const first = parked();
+    const state = await setup({ seed: ({ db }) => absorbedResearcher(db, "thr_r1") });
+    const base = state.live.values().next().value;
+    state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      if (threadId !== "thr_r1") return state.live.get(threadId);
+      reads.push(threadId);
+      active += 1; peak = Math.max(peak, active);
+      if (reads.length === 1) await first.hold();
+      active -= 1;
+      return { ...base, id: threadId, status: "active", archivedAt: null, deletedAt: null }; // busy: the row stays open, every pass reads it again
+    });
+    const idle = () => state.harness.behavior.emitThreadEvent("thread.idle", { thread: base, lastAssistantText: "done" });
+    await idle();
+    await first.hit;
+    await idle(); await idle(); await idle();
+    first.release();
+    await pause(100);
+    expect(reads).toHaveLength(2); // the flight's pass plus one collapsed pass
+    expect(peak).toBe(1);
+  });
 
   test("a no-argument section caller joining an abandoned supervisor flight gets its own live flight", async () => {
     const state = await setup();
@@ -299,4 +384,138 @@ describe("an abandoned supervisor tick's cleanup", () => {
     await pause();
     expect(jobs(world)).toEqual([{ thread_id: threadId, step: "archive", outcome: null }, { thread_id: "thr_no_managed_row", step: "archive", outcome: null }]);
   }, STOP_GRACE_MS + 5_000);
+});
+
+type S = Awaited<ReturnType<typeof setup>>;
+const call = (state: S, tool: string, params: object, threadId: string, projectId = "proj_1") =>
+  state.harness.behavior.callAgentTool(tool, params, { threadId, projectId }) as Promise<string>;
+const makeChief = async (state: S, projectId = "proj_1") => {
+  const result = await state.harness.behavior.runCli(["create", "--project", projectId, "--json"], { projectId });
+  expect(result.exitCode, result.stderr).toBe(0);
+  return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
+};
+const makeCoordinator = async (state: S, projectId = "proj_1") => {
+  const id = await makeChief(state, projectId);
+  await call(state, "chief_coordinate", {}, id, projectId);
+  return id;
+};
+const spawnChild = async (state: S, parent: string, params: Record<string, unknown> = {}, projectId = "proj_1") =>
+  /in thread (thr_\w+)/.exec(await call(state, "chief_spawn", { request: "Do the task", context: "Goal: done", ...params }, parent, projectId))![1]!;
+const archive = async (state: S, id: string) => {
+  state.live.set(id, { ...state.live.get(id)!, archivedAt: new Date().toISOString() });
+  await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(id)! });
+  await pause(30);
+};
+const row = (state: S, id: string) => rowOf(state, id);
+const pendingMarkers = (state: S) => state.db.prepare("SELECT key, value FROM plugin_meta WHERE key LIKE 'pending_handover:%' ORDER BY key").all();
+const decisionsOf = async (state: S, id: string) => {
+  const file = join(state.storageRoot, id, "decisions.md");
+  for (let i = 0; i < 200 && !(await readFile(file, "utf8").catch(() => "")).includes("carry me"); i++) await pause(5);
+  return readFile(file, "utf8").catch(() => "");
+};
+
+describe("an abandoned supervisor tick's Chief spawn", () => {
+  /** A harness whose spawns wait on `gate.current` while it is set; make it only after the setup spawns. */
+  const gated = async (autoSpawn = true) => {
+    const gate: { current: ReturnType<typeof parked> | null } = { current: null };
+    const state = await setup({ onSpawn: () => gate.current?.hold() });
+    if (autoSpawn) {
+      // chiefProject first, then autoSpawn: the settings change itself starts no Chief.
+      await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
+      await state.harness.behavior.setSettings({ chiefProject: "proj_1", autoSpawn: true });
+    }
+    return { state, gate };
+  };
+
+  test("a late spawn for an archived project Chief records only the row and a pending marker; the next live tick hands over once", async () => {
+    const { state, gate } = await gated(false);
+    const old = (await start(state)).threadId;
+    const worker = (await delegate(state, old, "Fix totals")).threadId;
+    await call(state, "chief_roster", { decision: { text: "carry me" } }, old);
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1", autoSpawn: true });
+    await archive(state, old);
+    const spawnedBefore = state.spawned.length;
+    gate.current = parked();
+    await abandon(state, gate.current.hit);
+    const held = gate.current;
+    gate.current = null;
+    held.release();
+    await pause(100);
+
+    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+    const next = (state.db.prepare("SELECT thread_id FROM managed_threads WHERE role='chief' AND thread_id<>? ORDER BY created_at DESC, rowid DESC").get(old) as { thread_id: string }).thread_id;
+    expect(row(state, next).state).toBe("starting");
+    expect(pendingMarkers(state)).toEqual([{ key: `pending_handover:${next}`, value: old }]);
+    expect(row(state, old).state).not.toBe("complete");
+    expect(row(state, worker).chief_thread_id).toBe(old);
+    expect(await readFile(join(state.storageRoot, next, "decisions.md"), "utf8").catch(() => "")).not.toContain("carry me");
+
+    await state.supervisorCycle();
+    expect(state.spawned).toHaveLength(spawnedBefore + 1); // the live tick adopted the late Chief: no second
+    expect(row(state, worker).chief_thread_id).toBe(next);
+    expect(row(state, old).state).toBe("complete");
+    expect(pendingMarkers(state)).toEqual([]);
+    expect(await decisionsOf(state, next)).toContain("carry me");
+    await state.supervisorCycle();
+    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+    expect(row(state, worker).chief_thread_id).toBe(next);
+  }, STOP_GRACE_MS + 10_000);
+
+  test("a late replacement for an orphaned child Chief is adopted by the next live tick, which moves its work and decisions", async () => {
+    const { state, gate } = await gated(false);
+    const coord = await makeCoordinator(state);
+    const child = await spawnChild(state, coord, { title: "Checkout" });
+    const worker = (await delegate(state, child, "Fix totals")).threadId;
+    const other = await makeCoordinator(state, "proj_2");
+    const foreign = await spawnChild(state, other, { projectId: "proj_1" }, "proj_2");
+    const foreignBefore = { ...row(state, foreign) };
+    await call(state, "chief_roster", { decision: { text: "carry me" } }, child);
+    await archive(state, child);
+    const spawnedBefore = state.spawned.length;
+    gate.current = parked();
+    await abandon(state, gate.current.hit);
+    const held = gate.current;
+    gate.current = null;
+    held.release();
+    await pause(100);
+
+    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+    const markers = pendingMarkers(state) as { key: string; value: string }[];
+    expect(markers).toHaveLength(1);
+    expect(markers[0]!.value).toBe(child);
+    const next = markers[0]!.key.slice("pending_handover:".length);
+    expect(row(state, worker).chief_thread_id).toBe(child);
+    expect(row(state, child).state).not.toBe("complete");
+
+    await state.supervisorCycle();
+    expect(state.spawned).toHaveLength(spawnedBefore + 1);
+    expect(row(state, worker).chief_thread_id).toBe(next);
+    expect(row(state, next)).toMatchObject({ role: "chief", coordinator_thread_id: coord });
+    expect(row(state, child).state).toBe("complete");
+    expect(pendingMarkers(state)).toEqual([]);
+    expect(await decisionsOf(state, next)).toContain("carry me");
+    expect(row(state, foreign)).toMatchObject({ coordinator_thread_id: other, title: foreignBefore.title, chief_thread_id: foreignBefore.chief_thread_id });
+  }, STOP_GRACE_MS + 10_000);
+
+  test("a live tick drops every marker it cannot hand over, and moves no work for them", async () => {
+    const state = await setup();
+    const coordA = await makeCoordinator(state);
+    const coordB = await makeCoordinator(state, "proj_2");
+    const childA = await spawnChild(state, coordA, { title: "A" });
+    const childB = await spawnChild(state, coordB, { title: "B", projectId: "proj_1" }, "proj_2");
+    const plain = await makeChief(state);
+    const lateDead = await makeChief(state);
+    await archive(state, lateDead);
+    const marker = state.db.prepare("INSERT INTO plugin_meta (key, value) VALUES (?, ?)");
+    marker.run("pending_handover:thr_missing_next", plain);
+    marker.run(`pending_handover:${lateDead}`, plain); // the late Chief is dead
+    marker.run(`pending_handover:${plain}`, "thr_missing_prev"); // previous is missing
+    marker.run(`pending_handover:${childA}`, coordA); // previous is a Coordinator
+    marker.run(`pending_handover:${childB}`, childA); // two Coordinators' children
+    const workers = await Promise.all([plain, childA, childB].map(async (chief) => [chief, (await delegate(state, chief, `Work of ${chief}`)).threadId] as const));
+    await state.supervisorCycle();
+    expect(pendingMarkers(state)).toEqual([]);
+    for (const [chief, worker] of workers) expect(row(state, worker).chief_thread_id).toBe(chief);
+  });
 });
