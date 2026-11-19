@@ -974,6 +974,13 @@ describe("Coordinator", () => {
       expect(childConfig.skills).not.toContain("coordinator");
       expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate" && name !== "chief_attach"));
       expect(childConfig.instructions).toContain(coord);
+      const preloads = [...childConfig.instructions.matchAll(/\bselect:(mcp__bb-bridge__\w+(?:,mcp__bb-bridge__\w+)*)/g)];
+      if (provider === "claude-code") {
+        expect(preloads).toHaveLength(1);
+        expect(preloads[0]![1]!.split(",").map((id) => id.replace(/^mcp__bb-bridge__/, "")).sort()).toEqual(childConfig.tools.map((tool) => tool.name).sort());
+      } else {
+        expect(preloads).toHaveLength(0);
+      }
     });
 
     // The SDK cuts instructions at 32768 chars; the core rules (the last, mandatory one is the Need-you escalation) go before the project rules, so they must end inside the cut even for the longest supported inputs.
