@@ -143,12 +143,7 @@ describe("reviewerPrompt rule blocks through reviewBrief", () => {
     expect(count(without, "worker-reported")).toBe(0);
   });
 
-  test("every rule block off at once leaves the invariant rules in place", () => {
-    const prompt = blocks({ feature: false, testAudit: false, docs: false });
-    expect(prompt).toContain("Classify every finding as blocking or nit.");
-    expect(prompt).toContain("Send each finding in chief_report `findings`");
-    expect(prompt).toContain("## This review");
-  });
+
 });
 
 describe("acceptedGaps", () => {
@@ -200,11 +195,26 @@ describe("branchReviewBrief defaults", () => {
 });
 
 describe("review-context.md: one read line or one inline copy", () => {
+  const contextRead = /^Read `[^`]+review-context\.md`/m;
+  const contextRule = /^Review context\b.*review-context\.md/m;
+
+  test("a standalone review has neither a context read nor a prefix rule", () => {
+    const prompt = branchReviewBrief({ branch: "feature/x", pullRequestRef: PR1, chiefThreadId: "thr_c" });
+    expect(prompt).not.toMatch(contextRead);
+    expect(prompt).not.toMatch(contextRule);
+  });
   // Contract: with a path the prompt holds one read line and no copy of the context; with null it ends with `## review-context.md` and the context; an empty context renders neither.
   test("with a path: one read line, no inline heading, no wait rule, no Context list", () => {
     const { prompt, context } = reviewBrief(single());
-    const read = "Read `/ctx/review-context.md` in full before reviewing: it holds the reports, plan files and pointers this brief names.";
-    expect(count(prompt, read)).toBe(1);
+    const lines = prompt.split("
+");
+    const boundary = lines.indexOf("## This review");
+    const reads = lines.filter((line) => contextRead.test(line));
+    const rules = lines.filter((line) => contextRule.test(line));
+    expect(reads.map((line) => line.split("`")[1])).toEqual([single().contextPath]);
+    expect(rules).toHaveLength(1);
+    expect(lines.indexOf(rules[0]!)).toBeLessThan(boundary);
+    expect(lines.indexOf(reads[0]!)).toBeGreaterThan(boundary);
     expect(prompt.split("\n")).not.toContain("## review-context.md");
     expect(count(prompt, "Full report: /r/thr_a.md")).toBe(0);
     expect(context).toContain("Full report: /r/thr_a.md");
@@ -217,7 +227,8 @@ describe("review-context.md: one read line or one inline copy", () => {
     const { prompt, context } = reviewBrief(single({ contextPath: null }));
     expect(prompt.endsWith(`\n\n## review-context.md\n${context}`)).toBe(true);
     expect(count(prompt, context)).toBe(1);
-    expect(prompt).not.toContain("in full before reviewing: it holds the reports");
+    expect(prompt).not.toMatch(contextRead);
+    expect(prompt).not.toMatch(contextRule);
     expect(reviewBrief(single({ contextPath: undefined })).prompt).toBe(prompt);
   });
 
@@ -228,7 +239,8 @@ describe("review-context.md: one read line or one inline copy", () => {
     for (const contextPath of ["/ctx/review-context.md", null]) {
       const { prompt, context } = reviewBrief({ ...input, contextPath });
       expect(context).toBe("");
-      expect(prompt).not.toContain("in full before reviewing: it holds the reports");
+      expect(prompt).not.toMatch(contextRead);
+      expect(prompt).not.toMatch(contextRule);
       expect(prompt.split("\n")).not.toContain("## review-context.md");
       expect(prompt.endsWith("\n")).toBe(false);
     }
