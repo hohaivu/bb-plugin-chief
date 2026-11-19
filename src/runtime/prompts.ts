@@ -13,4 +13,4 @@ export const COORDINATOR_REFUSED = new Set([
   "chief_complete", "chief_owner_approval", "chief_skip_specs", "chief_escalate", "chief_sync", "chief_research",
 ]);
 
-export const coordinatorRefusal = (what: string) => `${what} is not available to a Coordinator: it runs no planner, worker, reviewer, tester, advisor or researcher. Ask the child Chief that owns the work.`;
+export const coordinatorRefusal = (what: string) => `${what} is not available to a Coordinator: it runs no planner, worker, reviewer, advisor or researcher. Ask the child Chief that owns the work.`;

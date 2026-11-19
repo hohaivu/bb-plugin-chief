@@ -18,7 +18,6 @@ const ROLES = [
   { role: "planner", label: "Planner", hint: "Plans work before it starts." },
   { role: "worker", label: "Worker", hint: "Implements the work Chief delegates." },
   { role: "designer", label: "Designer", hint: "Decides or implements how UI looks (design tools, design-to-code)." },
-  { role: "tester", label: "Tester", hint: "Writes and runs tests." },
   { role: "spec-writer", label: "Spec Writer", hint: "Keeps docs/specs, docs/INDEX.md and docs/decisions current." },
   { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
   { role: "advisor", label: "Advisor", hint: "Diagnoses work that keeps failing review." },
@@ -204,7 +203,7 @@ function ChiefModelSettings() {
           {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
           {ROLES.map(({ role, label, hint }) => {
             const selection = host.selections[role];
-            const inheritsWorker = role === "designer" || role === "tester" || role === "spec-writer";
+            const inheritsWorker = role === "designer" || role === "spec-writer";
             const value = selection ?? (inheritsWorker ? host.selections.worker : null) ?? host.fallback;
             return (
               <div key={role} className="mt-3 flex flex-wrap items-center gap-3">

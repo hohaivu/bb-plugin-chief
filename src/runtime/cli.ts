@@ -38,7 +38,7 @@ export function registerCli(ctx: Ctx) {
     "  bb chief adopt --thread thr_id [--json]",
     "  bb chief plan [--title \"…\"] --mission \"…\" [--context \"…\"] [--revises thr_id] [--branch feature/…] [--research-thread thr_id | --undesigned-reason \"…\"] [--json]",
     "  bb chief consult [--title \"…\"] --mission \"…\" [--context \"…\"] --plan-thread thr_id [--branch feature/…] [--json]",
-    "  bb chief delegate [--title \"…\"] --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|tester|spec-writer] [--evidence-only] [--json]",
+    "  bb chief delegate [--title \"…\"] --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|spec-writer] [--json]",
     "  bb chief inspect <thread-id>",
     "  bb chief continue <thread-id> --instruction \"…\" [--json]",
     "  bb chief stop <thread-id> [--reason \"…\"] [--json]",
@@ -58,7 +58,7 @@ export function registerCli(ctx: Ctx) {
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
       { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan [--title \"…\"] --mission \"…\" [--revises thr_id] [--branch feature/…] [--research-thread thr_id | --undesigned-reason \"…\"] [--json]" },
       { name: "consult", summary: "Start a read-only advisor that reviews a plan", usage: "bb chief consult [--title \"…\"] --mission \"…\" --plan-thread thr_id [--branch feature/…] [--json]" },
-      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate [--title \"…\"] --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|tester|spec-writer] [--evidence-only] [--json]" },
+      { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate [--title \"…\"] --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|spec-writer] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
       { name: "continue", summary: "Nudge a managed thread that is still working", usage: "bb chief continue <thread-id> --instruction \"…\" [--json]" },
       { name: "stop", summary: "Interrupt a stuck managed thread, keeping its worktree for a replacement", usage: "bb chief stop <thread-id> [--reason \"…\"] [--json]" },
@@ -174,7 +174,6 @@ export function registerCli(ctx: Ctx) {
             wave: args.one("wave") !== undefined ? Number(args.one("wave")) : undefined,
             unplannedReason: args.one("unplanned-reason"),
             kind: args.one("kind"),
-            evidenceOnly: args.bool("evidence-only") || undefined,
             // undefined, not false: an absent flag must not override replaces: inheritance.
             verifyCommand: args.one("verify"),
           });

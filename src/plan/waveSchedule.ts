@@ -71,7 +71,7 @@ export type Lane = "side" | "implementation";
 /** One module owns the plan-wave graph and the state derived from it: which worker holds a wave, which waves are
  * still pending, which workers one review covers, and whether a worker ends its plan. It returns data and
  * decisions, never sentences. rows reads the server's live row cache, which is reloaded after writes. */
-/** gateActor: a review gate's tester (or later fix) row; wave scheduling never sees it. */
+/** gateActor: a review gate's fix run (or a legacy tester) row; wave scheduling never sees it. */
 export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<string, Row>, gateActor: (row: Row) => boolean = () => false) {
   /** A worker's linked planner's persisted wave schedule, or [] when unlinked. A legacy test wave no worker was ever
    * delegated on is marked absent, so the graph helpers skip it; one with rows is an ordinary wave. */

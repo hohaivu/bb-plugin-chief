@@ -194,7 +194,7 @@ export function createSettingsRuntime(ctx: Ctx) {
     const fallback = MODEL_FALLBACK[role];
     const selection = hostId === null
       ? null
-      // No Designer or Tester row inherits the Worker pick; a stored but unservable one goes to BB default.
+      // No Designer row inherits the Worker pick; a stored but unservable one goes to BB default.
       : readRoleModel(hostId, role) ?? (fallback ? readRoleModel(hostId, fallback) : null);
     if (!hostId || !selection) return {};
     return (await usableSelection(hostId, selection)) ?? {};

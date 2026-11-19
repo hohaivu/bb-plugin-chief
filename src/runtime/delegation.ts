@@ -1,7 +1,7 @@
 import { DOCS_WORK_FILE, advisorBrief, plannerBrief, resolveDelegation, workerBrief } from "../research/delegationBrief";
 import { MAX_CARRIED_FAILS, sectionOf } from "../report/reportIntake";
 import { isWriter } from "../plan/waveSchedule";
-import { wrongTestEvidence, neverReported } from "../plan/planProgress";
+import { neverReported } from "../plan/planProgress";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
 import { isReady } from "../plan/waveSchedule";
@@ -19,9 +19,6 @@ import type { Ctx } from "./context";
 const MAX_STALL_RESETS = 2;
 
 const MAX_LOG_READ = 30;
-
-/** The `## Failing tests` section of a tester's result, or null. */
-const failingTests = (result: string | null) => /^#{1,6}[ \t]+failing tests[^\n]*\n([\s\S]*?)(?=^#{1,6}[ \t]|(?![\s\S]))/im.exec(result ?? "")?.[1]?.trim() || null;
 
 export function createDelegation(ctx: Ctx) {
   const { bb, coexists, db, latestSideWriter, latestWorker, ledger, planWavesFor, plans, progress, reviewerFails, schedule, store } = ctx;
@@ -221,41 +218,31 @@ export function createDelegation(ctx: Ctx) {
     return out;
   }
 
-  type FixAdmission = { run: "gate" | "corrector"; gate: ReviewGate } | { run: "chat"; gate?: undefined };
+  type FixAdmission = { run: "gate"; gate: ReviewGate } | { run: "chat"; gate?: undefined };
 
-  /** A replaces: that is a fix run: the gate's one fix worker (replaces its tester), its one corrector (replaces a blocked fix run),
-   * or a chat fix (replaces a completed gate target or fix run while its environment lives). Throws on a refused one; null for any other delegation. */
+  /** A replaces: that is a fix run: the gate's one fix run (replaces the gate's first target), or a chat fix
+   * (replaces a completed gate target or fix run while its environment lives). Throws on a refused one; null for any other delegation. */
   function fixAdmission(prior: ManagedRow, kind: string | undefined): FixAdmission | null {
     const gate = store.gateFor(prior.thread_id);
     const escalate = (fixer: string) => `The gate already had its fix run (${fixer}): escalate to the user.`;
-    if (gate && gate.tester_thread_id === prior.thread_id) {
-      if (kind === undefined) throw new Error("Name the kind: kind: worker to change product code, kind: tester to change tests, kind: spec-writer to change docs/.");
-      if (kind !== "worker") throw new Error(`${prior.thread_id} is review gate ${gate.gate_key}'s tester: only the gate's one fix run replaces it — chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
+    if (gate && gate.targets[0].threadId === prior.thread_id && kind !== "spec-writer") {
       const fixer = gate.fixer_thread_id ? store.get(gate.fixer_thread_id) : undefined;
       if (fixer && neverReported(fixer)) throw new Error(`Fix run ${fixer.thread_id} stopped before it reported and its environment holds its partial work: chief_delegate (replaces: ${fixer.thread_id}, kind: worker).`);
-      if (gate.fixer_thread_id) throw new Error(escalate(gate.fixer_thread_id));
+      if (gate.fixer_thread_id && prior.state !== "complete") throw new Error(escalate(gate.fixer_thread_id));
+      if (!gate.fixer_thread_id && prior.state !== "complete") {
+        if (kind !== "worker") throw new Error(`Review gate ${gate.gate_key}'s one fix run replaces its first target: chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
+        const decision = ctx.gateOf(prior)!.decision;
+        if (decision.kind !== "fix") throw new Error(`Review gate ${gate.gate_key} needs no fix run. ${ctx.gateLine(gate, decision)}`);
+        return { run: "gate", gate };
+      }
+    }
+    if (gate && gate.fixer_thread_id === prior.thread_id && neverReported(prior)) {
+      if (kind !== "worker") throw new Error(`Fix run ${prior.thread_id} stopped before it reported, so the gate's fix-run slot is free: chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
       const decision = ctx.gateOf(prior)!.decision;
       if (decision.kind !== "fix") throw new Error(`Review gate ${gate.gate_key} needs no fix run. ${ctx.gateLine(gate, decision)}`);
       return { run: "gate", gate };
     }
-    if (gate && gate.fixer_thread_id === prior.thread_id && !gate.corrector_thread_id && neverReported(prior)) {
-      if (kind !== "worker") throw new Error(`Fix run ${prior.thread_id} stopped before it reported, so the gate's fix-run slot is free (a corrector replaces only a fix run that reported blocked with wrong-test evidence): chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
-      const decision = ctx.gateOf(prior)!.decision;
-      if (decision.kind !== "fix") throw new Error(`Review gate ${gate.gate_key} needs no fix run. ${ctx.gateLine(gate, decision)}`);
-      return { run: "gate", gate };
-    }
-    if (gate && prior.state !== "complete" && gate.fixer_thread_id === prior.thread_id) {
-      if (kind !== "tester") throw new Error(escalate(prior.thread_id));
-      if (gate.corrector_thread_id) throw new Error(`Review gate ${gate.gate_key} already had its corrector (${gate.corrector_thread_id}): escalate to the user.`);
-      if (prior.last_report_state !== "blocked" || !wrongTestEvidence(prior.blocker)) throw new Error(`A corrector replaces fix run ${prior.thread_id} only after it reports blocked with wrong-test evidence; it is ${prior.state}${prior.last_report_state === "blocked" ? " and its blocker names no test file:line" : ""}. Answer its blocker with chief_continue (threadId: ${prior.thread_id}), or escalate.`);
-      return { run: "corrector", gate };
-    }
-    if (gate && gate.fixer_thread_id === prior.thread_id && gate.corrector_thread_id && kind === "tester") throw new Error(`Review gate ${gate.gate_key} already had its corrector (${gate.corrector_thread_id}): escalate to the user.`);
-    if (gate && gate.corrector_thread_id === prior.thread_id && neverReported(prior)) {
-      if (kind !== "tester") throw new Error(`Corrector ${prior.thread_id} stopped before it reported: delegate the gate's corrector again — chief_delegate (replaces: ${prior.thread_id}, kind: tester).`);
-      return { run: "corrector", gate };
-    }
-    if (gate && prior.state !== "complete" && gate.corrector_thread_id === prior.thread_id) throw new Error(`${prior.thread_id} is review gate ${gate.gate_key}'s corrector: there is no second fix. Escalate to the user.`);
+    if (gate && prior.state !== "complete" && gate.fixer_thread_id === prior.thread_id) throw new Error(escalate(prior.thread_id));
     if (prior.state === "complete" && (prior.fix_run || gate?.targets.some((target) => target.threadId === prior.thread_id))) {
       if (kind !== "worker") throw new Error(`A change after completion is a fix run: chief_delegate (replaces: ${prior.thread_id}, kind: worker).`);
       return { run: "chat" };
@@ -263,21 +250,16 @@ export function createDelegation(ctx: Ctx) {
     return null;
   }
 
-  /** The fix run's brief section input: the gate's evidence for a gate fix or corrector; nothing replayed for a chat fix. */
+  /** The fix run's brief section input: the gate's evidence for a gate fix; nothing replayed for a chat fix. */
   function fixRunBrief(fix: FixAdmission, prior: ManagedRow) {
     if (fix.run === "chat") return { run: "chat" as const, branch: prior.branch };
     const reviewer = fix.gate.reviewer_thread_id ? store.get(fix.gate.reviewer_thread_id) : undefined;
-    const tester = fix.gate.tester_thread_id ? store.get(fix.gate.tester_thread_id) : undefined;
     let findings: ReportFinding[] = [];
     try { findings = reviewer?.findings ? JSON.parse(reviewer.findings) as ReportFinding[] : []; } catch { findings = []; }
-    // The corrector's evidence is the gate's fix run, also when it replaces a corrector that never reported.
-    const fixer = fix.run === "corrector" && fix.gate.fixer_thread_id ? store.get(fix.gate.fixer_thread_id) : undefined;
     return {
-      run: fix.run, fixerThreadId: fixer?.thread_id ?? null,
-      fixerReport: fixer ? fixer.report_path ?? fixer.blocker : null,
+      run: fix.run,
       targets: fix.gate.targets,
       reviewer: reviewer ? { threadId: reviewer.thread_id, verdict: reviewer.verdict, verdictPath: reviewer.verdict_path, findings } : null,
-      tester: tester ? { threadId: tester.thread_id, reportPath: tester.report_path, failingTests: failingTests(tester.result) } : null,
     };
   }
 
@@ -302,21 +284,21 @@ export function createDelegation(ctx: Ctx) {
       const pr = url ? await prMerged(url, await ctx.projectPath(projectId)) : null;
       if (!pr?.open || pr.merged) throw new Error(`A chat fix for ${prior!.thread_id} needs its pull request open and unmerged, but ${url ? `the forge reports ${url} ${pr ? (pr.merged ? "merged" : "closed") : "unknown"}` : "it has no pull request"}. Start new work with chief_delegate (no replaces:), or retry when the forge answers.`);
     }
-    // An open review gate pinned its targets: fixes go through the gate's fix run, and its one tester is the gate's.
+    // An open review gate pinned its targets: fixes go through the gate's fix run.
     const gate = prior ? store.gateFor(prior.thread_id) : params.planThreadId ? store.gate(`plan:${params.planThreadId}`) : undefined;
     if (!fix && gate?.targets.some((target) => store.get(target.threadId)?.state !== "complete")) {
       if (prior && gate.targets.some((target) => target.threadId === prior.thread_id) && params.kind !== "spec-writer") {
         throw new Error(`The review gate pinned ${prior.thread_id}; fixes go through the gate's fix run. ${ctx.gateLine(gate, ctx.gateOf(prior)!.decision)}`);
       }
-      if (params.kind === "tester" && !params.evidenceOnly) throw new Error(`Review gate ${gate.gate_key} is open: its one tester writes the tests. Pass evidenceOnly for an evidence-only tester.`);
-      // One writable owner per gate: a docs repair waits for the fix run and the corrector.
-      const busyFixer = isWriter(params.kind) && [gate.fixer_thread_id, gate.corrector_thread_id].map((id) => (id ? store.get(id) : undefined))
-        .find((actor) => actor && !terminal(actor.state) && !isReady(actor) && !["blocked", "failed"].includes(actor.state) && actor.last_report_state !== "blocked");
-      if (busyFixer) throw new Error(`Review gate ${gate.gate_key}'s ${busyFixer.kind === "tester" ? "corrector" : "fix run"} ${busyFixer.thread_id} is still working on the branch: wait for its report, then repair the docs.`);
+      // One writable owner per gate: a docs repair waits for the fix run.
+      const busyFixer = isWriter(params.kind) && gate.fixer_thread_id ? store.get(gate.fixer_thread_id) : undefined;
+      if (busyFixer && !terminal(busyFixer.state) && !isReady(busyFixer) && !["blocked", "failed"].includes(busyFixer.state) && busyFixer.last_report_state !== "blocked") {
+        throw new Error(`Review gate ${gate.gate_key}'s fix run ${busyFixer.thread_id} is still working on the branch: wait for its report, then repair the docs.`);
+      }
     }
     const resolved = resolveDelegation(params, prior);
     const { issueUrl, verifyCommand } = resolved;
-    // A fix run is no plan wave: a gate's fix run and corrector stay linked to the gate's plan like its tester; a chat fix is linked to none.
+    // A fix run is no plan wave: a gate's fix run stays linked to the gate's plan; a chat fix is linked to none.
     const planThreadId = fix ? fix.gate?.plan_thread_id ?? undefined : resolved.planThreadId;
     const wave = fix ? undefined : resolved.wave;
     const unplannedReason = fix ? undefined : resolved.unplannedReason;
@@ -327,11 +309,10 @@ export function createDelegation(ctx: Ctx) {
       throw new Error("Planning is on: call chief_plan first, then delegate its waves with planThreadId and wave. To skip the plan, pass unplannedReason (CLI: --unplanned-reason) with your reason.");
     }
     const { kind, planPath, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, specSources, specDocs, baseline, specWave, lane, sideChain } = fix
-      ? { kind: fix.run === "corrector" ? "tester" as const : "worker" as const, waveNext: null, waveIndependent: false, designWave: false, implementsDesign: null, specSources: [], specDocs: [], baseline: false, specWave: false, lane: "implementation" as const, planPath: undefined, waveTotal: undefined, stackBase: undefined, contracts: undefined, sideChain: undefined }
+      ? { kind: "worker" as const, waveNext: null, waveIndependent: false, designWave: false, implementsDesign: null, specSources: [], specDocs: [], baseline: false, specWave: false, lane: "implementation" as const, planPath: undefined, waveTotal: undefined, stackBase: undefined, contracts: undefined, sideChain: undefined }
       : plans.admitDelegation({
         chiefId: chief.thread_id, prior, kind: params.kind, resolvedKind: resolved.kind, planThreadId, wave, branch: params.branch, prUrl: params.prUrl,
       });
-    if (params.evidenceOnly && kind !== "tester") throw new Error("evidenceOnly is only for a tester: pass kind: tester (CLI --kind tester), or drop evidenceOnly.");
     // A first side-lane writer folds onto the chain's one branch and pull request, whatever Chief passed.
     const branch = sideChain?.branch ?? resolved.branch;
     const prUrl = sideChain ? sideChain.prUrl ?? undefined : resolved.prUrl;
@@ -350,11 +331,10 @@ export function createDelegation(ctx: Ctx) {
       ? store.all().find((row) => row.role === "worker" && !terminal(row.state)
         && row.project_id === projectId && row.branch === branch && row.thread_id !== params.replaces
         && !(planThreadId !== undefined && coexists(row, planThreadId, wave, lane))
-        // A gate fix run works on the pinned targets' branch: its targets and tester do not hold it.
-        && !(fix?.gate && (fix.gate.tester_thread_id === row.thread_id || fix.gate.targets.some((target) => target.threadId === row.thread_id)))
-        // A docs repair does not wait on a gate's fixer, corrector or tester that is no longer busy; a busy one still holds the branch.
-        && !(isWriter(kind) && gate && !BUSY_STATUSES.has(row.state)
-          && [gate.fixer_thread_id, gate.corrector_thread_id, gate.tester_thread_id].includes(row.thread_id)))
+        // A gate fix run works on the pinned targets' branch: its targets do not hold it.
+        && !(fix?.gate && fix.gate.targets.some((target) => target.threadId === row.thread_id))
+        // A docs repair does not wait on a gate's fixer that is no longer busy; a busy one still holds the branch.
+        && !(isWriter(kind) && gate && !BUSY_STATUSES.has(row.state) && gate.fixer_thread_id === row.thread_id))
       : undefined;
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
@@ -384,7 +364,7 @@ export function createDelegation(ctx: Ctx) {
     const { prompt, reviewerBrief, docsWorkFile } = workerBrief({
       title: params.title, chiefThreadId: chief.thread_id, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign,
       contracts, planContextLine, kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, baseline,
-      specDocs, specWave, lane, evidenceOnly: params.evidenceOnly, docsWork, heavyPath, fixRun: fix ? fixRunBrief(fix, prior!) : undefined,
+      specDocs, specWave, lane, docsWork, heavyPath, fixRun: fix ? fixRunBrief(fix, prior!) : undefined,
       sharedReview: !!findings && ledger.targets(findings.thread_id).length > 1,
     });
     // A side-lane writer, first or repair, never reuses a worktree: its own managed worktree is cut from the chain branch, so a stale or half-rebased side checkout never reaches the fold.
@@ -397,10 +377,10 @@ export function createDelegation(ctx: Ctx) {
     }, {
       role: "worker", chiefThreadId: chief.thread_id, brief: reviewerBrief,
       branch, issueUrl, prUrl, planThreadId, planWave: wave, unplannedReason, replacesThreadId: prior?.thread_id ?? null,
-      kind: kind === "worker" ? null : kind, plannerOn, verifyCommand, evidenceOnly: kind === "tester" && params.evidenceOnly ? true : null,
+      kind: kind === "worker" ? null : kind, plannerOn, verifyCommand,
     }, fix && ((threadId) => store.batch(() => {
-      if (fix.run !== "chat") store.setGateActor(fix.gate!.gate_key, fix.run === "gate" ? "fixer_thread_id" : "corrector_thread_id", threadId);
-      if (fix.run !== "corrector") store.setFixRun(threadId, fix.run);
+      if (fix.run === "gate") store.setGateActor(fix.gate.gate_key, "fixer_thread_id", threadId);
+      store.setFixRun(threadId, fix.run);
     })) || undefined);
     // The overflow file is written after the spawn, once the thread's own storage exists; the brief names it by $BB_THREAD_STORAGE.
     if (docsWorkFile) {
@@ -417,10 +397,8 @@ export function createDelegation(ctx: Ctx) {
           : `Stopping that thread FAILED (${clip(stopFailure, 200)}): it may still be running without the work list, and it still holds the branch, so a retry is refused until you stop and archive it`}; ${prior ? `${prior.thread_id} stays the owner of the docs work` : "nothing else changed"}. Repeat this chief_delegate call${stopFailure === undefined ? "" : " after that"}.`);
       }
     }
-    if (prior) {
-      const now = Date.now();
-      store.completeSuperseded(prior.thread_id, now);
-    }
+    // A gate fix run's target stays live: it completes with the gate.
+    if (prior && fix?.run !== "gate") store.completeSuperseded(prior.thread_id, Date.now());
     void (!prior && !planThreadId ? ctx.trackerSync.start(store.get(thread.id)!, params.mission) : ctx.trackerSync.join(store.get(thread.id)!));
     return { threadId: thread.id, title: params.title, projectId };
   }

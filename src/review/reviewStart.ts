@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { gateTesterBrief, verdictPreview } from "../research/delegationBrief";
+import { verdictPreview } from "../research/delegationBrief";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
 import { worktreeEnvironment, type ManagedSpawn } from "../research/managedSpawn";
 import { helperPrompt, isPinned, PR_AGENT_DIR, prAgentScript, prAgentSection, type EngineTarget, type ReviewEngine } from "./prAgent";
@@ -91,19 +91,19 @@ export interface BriefTarget {
   head: PinnedHead | null;
   /** Not pinned only: the target's plan base (stacked or branch-based wave), `skipped` while unresolved; absent = the project default branch. */
   planBase?: { base: string } | { skipped: string } | null;
-  kind?: "designer" | "tester" | "spec-writer" | null;
+  kind?: "designer" | "spec-writer" | null;
   /** side: a Spec Writer that works in its own side worktree and folds docs/ onto the chain branch; its own commits are its Fold base..Fold head range.
    * Absent or implementation: every other worker, checked from its Base commit. */
   lane?: "side" | "implementation";
   /** The earlier implementation-lane workers of its replaces: chain that reported, newest first (at most 4); a side-lane writer is a target of its own and
    * is never listed here (a side writer's own target lists its replaced writers). recorded is set for a single-target review. */
-  earlier?: { threadId: string; kind: "designer" | "tester" | "spec-writer" | null; reportPath: string | null; lane?: "side" | "implementation"; recorded?: string[] }[];
+  earlier?: { threadId: string; kind: "designer" | "spec-writer" | null; reportPath: string | null; lane?: "side" | "implementation"; recorded?: string[] }[];
 }
 
 export interface ReviewBriefInput {
   /** The worker chief_review named; its head is `head`, and it is one of `targets` unless a plan review reaches it through another. */
   worker: BriefTarget & {
-    kind: "designer" | "tester" | "spec-writer" | null;
+    kind: "designer" | "spec-writer" | null;
     /** Its brief, already cut to fit; null when it has none. */
     brief: string | null;
     /** What it reported, already cut to fit: its summary, else the start of its result. */
@@ -253,11 +253,10 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
   const groupCount = !branchGroups ? count(pinnedGroups, "pull request", "pull requests")
     : !pinnedGroups ? count(branchGroups, "branch", "branches")
       : `${count(pinnedGroups, "pull request", "pull requests")} and ${count(branchGroups, "branch", "branches")} without a pinned pull request`;
-  const testerTargets = (many ? targets : [worker]).filter((target) => target.kind === "tester");
   const specWriterTargets = (many ? targets : [worker]).filter((target) => isWriter(target.kind) && target.lane !== "side");
   const sideWriterTargets = (many ? targets : [worker]).filter((target) => isWriter(target.kind) && target.lane === "side");
   // On a spec-bearing chain every earlier worker is checked on its own interval: a docs/ path outside a Spec Writer's is scope drift.
-  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.lane !== "side" && (specGate || earlier.kind === "tester" || isWriter(earlier.kind))));
+  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.lane !== "side" && (specGate || isWriter(earlier.kind))));
   const readsReports = reportSection.length > 0 || earlierSection.length > 0;
   const prompt = reviewerPrompt({
     pinned: pinnedAll,
@@ -292,9 +291,6 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ...(worker.kind === "designer" ? [
         "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
       ] : []),
-      ...(testerTargets.length ? [
-        `A tester changes only tests, fixtures, test helpers and test config: check its commits since the Base commit its report names (git diff <base>..<head> --stat); a product-code change there is scope drift. The rest of the branch is the implementing workers' change.${many ? ` Testers here: ${testerTargets.map((target) => target.threadId).join(", ")}.` : ""}`,
-      ] : []),
       ...(specWriterTargets.length ? [
         `A Spec Writer changes only docs/: check its commits from the Base commit its report names to the reviewed head (git diff <base>..<head> --stat); any other path is scope drift.${many ? ` Spec Writers here: ${specWriterTargets.map((target) => target.threadId).join(", ")}.` : ""}`,
       ] : []),
@@ -303,8 +299,8 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ] : []),
       ...(earlierScoped.length ? [
         specGate
-          ? `Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind ?? "worker"} ${earlier.threadId}`))].join(", ")}.`
-          : `Check each earlier tester and Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind} ${earlier.threadId}`))].join(", ")}.`,
+          ? `Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A Spec Writer's path outside docs/ is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind ?? "worker"} ${earlier.threadId}`))].join(", ")}.`
+          : `Check each earlier Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A Spec Writer's path outside docs/ is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind} ${earlier.threadId}`))].join(", ")}.`,
       ] : []),
       ...(docs ? [
         "", "## Docs ownership",
@@ -366,7 +362,7 @@ interface ReviewRow {
   chief_thread_id: string | null;
   title: string;
   state: string;
-  kind: "designer" | "tester" | "spec-writer" | null;
+  kind: "designer" | "spec-writer" | null;
   brief: string | null;
   result: string | null;
   summary: string | null;
@@ -385,7 +381,6 @@ interface ReviewRow {
   reviewed_head_sha: string | null;
   created_at: number;
   last_report_state: string | null;
-  tests_passed: number | null;
 }
 
 /** What a chief_review call answers: the reviewer thread and the reply text the handler forwards. */
@@ -409,8 +404,6 @@ export interface ReviewHost<Row> {
   environmentHost: (environmentId: string) => Promise<string | null>;
   /** The checkout path of an environment when it is on the plugin server's host, else null. Never throws; bounded. */
   localPath: (environmentId: string) => Promise<string | null>;
-  /** The published slot wrapper's path on a host, or null. Never throws. */
-  heavyPath: (hostId: string) => Promise<string | null>;
   /** Why the project's checkout cannot be read here, or null. Never throws. */
   checkoutSkip: (projectId: string) => Promise<string | null>;
   recordedCommands: (threadId: string) => Promise<RecordedCommand[] | null>;
@@ -546,8 +539,8 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
   const startedReply = (created: boolean, title: string, threadId: string) => `${created ? "Started" : "Using existing"} “${title}” in thread ${threadId}.`;
 
   /** Opens, or resumes, the review gate of W's plan (or unplanned task): pins every target's head once, then starts
-   * one reviewer and one tester in parallel, each in a fresh worktree. Only a missing, failed or blocked side is launched again;
-   * with both sides live the call starts nothing and names them. */
+   * one reviewer in a fresh worktree. Only a missing, failed or blocked reviewer is launched again;
+   * with a live reviewer the call starts nothing and names it. */
   async function startReview(caller: Row, workerThreadId: string, focus?: string, acceptedGaps?: string): Promise<ReviewStarted> {
     const worker = store.get(workerThreadId);
     if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
@@ -562,22 +555,21 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const down = (id: string | null) => { const actor = id ? store.get(id) : undefined; return !actor || ["failed", "blocked", "archived", "deleted"].includes(actor.state); };
       let gate = store.gate(gateKey);
       const existing = !!gate;
-      // After the fix run, the reviewer side is advisory: one re-review when the review asked for changes, the gate's last fix row is green
+      // After the fix run, the reviewer side is advisory: one re-review when the review asked for changes, the gate's fix run is ready
       // and only one reviewer has a verdict since the gate opened. A failed no-verdict advisory attempt uses no budget and is retried with the prior verdict.
       const ids = gate ? gate.targets.map((target) => target.threadId) : [];
       const settled = gate ? store.get(ledger.newestVerdictReviewer(ids) ?? "") : undefined;
-      const lastFix = gate ? store.get(gate.corrector_thread_id ?? gate.fixer_thread_id ?? "") : undefined;
+      const lastFix = gate ? store.get(gate.fixer_thread_id ?? "") : undefined;
       const afterFix = !!gate?.fixer_thread_id;
       const advisoryRunning = afterFix && !down(gate!.reviewer_thread_id) && gate!.reviewer_thread_id !== settled?.thread_id;
       const rereview = afterFix && !advisoryRunning && (gate!.reviewer_thread_id === settled?.thread_id || down(gate!.reviewer_thread_id))
-        && settled?.verdict === "request_changes" && !!lastFix && (isReady(lastFix) || lastFix.state === "complete") && lastFix.tests_passed === 1
+        && settled?.verdict === "request_changes" && !!lastFix && (isReady(lastFix) || lastFix.state === "complete")
         && ledger.reviewersWithVerdict(ids, gate!.created_at) === 1;
       const startReviewer = !gate || (afterFix ? rereview : down(gate.reviewer_thread_id));
-      const startTester = !gate || (!advisoryRunning && down(gate.tester_thread_id));
-      if (gate && !startReviewer && !startTester) {
+      if (gate && !startReviewer) {
         return {
           threadId: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)!.title, created: false,
-          reply: `The review gate ${gateKey} already runs reviewer ${gate.reviewer_thread_id} and tester ${gate.tester_thread_id}; nothing started.`,
+          reply: `The review gate ${gateKey} already runs reviewer ${gate.reviewer_thread_id}; nothing started.`,
         };
       }
       const projectDir = await host.projectPath(worker.project_id);
@@ -605,22 +597,13 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         gate = store.gate(gateKey)!;
       }
       const previous = rereview && settled ? { threadId: settled.thread_id, preview: verdictPreview(settled), recommendation: settled.recommendation } : null;
-      // Each missing side starts independently and persists on success, so a retry starts only the side that failed.
-      const open = gate;
-      const [reviewerRun, testerRun] = await Promise.allSettled([
-        startReviewer ? launchReviewer(open, worker, focus, acceptedGaps, projectDir, previous) : Promise.resolve(null),
-        startTester ? launchTester(open, worker) : Promise.resolve(null),
-      ]);
-      const reviewer = reviewerRun.status === "fulfilled" ? reviewerRun.value : null;
-      const started: string[] = [];
-      if (reviewer) started.push(`reviewer ${reviewer.id}`);
-      if (testerRun.status === "fulfilled" && testerRun.value) started.push(`tester ${testerRun.value}`);
-      const failures = [reviewerRun.status === "rejected" ? `reviewer: ${String(reviewerRun.reason)}` : null, testerRun.status === "rejected" ? `tester: ${String(testerRun.reason)}` : null].filter(Boolean);
-      if (failures.length) throw new Error(`Review gate ${gateKey}${started.length ? ` started ${started.join(" and ")} but` : ""} could not start ${failures.join("; ")}. Call chief_review again to start only the missing side.`);
-      const shown = reviewer ?? { id: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)?.title ?? "" };
+      // The reviewer persists on success, so a retry after a failed launch starts it again.
+      const reviewer = await launchReviewer(gate, worker, focus, acceptedGaps, projectDir, previous).catch((error: unknown) => {
+        throw new Error(`Review gate ${gateKey} could not start its reviewer: ${String(error)}. Call chief_review again to retry.`);
+      });
       return {
-        threadId: shown.id, title: shown.title, created: !!reviewer,
-        reply: `Review gate ${gateKey} pinned ${gate.targets.map((target) => `${target.threadId} at ${target.headSha.slice(0, 12)}`).join(", ")}. Started ${started.join(" and ")}.`,
+        threadId: reviewer.id, title: reviewer.title, created: true,
+        reply: `Review gate ${gateKey} pinned ${gate.targets.map((target) => `${target.threadId} at ${target.headSha.slice(0, 12)}`).join(", ")}. Started reviewer ${reviewer.id}.`,
       };
     });
   }
@@ -687,13 +670,13 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const sideRows = (worker.plan_thread_id ? plan.specWriters?.(worker.plan_thread_id) ?? [] : []).filter((row) => specWaves.includes(row.plan_wave!));
       const sideIds = new Set(sideRows.map((row) => row.thread_id));
       const laneOf = (row: Row): "side" | "implementation" => sideIds.has(row.thread_id) ? "side" : "implementation";
-      // Each target's earlier reported workers on its branch: the implementer's evidence when the target is a tester.
+      // Each target's earlier reported workers on its branch.
       const earlier = new Map<string, NonNullable<BriefTarget["earlier"]>>();
       for (const target of new Set([worker, ...targets])) {
         // A side-lane writer is a target of its own: an implementation row's earlier list never holds one.
         const reported = ledger.taskChain(target.thread_id).slice(1).flatMap((id) => { const row = store.get(id); return row?.result && (laneOf(target) === "side" || laneOf(row) !== "side") ? [row] : []; });
-        // Every review keeps every Spec Writer report (a legacy writer's range has no trailer); a spec-bearing chain also keeps every Tester's. The 4-row cap applies to the others.
-        const keep = (row: Row) => isWriter(row.kind) || (specChain && row.kind === "tester");
+        // Every review keeps every Spec Writer report (a legacy writer's range has no trailer). The 4-row cap applies to the others.
+        const keep = (row: Row) => isWriter(row.kind);
         const others = new Set(reported.filter((row) => !keep(row)).slice(0, 4));
         const rows = reported.filter((row) => keep(row) || others.has(row));
         earlier.set(target.thread_id, await Promise.all(rows.map(async (row) => ({
@@ -797,34 +780,6 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         store.batch(() => store.setGateActor(gate.gate_key, "reviewer_thread_id", threadId));
       });
     return { id: thread.id, title };
-  }
-
-  /** Starts the gate's tester in a fresh worktree on the first target's branch. It supersedes no row. Returns its id. */
-  async function launchTester(gate: ReviewGate, worker: Row) {
-    const first = gate.targets[0]!;
-    const hostId = await host.projectHost(worker.project_id);
-    const prepared = await managedSpawn.prepare(worker.project_id, { role: "tester", hostId });
-    const title = `Test · ${worker.title}`;
-    const waves = plan.planWavesFor(worker.plan_thread_id);
-    const writers = new Map<string, Row>();
-    for (const target of gate.targets) {
-      const row = store.get(target.threadId);
-      if (!row) continue;
-      const chainIds = ledger.taskChain(row.thread_id);
-      for (const found of plan.taskWriters?.(row, chainIds) ?? chainIds.flatMap((id) => store.get(id) ?? []).filter((candidate) => isWriter(candidate.kind))) writers.set(found.thread_id, found);
-    }
-    const prompt = gateTesterBrief({
-      title: worker.title, chiefThreadId: worker.chief_thread_id, gateKey: gate.gate_key, targets: gate.targets,
-      planFiles: waves.map((wave) => wave.path), writers: [...writers.values()].map((row) => ({ threadId: row.thread_id, reportPath: row.report_path })),
-      verifyCommand: worker.verify_command ?? null, heavyPath: await host.heavyPath(hostId),
-    });
-    const thread = await managedSpawn.launch(prepared, {
-      projectId: worker.project_id, environment: worktreeEnvironment(hostId, first.branch), title, prompt,
-    }, {
-      role: "worker", kind: "tester", chiefThreadId: worker.chief_thread_id, planThreadId: gate.plan_thread_id, planWave: null,
-      replacesThreadId: null, branch: first.branch, prUrl: first.prUrl, verifyCommand: worker.verify_command ?? null,
-    }, (threadId) => store.batch(() => store.setGateActor(gate.gate_key, "tester_thread_id", threadId)));
-    return thread.id;
   }
 
   /** The chief_review counterpart to startReview for a pull request or branch no

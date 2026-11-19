@@ -1,4 +1,4 @@
-import { gateDecision, neverReported, type GateDecision } from "../plan/planProgress";
+import { gateDecision, type GateDecision } from "../plan/planProgress";
 import type { ReviewGate } from "../db/threadStore";
 import { reviewEngine } from "../review/prAgent";
 import { createReviewStart } from "../review/reviewStart";
@@ -8,7 +8,6 @@ import { isWriter, type PlanWave } from "../plan/waveSchedule";
 import { BUSY_STATUSES, MAX_NUDGE_LENGTH } from "./constants";
 import { bounded } from "./exec";
 import { forgeEnv, prHead } from "../forge/forge";
-import { heavySlotCount } from "../research/heavySlots";
 import type { Ctx } from "./context";
 import { researcherNextLine } from "../research/research";
 
@@ -25,7 +24,7 @@ export function createNextAction(ctx: Ctx) {
     return pending.map(({ wave, writer }) => writer
       ? `wave ${wave}'s Spec Writer ${writer.thread_id} (${writer.state}) is not ready yet.`
       : `Every wave is ready: delegate the plan's one Spec Writer now — chief_delegate (planThreadId: ${planThreadId}, wave: ${wave}, kind: spec-writer) — which covers the Spec delta of every spec: true wave in its own side worktree and folds docs/ onto the branch; or go without it: chief_skip_specs (planThreadId: ${planThreadId}, reason).`).join(" ")
-      + " The review gate waits for its ready report (the Tester derives tests from the committed docs).";
+      + " The review gate waits for its ready report.";
   }
 
   /** On a spec-bearing chain, the routes for a wrong spec and for a Spec delta that cannot be built. */
@@ -107,7 +106,7 @@ export function createNextAction(ctx: Ctx) {
     }
   }
 
-  const gateStartLine = (workerThreadId: string) => `Start the review gate: chief_review (workerThreadId: ${workerThreadId}). It starts one reviewer and one tester in parallel.`;
+  const gateStartLine = (workerThreadId: string) => `Start the review gate: chief_review (workerThreadId: ${workerThreadId}). It starts one reviewer.`;
 
   /** A row's review gate and its decision, or null when no gate names the row. */
   function gateOf(row: ManagedRow): { gate: ReviewGate; decision: GateDecision<ManagedRow> } | null {
@@ -129,32 +128,22 @@ export function createNextAction(ctx: Ctx) {
     const first = gate.targets[0]!.threadId;
     const ids = gate.targets.map((target) => target.threadId);
     const reviewer = gate.reviewer_thread_id ? store.get(gate.reviewer_thread_id) : undefined;
-    const tester = gate.tester_thread_id ? store.get(gate.tester_thread_id) : undefined;
-    const testerReport = tester ? `tester ${tester.thread_id}${tester.report_path ? ` (report: ${tester.report_path})` : ` (bb chief inspect ${tester.thread_id})`}` : "the tester";
     const verdictRef = reviewer ? `reviewer ${reviewer.thread_id}${reviewer.verdict_path ? ` (verdict: ${reviewer.verdict_path})` : ` (bb chief inspect ${reviewer.thread_id})`}` : "the reviewer";
     switch (decision.kind) {
       case "start": return gateStartLine(first);
       case "block": return decision.refusal;
       case "restart": {
-        const blocked = decision.blocked.map((side) => ` ${side.kind === "tester" ? "Tester" : "Reviewer"} ${side.thread_id} is blocked: ${clip(side.blocker ?? "", 200)}; fix its environment first, and escalate to the user if you cannot.`).join("");
-        return `The review gate's ${decision.sides.join(" and ")} ${decision.sides.length > 1 ? "are" : "is"} missing, failed or blocked.${blocked} Run chief_review (workerThreadId: ${first}) again: it starts only the ${decision.sides.join(" and ")}.`;
+        const blocked = decision.blocked.map((side) => ` Reviewer ${side.thread_id} is blocked: ${clip(side.blocker ?? "", 200)}; fix its environment first, and escalate to the user if you cannot.`).join("");
+        return `The review gate's reviewer is missing, failed or blocked.${blocked} Run chief_review (workerThreadId: ${first}) again: it starts only the reviewer.`;
       }
       case "wait": return `The review gate is waiting on ${decision.who.map((side) => `${side.role === "reviewer" ? "reviewer" : side.kind ?? "worker"} ${side.thread_id} (${side.state})`).join(", ")}. Wait for their reports.`;
       case "fix": {
-        // A fix decision with a fix run set means that run never reported: it is replaced, not the tester.
-        const replaced = gate.fixer_thread_id ?? gate.tester_thread_id;
-        const fixRun = replaced ? `chief_delegate (replaces: ${replaced}, kind: worker)` : "chief_delegate (replaces: <the gate tester>, kind: worker)";
-        return `The review gate needs a fix: ${[decision.redTests ? `${testerReport} has failing tests` : "", decision.codeFindings ? `${verdictRef} has ${decision.codeFindings} blocking code finding${decision.codeFindings > 1 ? "s" : ""}` : ""].filter(Boolean).join("; ")}. Delegate the gate's one fix run: ${fixRun}; its brief carries the verdict, the findings and the failing tests. Its green run passes the gate; after it, one advisory re-review may run with chief_review (workerThreadId: ${first}).`;
+        // A fix decision with a fix run set means that run never reported: it is replaced, not the first target.
+        const replaced = gate.fixer_thread_id ?? first;
+        return `The review gate needs a fix: ${verdictRef} has ${decision.codeFindings} blocking code finding${decision.codeFindings > 1 ? "s" : ""}. Delegate the gate's one fix run: chief_delegate (replaces: ${replaced}, kind: worker); its brief carries the verdict and the findings. Its ready run passes the gate; after it, one advisory re-review may run with chief_review (workerThreadId: ${first}).`;
       }
       case "docsRepair":
         return `The review gate's code passed, but ${verdictRef} has docs findings: chief_delegate (replaces: ${decision.writer.thread_id}, kind: spec-writer) with them as its mission, then wait for its ready report.`;
-      case "wrongTest": {
-        const corrector = gate.corrector_thread_id ? store.get(gate.corrector_thread_id) : undefined;
-        if (corrector && neverReported(corrector)) return `Corrector ${corrector.thread_id} stopped before it reported: delegate the gate's corrector again: chief_delegate (replaces: ${corrector.thread_id}, kind: tester).`;
-        return gate.corrector_thread_id
-          ? `Fix run ${decision.fixer.thread_id} reports a wrong test: ${clip(decision.fixer.blocker ?? "", 200)}. The gate already had its corrector: escalate to the user.`
-          : `Fix run ${decision.fixer.thread_id} reports a wrong test: ${clip(decision.fixer.blocker ?? "", 200)}. Read its evidence (bb chief inspect ${decision.fixer.thread_id}). If it holds, delegate the gate's one corrector: chief_delegate (replaces: ${decision.fixer.thread_id}, kind: tester); otherwise escalate to the user.`;
-      }
       case "escalate": return `The review gate cannot pass on its own: ${decision.why}. Escalate to the user.`;
       case "pass": {
         // An implementation-lane Spec Writer that replaced a target completes on this pass too.
@@ -227,21 +216,15 @@ export function createNextAction(ctx: Ctx) {
     if (gated) return forAlert || gated.gate.targets[0]!.threadId === row.thread_id ? gateLine(gated.gate, gated.decision) : null;
     // A chat fix run gets no review: its own green run completes it.
     if (row.fix_run === "chat" && row.state === "blocked") return `Chat fix run ${row.thread_id} is blocked: ${clip(row.blocker ?? "", 200)}. Escalate to the user.`;
-    if (row.fix_run === "chat" && row.state === "ready") return `Chat fix run ${row.thread_id} is green (testsPassed). Complete it: chief_complete (threadId: ${row.thread_id}); it marks the pull request ready. No review.`;
+    if (row.fix_run === "chat" && row.state === "ready") return `Chat fix run ${row.thread_id} is ready. Complete it: chief_complete (threadId: ${row.thread_id}); it marks the pull request ready. No review.`;
     if (row.role === "planner" && row.replaces_thread_id && row.state === "blocked") {
       return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user, then chief_plan (revises: ${row.replaces_thread_id}) with the decision in context; it gets no review.`;
     }
     if (row.state === "blocked" && row.role === "worker") {
-      if (row.kind === "tester" && onSpecChain(row)) {
-        return `Tester blocked: ${clip(row.blocker ?? "", 200)}. Tester's recommendation: ${clip(row.recommendation ?? "none", 300)}. Route by cause. ${inPlaceLine(row)} If tests fail on product code: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester. ${specRoutes(row)}`;
-      }
       if (isWriter(row.kind)) {
         return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route${schedule.sideLane(row) ? ` (the retry gets a fresh worktree from ${row.branch})` : ""}. ${row.plan_thread_id && schedule.sideLane(row) ? "The retry gets this wave's `## Docs needed` items with the blocker; one repair per wave, not separate fix and fold writers. " : ""}If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}, kind: spec-writer.`;
       }
-      if (row.kind !== "tester" && onSpecChain(row)) return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user. ${inPlaceLine(row)} ${specRoutes(row)}`;
-      if (row.kind === "tester") {
-        return `Tester blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} If tests fail on product code: delegate a fresh worker to fix it: chief_delegate (replaces: ${row.thread_id}, kind: worker) with the failures as its mission; its ready alert then asks for a tester.`;
-      }
+      if (onSpecChain(row)) return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user. ${inPlaceLine(row)} ${specRoutes(row)}`;
     }
     if (row.role === "researcher") {
       const line = researcherNextLine(row, ctx.state.plannerActive);
@@ -316,8 +299,6 @@ export function createNextAction(ctx: Ctx) {
           return null;
         }
       },
-      heavyPath: (hostId) => settings.get().then((values) => ctx.publishHeavy(hostId, heavySlotCount(values)))
-        .catch((error) => { bb.log.warn(`Heavy-command slots are unavailable for a gate tester: ${String(error)}`); return null; }),
       checkoutSkip: (...a) => ctx.checkoutHostSkip(...a),
       recordedCommands: (...a) => ctx.recordedCommands(...a),
       writeFile: (...a) => ctx.writeStorageFile(...a),
