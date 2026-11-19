@@ -7,7 +7,7 @@ export function registerSkipSpecsTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_skip_specs",
     presentation: { label: { pending: "Waiving specs…", completed: "Waived specs" } },
-    description: "Go without the plan's one Spec Writer, by your own judgment, until it was delegated: your reason is recorded on every spec: true wave without a Spec Writer (no Spec Writer can be delegated on them afterwards; the review judges the work against its plan) and shown in chief_roster, chief_inspect and the review. It never waives the tests. Refused for a plan with no spec: true implementation wave, or once the plan's Spec Writer was delegated (fix its docs with chief_delegate (replaces: the writer, kind: spec-writer), or re-plan with a fresh chief_plan). Calling it again changes nothing.",
+    description: "Go without the plan's one Spec Writer, by your own judgment, until it was delegated: your reason is recorded on every spec: true wave without a Spec Writer (no Spec Writer can be delegated on them afterwards; the review judges the work against its plan) and shown in chief_roster, chief_inspect and the review. Refused for a plan with no spec: true implementation wave, or once the plan's Spec Writer was delegated (fix its docs with chief_delegate (replaces: the writer, kind: spec-writer), or re-plan with a fresh chief_plan). Calling it again changes nothing.",
     parameters: z.object({ planThreadId: z.string(), reason: overrideSchema.describe("Why this plan goes without its Spec Writer.") }),
     async execute({ planThreadId, reason }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

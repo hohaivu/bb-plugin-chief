@@ -7,7 +7,7 @@ export function registerCoordinateTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_coordinate",
     presentation: { label: { pending: "Becoming Coordinator…", completed: "Became Coordinator" } },
-    description: "Upgrade this Chief to a Coordinator, once and for good: it then supervises child Chiefs in any project and runs no managed threads. Refused while this Chief owns an open managed thread, or if it is a child Chief. Call it only when the owner asks for /coordinator.",
+    description: "Upgrade this Chief to a Coordinator, once and for good: it then supervises child Chiefs in any project and runs no managed threads. Refused while this Chief owns an open managed thread, or if it is a child Chief. Call it only when the owner asks for /coordinator or to supervise other Chiefs, with goal set to the owner's request verbatim. On a refusal, tell the owner the refusal and their options in chat, and do not retry. On success, call chief_roster, then ask the owner which existing Chiefs (any project) to attach with chief_attach.",
     parameters: z.object({
       goal: z.string().trim().min(1).max(4000).optional().describe("The owner's words asking for coordination, verbatim; saved to brief.md."),
     }),
