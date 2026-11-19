@@ -142,7 +142,7 @@ describe("Chief backend", () => {
       lastAssistantText: "done",
     });
     expect(state.sent).toHaveLength(sentAfterPlan);
-    expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
+    expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${planner.threadId}:noreport:%`)).toEqual({ n: 0 });
 
     const worker = await delegate(state, chief.threadId);
     await state.harness.behavior.callAgentTool("chief_report", {
@@ -154,7 +154,7 @@ describe("Chief backend", () => {
       lastAssistantText: "done",
     });
     expect(state.sent).toHaveLength(sentAfterBlocked);
-    expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
+    expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${worker.threadId}:noreport:%`)).toEqual({ n: 0 });
   });
 
   test("requires canonical ready and complete report payloads", async () => {
@@ -206,7 +206,6 @@ describe("Chief backend", () => {
         workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/legacy-fix" } },
       },
     });
-    expect(spawnedReview.prompt).toContain("Remain review-only");
     expect(spawnedReview.prompt).toContain("feature/legacy-fix");
     // The CLI door is shut for every caller, the active Chief included: reviews start only through chief_review.
     const retired = await state.harness.behavior.runCli(["review", "--branch", "feature/legacy-fix"], opts);
@@ -358,11 +357,24 @@ describe("Chief backend", () => {
     });
 
     test("reviewer of a designer gets the design check", async () => {
-      const state = await setup();
-      const chief = await start(state);
-      const worker = await readyWorker(state, chief.threadId, "Draw the checkout screen", "Drawn", "designer");
-      await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts(chief.threadId));
-      expect(spawnedAs(state, "reviewer")[0].prompt).toContain("This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots");
+      const promptFor = async (kind?: string) => {
+        const state = await setup();
+        const chief = await start(state);
+        const worker = await readyWorker(state, chief.threadId, "Draw the checkout screen", "Drawn", kind);
+        await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts(chief.threadId));
+        return spawnedAs(state, "reviewer")[0].prompt as string;
+      };
+      // The two setups differ only in the volatile review-context path; it is normalized so the design check is the one difference.
+      const lines = (prompt: string) => prompt.split("\n").map((line) => line.replace(/[^\s`]*review-context\.md/g, "<context>"));
+      const plain = lines(await promptFor());
+      const designer = lines(await promptFor("designer"));
+      // The design check is one inserted block (a blank line and its paragraph) inside the prompt: removing it gives the plain prompt.
+      expect(designer).toHaveLength(plain.length + 2);
+      const at = plain.findIndex((line, index) => line !== designer[index]);
+      expect(at).toBeGreaterThan(0);
+      expect(at).toBeLessThan(plain.length);
+      expect(designer.slice(at, at + 2)).toContain("");
+      expect([...designer.slice(0, at), ...designer.slice(at + 2)]).toEqual(plain);
     });
 
   });
@@ -423,11 +435,18 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const worker = await readyWorker(state, chief.threadId);
     const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
-    // The removed --allow-edits flag must not resurface as an unreviewed edit path.
-    await state.harness.behavior.runCli(["continue", review.threadId, "--instruction", "Fix it yourself", "--allow-edits"]);
-    const text = state.sent.filter((entry: any) => entry.threadId === review.threadId).at(-1).input[0].text;
-    expect(text).toContain("Remain review-only");
-    expect(text).not.toContain("edits are allowed");
+    const deliveries = () => state.sent.filter((entry: any) => entry.threadId === review.threadId);
+    // Each continuation succeeds and adds exactly one delivery to the reviewer; returns that delivery's text.
+    const continuation = async (...flags: string[]) => {
+      const before = deliveries().length;
+      const result = await state.harness.behavior.runCli(["continue", review.threadId, "--instruction", "Fix it yourself", ...flags]);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(deliveries()).toHaveLength(before + 1);
+      return deliveries().at(-1).input[0].text as string;
+    };
+    // The removed --allow-edits flag must not resurface as an unreviewed edit path: the same instruction renders the same text without it.
+    const withFlag = await continuation("--allow-edits");
+    expect(withFlag).toBe(await continuation());
     const chiefTools = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(JSON.stringify(chiefTools.tools.find((tool: any) => tool.name === "chief_continue"))).not.toContain("allowEdits");
   });

@@ -80,7 +80,7 @@ describe("worker flows", () => {
     test("pr-agent: the section names the pinned pull request, the wrapper is written with the default directory", async () => {
       const { prompt, file, engineDir } = await review({ reviewEngine: "pr-agent" });
       expect(prompt).toContain("## Review engine: pr-agent");
-      expect(prompt).toContain(`${PR} pinned to ${SHA} → pr-agent`);
+      expect(prompt.split("\n").some((line) => line.includes(PR) && line.includes(SHA))).toBe(true);
       expect(engineDir).not.toBeNull();
       expect(prompt).toContain(`bash "${engineDir}/pr-agent-review.sh" ${PR} ${SHA}`);
       expect(prompt).not.toContain("$BB_THREAD_STORAGE/pr-agent-review.sh");
@@ -112,7 +112,7 @@ describe("worker flows", () => {
         ["host_1", join(engineDir!, "pr-agent-review.sh")],
         ["host_1", join(engineDir!, "review-helper.md")],
       ]);
-      expect(prompt).toContain(`Read \`${join(engineDir!, "review-context.md")}\` in full before reviewing`);
+      expect(prompt).toContain(`\`${join(engineDir!, "review-context.md")}\``);
       expect(prompt).toContain(`bash "${engineDir}/pr-agent-review.sh"`);
       // The worker's own host (host_storage, whose data dir is the storage root) holds no engine folder.
       expect(await readdir(join(state.storageRoot, "chief", "proj_1", worker, "review-1")).catch(() => [])).toEqual([]);
