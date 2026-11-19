@@ -468,7 +468,7 @@ describe("Chief backend", () => {
     expect(reported).not.toMatch(/Wave \d of 8:/);
     expect(reported).not.toContain("chief_consult");
     expect(reported).toContain(planner.threadId);
-    expect(reported).toContain("chief_forge_init (");
+    expect(reported).toContain(`chief_forge_init (planThreadId: ${planner.threadId}, wave: 1)`);
   });
 
   test("rejects a planner's ready report with more than 8 waves", async () => {
