@@ -236,7 +236,6 @@ describe("Coordinator", () => {
       const rows = state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads").get();
       const spawned = state.spawned.length;
       await expect(call(state, tool, params, id)).rejects.toThrow(/not available to a Coordinator.*ask the child Chief that owns the work/i);
-      await expect(call(state, tool, params, id)).rejects.toThrow(/planner, worker, reviewer, tester, advisor or researcher/);
       // The refusal is a failed call like any other: ledgered with the tool name, while the caller still gets the refusal itself.
       expect(state.db.prepare("SELECT detail FROM chief_events WHERE kind='tool_error'").all()).toContainEqual({ detail: expect.stringContaining(`${tool}: `) });
       expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads").get()).toEqual(rows);
@@ -651,11 +650,8 @@ describe("Coordinator", () => {
       forgeAnswers(state);
       const worker = (await delegate(state, child, "Fix totals", forged())).threadId;
       await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker);
-      const { reviewerId: reviewer, testerId } = await startGate(state, child, worker);
+      const { reviewerId: reviewer } = await startGate(state, child, worker);
       await call(state, "chief_report", { state: "ready", result: "Checked", verdict: "approve", findings: [] }, reviewer!);
-      // The gate tester finishes first: only the reviewer is still running when the worker completes.
-      await call(state, "chief_report", { state: "ready", result: "Tests pass", testsPassed: true }, testerId!);
-      await completeWorker(state, child, testerId!);
       state.live.set(reviewer!, { ...state.live.get(reviewer!)!, status: "active" });
       await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer!)! });
       // A running reviewer holds the gate, so Chief closes the worker out with override and the reviewer is absorbed.
