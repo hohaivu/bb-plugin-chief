@@ -6,7 +6,7 @@ export function registerSyncTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_sync",
     presentation: { label: { pending: "Syncing checkout…", completed: "Synced checkout" } },
-    description: "Fast-forward your own checkout to origin's default branch before you read code yourself. It never overwrites uncommitted or ignored files and never errors on a skip: it returns the old and new commit, or why it left the checkout as it is (a researcher or sharing planner is running, uncommitted changes, commits of its own, a failed fetch).",
+    description: "Fast-forward your own checkout to origin's default branch before you read code yourself. It never overwrites uncommitted or ignored files and never errors on a skip: it returns the old and new commit, or why it left the checkout alone (a researcher or sharing planner is running, uncommitted changes, commits of its own, a failed fetch).",
     parameters: z.object({}),
     async execute(_params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

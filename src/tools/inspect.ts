@@ -6,7 +6,7 @@ export function registerInspectTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_inspect",
     presentation: { label: { pending: "Inspecting thread…", completed: "Inspected thread" } },
-    description: "Inspect one managed thread's live status, persisted report summary, full-report file path, and bounded last assistant output before deciding what to do.",
+    description: "Inspect a managed thread's live status, report summary, full-report file path, and bounded last assistant output.",
     parameters: z.object({ threadId: z.string() }),
     async execute({ threadId }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

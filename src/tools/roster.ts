@@ -8,11 +8,11 @@ export function registerRosterTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_roster",
     presentation: { label: { pending: "Reading roster…", completed: "Read roster" } },
-    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, in the same wording as its lifecycle alert. Add a todo with `todo.text` (and optional `after`, e.g. 'PR #42 merges'); change one by `todo.id`; close it with `state: done|dropped`. Track all Chief work here — including queued work nobody has delegated yet. Todos with an after: condition are summarised as one line; pass includeWaiting: true to list them. Each todo belongs to the Chief that added it; others' todos show as one count line (includeOthers: true lists them, tagged).",
+    description: "Inspect this project's managed threads and their bounded persisted status, result, blocker, and recommendation. Opens with a Pending block naming each item's next action, worded as its lifecycle alert. Add a todo with `todo.text` (optional `after`); change one by `todo.id`; close it with `state: done|dropped`. Track all Chief work here, including queued, undelegated work. Todos with an after: condition show as one summary line (includeWaiting: true lists them). A todo belongs to the Chief that added it; others' todos show as one count line (includeOthers: true lists them, tagged, with unowned and ended Chiefs' todos).",
     parameters: z.object({
       includeComplete: z.boolean().optional(),
-      includeWaiting: z.boolean().optional().describe("List todos that wait on an after: condition in full; by default the Pending block shows them as one count line."),
-      includeOthers: z.boolean().optional().describe("List todos owned by other or ended Chiefs, and unowned ones, in full; by default the Pending block shows them as one count line."),
+      includeWaiting: z.boolean().optional(),
+      includeOthers: z.boolean().optional(),
       todo: z.object({
         id: z.number().int().optional(),
         text: z.string().trim().min(1).max(500).optional(),
@@ -24,7 +24,7 @@ export function registerRosterTool(ctx: Ctx) {
         why: z.string().trim().max(2_000).optional(),
         threadId: z.string().trim().min(1).max(64).optional(),
         todoId: z.number().int().optional(),
-      }).optional().describe("Records an owner answer given in chat or relayed to you, or a sequencing agreement, into your decisions file."),
+      }).optional().describe("Records an owner answer (given in chat or relayed to you) or a sequencing agreement in your decisions file."),
     }),
     async execute({ includeComplete, includeWaiting, includeOthers, todo, decision }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

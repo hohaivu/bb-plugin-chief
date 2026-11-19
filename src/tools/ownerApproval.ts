@@ -6,7 +6,7 @@ export function registerOwnerApprovalTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_owner_approval",
     presentation: { label: { pending: "Recording approval…", completed: "Recorded approval" } },
-    description: "Record the owner's approval of a design-only wave (a plan wave marked design: true). Only the owner approves design-only work; chief_review refuses it. Show the user the artboards from the designer's ready report, ask for explicit approval, then call this with their words verbatim. The wave that implements the artboards cannot be delegated, and the design wave cannot be completed, without it. A new report or chief_continue on the designer clears it. Refused for any other thread.",
+    description: "Record the owner's approval of a design-only wave (a plan wave marked design: true). Only the owner approves design-only work; chief_review refuses it. Show the user the artboards from the designer's ready report, ask for explicit approval, then call this. Without it, the wave that implements the artboards cannot be delegated and the design wave cannot be completed. A new report or chief_continue on the designer clears it. Refused for any other thread.",
     parameters: z.object({
       workerThreadId: z.string(),
       approval: z.string().trim().min(1).max(2_000).describe("The user's own words approving the artboards, verbatim."),
