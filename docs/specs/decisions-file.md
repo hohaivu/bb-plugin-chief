@@ -85,6 +85,7 @@ The decisions file is a Markdown file in the thread storage of each Chief and ea
 - `kind` is `decision` or `owner-answer`.
 - The text lines follow the marker line. Each reason line follows the text, and starts with `Why: `. An entry without a reason has no `Why:` line. Reason: a reader sees the reason next to its text, and a multi-line reason keeps its line breaks.
 - A text line that starts with `\`, `<!-- chief-`, `## Todo after` or `Why: ` gets one leading backslash. The parser removes one leading backslash from each text line. Reason: the parser would read an unescaped line as structure, and the backslash also escapes a text line that already starts with a backslash.
+- The writer and the parser round-trip an entry exactly, including empty and whitespace-only lines at the end of its text or reason. Reason: the writer ends each entry with one separator line, so the parser removes only that line, and any other trailing blank line is text.
 - The parser splits entries at marker lines. It drops everything from the exact generated heading on. Reason: the after-section is rebuilt on every write, so the parser never reads it back as entries.
 - Lines before the first marker line are ignored.
 
@@ -171,7 +172,6 @@ Reason: each write needs one known trigger.
 - The server cannot tell a chat answer, a Coordinator relay and a sequencing agreement apart. All three record as `decision`. Reason: the `decision` field has no kind.
 - The server trusts the `decision` field. It does not check the sender.
 - A file changes only on a write. A file of an idle Chief keeps stale entries until the next write.
-- The parser drops whitespace-only lines at the end of an entry's text or reason. Reason: the parser trims the end of each entry body before it reads the `Why:` lines.
 - The missing-file match reads the host's error text. The live host's response for a fresh thread is not checked in code. A manual check on a fresh Chief confirms it.
 
 ## Related decisions
