@@ -31,7 +31,7 @@ The research domain lets Chief start a read-only researcher thread for one ticke
 | `researcherNextLine` | `src/research/research.ts` | Give the Next line of a design researcher's alert and roster row. |
 | `nextAction` | `src/runtime/nextAction.ts` | Choose the Next line of each alert and roster row. It calls `researcherNextLine` first for a researcher. |
 | `reserveReport`, `syncLive` | `src/db/threadStore.ts` | Store `waiting_on_user` with each report and with each live state. |
-| `modelConfiguration`, `setRoleModel` | `src/runtime/host.ts` | Read and write the researcher pick. |
+| `modelConfiguration`, `setRoleModel` | `src/runtime/host.ts` | Read and write the researcher pick. `modelConfiguration` has no Tester role, and a stored tester row is never read. |
 | `researchChiefInstructions`, `bb.agents.configure` | `src/runtime/host.ts` | Give Chief the research tool and its instruction. |
 | `chief_models_v9` | `src/db/migrations.ts` | Stores the researcher pick and seeds it once. |
 | `judgeModel` | `src/observe/retro.ts` | Reads the researcher pick for the retro judge. |

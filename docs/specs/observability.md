@@ -445,10 +445,9 @@ One owner collects a successful run. The collect step is idempotent.
 | `efficiency` | every thread | 0.25 | `highly_efficient` 1, `mostly_efficient` 0.8, `mostly_inefficient` 0.4, `highly_inefficient` 0.2 |
 | `procedure-compliance` | every thread | 0.20 | `fully_compliant` 1, `mostly_compliant` 0.8, `noncompliant` 0.2 |
 | `verbosity` | every thread | 0.15 | `proportionate` 1, `verbose` 0.2, `terse` 0.1 |
-| `test-redundancy` | tester | 0.15 | `lean` 1, `some_redundancy` 0.6, `redundant` 0.2 |
 | `communication` | handoff | 0.25 | `clear` 1, `minor_gaps` 0.7, `costly_gaps` 0.4, `broken` 0.1 |
 
-`efficiency` counts failed and wasted tool calls. `test-redundancy` assesses duplicate coverage, E2E tests where a unit test proves the contract, several tests for one property, a full-suite rerun where a filter would do, and tests that only work around a problem.
+`efficiency` counts failed and wasted tool calls. The `test-redundancy` rubric is removed, and `aggregate` gives a stored score of an unknown rubric the weight 0. Reason: stored scores stay readable.
 
 ### Aggregation
 
@@ -551,7 +550,7 @@ The judge may file a lesson only when all four conditions hold. The plugin check
 
 The judge never files a lesson when the instruction existed and the thread ignored it, for variance, to restate an instruction, or when the fix is code or infrastructure.
 
-`SURFACES` in `src/observe/rubrics.ts` lists `chief` and `role-instructions`, plus `planner-prompt`, `worker-brief`, `reviewer-brief`, `tester-brief`, `chief-delegate-brief`, `chief-plan-mission`, `chief-alert-text`, `chief-nudge`, `chief-tell`, `report-contract`, `plugin-code` and `other`. The surface sets the role of the lesson. `lessonRole` maps each removed skill name to `null`. Reason: stored rows stay valid.
+`SURFACES` in `src/observe/rubrics.ts` lists `chief` and `role-instructions`, plus `planner-prompt`, `worker-brief`, `reviewer-brief`, `chief-delegate-brief`, `chief-plan-mission`, `chief-alert-text`, `chief-nudge`, `chief-tell`, `report-contract`, `plugin-code` and `other`. The surface sets the role of the lesson. `lessonRole` maps each removed skill name to `null`. Reason: stored rows stay valid.
 
 | Surface | Lesson role |
 | --- | --- |

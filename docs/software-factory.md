@@ -21,7 +21,6 @@ sequenceDiagram
   participant Designer
   participant SpecWriter as Spec Writer
   participant Worker
-  participant Tester
   participant Reviewer
   participant Forge as Forge / GitHub
 
@@ -73,26 +72,18 @@ sequenceDiagram
   Note over Chief,Worker: for a big feature the planner adds one optional reshape wave after the last feature wave. It is an ordinary worker wave in this loop
 
   Chief->>Reviewer: chief_review, one gate for the whole plan
-  Chief->>Tester: the gate starts its tester in parallel
   Reviewer-->>Chief: report with verdict approve or request_changes
-  Tester-->>Chief: report with testsPassed
   Note over Chief,Forge: the plugin posts each verdict, a blocked worker and the result on the PR
 
   alt gate decision fix
-    Chief->>FixRun: chief_delegate replaces: gate tester, kind worker, once
-    FixRun->>Forge: git push fix commits, no test or docs edits
-    alt ready with testsPassed true
-      FixRun-->>Chief: report (ready), no new review
-    else blocked on a wrong test, no corrector yet
-      FixRun-->>Chief: report (blocked, wrong-test evidence)
-      Chief->>Corrector: chief_delegate replaces: fix run, kind tester, once
-      Corrector-->>Chief: report, green passes, red or blocked escalates
-    end
+    Chief->>FixRun: chief_delegate replaces: first target, kind worker, once
+    FixRun->>Forge: git push fix commits and their tests, no docs edits
+    FixRun-->>Chief: report (ready passes the gate, blocked or failed escalates)
   else gate decision docsRepair
     Chief->>SpecWriter: chief_delegate kind spec-writer, replaces the side-lane writer
   end
-  Note over Chief,Owner: a second fix run is refused. A red or blocked corrector escalates to the owner
-  Note over Chief,Tester: gateDecision pass needs testsPassed true, and every docs finding settled. One advisory re-review may start after a green fix run, and it never blocks pass
+  Note over Chief,Owner: a second fix run is refused. A blocked or failed fix run escalates to the owner
+  Note over Chief,Reviewer: gateDecision pass needs a reviewer with no blocking code finding, or a ready fix run, and every docs finding settled. One advisory re-review may start after a green fix run, and it never blocks pass
 
   opt any other decision only the owner can make
     Chief->>Owner: Need you, also posted with chief_escalate
@@ -163,8 +154,7 @@ A plan chain has one branch, one pull request and one implementation worktree. T
 | --- | --- | --- | --- |
 | Designer | `kind: "designer"` | Decides or implements how the UI looks. In a plan it draws artboards in its own design-only wave, before the wave that builds the UI. | n/a |
 | Spec Writer | `kind: "spec-writer"` | Changes only `docs/`. Runs once, after every wave of the plan is ready, in its own worktree, and covers the `## Spec delta` of every `spec: true` wave. Folds `docs/` onto the chain branch. Writes from the plan's Spec delta and reads code only to check names. | `chief_skip_specs` |
-| Worker | `kind: "worker"` | Implements one wave. It never writes tests. A reshape wave is also a worker. | n/a |
-| Tester | `kind: "tester"` | Writes and runs the tests of the plan in the review gate. A corrector repairs a wrong test. | n/a |
+| Worker | `kind: "worker"` | Implements one wave and writes and runs the tests of that wave. A reshape wave is also a worker. | n/a |
 | Reviewer | thread role `reviewer` | Reports a `verdict` of `approve` or `request_changes`. It never edits. | `skipReview` |
 | Planner | thread role `planner` | Read-only. Splits the work into waves. | `unplannedReason` |
 | Advisor | thread role `advisor` | Read-only. Reviews a plan or helps a stuck review. | n/a |

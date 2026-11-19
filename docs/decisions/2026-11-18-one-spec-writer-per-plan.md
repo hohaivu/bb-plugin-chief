@@ -12,6 +12,6 @@ This supersedes the "runs in parallel" part of [the side-lane decision](2026-11-
 
 ## Consequence
 
-- Docs arrive after the code. The Tester waits for them before it derives tests.
+- Docs arrive after the code. The review waits for them.
 - A multi-chain plan folds every delta onto the chain of its last spec wave.
 - Legacy plans with per-wave writers keep working until their writers settle.
