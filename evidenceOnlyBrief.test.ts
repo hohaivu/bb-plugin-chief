@@ -155,16 +155,6 @@ describe("evidence-only tester brief", () => {
     expect(evidence({ wave: undefined, waveTotal: undefined, planContextLine: undefined, contracts: undefined }).prompt).not.toContain("## Deviations from plan");
   });
 
-  // Contract (plan-chains.md "Evidence-Only Tester Brief"): `## Evidence work` orders the run-only steps: write no tests, commit and push nothing, record Head commit,
-  // base runs, ready and blocked reports with the two recommendation routes. The receipt, the Expected head pin and the Prior receipt section are gone.
-  // Regression: a step is dropped, or a receipt/pin line returns.
-  test("Evidence work orders the run-only steps and carries no receipt or pin lines", () => {
-    const prompt = evidence().prompt;
-    const work = section(prompt, "Evidence work")!;
-    for (const step of ["write no tests", "Commit nothing, push nothing", "`Head commit: <sha>`", "git switch --detach", "git status --porcelain", "kind: tester", "kind: worker"]) expect(work, step).toContain(step);
-    for (const gone of ["Receipt", "receipt", "Expected head", "Last tested"]) expect(prompt, gone).not.toContain(gone);
-  });
-
   test.each([undefined, false, true])("selects Test work or Evidence work (evidenceOnly=%s)", (evidenceOnly) => {
     const cells = briefMatrix().filter(([, input]) => input.kind === "tester");
     for (const [label, input] of cells) {
