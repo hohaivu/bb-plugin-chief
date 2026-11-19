@@ -1,4 +1,5 @@
 import { clip, fitLines } from "../core/text";
+import { terminal } from "../types";
 import type { TodoRow } from "../tools/shapes";
 import type { Ctx } from "./context";
 
@@ -19,11 +20,15 @@ const AFTER_HEADING = "## Todo after: reasons (generated)";
 const MARKER = /^<!-- chief-decision id=(\d+) kind=(decision|owner-answer) thread=(\S+) todo=(\S+) at=(\S+) -->$/;
 const MAX_FILE = 8_000;
 const MAX_AFTER = 2_000;
-const ENDED = ["complete", "archived", "deleted"];
 
-/** The entries of a decisions.md; everything from the generated heading on is dropped (it is rebuilt), and lines before the first marker are ignored. */
-export function parseDecisions(text: string): DecisionEntry[] {
+/** An entry's text line that would read as structure (a chief- comment, the generated heading, a Why line, or the escape itself) gets a leading backslash. */
+const STRUCTURAL = /^(\\|<!-- chief-|## Todo after|Why: )/;
+const LAST = /^<!-- chief-last-id=(\d+) -->$/;
+
+/** The entries of a decisions.md, and the highest id it ever held (kept after pruning). Everything from the generated heading on is dropped (it is rebuilt), and lines before the first marker are ignored. */
+export function parseDecisions(text: string) {
   const entries: (DecisionEntry & { body: string[] })[] = [];
+  let last = 0;
   for (const line of text.split("\n")) {
     if (line === AFTER_HEADING) break;
     const marker = MARKER.exec(line);
@@ -31,25 +36,31 @@ export function parseDecisions(text: string): DecisionEntry[] {
       const todo = Number(marker[4]);
       entries.push({ id: Number(marker[1]), kind: marker[2] as DecisionEntry["kind"], thread: marker[3] === "-" ? undefined : marker[3],
         todo: marker[4] === "-" || Number.isNaN(todo) ? undefined : todo, at: marker[5], text: "", body: [] });
-    } else entries.at(-1)?.body.push(line);
+    } else if (LAST.test(line)) last = Number(LAST.exec(line)![1]);
+    else entries.at(-1)?.body.push(line);
   }
-  return entries.map(({ body, ...entry }) => {
-    while (body.length && !body.at(-1)!.trim()) body.pop();
-    const why = body.at(-1)?.startsWith("Why: ") ? body.pop()!.slice(5) : undefined;
-    return { ...entry, text: body.join("\n"), ...(why === undefined ? {} : { why }) };
-  });
+  return {
+    last: Math.max(last, ...entries.map((entry) => entry.id!)),
+    entries: entries.map(({ body, ...entry }) => {
+      while (body.length && !body.at(-1)!.trim()) body.pop();
+      const why: string[] = [];
+      while (body.at(-1)?.startsWith("Why: ")) why.unshift(body.pop()!.slice(5));
+      return { ...entry, text: body.map((line) => line.startsWith("\\") ? line.slice(1) : line).join("\n"), ...(why.length ? { why: why.join("\n") } : {}) };
+    }),
+  };
 }
 
-/** The file text for entries that all have ids, plus the generated after-section. */
-export function renderDecisions(entries: DecisionEntry[], afterLines: string[] = []) {
+/** The file text for entries that all have ids, the id high-water mark, plus the generated after-section. Text and reasons survive parseDecisions
+ * except trailing blank lines: structural text lines are escaped, and every reason line carries its own Why prefix. */
+export function renderDecisions(entries: DecisionEntry[], last: number, afterLines: string[] = []) {
   const after = afterLines.length ? `\n${AFTER_HEADING}\n${afterLines.join("\n")}\n` : "";
-  const render = (entry: DecisionEntry) =>
-    `<!-- chief-decision id=${entry.id} kind=${entry.kind} thread=${entry.thread ?? "-"} todo=${entry.todo ?? "-"} at=${entry.at} -->\n${entry.text}\n${entry.why === undefined ? "" : `Why: ${entry.why}\n`}\n`;
-  return `${HEADER}\n${entries.map(render).join("")}${after}`;
+  const render = (entry: DecisionEntry) => {
+    const text = entry.text.split("\n").map((line) => STRUCTURAL.test(line) ? `\\${line}` : line).join("\n");
+    const why = entry.why === undefined ? "" : `${entry.why.split("\n").map((line) => `Why: ${line}`).join("\n")}\n`;
+    return `<!-- chief-decision id=${entry.id} kind=${entry.kind} thread=${entry.thread ?? "-"} todo=${entry.todo ?? "-"} at=${entry.at} -->\n${text}\n${why}\n`;
+  };
+  return `${HEADER}<!-- chief-last-id=${last} -->\n\n${entries.map(render).join("")}${after}`;
 }
-
-/** A line that would parse as structure (marker, generated heading, Why line) gets a leading space, so parse(render(x)) returns x. */
-const escapeLines = (text: string) => text.split("\n").map((line) => MARKER.test(line) || line === AFTER_HEADING || line.startsWith("Why: ") ? ` ${line}` : line).join("\n");
 
 export function createDecisions(ctx: Ctx) {
   const { bb, store, todoById, todosForProject } = ctx;
@@ -61,19 +72,20 @@ export function createDecisions(ctx: Ctx) {
         return await ctx.retryWhileProvisioning(async () => {
           const project = projectId ?? store.get(ownerId)?.project_id;
           // A read failure other than "missing" throws here: writing over a file we could not read would lose its entries.
-          let entries = change(parseDecisions((await ctx.readStorageFileIfPresent(ownerId, FILE)) ?? ""));
-          let next = Math.max(0, ...entries.map((entry) => entry.id ?? 0)) + 1;
-          entries = entries.map((entry) => entry.id === undefined ? { ...entry, id: next++ } : entry);
+          const parsed = parseDecisions((await ctx.readStorageFileIfPresent(ownerId, FILE)) ?? "");
+          // New entries (also copied ones) take ids above the file's high-water mark, which pruning never lowers.
+          let last = parsed.last;
+          let entries = change(parsed.entries).map((entry) => entry.id === undefined ? { ...entry, id: ++last } : entry);
           entries = entries.filter((entry) => {
-            if (entry.thread && ENDED.includes(store.get(entry.thread)?.state ?? "")) return false;
+            if (entry.thread && terminal(store.get(entry.thread)?.state ?? "")) return false;
             if (entry.todo === undefined || !project) return true;
             return (todoById.get(entry.todo, project) as TodoRow | undefined)?.state === "open";
           });
           const todos = project ? (todosForProject.all(project) as TodoRow[]).filter((todo) => todo.chief_thread_id === ownerId && todo.after) : [];
           const afterLines = fitLines(todos.map((todo) => ctx.todoLine(todo, ownerId)), MAX_AFTER - AFTER_HEADING.length - 3).lines;
           // The newest entry always stays: an entry is far smaller than the cap.
-          while (entries.length > 1 && renderDecisions(entries, afterLines).length > MAX_FILE) entries = entries.slice(1);
-          await ctx.writeStorageFile(ownerId, FILE, renderDecisions(entries, afterLines));
+          while (entries.length > 1 && renderDecisions(entries, last, afterLines).length > MAX_FILE) entries = entries.slice(1);
+          await ctx.writeStorageFile(ownerId, FILE, renderDecisions(entries, last, afterLines));
           return true;
         });
       } catch (error) {
@@ -89,10 +101,10 @@ export function createDecisions(ctx: Ctx) {
 
   /** Appends one entry to the owner's file. Never rejects. */
   function recordDecision(ownerId: string, input: DecisionInput) {
-    const why = input.why?.replace(/\s*\n\s*/g, " ").trim();
+    const why = input.why?.trim();
     const thread = input.threadId?.replace(/\s/g, "");
     const entry: DecisionEntry = {
-      kind: input.kind, at: new Date().toISOString(), text: clip(escapeLines(input.text.trim()), 600),
+      kind: input.kind, at: new Date().toISOString(), text: clip(input.text.trim(), 600),
       ...(thread ? { thread } : {}), ...(input.todoId === undefined ? {} : { todo: input.todoId }),
       ...(why ? { why: clip(why, 300) } : {}),
     };
@@ -103,7 +115,7 @@ export function createDecisions(ctx: Ctx) {
   async function copyDecisions(fromId: string, toId: string, projectId: string, todoId?: number) {
     try {
       await ctx.state.decisionWrites.get(fromId); // never rejects
-      const source = parseDecisions((await ctx.readStorageFileIfPresent(fromId, FILE)) ?? "")
+      const source = parseDecisions((await ctx.readStorageFileIfPresent(fromId, FILE)) ?? "").entries
         .filter((entry) => todoId === undefined || entry.todo === todoId);
       if (!source.length) return true;
       return await writeDecisions(toId, (entries) => [...entries, ...source.map(({ id: _, ...entry }) => entry)], projectId);

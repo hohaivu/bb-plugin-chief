@@ -830,7 +830,7 @@ describe("Coordinator", () => {
       await call(state, "chief_roster", { todo: { text: "Far todo" } }, far, "proj_2");
       await call(state, "chief_roster", { todo: { text: "Own todo" } }, coord);
       const text = await call(state, "chief_roster", {}, coord);
-      expect(text.startsWith("## Children\n")).toBe(true);
+      expect(text.startsWith("Decisions: $BB_THREAD_STORAGE/decisions.md\n## Children\n")).toBe(true);
       expect(text).toMatch(new RegExp(`^- “[^”]*Near child” \\(${near}\\) · project proj_1 · \\w+$`, "m"));
       expect(text).toMatch(new RegExp(`^- “[^”]*Far child” \\(${far}\\) · project proj_2 · \\w+$`, "m"));
       expect(text).not.toContain(stranger);
@@ -847,7 +847,7 @@ describe("Coordinator", () => {
       expect(nearLines).not.toContain("Own todo");
       expect(nearLines).toContain("1 other-Chief todo (#2) hidden: not your work. chief_roster includeOthers: true lists them.");
       expect(farLines.slice(0, farLines.indexOf("\nPending:\n- todo"))).not.toContain("other-Chief todo (#2)");
-      expect(text.replace(/\nDecisions: \S+$/, "").endsWith(`Pending:\n- todo #2: Own todo`)).toBe(true);
+      expect(text.endsWith(`Pending:\n- todo #2: Own todo`)).toBe(true);
       // includeOthers: true expands every child block back to the tagged todo lines.
       const expanded = await call(state, "chief_roster", { includeOthers: true }, coord);
       const expandedNear = expanded.slice(expanded.indexOf(`(${near})`), expanded.indexOf(`(${far})`));
@@ -862,7 +862,7 @@ describe("Coordinator", () => {
       const child = (await spawnChild(state, coord, { title: "Only child" })).id;
       await call(state, "chief_roster", { todo: { text: "Child todo" } }, child);
       await call(state, "chief_roster", { todo: { text: "Coordinator todo" } }, coord);
-      const ownBlock = (text: string) => text.slice(text.lastIndexOf("\nPending:\n") + 1).replace(/\nDecisions: \S+$/, "");
+      const ownBlock = (text: string) => text.slice(text.lastIndexOf("\nPending:\n") + 1);
       const collapsed = ownBlock(await call(state, "chief_roster", {}, coord));
       expect(collapsed).toBe("Pending:\n- todo #2: Coordinator todo\n- 1 other-Chief todo (#1) hidden: not your work. chief_roster includeOthers: true lists them.");
       const expanded = ownBlock(await call(state, "chief_roster", { includeOthers: true }, coord));
@@ -883,9 +883,17 @@ describe("Coordinator", () => {
         const child = (await spawnChild(state, coord, { title: `Child ${index}` })).id;
         for (let item = 0; item < 3; item += 1) await call(state, "chief_roster", { todo: { text: `Todo ${index}.${item} ${"x".repeat(300)}` } }, child);
       }
+      const path = "Decisions: $BB_THREAD_STORAGE/decisions.md\n";
       const text = await call(state, "chief_roster", {}, coord);
       expect(text.length).toBeLessThanOrEqual(6_000);
-      expect(text.startsWith("## Children\n")).toBe(true);
+      expect(text.startsWith(`${path}## Children\n`)).toBe(true);
+      // The Coordinator's own Pending block and a decisions.md write-failure note survive the crowded Children block.
+      state.failWritesMatching(/decisions\.md/);
+      const failed = await call(state, "chief_roster", { todo: { text: "Own todo" } }, coord);
+      state.failWritesMatching(null);
+      expect(failed.length).toBeLessThanOrEqual(6_000);
+      expect(failed.startsWith(path)).toBe(true);
+      expect(failed).toMatch(/Note: decisions\.md was not updated \(see the plugin log\)\.\nPending:\n- todo #\d+: Own todo/);
     });
   });
 
@@ -1746,9 +1754,14 @@ describe("Coordinator", () => {
       const other = await coordinator(state, "proj_2");
       const foreign = (await spawnChild(state, other, { projectId: "proj_1" }, "proj_2")).id;
       const before = { ...row(state, foreign) };
+      await call(state, "chief_roster", { decision: { text: "carry me" } }, child);
       await archive(state, child);
       await state.supervisorCycle();
       const successor = row(state, worker).chief_thread_id as string;
+      // The dedicated successor (replaceChief's hand-over) gets the orphan's decisions.
+      const successorFile = join(state.storageRoot, successor, "decisions.md");
+      for (let i = 0; i < 200 && !(await readFile(successorFile, "utf8").catch(() => "")).includes("carry me"); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(await readFile(successorFile, "utf8")).toContain("carry me");
       expect(successor).not.toBe(foreign);
       expect(successor).not.toBe(child);
       expect(row(state, successor)).toMatchObject({ role: "chief", coordinator_thread_id: coord });

@@ -9,6 +9,8 @@ import type { Ctx } from "./context";
 
 // shortcut: the host's message text is how we detect a missing file (see cleanup.ts MISSING); upgrade when the SDK exposes a status.
 const MISSING_FILE = /not found|404|ENOENT|no such file/i;
+// Stricter, for files whose absence decides an overwrite: the message must open with the missing-file response, so a path like thr_404 in another error never matches.
+const FILE_ABSENT = /^(HTTP 404\b|ENOENT\b)/;
 
 export function createArtifacts(ctx: Ctx) {
   const { bb, db } = ctx;
@@ -78,7 +80,7 @@ export function createArtifacts(ctx: Ctx) {
     try {
       return await readFile(hostId, join(storageRootPath, relPath));
     } catch (error) {
-      if (MISSING_FILE.test(String((error as Error)?.message ?? error))) return null;
+      if (FILE_ABSENT.test(String((error as Error)?.message ?? error))) return null;
       throw error;
     }
   }

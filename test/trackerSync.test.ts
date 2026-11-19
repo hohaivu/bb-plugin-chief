@@ -572,6 +572,8 @@ describe("answers", () => {
   test("one owner comment becomes one alert for the concerned thread, delivered once, and the flag clears", async () => {
     const { w } = await asked("Pick A or B.");
     owner(w, "o1", "Use option A.");
+    let seen: { receipts: number; alerts: number } | undefined;
+    w.recordAnswer.mockImplementation(() => { seen = { receipts: w.receipts("answer").length, alerts: w.answerAlert.mock.calls.length }; });
     await w.sync.sync();
     expect(w.answerAlert).toHaveBeenCalledTimes(1);
     expect(w.answerAlert).toHaveBeenCalledWith("P1", `decision-${sha12("Pick A or B.")}:answer`,
@@ -580,6 +582,7 @@ describe("answers", () => {
     expect(w.deliver).toHaveBeenCalledWith(`out:decision-${sha12("Pick A or B.")}:answer`);
     expect(w.recordAnswer).toHaveBeenCalledTimes(1);
     expect(w.recordAnswer).toHaveBeenCalledWith("P1", "Use option A.", "Owner answer to decision #1 on tracker task “Alpha”");
+    expect(seen).toEqual({ receipts: 1, alerts: 1 }); // recording runs after the receipt and the alert are committed
     expect(w.receipts("answer")).toMatchObject([{ ref: "o1", state: "sent", result: sha12("Pick A or B.") }]);
     expect(w.receipts("decision")[0].answered_at).not.toBeNull();
     // The next pass closes the flag; seeing the same comment again does nothing.
@@ -599,6 +602,15 @@ describe("answers", () => {
     expect(w.answerAlert.mock.calls[0]![1]).toBe(`decision-${sha12("Ship now or wait?")}:answer`);
     expect(w.answerAlert.mock.calls[0]![2]).toContain("decision #2");
     expect(w.receipts("decision").map((d) => d.answered_at !== null)).toEqual([false, true]);
+  });
+
+  test("an answer with no live Chief to tell is not recorded in a decisions file", async () => {
+    const { w } = await asked("Pick A or B.");
+    w.answerAlert.mockReturnValue(null);
+    owner(w, "o1", "Use option A.");
+    await w.sync.sync();
+    expect(w.recordAnswer).not.toHaveBeenCalled();
+    expect(w.receipts("answer")).toEqual([]); // the transaction rolled back; the next poll retries
   });
 
   test("a comment with no #N while two decisions are open is one unmatched alert and closes nothing", async () => {

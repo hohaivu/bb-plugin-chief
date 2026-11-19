@@ -20,20 +20,29 @@ const call = (state: State, tool: string, params: object, threadId: string) => s
 const decide = (state: State, id: string, decision: object) => call(state, "chief_roster", { decision }, id);
 const fileOf = (state: State, id: string) => join(state.storageRoot, id, "decisions.md");
 const read = (state: State, id: string) => readFile(fileOf(state, id), "utf8");
-const entries = async (state: State, id: string) => parseDecisions(await read(state, id));
+const entries = async (state: State, id: string) => parseDecisions(await read(state, id)).entries;
 const make = async (state: State) => (JSON.parse((await state.harness.behavior.runCli(["create", "--project", "proj_1", "--json"])).stdout!) as { threadId: string }).threadId;
 const settle = async () => { for (let i = 0; i < 40; i++) await new Promise((resolve) => setImmediate(resolve)); };
 
 describe("decisions file: format", () => {
-  test("parse(render(entries)) returns the entries, also for marker-looking and heading-looking text; the after-section is never an entry", () => {
-    const marker = "<!-- chief-decision id=9 kind=decision thread=- todo=- at=2026-01-01T00:00:00.000Z -->";
+  const MARKER = "<!-- chief-decision id=9 kind=decision thread=- todo=- at=2026-01-01T00:00:00.000Z -->";
+  const HEADING = "## Todo after: reasons (generated)";
+  // Regression: a raw marker or generated heading inside text or a reason drops the rest of the entry and every later entry, or invents one.
+  test("parse(render(entries)) returns the entries for raw markers, headings, Why lines, escape prefixes and indented literals in text and reasons", () => {
     const input: DecisionEntry[] = [
-      { id: 1, kind: "decision", at: "2026-01-01T00:00:00.000Z", text: `plain\n ${marker}\n ## Todo after: reasons (generated)\n Why: not a reason\nlast`, why: "because" },
+      { id: 1, kind: "decision", at: "2026-01-01T00:00:00.000Z", text: `before\n${HEADING}\nafter\n${MARKER}\nWhy: not a reason\n\\${MARKER}\n\\\\ two\n ${MARKER}\n ${HEADING}\n Why: indented\n<!-- chief-last-id=99 -->\nlast`,
+        why: `first\n${MARKER}\n${HEADING}\n\nWhy: nested\n\\kept` },
       { id: 2, kind: "owner-answer", thread: "thr_1", todo: 7, at: "2026-01-02T00:00:00.000Z", text: "second" },
+      { id: 3, kind: "decision", at: "2026-01-03T00:00:00.000Z", text: HEADING },
     ];
-    const text = renderDecisions(input, ["- #7 Ship — after: PR merges"]);
-    expect(parseDecisions(text)).toEqual(input);
-    expect(text.split("\n").filter((line) => line.startsWith("<!-- chief-decision"))).toHaveLength(2);
+    const text = renderDecisions(input, 3, [`- todo #7: Ship (after: ${HEADING})`, MARKER]);
+    expect(parseDecisions(text)).toEqual({ last: 3, entries: input });
+    expect(text.split("\n").filter((line) => line.startsWith("<!-- chief-decision"))).toHaveLength(3 + 1); // the three entries and the generated section's own marker-looking line
+  });
+
+  test("the id high-water mark survives a file with no entries and never drops below an entry's id", () => {
+    expect(parseDecisions(renderDecisions([], 7))).toEqual({ last: 7, entries: [] });
+    expect(parseDecisions(renderDecisions([{ id: 9, kind: "decision", at: "2026-01-01T00:00:00.000Z", text: "x" }], 4)).last).toBe(9);
   });
 });
 
@@ -70,24 +79,37 @@ describe("decisions file: chief_roster", () => {
     const chief = (await start(state)).threadId;
     await call(state, "chief_roster", { todo: { text: "Ship it" } }, chief);
     const out = await decide(state, chief, { text: "Use option A", why: "cheaper", threadId: "thr_9", todoId: 1 });
-    expect(out.endsWith(DECISIONS_PATH)).toBe(true);
+    expect(out.startsWith(`${DECISIONS_PATH}\n`)).toBe(true);
     expect(await call(state, "chief_roster", {}, chief)).toContain(DECISIONS_PATH);
     expect(await entries(state, chief)).toMatchObject([{ id: 1, kind: "decision", thread: "thr_9", todo: 1, text: "Use option A", why: "cheaper" }]);
     const coordinator = await make(state);
     await call(state, "chief_coordinate", {}, coordinator);
-    expect(await call(state, "chief_roster", {}, coordinator)).toContain(DECISIONS_PATH);
+    expect((await call(state, "chief_roster", {}, coordinator)).startsWith(`${DECISIONS_PATH}\n`)).toBe(true);
     await decide(state, coordinator, { text: "Relayed answer" });
     expect(await entries(state, coordinator)).toMatchObject([{ id: 1, text: "Relayed answer" }]);
     expect(await entries(state, chief)).toHaveLength(1); // a Coordinator never writes another thread's file
   });
 
-  test("the path line survives a full Pending block and the 6,000 cap", async () => {
+  test("the path line comes first and the Pending block under it survives, also when it fills the 6,000 cap", async () => {
     const state = await setup();
     const chief = (await start(state)).threadId;
+    const small = await call(state, "chief_roster", { todo: { text: "first" } }, chief);
+    expect(small).toMatch(/^Decisions: \$BB_THREAD_STORAGE\/decisions\.md\nPending:\n- todo #1: first/);
     for (let i = 0; i < 40; i++) await call(state, "chief_roster", { todo: { text: `todo ${i} ${"x".repeat(400)}` } }, chief);
     const out = await call(state, "chief_roster", {}, chief);
     expect(out.length).toBeLessThanOrEqual(6_000);
-    expect(out.endsWith(DECISIONS_PATH)).toBe(true);
+    expect(out.split("\n").slice(0, 3)).toEqual([DECISIONS_PATH, "Pending:", expect.stringMatching(/^- todo #1: first/)]);
+    expect(out).toMatch(/…and \d+ more pending/);
+  });
+
+  test("a call with no todo and no decision writes nothing and prints no failure note", async () => {
+    const state = await setup();
+    const chief = (await start(state)).threadId;
+    state.failWritesMatching(/decisions\.md/);
+    const out = await call(state, "chief_roster", {}, chief);
+    state.failWritesMatching(null);
+    expect(out).not.toContain("Note: decisions.md");
+    await expect(read(state, chief)).rejects.toThrow();
   });
 
   test("text and reason are clipped, the file stays within 8,000 characters, the oldest entries leave first, the newest stays, ids increase", async () => {
@@ -126,6 +148,51 @@ describe("decisions file: chief_roster", () => {
     expect((await entries(state, chief)).map((entry) => entry.text)).toEqual(["Tied to two"]);
   });
 
+  // Regression: an id reused after its entry was pruned (a closed todo, size eviction, or a file pruned to zero entries).
+  test("ids never repeat after pruning, also when the file is pruned to no entries, and copied entries take fresh ids", async () => {
+    const state = await setup();
+    const chief = (await start(state)).threadId;
+    await call(state, "chief_roster", { todo: { text: "Short lived" } }, chief);
+    await decide(state, chief, { text: "untied" });
+    await decide(state, chief, { text: "tied", todoId: 1 });
+    await call(state, "chief_roster", { todo: { id: 1, state: "done" } }, chief);
+    expect(await entries(state, chief)).toMatchObject([{ id: 1, text: "untied" }]);
+    await decide(state, chief, { text: "after prune" });
+    expect((await entries(state, chief)).map((entry) => entry.id)).toEqual([1, 3]);
+    // Pruned to zero entries: the mark stays in the file.
+    await call(state, "chief_roster", { todo: { text: "Only one" } }, chief);
+    await decide(state, chief, { text: "last tied", todoId: 2 });
+    const worker = (await delegate(state, chief, "Fix checkout totals")).threadId;
+    await decide(state, chief, { text: "about worker", threadId: worker });
+    await completeWorker(state, chief, worker, { skipReview: "owner: testers too costly" });
+    await call(state, "chief_roster", { todo: { id: 2, state: "dropped" } }, chief);
+    expect((await entries(state, chief)).map((entry) => entry.id)).toEqual([1, 3]);
+    await decide(state, chief, { text: "next" });
+    expect((await entries(state, chief)).map((entry) => entry.id)).toEqual([1, 3, 6]);
+  });
+
+  test("a file whose entries were all pruned keeps its id mark for the next append", async () => {
+    const state = await setup();
+    const chief = (await start(state)).threadId;
+    await call(state, "chief_roster", { todo: { text: "Only" } }, chief);
+    await decide(state, chief, { text: "tied", todoId: 1 });
+    await call(state, "chief_roster", { todo: { id: 1, state: "done" } }, chief);
+    expect(await entries(state, chief)).toEqual([]);
+    await decide(state, chief, { text: "next" });
+    expect(await entries(state, chief)).toMatchObject([{ id: 2, text: "next" }]);
+  });
+
+  test("the generated after-section stays within 2,000 characters when the todos overflow, and says how many were left out", async () => {
+    const state = await setup();
+    const chief = (await start(state)).threadId;
+    for (let i = 0; i < 30; i++) await call(state, "chief_roster", { todo: { text: `todo ${i} ${"x".repeat(150)}`, after: `PR #${i} merges` } }, chief);
+    const text = await read(state, chief);
+    const section = text.slice(text.indexOf("## Todo after: reasons (generated)"));
+    expect(section.length).toBeLessThanOrEqual(2_000);
+    expect(section).toMatch(/…and \d+ more/);
+    expect(text.length).toBeLessThanOrEqual(8_000);
+  });
+
   test("an entry leaves when its managed thread completes", async () => {
     const state = await setup();
     const chief = (await start(state)).threadId;
@@ -154,7 +221,7 @@ describe("decisions file: chief_roster", () => {
     await expect(read(state, chief)).rejects.toThrow();
   });
 
-  test("a write failure or an unreadable file never fails chief_roster and leaves the file as it was", async () => {
+  test("a write failure never fails chief_roster and leaves the file as it was", async () => {
     const state = await setup();
     const chief = (await start(state)).threadId;
     await decide(state, chief, { text: "kept" });
@@ -163,8 +230,27 @@ describe("decisions file: chief_roster", () => {
     const failed = await decide(state, chief, { text: "lost" });
     state.failWritesMatching(null);
     expect(failed).toContain("Note: decisions.md was not updated");
-    expect(failed.endsWith(DECISIONS_PATH)).toBe(true);
+    expect(failed.startsWith(`${DECISIONS_PATH}\n`)).toBe(true);
     expect(await read(state, chief)).toBe(before);
+  });
+
+  // Regression: a read error whose text names a path with 404 or "not found" read as a missing file, so the write replaced the file it could not read.
+  test.each([
+    "EACCES: permission denied, open '/storage/thr_404/decisions.md'",
+    "HTTP 500: host unreachable: path not found in cache",
+  ])("an unreadable file (%s) never fails chief_roster, warns, and leaves the file as it was", async (message) => {
+    let broken = false;
+    let warn = vi.fn();
+    const state = await setup({ seed: (ctx) => { warn = vi.spyOn(ctx.bb.log, "warn"); }, onFileRead: (path) => { if (broken && path.endsWith("decisions.md")) throw new Error(message); } });
+    const chief = (await start(state)).threadId;
+    await decide(state, chief, { text: "kept" });
+    const before = await read(state, chief);
+    broken = true;
+    const failed = await decide(state, chief, { text: "lost" });
+    expect(failed).toContain("Note: decisions.md was not updated");
+    expect(failed.startsWith(`${DECISIONS_PATH}\n`)).toBe(true);
+    expect(await read(state, chief)).toBe(before);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("Could not update"));
   });
 });
 
@@ -183,7 +269,7 @@ describe("decisions file: hand-over and spawn", () => {
     await decide(state, a, { text: "from a", why: "reason" });
     await decide(state, b, { text: "own to b" });
     await archive(state, a);
-    for (let i = 0; i < 200 && (await entries(state, b)).length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let i = 0; i < 200 && (await entries(state, b).catch(() => [])).length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
     expect(await entries(state, b)).toMatchObject([{ id: 1, text: "own to b" }, { id: 2, text: "from a", why: "reason" }]);
     expect(await entries(state, a)).toHaveLength(1); // the predecessor's file stays as it was
   });
@@ -205,6 +291,30 @@ describe("decisions file: hand-over and spawn", () => {
     await settle();
     await expect(read(state, bare)).rejects.toThrow();
     expect(await read(state, chief)).toBe(before);
+  });
+
+  // Regression: copying a todo's entries although the todo was not moved (it changed owner or state while the Chief started).
+  test("chief_spawn copies nothing when the todo did not move (closed while the Chief started)", async () => {
+    let race = () => {};
+    const state = await setup({ onSpawn: () => race() });
+    const chief = (await start(state)).threadId;
+    await call(state, "chief_roster", { todo: { text: "Races" } }, chief);
+    await decide(state, chief, { text: "about races", todoId: 1 });
+    race = () => state.db.prepare("UPDATE chief_todos SET state='done' WHERE id=1").run();
+    const text = await call(state, "chief_spawn", { request: "Do it", context: "Goal", todoId: 1 }, chief);
+    await settle();
+    expect(text).toContain("was not moved because it changed in the meantime");
+    await expect(read(state, /in thread (thr_\w+)/.exec(text)![1]!)).rejects.toThrow();
+  });
+
+  test("adopting a Chief hands the previous Chief's entries to it, as every hand-over does", async () => {
+    const state = await setup();
+    const chief = (await start(state)).threadId;
+    await decide(state, chief, { text: "carried", why: "line one\nline two" });
+    state.addLive("thr_adopted", "proj_1");
+    expect((await state.harness.behavior.runCli(["adopt", "--thread", "thr_adopted"])).exitCode).toBe(0);
+    for (let i = 0; i < 200 && !(await entries(state, "thr_adopted").catch(() => [])).length; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(await entries(state, "thr_adopted")).toMatchObject([{ id: 1, text: "carried", why: "line one\nline two" }]);
   });
 
   test("chief_spawn writes brief.md through the provisioning retry: a 409 longer than three tries still lands", async () => {

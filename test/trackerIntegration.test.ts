@@ -297,7 +297,7 @@ describe("tracker integration", () => {
     expect(tasks.of("update").filter((a) => a.includes("--remove-label"))).toHaveLength(1);
     // The answer is also recorded in the live Chief's decisions.md, after the alert transaction.
     await until(() => { try { return readFileSync(join(state.storageRoot, chief, "decisions.md"), "utf8").includes("kind=owner-answer"); } catch { return false; } });
-    expect(parseDecisions(readFileSync(join(state.storageRoot, chief, "decisions.md"), "utf8"))).toMatchObject([{ kind: "owner-answer", text: "Option A" }]);
+    expect(parseDecisions(readFileSync(join(state.storageRoot, chief, "decisions.md"), "utf8")).entries).toMatchObject([{ kind: "owner-answer", text: "Option A" }]);
   });
 
   // Contract (spec, Answers reasons): the answer rides the existing outbox, so a hand-off sends an undelivered answer to the replacement Chief.

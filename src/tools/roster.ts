@@ -51,7 +51,8 @@ export function registerRosterTool(ctx: Ctx) {
       // A todo change rebuilds the after-section; a failed write only adds a note.
       const written = decision ? await ctx.recordDecision(caller.thread_id, { kind: "decision", ...decision }) : todo ? await ctx.writeDecisions(caller.thread_id, (entries) => entries) : true;
       if (!written) note += "Note: decisions.md was not updated (see the plugin log).\n";
-      const tail = "\nDecisions: $BB_THREAD_STORAGE/decisions.md";
+      // The path line comes first and its room is taken before anything else is fitted.
+      const head = "Decisions: $BB_THREAD_STORAGE/decisions.md\n";
       if (ctx.isCoordinator(caller)) {
         const children = store.all().filter((row) => row.role === "chief" && row.coordinator_thread_id === caller.thread_id);
         const live = children.filter((row) => !ctx.INACTIVE_CHIEF_STATES.includes(row.state));
@@ -62,28 +63,28 @@ export function registerRosterTool(ctx: Ctx) {
           const asked = ctx.needYouAt(child);
           return asked === null ? "" : ` · needs the owner since ${new Date(asked).toISOString()}`;
         };
-        // The path line is appended after the clip, so a full roster never cuts it.
-        return `${clip([
+        // The own Pending block and the failure note take their room first; the children fill what is left.
+        const own = note + ctx.pendingBlock(caller.thread_id, includeWaiting, 1_500, includeOthers);
+        return `${head}${clip([
           ...(live.length ? ["## Children", ...live.map((child) => clip(`- “${clip(child.title, 120)}” (${child.thread_id}) · project ${child.project_id} · ${child.state}${needsOwner(child)}\n${ctx.pendingBlock(child.thread_id, includeWaiting, share, includeOthers).replace(/\n/g, "\n  ")}`, share))] : []),
           ...(children.length > live.length ? [`closed: ${children.length - live.length}`] : []),
           ...(live.length ? [] : ["No child Chiefs. Attach ones the owner names with chief_attach, or start one with chief_spawn."]),
-          note + ctx.pendingBlock(caller.thread_id, includeWaiting, 1_500, includeOthers),
-        ].join("\n"), 6_000 - tail.length)}${tail}`;
+        ].join("\n"), 6_000 - head.length - own.length - 1)}\n${own}`;
       }
       const rows = ctx.rosterForChief(caller.thread_id, includeComplete);
       const reversed = [...rows].reverse();
       // The Pending block is clipped on its own so it always survives whole (or
       // ends with "…and N more pending"), then the rest gets whatever budget is
       // left — otherwise one clip() across both could cut a pending action off mid-line.
-      const pending = note + ctx.pendingBlock(caller.thread_id, includeWaiting, 6_000 - note.length - tail.length, includeOthers);
-      const room = 6_000 - pending.length - tail.length - 1;
+      const pending = note + ctx.pendingBlock(caller.thread_id, includeWaiting, 6_000 - note.length - head.length, includeOthers);
+      const room = 6_000 - head.length - pending.length - 1;
       // clip() with a limit of 0 or less returns the whole string, so a full Pending block drops the rest.
-      if (room <= 0) return pending + tail;
+      if (room <= 0) return head + pending;
       const rest = clip([
         ...reversed.map((row) => ctx.rosterRowLines(row).join("\n  ")),
         ...(includeComplete ? (closedTodosForProject.all(caller.project_id) as TodoRow[]).map((todo) => ctx.todoLine(todo, caller.thread_id)) : []),
       ].join("\n"), room);
-      return `${pending}\n${rest}${tail}`;
+      return `${head}${pending}\n${rest}`;
     },
   });}
 
