@@ -4,7 +4,6 @@ import { provideSdk } from "./test/sdk";
 import { delegate, reviewContextOf, disposeAll, setup, start } from "./test/harness";
 import { PR_URL, type State, delegateWave, forgeAnswers, openGate, plan, readyIdle, rowOf, workerOn } from "./test/testerHelpers";
 import { CHAIN, CHAIN_PR, fullChain, writerOn } from "./test/specWriterHelpers";
-import { OWNERSHIP_PARAGRAPH } from "./test/docsOwnership";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -30,7 +29,10 @@ describe("review prompt: Docs ownership", () => {
     const { chief, worker, writer } = await fullChain(state);
     const { prompt, context } = await reviewOf(state, chief.threadId, worker);
     expect(paragraphs(prompt)).toBe(1);
-    expect(ownership(prompt)).toBe(OWNERSHIP_PARAGRAPH(writer));
+    const prefix = prompt.split("\n## Docs ownership\n")[0];
+    expect(prefix).toContain("Docs ownership, only when the brief has a Docs ownership section");
+    expect(prefix).toContain("Chief-Spec-Writer trailer");
+    expect(ownership(prompt)).toBe(`The Spec Writers of this task: ${writer}.`);
     expect(prompt).toContain("(4) a docs/ ownership violation (see Docs ownership)");
     expect(prompt).not.toContain("(4) a docs/ change in a worker's, designer's or tester's own commit range");
     expect(prompt).not.toContain("## Context\n");
@@ -45,7 +47,7 @@ describe("review prompt: Docs ownership", () => {
     await readyIdle(state, worker.threadId);
     const { prompt } = await reviewOf(state, chief.threadId, worker.threadId);
     expect(paragraphs(prompt)).toBe(1);
-    expect(ownership(prompt)).toBe(OWNERSHIP_PARAGRAPH("none"));
+    expect(ownership(prompt)).toBe("The Spec Writers of this task: none.");
     expect(prompt).not.toContain("(4) a docs/");
     expect(prompt).not.toContain("The Spec Writers of this task and where");
   });
@@ -60,7 +62,7 @@ describe("review prompt: Docs ownership", () => {
     const fix = await delegate(state, chief.threadId, "Fix", { replaces: writer.threadId, kind: "worker" });
     await readyIdle(state, fix.threadId);
     const { prompt, context } = await reviewOf(state, chief.threadId, fix.threadId);
-    expect(ownership(prompt)).toBe(OWNERSHIP_PARAGRAPH(writer.threadId));
+    expect(ownership(prompt)).toBe(`The Spec Writers of this task: ${writer.threadId}.`);
     expect(prompt).toContain("(4) a docs/ ownership violation (see Docs ownership)");
     expect(earlierRows(context).some((line) => line.startsWith(`- spec-writer ${writer.threadId}:`))).toBe(true);
   });
@@ -84,7 +86,7 @@ describe("review prompt: Docs ownership", () => {
       await readyIdle(state, head);
     }
     const { prompt, context } = await reviewOf(state, chief.threadId, head);
-    expect(ownership(prompt)).toBe(OWNERSHIP_PARAGRAPH(writer));
+    expect(ownership(prompt)).toBe(`The Spec Writers of this task: ${writer}.`);
     const rows = earlierRows(context);
     expect(rows.some((line) => line.startsWith(`- spec-writer ${writer}:`))).toBe(true);
     expect(rows.filter((line) => !line.startsWith("- spec-writer "))).toHaveLength(4);

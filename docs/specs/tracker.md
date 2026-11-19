@@ -350,7 +350,7 @@ The only change of a tool schema is the optional `merge` parameter of `chief_esc
 - No tool and no report awaits an adapter call. A CLI that never resolves blocks none of `chief_plan`, `chief_delegate`, `chief_report`, and `chief_escalate`.
 - A tracker error or a database error in a hook or in the sync is logged. It never reaches the caller.
 - The sync limits a create and a receipt to 5 attempts. After the last attempt it logs a warning. It never alerts Chief.
-- The `chief` skill tells Chief to write each **Need you** request in four labelled parts: **Decide**, **Options**, **Recommend**, **Meanwhile**. The sync posts the request as given and checks nothing.
+- The Chief procedure tells Chief to write each **Need you** request in four labelled parts: **Decide**, **Options**, **Recommend**, **Meanwhile**. The sync posts the request as given and checks nothing.
 
 ## Contracts and Invariants
 

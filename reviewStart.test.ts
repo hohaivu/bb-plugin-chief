@@ -119,7 +119,14 @@ describe("review-context.md: written before the launch; a failed write inlines t
     expect(nameOf(w)).toMatch(FOLDER);
     const path = `/data/host_proj/chief/proj/W1/${nameOf(w)}`;
     const prompt: string = w.reviewerLaunch()!.args.prompt;
-    expect(prompt).toContain(`Read \`${path}\` in full before reviewing: it holds the reports, plan files and pointers this brief names.`);
+    const lines = prompt.split("\n");
+    const boundary = lines.indexOf("## This review");
+    const readLines = lines.filter((line) => /^Read `[^`]+review-context\.md`/.test(line));
+    const policyLines = lines.filter((line) => /^Review context\b.*review-context\.md/.test(line));
+    expect(readLines.map((line) => line.split("`")[1])).toEqual([path]);
+    expect(policyLines).toHaveLength(1);
+    expect(lines.indexOf(policyLines[0]!)).toBeLessThan(boundary);
+    expect(lines.indexOf(readLines[0]!)).toBeGreaterThan(boundary);
     expect(prompt).not.toContain("## review-context.md");
     expect(w.host.alertChief).not.toHaveBeenCalled();
     // The path the prompt names is the one the host returned: a prompt can never name a file that was not written.
@@ -128,7 +135,7 @@ describe("review-context.md: written before the launch; a failed write inlines t
     other.worker("W1", { prUrl: pr(1), branch: "feature/one" });
     other.host.writeArtifact.mockImplementation(async () => "/elsewhere/returned/review-context.md");
     await other.review.startReview(other.chief, "W1");
-    expect(other.reviewerLaunch()!.args.prompt).toContain("Read `/elsewhere/returned/review-context.md` in full before reviewing");
+    expect(other.reviewerLaunch()!.args.prompt).toMatch(/^Read `\/elsewhere\/returned\/review-context\.md`/m);
   });
 
   test("3 attempts on a 1 s and 2 s backoff before the launch, then one Chief alert; the launch still happens with the context inlined; the reply is unchanged", async () => {

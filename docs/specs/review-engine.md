@@ -45,11 +45,13 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 
 This section describes the behaviour of the code at commit 6638ef5, before the engine. The `reviewer` engine keeps it unchanged.
 
-Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` in `src/review/reviewStart.ts`. `REVIEW_ONLY` in `src/core/roles.ts`. The `bb.settings.define` block and the `createReviewStart` call in `server.ts`. The reviewer rule in `skills/chief-role-reviewer/SKILL.md`. `checkReport` in `src/report/reportIntake.ts` and `reportFinding` in `server.ts`, for the finding limits only.
+Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` in `src/review/reviewStart.ts`. `REVIEW_ONLY` in `src/core/roles.ts`. The `bb.settings.define` block and the `createReviewStart` call in `server.ts`. `checkReport` in `src/report/reportIntake.ts` and `reportFinding` in `server.ts`, for the finding limits only.
 
 ### Reviewer prompt
 
-`reviewerPrompt` builds one prompt for a worker's reviewer and for a branch reviewer.
+`reviewerPrompt` builds one prompt for a worker's reviewer and for a branch reviewer. It holds the reviewer rules, such as the gate rule, the docs-ownership policy and the read-in-full policy. The reviewer loads no skill. `prAgent.ts` no longer restates the rule that a reviewer runs no checks.
+
+CHANGED: the invariant prefix of `reviewerPrompt` holds the gate rule, the docs-ownership policy (the `Chief-Spec-Writer` trailer) and the read-in-full policy for `review-context.md`. The docs-ownership policy applies only when the brief has a `## Docs ownership` section. The read-in-full policy renders only when the brief names a context file. `reviewBrief` carries only the conditional Spec Writer list and the per-run context path or inline context.
 
 - Invariant rules come first. Reason: the prefix caches.
 - The first rule is `REVIEW_ONLY`: the reviewer does not create, modify, delete, commit, or push tracked files. A repair goes back to the worker.
@@ -73,9 +75,9 @@ Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` 
 - The subject header counts target lines: `N pull requests` when all are pinned, `N branches` when none is, and `N pull requests and M branches without a pinned pull request` for a mix. It never calls an unpinned group a pull request.
 - The context holds the worker brief, the recorded commands, the report pointers, the earlier workers, the previous review, the plan files, the waivers, the impact slice, and the guideline files.
 - The prompt has no `## Context` list.
-- When the context is not empty and its file is written, the prompt has one line: read the absolute path of `review-context.md` in full. The prompt has no wait rule.
+- When the context is not empty and its file is written, the brief names the absolute path of `review-context.md`. The read-in-full policy sits in the prefix of `reviewerPrompt`, not in the brief. The prompt has no wait rule.
 - When the context file is not written, the prompt ends with `## review-context.md` and the context inline.
-- An empty context writes no file and renders no read line.
+- An empty context writes no file, names no path and renders no read-in-full policy.
 - The worker-reported contract rule renders only when the prompt lists contract items.
 
 ### Conditional blocks

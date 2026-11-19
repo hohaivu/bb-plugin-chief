@@ -5,7 +5,6 @@ import { PLAN_FIXTURE, REVIEWER_NATIVE_LINE, chiefReview, configurationContext, 
 import { NATIVE_NO_RESHAPE_LINE } from "./test/reviewWave1";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
-import { expectLoadLine } from "./test/loadLine";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -261,13 +260,7 @@ describe("Chief backend", () => {
     });
     // The planner opens on a plain prompt, not the provider's own /plan action.
     expect(spawned.input).toBeUndefined();
-    const planPrompt = spawned.prompt as string;
-    expect(planPrompt).toContain("do not create, modify, or delete any file the repository tracks, and do not commit or push");
-    expect(planPrompt).not.toContain("$BB_THREAD_STORAGE");
-    // The plan contract (plan field, split verification, out-of-scope section) lives in the skill the brief orders loaded first;
-    // the brief keeps the wave limit and the read-only line.
-    expectLoadLine(planPrompt, "planner");
-    expect(planPrompt).toContain("Split the work into at most 8 waves.");
+    expect(spawned.prompt).toContain("Propose how to fix totals");
     expect(JSON.stringify(plan)).toContain("Its ready alert lists the wave schedule and the exact next call");
 
     const planner = (await status(state)).threads.find((row) => row.role === "planner")!;

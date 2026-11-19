@@ -513,10 +513,6 @@ describe("prAgentSection: precedence and rules", () => {
     for (const read of ["git fetch", "git checkout", "git diff", "gh pr view"]) expect(body).toContain(read);
   });
 
-  test("restates the ban on builds, linters, typecheckers and tests", () => {
-    expect(body).toMatch(/ban on running builds, linters, typecheckers and tests still holds/);
-  });
-
   test("the run step: 570000 ms tool timeout, the missing-wrapper retry and its failure reason", () => {
     expect(body).toContain("570000 ms");
     expect(body).toMatch(/missing, wait 10 s and look once more; still missing: .*`wrapper missing`/);
@@ -648,12 +644,6 @@ describe("helperPrompt()", () => {
     expect(helper).toContain(`\n\n${prompt}\n\n## review-context.md\n${context}`);
     expect(helper.endsWith(context)).toBe(true);
     expect(helper).not.toContain("## Review engine");
-  });
-
-  test("tells the helper the inline context replaces the file read", () => {
-    const helper = helperPrompt(prompt, context);
-    expect(helper).toContain("it replaces the brief's instruction to read review-context.md. Ignore");
-    expect(helper).not.toContain("missing-file rule");
   });
 
   test("forbids chief_report and names the two endings: the verdict object and the blocked object", () => {

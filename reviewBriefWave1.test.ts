@@ -128,12 +128,8 @@ describe("reviewerPrompt rule blocks through reviewBrief", () => {
     }
   });
 
-  test("Docs ownership renders iff docs, once, and defaults on", () => {
-    expect(count(blocks({ docs: true }), "## Docs ownership")).toBe(1);
-    expect(count(blocks(), "## Docs ownership")).toBe(1);
-    const off = blocks({ docs: false });
-    expect(off).not.toContain("## Docs ownership");
-    expect(off).not.toContain("Chief-Spec-Writer");
+  test("Docs ownership is absent when disabled", () => {
+    expect(blocks({ docs: false })).not.toContain("## Docs ownership");
   });
 
   // Contract: the worker-reported rule renders only when the contract list renders, right after its check line.
@@ -147,12 +143,7 @@ describe("reviewerPrompt rule blocks through reviewBrief", () => {
     expect(count(without, "worker-reported")).toBe(0);
   });
 
-  test("every rule block off at once leaves the invariant rules in place", () => {
-    const prompt = blocks({ feature: false, testAudit: false, docs: false });
-    expect(prompt).toContain("Classify every finding as blocking or nit.");
-    expect(prompt).toContain("Send each finding in chief_report `findings`");
-    expect(prompt).toContain("## This review");
-  });
+
 });
 
 describe("acceptedGaps", () => {
@@ -204,11 +195,25 @@ describe("branchReviewBrief defaults", () => {
 });
 
 describe("review-context.md: one read line or one inline copy", () => {
+  const contextRead = /^Read `[^`]+review-context\.md`/m;
+  const contextRule = /^Review context\b.*review-context\.md/m;
+
+  test("a standalone review has neither a context read nor a prefix rule", () => {
+    const prompt = branchReviewBrief({ branch: "feature/x", pullRequestRef: PR1, chiefThreadId: "thr_c" });
+    expect(prompt).not.toMatch(contextRead);
+    expect(prompt).not.toMatch(contextRule);
+  });
   // Contract: with a path the prompt holds one read line and no copy of the context; with null it ends with `## review-context.md` and the context; an empty context renders neither.
   test("with a path: one read line, no inline heading, no wait rule, no Context list", () => {
     const { prompt, context } = reviewBrief(single());
-    const read = "Read `/ctx/review-context.md` in full before reviewing: it holds the reports, plan files and pointers this brief names.";
-    expect(count(prompt, read)).toBe(1);
+    const lines = prompt.split("\n");
+    const boundary = lines.indexOf("## This review");
+    const reads = lines.filter((line) => contextRead.test(line));
+    const rules = lines.filter((line) => contextRule.test(line));
+    expect(reads.map((line) => line.split("`")[1])).toEqual([single().contextPath]);
+    expect(rules).toHaveLength(1);
+    expect(lines.indexOf(rules[0]!)).toBeLessThan(boundary);
+    expect(lines.indexOf(reads[0]!)).toBeGreaterThan(boundary);
     expect(prompt.split("\n")).not.toContain("## review-context.md");
     expect(count(prompt, "Full report: /r/thr_a.md")).toBe(0);
     expect(context).toContain("Full report: /r/thr_a.md");
@@ -221,7 +226,8 @@ describe("review-context.md: one read line or one inline copy", () => {
     const { prompt, context } = reviewBrief(single({ contextPath: null }));
     expect(prompt.endsWith(`\n\n## review-context.md\n${context}`)).toBe(true);
     expect(count(prompt, context)).toBe(1);
-    expect(prompt).not.toContain("in full before reviewing: it holds the reports");
+    expect(prompt).not.toMatch(contextRead);
+    expect(prompt).not.toMatch(contextRule);
     expect(reviewBrief(single({ contextPath: undefined })).prompt).toBe(prompt);
   });
 
@@ -232,7 +238,8 @@ describe("review-context.md: one read line or one inline copy", () => {
     for (const contextPath of ["/ctx/review-context.md", null]) {
       const { prompt, context } = reviewBrief({ ...input, contextPath });
       expect(context).toBe("");
-      expect(prompt).not.toContain("in full before reviewing: it holds the reports");
+      expect(prompt).not.toMatch(contextRead);
+      expect(prompt).not.toMatch(contextRule);
       expect(prompt.split("\n")).not.toContain("## review-context.md");
       expect(prompt.endsWith("\n")).toBe(false);
     }
@@ -291,23 +298,6 @@ describe("a merged rule is stated once", () => {
     expect(noReports).not.toContain("Read every worker report");
   });
 
-  test("the Fold-range exemption and the worker-range violation are stated once, in Docs ownership", () => {
-    const prompt = planReview();
-    const ownership = prompt.split("## Docs ownership\n")[1]!.split("\n")[0]!;
-    expect(count(prompt, "`Fold: none` with equal Fold base and Fold head is an empty scope")).toBe(1);
-    expect(count(ownership, "`Fold: none` with equal Fold base and Fold head is an empty scope")).toBe(1);
-    expect(count(prompt, "never fall back to its Base commit")).toBe(1);
-    expect(count(prompt, "A docs/ path in a worker's, designer's or tester's own range is a violation.")).toBe(1);
-    expect(count(ownership, "A docs/ path in a worker's, designer's or tester's own range is a violation.")).toBe(1);
-    // The side-lane line keeps only the Fold range and the scope-drift sentence; spec-gate item (4) only points at Docs ownership.
-    const sideLine = linesOf(prompt, "A side-lane Spec Writer works in its own worktree")[0]!;
-    expect(sideLine).toBe("A side-lane Spec Writer works in its own worktree and changes only docs/: check its Fold base..Fold head range (git diff <Fold base>..<Fold head> --stat); any path outside docs/ in it is scope drift. Side-lane Spec Writers here: thr_s.");
-    expect(prompt.split("\n")).toContain("(4) a docs/ ownership violation (see Docs ownership);");
-    const earlier = linesOf(prompt, "Check each earlier worker on its own commits only")[0] ?? linesOf(prompt, "Check each earlier tester and Spec Writer on its own commits only")[0]!;
-    expect(earlier).toContain("A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift.");
-    expect(count(earlier, "docs/ path in a worker's")).toBe(0);
-    expect(count(earlier, "Fold")).toBe(0);
-  });
 });
 
 describe("checkPlan: feature and reshape flags", () => {

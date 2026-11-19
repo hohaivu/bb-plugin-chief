@@ -31,6 +31,8 @@ export function reviewerPrompt(opts: {
   feature?: boolean;
   /** A reshape wave is reviewed (adds the reshape sentences to the native-design check). Default false. */
   reshape?: boolean;
+  /** The brief names a review-context file (adds the read-in-full policy to the prefix). Default false. */
+  contextFile?: boolean;
 }) {
   const { feature = true, reshape = false } = opts;
   return [
@@ -53,6 +55,10 @@ export function reviewerPrompt(opts: {
     "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
     "Set chief_report `lesson` (at most 400 characters) only for a durable, project-level review rule or known false positive a future reviewer should know; never for something specific to this task.",
     "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
+    "Review gate, only when this review is a managed-work review gate (not a review of a branch or pull request no managed worker owns): you run once per gate, on the pinned heads in this brief, beside the gate's tester. Tests are out of your scope: the tester writes and runs them, and you never wait for or judge its test runs. The gate's one fix run follows your verdict and its green run passes the gate; at most one advisory re-review follows it (the brief then names the previous verdict), and its code findings do not reopen the gate. Put every blocking finding in this one report.",
+    "Doc-text tests: a test the diff adds or changes that reads README, CHANGELOG, docs/, a skill file, any other markdown or prose file, or a spec file and asserts on its wording is a vacuous test, so it is missing verification evidence: a blocking finding against the tester, with fix \"delete the test; test the behaviour the doc describes\". Text the product emits at runtime and fields a program parses from such a file (frontmatter, a config block the product loads) are not doc text.",
+    `Docs ownership, only when the brief has a Docs ownership section: only a Spec Writer changes docs/. A docs/ commit is in scope only when its Chief-Spec-Writer trailer names one of the Spec Writers that section lists, or it lies inside one of their reported ranges (Base commit..Head commit, or Fold base..Fold head; \`Fold: none\` with equal Fold base and Fold head is an empty scope: nothing to check, never fall back to its Base commit). Check with: git log --no-merges --format='%H %(trailers:key=Chief-Spec-Writer,valueonly)' <base>..<head> -- docs/. Any other docs/ commit is an ownership violation and is blocking. Exception: a later Spec Writer of this task lists that commit under "## Adopted docs commits" in its report, and the final docs/ content is correct. Then name it as a non-blocking note. A missing trailer means unknown ownership, not proof that a non-writer made the commit. A docs/ path in a worker's, designer's or tester's own range is a violation. The repair is never a worker change: it is a Spec Writer (kind: spec-writer).`,
+    ...(opts.contextFile ? ["Review context, only when this brief names a review-context.md file: read it in full before reviewing; it holds the reports, plan files and pointers the brief refers to."] : []),
     "## This review",
     opts.subject,
     `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict.`,
@@ -257,6 +263,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     pinned: pinnedAll,
     feature: input.feature,
     reshape: input.reshape,
+    contextFile: Boolean(context && contextPath),
     acceptedGaps: input.acceptedGaps,
     subject: many
       ? `Independently review the whole plan: ${groupCount}, started after every wave was ready. Review each target below, then give one verdict for all of them; request_changes if any target has a blocking finding, and name the branch each finding belongs to. Read each pull request description (gh pr view <url> --json title,body, or glab mr view <url>) as its brief, and treat nothing outside a target's pinned commit as part of its change.\n${[...groups.values()].map(groupLine).join("\n")}`
@@ -266,7 +273,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
     chiefThreadId: input.chiefThreadId,
     focus: input.focus,
     provenance: [
-      ...(context && contextPath ? ["", `Read \`${contextPath}\` in full before reviewing: it holds the reports, plan files and pointers this brief names.`] : []),
+      ...(context && contextPath ? ["", `Read \`${contextPath}\` in full before reviewing.`] : []),
       ...(briefSection.length ? [
         "", "Judge the change against that brief. A trade-off the brief mandates is not a defect — say so rather than filing it as one.",
       ] : []),
@@ -301,7 +308,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ] : []),
       ...(docs ? [
         "", "## Docs ownership",
-        `Only a Spec Writer changes docs/. The Spec Writers of this task: ${writers.map((writer) => writer.threadId).join(", ") || "none"}. A docs/ commit is in scope only when its Chief-Spec-Writer trailer names one of them, or it lies inside one of their reported ranges (Base commit..Head commit, or Fold base..Fold head; \`Fold: none\` with equal Fold base and Fold head is an empty scope: nothing to check, never fall back to its Base commit). Check with: git log --no-merges --format='%H %(trailers:key=Chief-Spec-Writer,valueonly)' <base>..<head> -- docs/. Any other docs/ commit is an ownership violation and is blocking. Exception: a later Spec Writer of this task lists that commit under "## Adopted docs commits" in its report, and the final docs/ content is correct. Then name it as a non-blocking note. A missing trailer means unknown ownership, not proof that a non-writer made the commit. A docs/ path in a worker's, designer's or tester's own range is a violation. The repair is never a worker change: it is a Spec Writer (kind: spec-writer).`,
+        `The Spec Writers of this task: ${writers.map((writer) => writer.threadId).join(", ") || "none"}.`,
       ] : []),
       ...(specGate ? [
         "", `${specWaves.length ? `Wave${specWaves.length > 1 ? "s" : ""} ${specWaves.join(", ")} ${specWaves.length > 1 ? "are" : "is"} marked spec: true` : "This task ran a Spec Writer"}: ${specWaves.length ? "the plan's Spec Writer committed docs/ from each \`## Spec delta\` after the last wave was ready; the workers built from the plan. Judge the code and the tests against the plan's contracts and those docs" : "a Spec Writer committed docs/ from the Spec delta first, and the worker then implemented against them. Judge the code and the tests against those docs"}. Block only on:`,

@@ -1,7 +1,7 @@
 // Rubric format, the aggregation and the filing bar are adapted from warpdotdev/common-skills (MIT),
 // .agents/skills/skill-doctor/ at 8792394ff1b655e0af451b8fabb68ef0cfcbd208:
 // scorers/{efficiency,procedure-compliance,verbosity}.md, SKILL.md (Step 3 math, fail filter), references/skill-improvements.md.
-// The wording is rewritten for Chief (brief, AGENTS.md, skills, Working contract).
+// The wording is rewritten for Chief (brief, AGENTS.md, role instructions, Working contract).
 
 /** Bump on any change to a rubric, its labels or its weights: scores are stored and trended per version, never mixed. */
 export const RUBRIC_VERSION = "2026-11-13.1";
@@ -47,7 +47,7 @@ export const RUBRICS: Rubric[] = [
   {
     name: "procedure-compliance", applies: "all", weight: 0.2,
     labels: [
-      { value: "fully_compliant", description: "followed the brief, AGENTS.md, the loaded skills and the Working contract", score: 1 },
+      { value: "fully_compliant", description: "followed the brief, AGENTS.md, the role instructions and the Working contract", score: 1 },
       { value: "mostly_compliant", description: "minor slips that did not change the outcome", score: 0.8 },
       { value: "noncompliant", description: "skipped or broke a stated rule, constraint or report requirement", score: 0.2 },
       ...extra("procedure compliance"),
@@ -173,15 +173,14 @@ export function aggregate(scores: readonly ScoreInput[], applicable?: readonly s
   return { status, overall, failed, raw, curved };
 }
 
-/** Every surface a lesson may name: the skill directories under skills/, the prompt and brief surfaces, plugin code and other.
- * shortcut: a static copy of `ls skills/`, update it when a skill directory is added. */
+/** Every surface a lesson may name: Chief's instructions (`chief`), every managed role's instructions (`role-instructions`), the prompt and brief surfaces, plugin code and other. */
 export const SURFACES = [
-  "chief", "chief-role-designer", "chief-role-read-only", "chief-role-reviewer", "chief-role-spec-writer", "chief-role-tester", "chief-role-worker", "chief-worker", "coordinator",
+  "chief", "role-instructions",
   "planner-prompt", "worker-brief", "reviewer-brief", "tester-brief", "chief-delegate-brief", "chief-plan-mission", "chief-alert-text", "chief-nudge", "chief-tell",
   "report-contract", "plugin-code", "other",
 ] as const;
 
 const CHIEF_SURFACES = new Set(["chief", "chief-delegate-brief", "chief-plan-mission", "chief-alert-text", "chief-nudge", "chief-tell"]);
 /** Which prompts a lesson reaches: reviewer-brief → reviewers, Chief's own surfaces → Chief, everything else → every managed role (NULL).
- * Explicit set, not a `chief-*` prefix: chief-worker and chief-role-* are managed-role skills. */
+ * Explicit set, not a `chief-*` prefix: old surface names stored in lesson rows map to NULL. */
 export const lessonRole = (surface: string): "reviewer" | "chief" | null => surface === "reviewer-brief" ? "reviewer" : CHIEF_SURFACES.has(surface) ? "chief" : null;

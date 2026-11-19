@@ -17,7 +17,7 @@ The file `server.ts` owns tool-call stability and title defaulting.
 
 The domain exposes three entry points in `server.ts`:
 
-1. `bb.agents.configure`: configures tools, skills, and prompt instructions for each thread.
+1. `bb.agents.configure`: configures tools and prompt instructions for each thread.
 2. Schema definitions (`delegateShape`, `delegateParams`, `planParams`, `consultParams`, `spawnParams`): validate tool inputs and default missing titles.
 3. CLI commands (`delegate`, `plan`, `consult`): parse command arguments through the schema definitions.
 
@@ -27,13 +27,25 @@ The domain exposes three entry points in `server.ts`:
 
 1. The platform invokes `bb.agents.configure` with thread context.
 2. The function queries the store for the thread row.
-3. If the row state is complete, archived, or deleted, the function returns empty tool and skill lists.
+3. If the row state is complete, archived, or deleted, the function returns empty tool lists.
 4. If the row is missing, the function reads seeded metadata from the plugin origin.
-5. If the role is missing, the function returns empty tool and skill lists.
+5. If the role is missing, the function returns empty tool lists.
 6. The function resolves tools for the active role.
 7. For the `claude-code` provider, the function builds a schema-preload line from the resolved tools, for every role.
 8. The function composes instructions with the preload line at the role position.
-9. The function returns the tools, skills, and instructions.
+9. The function returns the tools, no skills, and the instructions.
+
+### Instruction Order
+
+The SDK cuts instructions at 32,768 characters. The order puts the rules that must arrive first.
+
+Managed roles get this order: identity, compaction line, tool line, role rules, `chief.md`, lessons. The cut drops lessons and `chief.md` first. Reason: the role rules must always arrive.
+
+A non-Coordinator Chief gets this order: identity, tool-schema line, roster, wait, planner, research, `# Chief core rules`, `# Chief procedure`, project rules, Chief lessons. `CHIEF_PROCEDURE` in `src/core/roleRules.ts` holds the procedure. The cut drops lessons and the `chief.md` tail first. Core rules and procedure always arrive. Reason: the Chief skill reached Chief in 2 of 414 sessions.
+
+### Evidence-only Tester
+
+`managed_threads.evidence_only` (`src/db/migrations.ts`) marks an evidence-only tester. The spawn seeds it as `pluginMetadata.evidenceOnly` (`src/research/managedSpawn.ts`, `spawnMetadataSchema` in `src/tools/shapes.ts`). Reason: `bb.agents.configure` may run before the row insert, so it reads the seed. An evidence-only tester gets no test-writing rules.
 
 ### Brief Title Defaulting Flow
 
@@ -47,8 +59,8 @@ The domain exposes three entry points in `server.ts`:
 
 ### Agent Configuration and Terminal Filters
 
-- `bb.agents.configure` returns empty tool and skill lists when thread state is complete, archived, or deleted. Reason: finished threads require no tools.
-- `bb.agents.configure` returns empty tool and skill lists when the thread lacks a role. Reason: unmanaged threads require no Chief capabilities.
+- `bb.agents.configure` returns empty tool lists when thread state is complete, archived, or deleted. Reason: finished threads require no tools.
+- `bb.agents.configure` returns empty tool lists when the thread lacks a role. Reason: unmanaged threads require no Chief capabilities.
 - `bb.agents.configure` trusts seeded role metadata only when `origin.pluginId` matches the Chief plugin identifier. Reason: external callers must not forge internal managed roles.
 - `bb.agents.configure` places project rules at the end of Chief instructions. Reason: variable project rules may exceed the 32,768-character limit without truncating core rules.
 

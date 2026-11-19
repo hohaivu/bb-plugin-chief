@@ -205,8 +205,6 @@ exit 0
 `;
 }
 
-const BAN = "The ban on running builds, linters, typecheckers and tests still holds.";
-
 /** The lines appended to the reviewer prompt for mode `pr-agent` or `both`. Every target appears once; with no pinned target only the heading and the direct line remain.
  * `dir` is the absolute directory holding `pr-agent-review.sh` and `review-helper.md`, written before the reviewer is spawned and rendered literally into every command.
  * `helperWritten` false (both mode, helper prompt write failed): no helper lines, the reviewer does the direct half itself. */
@@ -223,7 +221,7 @@ export function prAgentSection(mode: "pr-agent" | "both", targets: EngineTarget[
   const spawn = `bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID" --parent-notifications off --title "Review helper" --prompt-file "${dir}/review-helper.md" --json`;
   return [
     heading,
-    `This section adds to the review above: every rule above holds unless this section names an exception. You may also run the commands named here. ${BAN} The reads a direct review needs (git fetch, git checkout, git diff, gh pr view, glab mr view) stay allowed.`,
+    `This section adds to the review above: every rule above holds unless this section names an exception. You may also run the commands named here. The reads a direct review needs (git fetch, git checkout, git diff, gh pr view, glab mr view) stay allowed.`,
     "Targets:",
     ...targets.map((target) => {
       const where = `- worker ${target.threadId} (branch ${target.branch ?? "none"})`;

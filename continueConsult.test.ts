@@ -152,7 +152,6 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const { advisor } = await planAdvisor(state, chief.threadId);
     expect(state.spawned.at(-1)).toMatchObject({ pluginMetadata: { role: "advisor" }, providerId: "codex" });
-    expect(state.spawned.at(-1).prompt).toContain("Remain advisory");
     const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(advisor.threadId));
     expect(configured.tools.map((tool) => tool.name)).toEqual(["chief_report"]);
 

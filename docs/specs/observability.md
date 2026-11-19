@@ -302,7 +302,7 @@ The retro adds the sections in "Report sections from the retro".
 
 ## Retro grader
 
-The retro scores a finished plan. A read-only judge grades the threads of the plan and the handoffs between Chief and each child. The plugin then aggregates the scores, stores them and writes `retro.md`. It never edits a prompt, a skill or code.
+The retro scores a finished plan. A read-only judge grades the threads of the plan and the handoffs between Chief and each child. The plugin then aggregates the scores, stores them and writes `retro.md`. It never edits a prompt or code.
 
 ### Eligibility
 
@@ -551,12 +551,12 @@ The judge may file a lesson only when all four conditions hold. The plugin check
 
 The judge never files a lesson when the instruction existed and the thread ignored it, for variance, to restate an instruction, or when the fix is code or infrastructure.
 
-`SURFACES` lists every skill directory under `skills/`, plus `planner-prompt`, `worker-brief`, `reviewer-brief`, `tester-brief`, `chief-delegate-brief`, `chief-plan-mission`, `chief-alert-text`, `chief-nudge`, `chief-tell`, `report-contract`, `plugin-code` and `other`. The surface sets the role of the lesson:
+`SURFACES` in `src/observe/rubrics.ts` lists `chief` and `role-instructions`, plus `planner-prompt`, `worker-brief`, `reviewer-brief`, `tester-brief`, `chief-delegate-brief`, `chief-plan-mission`, `chief-alert-text`, `chief-nudge`, `chief-tell`, `report-contract`, `plugin-code` and `other`. The surface sets the role of the lesson. `lessonRole` maps each removed skill name to `null`. Reason: stored rows stay valid.
 
 | Surface | Lesson role |
 | --- | --- |
 | `reviewer-brief` | `reviewer` |
-| `chief-*` | `chief` |
+| `chief`, `chief-delegate-brief`, `chief-plan-mission`, `chief-alert-text`, `chief-nudge`, `chief-tell` | `chief` |
 | every other surface | NULL, so every managed role |
 
 ### Injection (`newestLessons` in `src/runtime/host.ts`)
@@ -581,7 +581,7 @@ The judge never files a lesson when the instruction existed and the thread ignor
 
 ### Invariant: Chief never edits itself
 
-- The plugin never edits a prompt, a skill or code.
+- The plugin never edits a prompt or code.
 - The retro writes only these items: `chief_retros`, `chief_scores`, `chief_lessons` rows with status `proposed`, the Chief artifacts `retro/`, the `reports/` of the Chief, and `alert_outbox`.
 - A lesson reaches a prompt only after a recorded Chief decision. Reason: a lesson from a judge or a reviewer can be wrong. A durable fix still ships as a reviewed plan.
 

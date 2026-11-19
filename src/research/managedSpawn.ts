@@ -90,7 +90,7 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
       ...extra,
       ...(await lifecycleOwner(chiefThreadId)),
       prompt,
-      pluginMetadata: { role: row.role, chiefThreadId, ...(row.kind ? { kind: row.kind } : {}), ...(row.planThreadId ? { planThreadId: row.planThreadId } : {}), ...(row.evidenceOnly ? { evidenceOnly: true } : {}) },
+      pluginMetadata: { role: row.role, chiefThreadId, ...(row.kind ? { kind: row.kind } : {}), ...(row.planThreadId ? { planThreadId: row.planThreadId } : {}), ...(row.evidenceOnly && row.kind === "tester" ? { evidenceOnly: true } : {}) },
     });
     let thread: Awaited<ReturnType<typeof spawnThread>>;
     try {

@@ -5,7 +5,6 @@ import { provideSdk } from "./test/sdk";
 import { type World, git, world } from "./test/docsGateWorld";
 import { delegateWave, openGate, plan, readyIdle, refusal, rowOf, tool, workerOn } from "./test/testerHelpers";
 import { putWriter, specImpl, writerOn } from "./test/specWriterHelpers";
-import { OWNERSHIP_PARAGRAPH } from "./test/docsOwnership";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
@@ -78,7 +77,7 @@ describe("cross-plan writer recovery P -> Q", () => {
     const gate = await openGate(w.state, w.chief.threadId, worker);
     const prompt = w.state.spawned[Number(gate.reviewer_thread_id.slice("thr_".length)) - 1].prompt as string;
     const ownership = prompt.split("\n## Docs ownership\n")[1]!.split("\n")[0]!;
-    expect(ownership).toBe(OWNERSHIP_PARAGRAPH(t));
+    expect(ownership).toBe(`The Spec Writers of this task: ${t}.`);
     expect(ownership).not.toContain(s);
   });
 });

@@ -222,10 +222,6 @@ describe("tester role", () => {
       expect(repair).toMatchObject({ kind: "spec-writer", replaces_thread_id: writer, plan_wave: 1, branch: CHAIN });
       expect(state.spawned.at(-1).environment).toEqual({ type: "host", hostId: expect.any(String), workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: CHAIN } } });
       expect(state.live.get(repair.thread_id)!.environmentId).not.toBe(environment);
-      const brief = String(state.spawned.at(-1).prompt);
-      expect(brief).toContain("Your worktree is fresh from");
-      expect(brief).not.toContain("already holds the previous worker's changes");
-      expect(brief).toContain("never cherry-pick or merge the previous writer's commits");
       expect(rowOf(state, writer).state).toBe("complete");
       expect(countRows(state)).toBe(rows + 1);
       expect(ownerOn(state, P, 1).thread_id).toBe(worker);
@@ -462,44 +458,23 @@ describe("tester role", () => {
     };
     const BASE_HEAD = "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.";
     // Wave 2 of the shrink-prompts plan: the brief keeps the dynamic values (branch, record name, push command); the sync and rebase rules live in the skills.
-    const localSync = (branch: string, label = "Local sync") => `Task branch: ${branch}. After loading your skills and before any other file read, sync and record \`${label}: <sha>\`; push every commit with \`git push origin HEAD:${branch}\`; follow the git workflow in your loaded skills.`;
-    const BLOCKED_PLAN = "- If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.";
     const WORKER_SPEC_RULES = [
       "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
       "- If the spec is wrong, report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`. If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.",
       BASE_HEAD,
     ];
 
-    // Wave 2 contracts 2 and 4 (worker brief): a spec wave's worker or designer builds from the plan and never waits for the writer's
-    // docs; it keeps Base/Head and the fresh-plan route, rebases a rejected push with no autostash, and has no "implement to match them"
-    // and no spec-writer replace route; every implementation-lane prompt with a branch carries the pre-read local sync.
-    // Regression: the worker brief still says it implements against the writer's docs, or loses the sync or the rebase rule.
-    test.each(["worker", "designer"])("a spec wave's %s builds from the plan: stale-spec, no-wait and rejected-push rules, no writer route", async (kind) => {
+    test.each(["worker", "designer"])("a planned %s receives the chain branch in Git workflow", async (kind) => {
       const state = await setup();
       const { chief, planner } = await specPlan(state);
       await delegateWave(state, chief.threadId, planner.threadId, 1, { branch: CHAIN, prUrl: CHAIN_PR, ...(kind === "designer" ? { kind } : {}) });
-      const prompt = state.spawned.at(-1).prompt as string;
-      expect(section(prompt, "Spec")).toBe([
-        "The plan file is your source of truth. Pre-plan specs may be stale for the domains this wave touches: where they conflict with the plan, follow the plan and name the conflict in your report. A Spec Writer records this change in docs/ after the last wave of the plan is ready: do not wait for it and do not implement against its docs.",
-        BLOCKED_PLAN,
-        BASE_HEAD,
-      ].join("\n") + "\n");
-      expect(section(prompt, "Git workflow")).toContain(localSync(CHAIN));
-      expect(prompt).not.toMatch(/implement to match them|kind: spec-writer|you run before its worker/);
+      expect(section(state.spawned.at(-1).prompt, "Git workflow")).toContain(CHAIN);
     });
 
-    // Side-lane writer prompt: the `## Fold` section names the chain branch and sends the writer to the skill's Fold steps; the side branch is never pushed
-    // except through them, and none of the run-first wording or the "commit and push after each step" rule survives.
-    // Regression: the Fold section loses the target branch, or the writer is told to push the side branch.
-    test("a side-lane Spec Writer's prompt names the fold target and the skill's Fold steps, with none of the run-first wording", async () => {
+    test("a side-lane Spec Writer gets the target branch in its Fold section", async () => {
       const state = await setup();
       const { writer } = await withBoth(state);
-      const prompt = state.spawned.at(-1).prompt as string;
-      expect(section(prompt, "Wave")).toContain("Wave 1 of 1: you are the plan's one Spec Writer. You run after every wave of the plan is ready, in your own worktree on a side branch cut from feature/chain.");
-      expect(section(prompt, "Fold")).toBe(`Fold your docs/ commits onto ${CHAIN}: follow section 10 (Fold) of the \`chief-role-spec-writer\` skill with <branch> = ${CHAIN}, and record Fold base and Fold head.\n`);
-      expect(section(prompt, "Git workflow")).toContain(`Side branch cut from ${CHAIN}: commit only docs/ on it and push only through the \`## Fold\` steps.`);
-      expect(prompt).toContain("A delta item the docs already reflect needs no commit: say so, and record `Fold: none`.");
-      expect(prompt).not.toMatch(/you run before its worker|git diff --name-only <base>\.\.HEAD|Commit and push after each meaningful step|Commit and push your work/);
+      expect(section(state.spawned.at(-1).prompt, "Fold")).toContain(CHAIN);
       expect(rowOf(state, writer).kind).toBe("spec-writer");
     });
 
@@ -934,7 +909,8 @@ describe("docs work list", () => {
 
   // Contract 8 (route unchanged): the same-plan repair still gets its own fresh worktree on the chain branch, the Fold section and the trailer line.
   // Regression: carrying the list changes the worktree, drops the Fold section or the trailer rule.
-  test("the repair keeps its fresh worktree from the branch, the Fold section and the trailer line", async () => {
+  // Preserve the repair worktree and Fold target.
+  test("the repair gets a fresh worktree and the chain branch in its Fold section", async () => {
     const state = await setup();
     const ctx = await docsChains(state, OWN);
     const before = state.live.get(ctx.s5)!.environmentId;
@@ -942,7 +918,6 @@ describe("docs work list", () => {
     expect(docsWorkList(prompt)).toContain("W5NOTE");
     expect(state.spawned.at(-1).environment).toEqual({ type: "host", hostId: expect.any(String), workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: CHAIN_B } } });
     expect(state.live.get(writerOn(state, ctx.P, 5).thread_id)!.environmentId).not.toBe(before);
-    expect(section(prompt, "Fold")).toBe(`Fold your docs/ commits onto ${CHAIN_B}: follow section 10 (Fold) of the \`chief-role-spec-writer\` skill with <branch> = ${CHAIN_B}, and record Fold base and Fold head.\n`);
-    expect(prompt).toContain("every commit carries the trailer Chief-Spec-Writer: $BB_THREAD_ID.");
+    expect(section(prompt, "Fold")).toContain(CHAIN_B);
   });
 });

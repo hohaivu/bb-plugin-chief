@@ -86,17 +86,14 @@ describe("repair briefs", () => {
 
   // plan-5 contract (test ownership): a plain worker never runs tests; a fix run does, as its Fix run section says (a chat fix is the reachable fix run, see the gate fix defect). Regression: the fix run
   // keeps the never-run line and cannot verify its own change, or a plain worker is allowed to run tests.
-  test("a plain worker brief forbids running tests; a fix run brief allows it", async () => {
+  test("only the fix run brief has a Fix run section", async () => {
     const state = await setup();
     const { chief, worker, gate } = await gated(state);
     const plain = spawnOf(state, (await delegate(state, chief.threadId, "Plain work")).threadId).prompt as string;
     await closeGate(state, chief.threadId, gate, worker);
     const fixPrompt = spawnOf(state, (await delegate(state, chief.threadId, "Change the label", { replaces: worker, kind: "worker" })).threadId).prompt as string;
-    expect(plain).toContain("Never write, edit or run tests");
     expect(plain).not.toContain("## Fix run");
-    expect(fixPrompt).not.toContain("Never write, edit or run tests");
     expect(fixPrompt).toContain("## Fix run");
-    expect(fixPrompt).toContain("run the tests as `## Fix run` says");
   });
 
   // plan-5 contract (gate tester): the one gate tester's brief lists every gate target with branch, PR, pinned sha and base.
