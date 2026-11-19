@@ -915,6 +915,8 @@ describe("docs work list", () => {
   // Regression: carrying the list changes the worktree, drops the Fold section or the trailer rule.
   // Preserve the repair worktree and Fold target.
   test("the repair gets a fresh worktree and the chain branch in its Fold section", async () => {
+    const state = await setup();
+    const ctx = await docsChains(state, OWN);
     const before = state.live.get(ctx.s5)!.environmentId;
     const prompt = await repair(state, ctx, 5, ctx.s5);
     expect(docsWorkList(prompt)).toContain("W5NOTE");
