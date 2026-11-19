@@ -10,7 +10,8 @@ export function heavySlotCount(values: { heavySlots?: string }): number {
 }
 
 /** The wrapper `chief-heavy-<hash>.sh`: `bash <script> <sim|test|build> -- <command> [args...]` runs the command once a slot
- * of the pool is free; its exit status passes through. bash 3.2 (macOS /bin/bash). No `${` in the text: it would clash with the template.
+ * of the pool is free; its exit status passes through. The command's full output goes to a log file; stdout gets only the log path,
+ * the exit status, failure-marker lines (capped) and the last 40 lines. bash 3.2 (macOS /bin/bash). No `${` in the text: it would clash with the template.
  * The capacity is never baked in: every admission round reads `slots` beside the script (missing or invalid = 1; sim = 1).
  * Admission is recorded by removing a private marker file inside the lock, so a payload's own exit 75 is never read as "busy". */
 export function heavyScript(limits = HEAVY_LIMITS): string {
@@ -57,6 +58,9 @@ TMPD=$TMPDIR
 if [ -z "$TMPD" ]; then TMPD=/tmp; fi
 MARK=$(mktemp "$TMPD/chief-heavy.XXXXXX") || no_marker
 trap 'rm -f "$MARK"' EXIT
+LOGD=$BB_THREAD_STORAGE
+if [ -z "$LOGD" ] || [ ! -d "$LOGD" ]; then LOGD=$TMPD; fi
+export CHIEF_HEAVY_LOG="$LOGD/chief-heavy-$POOL-$(date +%Y%m%d-%H%M%S)-$$.log"
 
 # Runs inside the lock: removing the marker records the admission before the command starts.
 INNER='rm "$1" || exit 70
@@ -68,7 +72,15 @@ if [ -z "$t" ]; then t=unknown; fi
 export CHIEF_HEAVY_HELD=1
 if [ -n "$CHIEF_HEAVY_WAITED" ]; then printf "[chief-heavy] got %s after %ss\n" "$CHIEF_HEAVY_SLOT" "$CHIEF_HEAVY_WAITED" >&2; fi
 unset CHIEF_HEAVY_SLOT CHIEF_HEAVY_WAITED
-exec "$@"'
+log=$CHIEF_HEAVY_LOG
+unset CHIEF_HEAVY_LOG
+"$@" > "$log" 2>&1
+s=$?
+printf "[chief-heavy] exit %s; full log: %s\n--- failure markers (first 30) ---\n" "$s" "$log"
+grep -nE "FAIL|[Ee]rror|✗|AssertionError|panic|Traceback" "$log" | head -n 30 | cut -c1-300
+printf -- "--- last 40 lines ---\n"
+tail -n 40 "$log"
+exit "$s"'
 
 # One stderr line naming the holder of each of the N busy slots.
 beat() {
