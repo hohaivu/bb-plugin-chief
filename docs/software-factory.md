@@ -2,7 +2,7 @@
 
 This page shows how Chief turns one owner request into a merged pull request. The sequence chart shows who messages whom. The tables list the roles and the support tools.
 
-> **Keep this page current.** When a change alters a tool, a role kind, a gate, or the order of steps, update the charts and tables in the same pull request. The code and the skills win over this page: `src/plan/planLifecycle.ts`, `src/runtime/delegation.ts`, `src/core/roles.ts`, `skills/chief/SKILL.md`, and the README "Workflow" and "Planning" sections.
+> **Keep this page current.** When a change alters a tool, a role kind, a gate, or the order of steps, update the charts and tables in the same pull request. The code wins over this page: `src/plan/planLifecycle.ts`, `src/runtime/delegation.ts`, `src/core/roles.ts`, `src/core/roleRules.ts`, and the README "Workflow" and "Planning" sections.
 
 ## Chart
 

@@ -118,11 +118,11 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 
 ### Chief configuration (`bb.agents.configure`, Chief branch)
 
-- A row in state `complete`, `archived` or `deleted` gets no tools and no skills.
+- A row in state `complete`, `archived` or `deleted` gets no tools.
 - The base list is `chief_consult`, `chief_spawn`, `chief_forge_init`, `chief_delegate`, `chief_roster`, `chief_inspect`, `chief_continue`, `chief_stop`, `chief_review`, `chief_complete`, `chief_owner_approval`, `chief_skip_specs`, `chief_escalate` and `chief_sync`.
 - The list adds `chief_plan` when planning is on, and `chief_research` when research is on.
 - A plain Chief also gets `chief_coordinate` and `chief_attach`. A plain Chief has 18 tools with planning and research on. A child Chief has 16. A Coordinator has 3.
-- The skills are `["chief"]`.
+- The skills are `[]`. Reason: the Chief procedure arrives in the instructions.
 - The instructions hold the greeting, then the preload line for `claude-code`, then the Chief rules. The project rules come last. Reason: the SDK cuts instructions at 32,768 characters.
 - The preload line is `select:` followed by the exact `mcp__bb-bridge__` names of the row's tools, in the host's selected order.
 
@@ -239,11 +239,13 @@ Each contract has an identifier. Tests and reviews cite it.
 
 ### COORD-9 Configure
 
-| Row | Tools | Skills | Preload names |
-| --- | --- | --- | --- |
-| Coordinator | `chief_roster`, `chief_spawn`, `chief_attach` | none | 3 |
-| Plain Chief | The base list plus `chief_coordinate` and `chief_attach` | `chief`, `coordinator` | Tool count (18 with planning and research on) |
-| Child Chief | The base list | `chief` | Tool count (16 with planning and research on) |
+| Row | Tools | Preload names |
+| --- | --- | --- |
+| Coordinator | `chief_roster`, `chief_spawn`, `chief_attach` | 3 |
+| Plain Chief | The base list plus `chief_coordinate` and `chief_attach` | Tool count (18 with planning and research on) |
+| Child Chief | The base list | Tool count (16 with planning and research on) |
+
+Every row gets `skills: []`. The `coordinator` skill no longer exists. The `chief_coordinate` description in `src/tools/coordinate.ts` holds the upgrade steps: pass the goal verbatim, on a refusal tell the owner and do not retry, and on success call `chief_roster` then ask which Chiefs to attach.
 
 - The Coordinator greeting states that the Coordinator supervises child Chiefs in any project, not managed threads.
 - The Coordinator instructions replace the Chief rules. They state that the Coordinator never edits code, never plans, delegates, reviews or completes, and attaches only Chiefs that the owner names.

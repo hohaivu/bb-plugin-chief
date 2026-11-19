@@ -45,11 +45,13 @@ The review engine decides how a Chief-managed worker reviewer forms its verdict 
 
 This section describes the behaviour of the code at commit 6638ef5, before the engine. The `reviewer` engine keeps it unchanged.
 
-Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` in `src/review/reviewStart.ts`. `REVIEW_ONLY` in `src/core/roles.ts`. The `bb.settings.define` block and the `createReviewStart` call in `server.ts`. The reviewer rule in `skills/chief-role-reviewer/SKILL.md`. `checkReport` in `src/report/reportIntake.ts` and `reportFinding` in `server.ts`, for the finding limits only.
+Code paths: `reviewerPrompt`, `reviewBrief`, `startReview`, `startBranchReview` in `src/review/reviewStart.ts`. `REVIEW_ONLY` in `src/core/roles.ts`. The `bb.settings.define` block and the `createReviewStart` call in `server.ts`. `checkReport` in `src/report/reportIntake.ts` and `reportFinding` in `server.ts`, for the finding limits only.
 
 ### Reviewer prompt
 
-`reviewerPrompt` builds one prompt for a worker's reviewer and for a branch reviewer.
+`reviewerPrompt` builds one prompt for a worker's reviewer and for a branch reviewer. It holds the reviewer rules, such as the gate role and the doc-text tests. The reviewer loads no skill. `prAgent.ts` no longer restates the rule that a reviewer runs no checks.
+
+CHANGED: the docs ownership rule (the `Chief-Spec-Writer` trailer) and the line that orders a read of `review-context.md` come from the brief (`reviewBrief`), not from `reviewerPrompt`.
 
 - Invariant rules come first. Reason: the prefix caches.
 - The first rule is `REVIEW_ONLY`: the reviewer does not create, modify, delete, commit, or push tracked files. A repair goes back to the worker.

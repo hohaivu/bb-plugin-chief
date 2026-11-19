@@ -1,5 +1,7 @@
 # Brief rules live in role skills
 
+Superseded by [Role rules live in instructions](2026-11-19-role-rules-in-instructions.md).
+
 ## Context
 
 Every brief repeated the same working contract, git workflow and fold steps. One plan spent about 55,000 characters on this text. The skills of each role held most of the same rules.

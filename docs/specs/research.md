@@ -27,7 +27,7 @@ The research domain lets Chief start a read-only researcher thread for one ticke
 | `chief_research` | `src/tools/research.ts` | Registers the tool and its description. |
 | `createResearch`, `research` | `src/research/research.ts` | Check the caller and write the research call row. |
 | `startResearcher` | `src/research/research.ts` | Check the model, cooldown, quota and checkout, then spawn the researcher. |
-| `researcherBrief` | `src/research/research.ts` | Build the researcher's prompt. |
+| `researcherBrief` | `src/research/research.ts` | Build the researcher's prompt. It keeps stage text. The read-only rule and the no-ask rule come from the researcher's instructions. |
 | `researcherNextLine` | `src/research/research.ts` | Give the Next line of a design researcher's alert and roster row. |
 | `nextAction` | `src/runtime/nextAction.ts` | Choose the Next line of each alert and roster row. It calls `researcherNextLine` first for a researcher. |
 | `reserveReport`, `syncLive` | `src/db/threadStore.ts` | Store `waiting_on_user` with each report and with each live state. |
@@ -59,8 +59,8 @@ The first failing check decides the refusal.
 | Caller | Outcome |
 | --- | --- |
 | Active registered Chief, research on | Allowed. |
-| Finished Chief (state `complete`, `archived` or `deleted`) | Refused: `chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads (chief-role-read-only skill).` |
-| Planner, researcher, worker, reviewer, advisor or unmanaged thread | Refused: `chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads (chief-role-read-only skill).` |
+| Finished Chief (state `complete`, `archived` or `deleted`) | Refused: `chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads.` |
+| Planner, researcher, worker, reviewer, advisor or unmanaged thread | Refused: `chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads.` |
 | Research switched off (`researchEnabled` is off) | Refused: the research switch is off. |
 
 ### Researcher model
