@@ -6,10 +6,10 @@ BB waits 5 seconds for a plugin service to settle after an abort. If the service
 
 ## Decision
 
-The supervisor waits 3 seconds after an abort. It then abandons a tick that still runs. An abandoned tick starts no further step, and only its in-flight call may finish.
+The supervisor waits 3 seconds after an abort. It then abandons a tick that still runs. An abandoned tick starts no further top-level step, reconcile row, stall or orphan iteration, or alert delivery. An alert send in flight ends its wait at once.
 
 ## Consequence
 
-- An abandoned in-flight alert send may finish after the next generation loads. Its database write then fails, because BB closes the database.
-- Alert sends already tolerate this. Attempts are counted before the send, and retries check a marker.
-- Generations already overlap during reload, so this adds no new cross-generation race.
+- An abandoned alert send may still reach its target. Its last error becomes `abandoned`. The next retry checks the target for the marker before it sends again.
+- Generations already overlap during reload, because BB runs the new factory before it disposes the old one. This adds no new cross-generation race.
+- `sweep()` and `observeCleanup()` take no stop check. An abandoned tick can still start their later reads.

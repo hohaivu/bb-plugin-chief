@@ -106,20 +106,6 @@ At base, no Coordinator exists. Every Chief is independent. This section describ
 - `reconcileThread` reads the live thread. It records a deleted or archived thread. It moves the thread to the Chief section. It syncs the row state and status with the live thread.
 - An unchanged row causes no write and no reload. A changed row writes through `store.syncLive`, which reloads the store and starts the sweep.
 
-### Supervisor stop (`registerLifecycle`, service `supervisor`)
-
-- On abort, the supervisor service settles within `STOP_GRACE_MS`, which is 3 seconds.
-- Reason: BB marks the plugin `degraded (service supervisor did not stop)` when a service has not settled 5 seconds after the abort.
-- A tick that finishes within the grace runs every step to its end, in the same order.
-- A tick still running after the grace is abandoned.
-- An abandoned tick starts no further step, loop iteration, reconciled row or alert delivery.
-- Only the call already in flight may complete after abandonment.
-- Reason: BB refuses to load a new generation until the old run settles, so the `chief_*` tools disappear.
-- `reconcile(stopped?)` in `src/runtime/lifecycle.ts` and `retryAlerts(stopped?)` in `src/runtime/alerts.ts` accept an optional stop check.
-- When the stop check returns true, each serial loop ends early.
-- A caller that passes no argument sees no change.
-- Decision: [Abandon a stuck tick after a grace](../decisions/2026-11-19-supervisor-abandon-tick-after-grace.md).
-
 ### Alerts (`writeAlert`, `insertAlert`, `deliverAlert`)
 
 - `writeAlert` takes a managed row with a `chief_thread_id`. The key is `<kind>:<detail>`. The dedupe key is `<source thread id>:<key>`.
@@ -358,6 +344,25 @@ Every row gets `skills: []`. The `coordinator` skill no longer exists. The `chie
 - For stalled alerts, work going busy, a new need-you arrival, new child activity, or a turn change settles the alert as stale.
 - `stillDue` does not invalidate an ended receipt. This exemption does not override target restrictions, backoff or the attempt cap.
 - A legacy need-you row (`<child>:coordinator-need-you:<sha12>`) remains due as long as the child remains linked to the same live Coordinator.
+
+### COORD-12b Supervisor stop
+
+The supervisor is the plugin service that reconciles managed rows, sends the problem alerts of COORD-12 and retries the alert outbox. This contract keeps the service within BB's stop window.
+
+- On abort, the supervisor `start()` promise settles within `STOP_GRACE_MS`, which is 3 seconds.
+- Reason: BB marks the plugin `degraded (service supervisor did not stop)` when a service has not settled 5 seconds after the abort.
+- BB then refuses to load the new generation, so the `chief_*` tools disappear.
+- A tick that finishes within the grace runs every step to its end, in the same order.
+- A tick still running after the grace is abandoned.
+- An abandoned tick starts no further top-level step.
+- An abandoned tick starts no further reconcile row, `readRules` call, stall or orphan iteration, or alert delivery.
+- An alert send in flight at abandonment ends its wait at once. Its last error becomes `abandoned`.
+- The abandoned send may still reach its target. The next retry checks the target for the alert marker before it sends again.
+- `reconcile` takes an optional stop check. `retryAlerts` takes an optional `AbortSignal`.
+- Both end their serial loops when the stop is requested. `bounded` in `src/runtime/exec.ts` ends its race when the signal aborts.
+- A caller that passes no argument sees no change.
+- `sweep()` and `observeCleanup()` take no stop check. An abandoned tick can still start their later reads. Reason: not stated in the code.
+- Decision: [Abandon a stuck supervisor tick after a grace](../decisions/2026-11-19-supervisor-abandon-tick-after-grace.md).
 
 ### COORD-13 Notices to children
 
