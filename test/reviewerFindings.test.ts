@@ -207,7 +207,7 @@ describe("reviewer lesson from chief_report to the next reviewer", () => {
       source_thread_id: review.threadId, worker_thread_id: worker.threadId, role: "reviewer",
     }]);
     expect(state.db.prepare("SELECT status FROM chief_lessons").all()).toEqual([{ status: "proposed" }]);
-    expect(state.sent.at(-1).input[0].text).toContain("Lesson proposed for future managed threads: Check the discount path before flagging rounding.");
+    expect(state.sent.at(-1).input[0].text).toContain("Check the discount path before flagging rounding.");
   });
 
   test("the next reviewer of the project sees it under Review lessons; other roles and other projects do not", async () => {

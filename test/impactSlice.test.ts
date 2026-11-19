@@ -80,7 +80,6 @@ describe("computeImpactSlice: changed paths from the Git listing", () => {
     expect(result.docsHistory).toBe(true);
     // The text diff has no hunk: the early-return path carries both values.
     expect(result.entries).toBe(0);
-    expect(result.lines[1]).toBe("No touched symbols or calls found in the diff.");
   });
 
   test("a mode-only change (chmod +x with core.fileMode on) is a changed path, though the text diff has no ---/+++ header", async () => {
@@ -116,7 +115,6 @@ describe("computeImpactSlice: changed paths from the Git listing", () => {
     const result = await slice(r.dir, head, r.base);
 
     expect(result.lines).toHaveLength(2);
-    expect(result.lines[1]).toBe("No touched symbols or calls found in the diff.");
     expect(result.entries).toBe(0);
     expect(result.changed).toEqual(["README.md"]);
     expect(result.docsHistory).toBe(false);

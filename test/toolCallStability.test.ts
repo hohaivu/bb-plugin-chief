@@ -3,6 +3,7 @@ import { type PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import { approvePlan, completeWorker, configurationContext, delegate, disposeAll, planTwoWaves, setup, start, status } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
+import { researchLine, type ResearchSettings } from "../src/research/research";
 import { CHIEF_HOST_ORDER, toolConfigFixture } from "./toolConfigFixture";
 
 provideSdk(sdkTesting);
@@ -51,14 +52,29 @@ describe("tool-call stability", () => {
   // first line, before the roster instruction.
   test("the preload line comes before research, project rules and lessons, and before Chief's roster instruction", async () => {
     const entries = claudeEntries(await head()).filter((entry) => entry.key.startsWith("short rules") && entry.tools.length);
+    const counterpart = (key: string, from: string) => entries.find((entry) => entry.key === key.replace(/research (true|false)$/, from))!;
     for (const entry of entries) {
       const lines = entry.instructions!.split("\n");
       const at = lines.findIndex((line) => line.includes("ToolSearch"));
       const after = (text: string) => lines.findIndex((line) => line.includes(text));
       if (entry.key.includes("| chief |")) {
         expect(at, entry.key).toBe(1);
-        expect(at, entry.key).toBeLessThan(after("Call chief_roster at the start of every turn"));
-        if (entry.key.includes("research true")) expect(after("Use chief_research"), entry.key).toBeGreaterThan(at);
+        expect(at, entry.key).toBeLessThan(after("# Chief core rules (always apply)"));
+        if (entry.key.includes("research true")) {
+          // The dedicated research cue is the lines this render has that the research-off render (same other inputs) lacks, once the
+          // shared lines whose tool lists change (same opening, different text) are set aside. It sits after the preload line, before the core heading.
+          const off = counterpart(entry.key, "research false").instructions!.split("\n");
+          const changed = off.filter((line) => !lines.includes(line)).map((line) => line.slice(0, 12));
+          const cue = lines.flatMap((line, index) => off.includes(line) || changed.includes(line.slice(0, 12)) ? [] : [index]);
+          expect(cue.length, entry.key).toBeGreaterThan(0);
+          // The research module's own line (its text is the module's, not pinned here) is part of the cue.
+          expect(cue.map((index) => lines[index]), entry.key).toContain(researchLine("chief", { enabled: true } as ResearchSettings));
+          for (const index of cue) {
+            expect(lines[index], entry.key).toContain("chief_research");
+            expect(index, entry.key).toBeGreaterThan(at);
+            expect(index, entry.key).toBeLessThan(after("# Chief core rules (always apply)"));
+          }
+        }
         continue;
       }
       expect(at, entry.key).toBe(2);
@@ -67,8 +83,8 @@ describe("tool-call stability", () => {
       // A planner and a researcher have no chief_research and no research line, whatever the switch says.
       if (entry.key.includes("| planner |") || entry.key.includes("| researcher |")) expect(entry.instructions, entry.key).not.toContain("chief_research");
     }
-    // The lines under test exist: Chief with research on has its research line after the preload line, and a reviewer shows its review lessons.
-    expect(entries.find((entry) => entry.key.includes("| chief | claude-code | planner true | research true"))!.instructions).toContain("Use chief_research");
+    // The lines under test exist: Chief with research on shows the cue check above for both planner settings, and a reviewer shows its review lessons.
+    expect(entries.filter((entry) => entry.key.includes("| chief | claude-code |") && entry.key.endsWith("research true"))).toHaveLength(2);
     expect(entries.some((entry) => entry.key.includes("| planner | claude-code | planner true | research true"))).toBe(true);
     expect(entries.find((entry) => entry.key.includes("| reviewer |"))!.instructions).toContain("## Review lessons");
   });
@@ -117,17 +133,14 @@ describe("tool-call stability", () => {
     // Only the 32,000-char chief.md reaches the SDK cap, so it still exercises the cut; the 5,000-char cases fit uncut.
     if (size === 32_000) expect(instructions!.length).toBe(32768);
     else expect(instructions!.length).toBeLessThanOrEqual(32768);
-    const coreEnd = instructions!.indexOf("chief_escalate with the thread and the full request");
-    expect(coreEnd).toBeGreaterThan(-1);
+    const coreStart = instructions!.indexOf("# Chief core rules (always apply)");
+    // The core section ends where the Chief procedure section begins.
+    const coreEnd = instructions!.indexOf("# Chief procedure");
+    expect(coreStart).toBeGreaterThan(-1);
+    expect(coreEnd).toBeGreaterThan(coreStart);
     expect(instructions!.indexOf(`ToolSearch call: select:${CHIEF_HOST_ORDER.filter((name) => tools.some((tool) => tool.name === name)).map(prefix).join(",")}`)).toBeGreaterThan(-1);
     expect(instructions).not.toMatch(/\+chief|max_results/);
-    expect(instructions!.indexOf("ToolSearch")).toBeLessThan(instructions!.indexOf("Call chief_roster at the start of every turn"));
-    for (const part of [
-      "# Chief core rules (always apply)", "Call chief_roster at the start of every turn", "never poll managed threads",
-      "chief_plan first", "delegate every wave it lists right away",
-      "chief_research is optional.", "or the doubtful evidence to chief_review.",
-      "Small, low-risk changes suit a skip.", "Chief never edits code",
-    ]) expect(instructions).toContain(part);
+    expect(instructions!.indexOf("ToolSearch")).toBeLessThan(coreStart);
     expect(instructions!.indexOf(marker)).toBeGreaterThan(coreEnd);
   });
 

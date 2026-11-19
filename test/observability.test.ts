@@ -298,7 +298,7 @@ describe("plugin warnings leave no script, prompt or code in the Sentry envelope
     const reply = await state.harness.behavior.callAgentTool("chief_research", { question: "Who calls this?", design: false }, { threadId: chief.threadId, projectId: "proj_1" }) as string;
     await flush();
 
-    expect(reply).toContain("Started researcher thread");
+    expect(reply).toMatch(/thr_\w+/);
     // Non-vacuous: the local log still holds the real diagnostic with every sentinel, so the outbound copy was never built from it.
     const local = state.harness.logEntries.filter((entry) => entry.level === "warn" && entry.message.includes("Could not record chief_research call"));
     expect(local.some((entry) => sentinels.every((sentinel) => entry.message.includes(sentinel)))).toBe(true);

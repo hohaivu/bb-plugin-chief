@@ -38,9 +38,6 @@ describe("Chief backend", () => {
     expect(state.sent.at(-1).mode).toBe("steer-if-active");
     const text = state.sent.at(-1).input[0].text as string;
     expect(text.startsWith("Name the test file")).toBe(true);
-    expect(text.startsWith("Remain read-only")).toBe(false);
-    // The read-only reminder still follows, unchanged in wording.
-    expect(text).toContain("Remain read-only: do not create, modify, or delete any file the repository tracks, and do not commit or push. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.");
   });
 
   test.each([

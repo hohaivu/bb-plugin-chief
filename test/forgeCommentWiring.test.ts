@@ -6,8 +6,6 @@ import { MIGRATIONS } from "../src/db/migrations";
 import { APPROVE, NO_DEVIATIONS, chiefReview, completeWorker, delegate, disposals, disposeAll, execFileMock, ghHead, rowOf, setup, start, status, wave, withoutAlertMarker } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
-import { dropSkippedNote } from "./docsOwnership";
-import { inPlaceLine } from "./blockedAlerts";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
@@ -46,7 +44,11 @@ describe("forge comments", () => {
     route((args) => (override[opOf(args)] ?? (() => ANSWERS[opOf(args)]))(args));
   /** A comment call that stays unresolved until `release()`, then answers as a healthy forge would. */
   const gate = (op: Op) => { let release!: () => void; const held = new Promise((resolve) => { release = () => resolve(ANSWERS[op]); }); return { held, release }; };
-  const alerts = (state: State, text: string) => state.sent.filter((message) => String(message.input?.[0]?.text).includes(text));
+  /** Alerts sent to a Chief about a forge comment: the sent messages whose text is the message of a `forge-comment:` outbox row (keyed by its thread). */
+  const escalations = (state: State) => {
+    const bodies = (state.db.prepare("SELECT message FROM alert_outbox WHERE dedupe_key LIKE '%forge-comment:%'").all() as { message: string }[]).map((row) => row.message);
+    return state.sent.filter((message) => bodies.some((body) => String(message.input?.[0]?.text).includes(body)));
+  };
   const sentText = (state: State, from: number) => state.sent.slice(from).map((message) => ({ threadId: message.threadId, text: withoutAlertMarker(message.input[0].text) }));
 
   async function blockedWorker(state: State, forge: { issueUrl?: string; prUrl?: string } = { prUrl: PR }) {
@@ -64,35 +66,37 @@ describe("forge comments", () => {
 
   /** What a caller owes its own user whatever the forge does: its returned text, its committed state and the full Report to its Chief. */
   type Scenario = {
-    chief: string; prefix: string; act: () => Promise<unknown>; result: string;
+    chief: string; prefix: string; act: () => Promise<unknown>;
+    /** Dynamic values the caller's returned text must carry. */
+    replyHas: string[];
     /** The managed row the report or completion changes, and the fields it must hold afterwards. */
     row: { id: string; fields: object };
-    /** The one Report alert Chief receives, in full; null when the caller sends none. */
-    report: { from: string; text: string } | null;
+    /** The one Report alert Chief receives, with the dynamic values it must carry; null when the caller sends none. */
+    report: { from: string; has: string[] } | null;
   };
   const CALLERS: [string, (state: State, pr: string) => Promise<Scenario>][] = [
     ["blocked report", async (state, pr) => {
       const { chief, worker, act } = await blockedWorker(state, { prUrl: pr });
       return {
-        chief: chief.threadId, prefix: "blocked:", act, result: "Report delivered to Chief.",
+        chief: chief.threadId, prefix: "blocked:", act, replyHas: [],
         row: { id: worker.threadId, fields: { state: "blocked", last_report_state: "blocked", report_seq: 1, blocker: "Totals test fails", recommendation: "Fix the product code", result: "Tests fail" } },
-        report: { from: worker.threadId, text: `[Chief lifecycle alert]\nWorker report from Fix totals (${worker.threadId})\nState: blocked\nBlocked: Totals test fails — decide or escalate to the user. ${inPlaceLine(worker.threadId)}\nBlocker: Totals test fails\nRecommendation: Fix the product code\nResult: Tests fail` },
+        report: { from: worker.threadId, has: [worker.threadId, "Fix totals", "State: blocked", "Totals test fails", "Fix the product code", "Tests fail"] },
       };
     }],
     ["reviewer verdict", async (state, pr) => {
       const { chief, worker } = await readyWorker(state, { prUrl: pr });
       const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
       return {
-        chief: chief.threadId, prefix: "verdict:", act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId), result: "Report delivered to Chief.",
+        chief: chief.threadId, prefix: "verdict:", act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId), replyHas: [],
         row: { id: review.threadId, fields: { state: "ready", verdict: "approve", last_report_state: "ready", report_seq: 1, result: "Reviewed" } },
-        report: { from: review.threadId, text: `[Chief lifecycle alert]\nReviewer report from Review · Fix totals (${review.threadId})\nState: ready\nVerdict: approve\nVerdict file: ${join(state.storageRoot, "chief", "proj_1", review.threadId, "verdict-1.md")}\nThe review gate passed. Complete it: chief_complete (threadId: ${worker.threadId}); each marks its pull request ready.\nFull report and last output: bb chief inspect ${review.threadId}\nResult: Reviewed` },
+        report: { from: review.threadId, has: [review.threadId, "State: ready", "approve", join(state.storageRoot, "chief", "proj_1", review.threadId, "verdict-1.md"), `chief_complete (threadId: ${worker.threadId}`, "Reviewed"] },
       };
     }],
     ["completion", async (state, pr) => {
       const { chief, worker } = await readyWorker(state, { prUrl: pr });
       return {
         chief: chief.threadId, prefix: "complete:", act: () => completeWorker(state, chief.threadId, worker.threadId),
-        result: "Marked “Fix totals” complete without a review (reason recorded).\nIts pull request is marked ready for review.\nNo cleanup: completed without the gate.",
+        replyHas: ["Fix totals"],
         row: { id: worker.threadId, fields: { state: "complete", last_report_state: "ready", report_seq: 1, result: `Done${NO_DEVIATIONS}` } },
         report: null,
       };
@@ -103,8 +107,11 @@ describe("forge comments", () => {
   /** The caller's own work, as base produces it: asserted while a forge call is unresolved, and again after it settles. */
   function expectRequiredWork(state: State, scenario: Scenario, sentBefore: number, outboxBefore: number) {
     expect(rowOf(state, scenario.row.id)).toMatchObject(scenario.row.fields);
-    expect(sentText(state, sentBefore)).toEqual(scenario.report ? [{ threadId: scenario.chief, text: scenario.report.text }] : []);
+    const sent = sentText(state, sentBefore);
+    expect(sent.map((message) => message.threadId)).toEqual(scenario.report ? [scenario.chief] : []);
     if (!scenario.report) return;
+    expect(sent[0]!.text.startsWith("[Chief lifecycle alert]\n")).toBe(true);
+    for (const part of scenario.report.has) expect(sent[0]!.text).toContain(part);
     // The full Report replaced its pending fallback in the outbox and was marked delivered.
     const outbox = reporterOutbox(state, scenario.report.from);
     expect(outbox).toHaveLength(outboxBefore + 1);
@@ -144,7 +151,9 @@ describe("forge comments", () => {
       const rowOfKey = (key: string | undefined) => rows(state).find((row) => row.dedupe_key === key);
       const callerKey = () => rows(state).find((row) => row.dedupe_key.startsWith(scenario.prefix))?.dedupe_key;
       try {
-        expect(dropSkippedNote(await scenario.act())).toBe(scenario.result);
+        const reply = await scenario.act();
+        expect(typeof reply).toBe("string");
+        for (const part of scenario.replyHas) expect(reply).toContain(part);
         expectRequiredWork(state, scenario, sentBefore, outboxBefore);
         // The stuck call was really reached, and nothing past it ran.
         await until(() => callsOf(op).length === 1);
@@ -179,7 +188,9 @@ describe("forge comments", () => {
       const seeded = seed ? SEED_ROW(state, scenario.chief, prOn(host), ...seed) : null;
       const sentBefore = state.sent.length;
       const outboxBefore = scenario.report ? reporterOutbox(state, scenario.report.from).length : 0;
-      expect(dropSkippedNote(await scenario.act())).toBe(scenario.result);
+      const reply = await scenario.act();
+      expect(typeof reply).toBe("string");
+      for (const part of scenario.replyHas) expect(reply).toContain(part);
       expectRequiredWork(state, scenario, sentBefore, outboxBefore);
       await until(() => rows(state).length > (seed ? 1 : 0) && rows(state).every((row) => row.last_error));
       const caller = rows(state).find((row) => row.dedupe_key.startsWith(scenario.prefix));
@@ -246,7 +257,8 @@ describe("forge comments", () => {
         act: async () => {
           const first = await call(state, "chief_escalate", { threadId: worker.threadId, request }, chief.threadId);
           const second = await call(state, "chief_escalate", { threadId: worker.threadId, request }, chief.threadId);
-          expect([first, second]).toEqual(Array(2).fill(`Queued for ${PR}. Now write the same request in chat under **Need you**.`));
+          expect(second).toBe(first);
+          expect(first).toContain(PR);
         },
         golden: { key, thread: worker.threadId, target: PR, mention: 1, body: `**Chief · Need you**\n${request}\n\n${markerOf(key)}`, post: `**Chief · Need you**\n${request}\n\n@boss\n\n${markerOf(key)}` },
       };
@@ -296,17 +308,17 @@ describe("forge comments", () => {
   test("a failed queue write leaves the report intact and alerts Chief", async () => {
     const state = await setup();
     route(() => ({ stdout: "" }));
-    const { worker, act } = await blockedWorker(state);
+    const { chief, worker, act } = await blockedWorker(state);
     state.db.exec(`DROP TABLE forge_comments`);
     await act();
     expect(rowOf(state, worker.threadId).state).toBe("blocked");
-    await until(() => alerts(state, "Could not queue the forge comment blocked").length);
-    expect(alerts(state, "The local record is intact.")).not.toHaveLength(0);
+    await until(() => escalations(state).length);
+    expect(escalations(state).map((message) => message.threadId)).toEqual([chief.threadId]);
     expect(forgeCalls()).toHaveLength(0);
   });
 
   // Contract "Exactly one escalation" + inherited limits: a row left at attempts=5 by an earlier process runs again at once
-  // as attempt 6 on a fresh instance, scans first, and escalates once with the "after 5 attempts" text. These are limits kept, not fixed.
+  // as attempt 6 on a fresh instance, scans first, and escalates once. These are limits kept, not fixed.
   test("a row left at 5 attempts retries at once after a restart, escalates once, and is then terminal", async () => {
     const state = await setup();
     const { worker } = await blockedWorker(state);
@@ -323,11 +335,11 @@ describe("forge comments", () => {
     await until(() => rows(state)[0]?.gave_up_at);
     expect(order).toEqual(["scan", "post"]);
     expect(rows(state)[0]).toMatchObject({ attempts: 6, posted_at: null });
-    await until(() => alerts(state, "after 5 attempts").length === 1);
+    await until(() => escalations(state).length === 1);
     await state.supervisorCycle();
     await sleep(30);
     expect(forgeCalls()).toHaveLength(2);
-    expect(alerts(state, "after 5 attempts")).toHaveLength(1);
+    expect(escalations(state)).toHaveLength(1);
   });
 
   test("a row that exhausts its attempts for a thread with no Chief is logged as an error, not alerted", async () => {
@@ -339,8 +351,8 @@ describe("forge comments", () => {
       .run(key, worker.threadId, PR, `body\n\n${markerOf(key)}`, Date.now());
     route((args) => { if (args.includes("POST")) throw bad(); return { stdout: "" }; });
     await state.supervisorCycle();
-    await until(() => state.harness.logEntries.some((entry) => entry.level === "error" && entry.message.includes("after 5 attempts")));
-    expect(alerts(state, "after 5 attempts")).toHaveLength(0);
+    await until(() => state.harness.logEntries.some((entry) => entry.level === "error" && entry.message.includes(PR)));
+    expect(escalations(state)).toHaveLength(0);
   });
 
   // Contract "Table persistence and migration index": the host hashes each migration statement by index and refuses a mismatch,

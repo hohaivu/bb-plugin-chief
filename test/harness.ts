@@ -1,12 +1,12 @@
 import { access, mkdir, mkdtemp, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { expect, test, vi } from "vitest";
 import { type PluginAgentConfigurationContext } from "@get-bb/plugin-sdk";
 import plugin from "../server";
 import { MIGRATIONS } from "../src/db/migrations";
 import { managedSkills } from "../src/core/roles";
+import { reviewBrief } from "../src/review/reviewStart";
 import { sdk } from "./sdk";
 import { execFileMock } from "./execMock";
 export { execFileMock };
@@ -18,39 +18,27 @@ export const AGENT_SKILL_IDS = ["chief", "coordinator", "chief-worker", "chief-r
 export const HEAD_SHA = "a".repeat(40);
 export const ghHead = (branch: string) => JSON.stringify({ headRefName: branch, headRefOid: HEAD_SHA, baseRefName: "main" });
 
-// Base oracles in test/fixtures/ predate the make-native lines. Expected text = the base oracle with exactly one line spliced in
-// after each anchor line; every other byte stays the base's, so a changed, moved or doubled line fails the exact compare.
-// The inserted lines are copied from wave 1's plan, not from the implementation.
-export const REVIEWER_ANCHOR = "Classify the change, then check it by type:";
-export const REVIEWER_NATIVE_LINE = "Native-design check, for feature work only (never a bug fix, nor a refactor or migration on its own; in a mixed change, only its feature part): look for these smells on lines the diff introduced: an alias that re-derives a value an existing function or field already returns; an `if (newKind)` branch in code that already dispatches on kind; a new file or component that mirrors an existing one for one variant; a new flag, option or boolean that duplicates what a type already encodes; a validation or download path beside the shared one; a test whose only purpose is \"nothing else changed\" (a test that proves a listed equivalence or preservation contract is not one); a second system for a concern that already has one (a counter, logger, retry helper, config reader, …). Report each as a finding whose message names, at file:line, the existing value, dispatch, component, type or system it duplicates, and whose fix folds the feature into it. Genuinely different behaviour is not a smell. A smell is a nit unless a listed contract rules it out (a reshape wave's contracts do); then it is an unmet contract. A reshape commit belongs to its feature: judge the feature and its reshape together as one feature against the plan's contracts, not the reshape commit as a refactor with the base commit as the oracle.";
-export const PLANNER_ANCHOR = "- Workers never write or run tests: implementation waves hold no test work.";
-export const RESHAPE_CHECKLIST_LINE = "- A big feature (3+ modules or 10+ files of new behaviour) whose chain has no reshape wave before its test wave, a reshape wave on a bug fix, refactor or smaller change, or a reshape wave that writes or runs tests.";
-// The design-wave plan changes one planner sentence and adds one advisor checklist line; the new text is copied from that plan, the old text from the base oracle.
-export const PLANNER_OLD_COMPLEX_TAIL = "A plan with more than one implementation wave gets one advisor review either way; test waves do not count.";
-export const PLANNER_NEW_COMPLEX_TAIL = "A plan with more than one implementation wave gets one advisor review either way; design and test waves do not count.";
-export const TEST_WAVE_CHECKLIST_LINE = "- A chain without a final test wave, or test work inside an implementation wave.";
-export const DESIGN_CHECKLIST_LINE = "- UI whose look no approved design or explicit visual spec fixes with no `design: true` wave before the wave that builds it, or app code inside a design wave.";
-/** Base oracle text with `from` replaced by `to` exactly `expectedCount` times. */
-export const replaceText = (base: string, from: string, to: string, expectedCount: number) => {
-  const parts = base.split(from);
-  expect(parts.length - 1).toBe(expectedCount);
-  return parts.join(to);
+/** The native-design line a reviewer prompt renders for feature work, with and without reshape: the line each render adds to the feature:false render of the same input. */
+export const nativeLines = () => {
+  const target = { threadId: "thr_a", title: "Task", prUrl: null, branch: "feature/a", reportSeq: 1, hasResult: true, reportPath: "/r/a.md", head: null };
+  const render = (feature: boolean, reshape: boolean) => reviewBrief({
+    worker: { ...target, kind: null, brief: null, reported: "Done" }, targets: [target], wavePaths: [], chain: [], contractLines: [], recordedLines: [],
+    previous: null, chiefThreadId: "thr_c", contextPath: null, feature, reshape,
+  }).prompt.split("\n");
+  const none = render(false, false);
+  const added = (lines: string[]) => {
+    const extra = lines.filter((line) => !none.includes(line));
+    if (extra.length !== 1) throw new Error(`expected one native line, got ${extra.length}`);
+    return extra[0]!;
+  };
+  return { full: added(render(true, true)), noReshape: added(render(true, false)) };
 };
-/** Base oracle text with `line` inserted after every line that starts with `anchor`; fails when no anchor line exists. */
-export const spliceAfter = (base: string, anchor: string, line: string, expectedCount: number) => {
-  let count = 0;
-  const out = base.split("\n").flatMap((l) => l.startsWith(anchor) ? (count += 1, [l, line]) : [l]).join("\n");
-  expect(count).toBe(expectedCount);
-  return out;
-};
-export const withReviewerLine = (base: string, count = 1) => spliceAfter(base, REVIEWER_ANCHOR, REVIEWER_NATIVE_LINE, count);
 /** Every stored alert ends with `[alert <10 hex>]` (COORD-11). Returns the text before that line and throws when the marker is missing, so an oracle comparing alert text still proves the marker. */
 export const withoutAlertMarker = (text: string) => {
   const marker = /\n\[alert [0-9a-f]{10}\]$/;
   if (!marker.test(text)) throw new Error(`alert has no trailing marker: ${text.slice(-80)}`);
   return text.replace(marker, "");
 };
-export const snapshotText = (name: string) => readFile(join(dirname(fileURLToPath(import.meta.url)), "fixtures", name), "utf8");
 
 /** Moves the wall clock forward: a failed alert waits 30 s before its first retry (COORD-11). disposeAll restores the real clock. */
 export const elapse = (ms: number) => vi.setSystemTime(Date.now() + ms);
@@ -461,14 +449,12 @@ export async function chiefReview(state: Awaited<ReturnType<typeof setup>>, chie
 export const reviewContextOf = async (state: { spawned: { prompt?: string }[] }, reviewerThreadId: string) => {
   // The reviewer's prompt names the absolute path the context was written to before the launch (thr_<n> is the n-th spawn).
   const prompt = state.spawned[Number(reviewerThreadId.slice("thr_".length)) - 1]?.prompt ?? "";
-  const path = /Read `([^`]+review-context\.md)` in full before reviewing/.exec(prompt)?.[1];
+  const path = /`([^`]+review-context\.md)`/.exec(prompt)?.[1];
   if (!path) throw new Error(`the prompt of ${reviewerThreadId} names no review-context.md`);
   return readFile(path, "utf8");
 };
 export const latestReviewContext = async (state: Awaited<ReturnType<typeof setup>>) =>
   reviewContextOf(state, (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId);
-/** The Pending line a ready worker shows until Chief opens its review gate; the roster and the lifecycle alert carry it word for word. */
-export const readyAction = (id: string) => `Start the review gate: chief_review (workerThreadId: ${id}). It starts one reviewer.`;
 export const APPROVE = { verdict: "approve", findings: [] } as const;
 export const REQUEST_CHANGES = { verdict: "request_changes", findings: [{ file: "totals.ts", line: 1, severity: "blocking", message: "Totals go negative." }] } as const;
 

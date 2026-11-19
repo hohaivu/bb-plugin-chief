@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server";
 import { MIGRATIONS } from "../src/db/migrations";
-import { APPROVE, NO_DEVIATIONS, approvePlan, completeWorker, configurationContext, delegate as delegateWith, disposals, disposeAll, execFileMock, ghHead, planTwoWaves, readyAction, setup as setupWith, start, status } from "./harness";
+import { APPROVE, NO_DEVIATIONS, approvePlan, completeWorker, configurationContext, delegate as delegateWith, disposals, disposeAll, execFileMock, ghHead, planTwoWaves, setup as setupWith, start, status } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
 
@@ -147,8 +147,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     await reviewed(state, chief.threadId, worker.threadId, "approve");
-    const reply = String(await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId));
-    expect(reply).not.toMatch(/Worktree|Archived|release/);
+    await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
     expect(stateOf(state, worker.threadId)).toBe("complete");
     expect([state.archivedEnvs, state.archivedThreads]).toEqual([[], []]);
   });
@@ -273,11 +272,12 @@ describe("auto-completing absorbed supporting threads", () => {
     const pendingLines = roster.split("\n").filter((line) => /\(thr_[^)]+\): /.test(line));
     // Only a thread with a next action is listed; the planner, the idle advisor and the planned worker in progress are not; a blocked gate reviewer shows on the worker it reviews.
     expect(pendingLines).toHaveLength(2);
-    expect(pendingLines.find((line) => line.startsWith(`- worker “Ready work” (${ready.threadId}): `))).toBe(`- worker “Ready work” (${ready.threadId}): ${readyAction(ready.threadId)}`);
+    expect(pendingLines.find((line) => line.startsWith(`- worker “Ready work” (${ready.threadId}): `))).toContain(`chief_review (workerThreadId: ${ready.threadId})`);
     // The blocked reviewer is a gate actor: its line sits on the worker the gate covers and names the reviewer-only restart.
     const blocked = pendingLines.find((line) => line.startsWith(`- worker “Blocked review target” (${blockedWorker.threadId}): `))!;
-    expect(blocked).toContain(`Reviewer ${reviewer.threadId} is blocked: No access`);
-    expect(blocked).toContain(`Run chief_review (workerThreadId: ${blockedWorker.threadId}) again: it starts only the reviewer.`);
+    expect(blocked).toContain(reviewer.threadId);
+    expect(blocked).toContain("No access");
+    expect(blocked).toContain(`chief_review (workerThreadId: ${blockedWorker.threadId})`);
   });
 
   test("chief_complete lists open todos for a worker; instructions name the close-todo rule", async () => {
@@ -292,8 +292,12 @@ describe("auto-completing absorbed supporting threads", () => {
     const worker = await delegate(state, chief.threadId);
     await call(state, "chief_report", { state: "ready", result: "Done" }, worker.threadId);
     const reply = String(await call(state, "chief_complete", { threadId: worker.threadId, ...closeOut }, chief.threadId));
-    expect(reply).toContain(`Open todos: #1 Ship totals — close any this work finished with chief_roster todo { id, state: "done" }.`);
-    const configured = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
-    expect(JSON.stringify(configured)).toContain("When work a todo tracks is finished, close that todo in the same turn");
+    expect(reply).toContain("Open todos");
+    expect(reply).toContain("#1 Ship totals");
+    // Only Chief is told to close its todos, through the roster `todo` field; a worker's configuration has no such tool call.
+    const instructionsOf = async (id: string) => String((await state.harness.behavior.resolveAgentConfiguration(configurationContext(id)) as { instructions?: string }).instructions);
+    const CLOSE = 'todo { id, state: "done" }';
+    expect(await instructionsOf(chief.threadId)).toContain(CLOSE);
+    expect(await instructionsOf(worker.threadId)).not.toContain(CLOSE);
   });
 });

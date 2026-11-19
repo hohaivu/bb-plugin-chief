@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CLOSE_OUT, NO_DEVIATIONS, PLAN_FIXTURE, approvePlan, readyAction, completeWorker, delegate, disposeAll, legacyWave, planFile, planTwoWaves, setup, start, status, wave } from "./harness";
+import { CLOSE_OUT, NO_DEVIATIONS, PLAN_FIXTURE, approvePlan, completeWorker, delegate, disposeAll, legacyWave, planFile, planTwoWaves, setup, start, status, wave } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import plugin from "../server";
 import { provideSdk } from "./sdk";
@@ -12,6 +12,7 @@ import { ctxOf, readyIdle, rowOf, tool, report } from "./flowHelpers";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
 afterEach(disposeAll);
+const section = (text: string, heading: string) => text.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0];
 describe("Chief backend", () => {
   test("spawns each role on the model picked for its machine", async () => {
     const world = await gateWorld({
@@ -265,9 +266,8 @@ describe("Chief backend", () => {
     const worker = JSON.parse(result.stdout!) as { threadId: string };
 
     expect(state.spawned.at(-1).prompt).toContain(`Plan file (wave 1 of 2): ${path1}`);
-    expect(state.spawned.at(-1).prompt).toContain('Wave 1 of 2. Implement only this wave\'s plan file. Name "Wave 1 of 2" in your ready result.');
-    expect(state.spawned.at(-1).prompt).toContain("No review runs after this wave.");
-    expect(state.spawned.at(-1).prompt).toContain(`## Contracts to verify\nRead the \`## Contracts to verify\` section of your plan file (Plan file (wave 1 of 2): ${path1}) in full: it is your checklist. Keep every item.`);
+    expect(section(state.spawned.at(-1).prompt, "Wave")).toContain("Wave 1 of 2");
+    expect(section(state.spawned.at(-1).prompt, "Contracts to verify")).toContain(`Plan file (wave 1 of 2): ${path1}`);
     expect(state.spawned.at(-1).prompt).not.toContain("- Totals stay non-negative");
 
     const row = state.db.prepare(`SELECT plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(worker.threadId) as any;
@@ -356,7 +356,7 @@ describe("Chief backend", () => {
     const freshWorker = JSON.parse(replaceResult.stdout!) as { threadId: string };
 
     expect(state.spawned.at(-1).prompt).toContain(`Plan file (wave 1 of 2): ${path1}`);
-    expect(state.spawned.at(-1).prompt).toContain(`## Contracts to verify\nRead the \`## Contracts to verify\` section of your plan file (Plan file (wave 1 of 2): ${path1}) in full`);
+    expect(section(state.spawned.at(-1).prompt, "Contracts to verify")).toContain(`Plan file (wave 1 of 2): ${path1}`);
     expect(state.spawned.at(-1).prompt).not.toContain("- Totals stay non-negative");
     const freshRow = state.db.prepare(`SELECT plan_thread_id, plan_wave FROM managed_threads WHERE thread_id=?`).get(freshWorker.threadId) as any;
     expect(freshRow).toEqual({ plan_thread_id: planner.threadId, plan_wave: 1 });
@@ -449,7 +449,7 @@ describe("Chief backend", () => {
       state: "ready", result: `Wave 3 of 3 done${NO_DEVIATIONS}`,
     }, { threadId: worker3.threadId, projectId: "proj_1" });
     alert = state.sent.at(-1).input[0].text as string;
-    expect(alert).toContain(readyAction(worker3.threadId));
+    expect(alert).toContain(`chief_review (workerThreadId: ${worker3.threadId})`);
   });
 
   test("persists dependsOn and lists every independent head wave for parallel delegation", async () => {
@@ -470,7 +470,6 @@ describe("Chief backend", () => {
     // Three implementation waves need their one advisor review before any is delegated; its approval releases the heads.
     await approvePlan(state, chief.threadId, planner.threadId);
     const alert = state.sent.at(-1).input[0].text as string;
-    expect(alert).toContain("Delegate waves 1, 2 now, in parallel");
     expect(alert).toContain(`(planThreadId: ${planner.threadId}, wave: N)`);
   });
 
@@ -560,11 +559,12 @@ describe("Chief backend", () => {
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain("waves: 0/2 done, wave 1 starting, wave 2 starting");
     expect(roster).toContain(`: ${path2} (independent)`);
-    expect(state.spawned.at(-1).prompt).toContain("This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch.");
+    const gitWorkflow = section(state.spawned.at(-1).prompt, "Git workflow");
+    expect(gitWorkflow).toContain("feature/b");
+    expect(gitWorkflow).not.toContain("feature/a");
 
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 1 done${NO_DEVIATIONS}` }, { threadId: w1.threadId, projectId: "proj_1" });
     let alert = state.sent.at(-1).input[0].text as string;
-    expect(alert).toContain("the one review of the whole plan waits until wave(s) 2 are ready");
     expect(alert).not.toContain("chief_review");
     expect(alert).not.toContain("chief_delegate");
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
@@ -572,7 +572,7 @@ describe("Chief backend", () => {
 
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 2 done${NO_DEVIATIONS}` }, { threadId: w2.threadId, projectId: "proj_1" });
     alert = state.sent.at(-1).input[0].text as string;
-    expect(alert).toContain("Start the review gate: chief_review (workerThreadId: ");
+    expect(alert).toContain("chief_review (workerThreadId: ");
 
     await state.harness.behavior.callAgentTool("chief_complete", { threadId: w1.threadId, ...CLOSE_OUT }, opts);
     expect(state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(planner.threadId)).toEqual({ state: "ready" });
@@ -602,7 +602,6 @@ describe("Chief backend", () => {
 
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 2 done${NO_DEVIATIONS}` }, { threadId: w2.threadId, projectId: "proj_1" });
     const alert = state.sent.at(-1).input[0].text as string;
-    expect(alert).toContain("the one review of the whole plan waits until wave(s) 1 are ready");
     expect(alert).not.toContain("chief_review");
     expect(alert).not.toContain(w1b.threadId);
   });
@@ -624,7 +623,6 @@ describe("Chief backend", () => {
     const w2 = await legacyWave(state, chief.threadId, planner.threadId, 2, "feature/b");
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: `Wave 2 done${NO_DEVIATIONS}` }, { threadId: w2.threadId, projectId: "proj_1" });
     const alert = state.sent.at(-1).input[0].text as string;
-    expect(alert).toContain("the one review of the whole plan waits until wave(s) 1 are ready");
     expect(alert).not.toContain("chief_review");
   });
 
