@@ -37,6 +37,7 @@
 - [Design discussion runs in the researcher thread](decisions/2026-11-18-crispy-design-discussion.md)
 - [Advisor review is opt-in at Chief's discretion](decisions/2026-11-18-advisor-review-opt-in.md)
 - [Managed threads use BB stuck notices](decisions/2026-11-19-managed-threads-parent-notifications-stuck.md)
+- [Abandon a stuck supervisor tick after a grace](decisions/2026-11-19-supervisor-abandon-tick-after-grace.md)
 
 ## Superseded decisions
 
