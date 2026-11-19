@@ -465,7 +465,7 @@ export const reviewContextOf = async (state: { spawned: { prompt?: string }[] },
 export const latestReviewContext = async (state: Awaited<ReturnType<typeof setup>>) =>
   reviewContextOf(state, (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId);
 /** The Pending line a ready worker shows until Chief opens its review gate; the roster and the lifecycle alert carry it word for word. */
-export const readyAction = (id: string) => `Start the review gate: chief_review (workerThreadId: ${id}). It starts one reviewer and one tester in parallel.`;
+export const readyAction = (id: string) => `Start the review gate: chief_review (workerThreadId: ${id}). It starts one reviewer.`;
 export const APPROVE = { verdict: "approve", findings: [] } as const;
 export const REQUEST_CHANGES = { verdict: "request_changes", findings: [{ file: "totals.ts", line: 1, severity: "blocking", message: "Totals go negative." }] } as const;
 

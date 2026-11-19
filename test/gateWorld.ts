@@ -4,7 +4,7 @@ import { APPROVE, HEAD_SHA, REQUEST_CHANGES, chiefReview, delegate, execFileMock
 // (`git ls-remote origin refs/heads/<branch>`, `git symbolic-ref`, `git status --porcelain`, `git merge-base --is-ancestor`, `gh pr view`).
 // The test file must mock the child process itself (vi.mock is hoisted per file):
 //   vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
-// The gate is opened, the reviewer's verdict and the tester's report are sent, through the real chief_report and chief_review tools.
+// The gate is opened, the reviewer's verdict is sent, through the real chief_report and chief_review tools.
 
 export const PROJECT_PATH = "/repo/gate-world";
 export const BUILDER_PATH = "/repo/gate-world-builder";
@@ -89,31 +89,26 @@ export async function gateWorld(options: { /** cleanupApproved setting: true sta
     verdict: (reviewerId: string, verdict: Verdict, extra: object = {}) => call("chief_report", {
       state: "ready", result: verdict === "approve" ? "The change is right." : "Totals go negative.", ...(verdict === "approve" ? APPROVE : REQUEST_CHANGES), ...extra,
     }, asThread(reviewerId)),
-    /** The tester's (or a fix run's, or the corrector's) ready report: tests green or red. */
-    testReport: (threadId: string, testsPassed: boolean, extra: object = {}) => call("chief_report", {
-      state: "ready", result: testsPassed ? "The tests pass." : "The totals test fails.", testsPassed, ...extra,
-    }, asThread(threadId)),
     /** A blocked report. */
     block: (threadId: string, result = "The test setup is wrong.") => call("chief_report", { state: "blocked", result, blocker: result, recommendation: "Reroute it." }, asThread(threadId)),
     complete: (threadId: string, extra: object = {}) => call("chief_complete", { threadId, ...extra }),
-    /** chief_delegate of a repair (a fix run, corrector, chat fix, docs repair); threadId is the row it created. */
+    /** chief_delegate of a repair (a fix run, chat fix, docs repair); threadId is the row it created. */
     async delegateTo(params: object) {
       const text = await call("chief_delegate", { title: "Repair", mission: "Repair it.", ...params }) as string;
       const created = state.db.prepare("SELECT thread_id FROM managed_threads ORDER BY rowid DESC LIMIT 1").get() as { thread_id: string };
       return { text, threadId: created.thread_id };
     },
-    /** A worker whose gate is open: ready, gate started, reviewer and tester ids. */
+    /** A worker whose gate is open: ready, gate started, reviewer id. */
     async gated(title?: string, forge?: { branch?: string; prUrl?: string }) {
       const worker = await world.worker(title, forge);
       await world.ready(worker.threadId);
       const opened = await world.open(worker.threadId);
-      return { worker, reviewer: opened.threadId, tester: opened.testerThreadId!, text: opened.text };
+      return { worker, reviewer: opened.threadId, text: opened.text };
     },
-    /** A gate that passed: approve and green tests. */
+    /** A gate that passed: approve. */
     async passed(title?: string, forge?: { branch?: string; prUrl?: string }) {
       const gated = await world.gated(title, forge);
       await world.verdict(gated.reviewer, "approve");
-      await world.testReport(gated.tester, true);
       return gated;
     },
   };
