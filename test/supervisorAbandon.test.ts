@@ -640,6 +640,25 @@ describe("an abandoned supervisor tick's Chief spawn", () => {
     expect(pendingMarkers(state)).toEqual([]);
   });
 
+  test("adoption moves nothing to a late Chief archived before this generation first read it, and drops its marker", async () => {
+    const state = await setup();
+    const old = await makeChief(state);
+    const worker = (await delegate(state, old, "Fix totals")).threadId;
+    await archive(state, old);
+    seedTargets(state, old);
+    // The other generation inserted the late Chief (`starting`) and the archive event arrived while this cache lacked its row.
+    state.addLive("thr_late", "proj_1", "Chief · late");
+    state.live.set("thr_late", { ...state.live.get("thr_late")!, archivedAt: new Date().toISOString() });
+    state.db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, created_at, updated_at) VALUES ('thr_late', 'chief', 'proj_1', 'Chief · late', 'starting', 'idle', ?, ?)").run(Date.now(), Date.now());
+    state.db.prepare("INSERT INTO plugin_meta (key, value) VALUES ('pending_handover:thr_late', ?)").run(old);
+    await state.supervisorCycle();
+    // Normal recovery may still give the work to a fresh Chief; never to the archived one.
+    expect(Object.values(targetsOf(state))).not.toContain("thr_late");
+    expect(row(state, worker).chief_thread_id).not.toBe("thr_late");
+    expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads WHERE chief_thread_id='thr_late'").get()).toEqual({ n: 0 });
+    expect(pendingMarkers(state)).toEqual([]);
+  });
+
   test("a live tick drops every marker it cannot hand over, and moves no work for them", async () => {
     const state = await setup();
     const coordA = await makeCoordinator(state);

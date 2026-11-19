@@ -236,7 +236,7 @@ export function registerLifecycle(ctx: Ctx) {
       if (stopped()) return;
       await ctx.sweep(abandon); // safety net for idle events missed across a reload, or a blocker archived without idling
       if (stopped()) return;
-      ctx.adoptPendingHandovers(abandon); // a Chief an abandoned tick spawned: its handover belongs to this live tick, before the orphan loop would spawn another
+      await ctx.adoptPendingHandovers(abandon); // a Chief an abandoned tick spawned: its handover belongs to this live tick, before the orphan loop would spawn another
       if (stopped()) return;
       const values = await settings.get();
       if (stopped()) return;

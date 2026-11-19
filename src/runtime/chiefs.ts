@@ -108,16 +108,26 @@ export function createChiefs(ctx: Ctx) {
 
   /** The live tick's half of a spawn the abandoned tick only recorded: hands over from the recorded previous Chief when the late Chief is live and compatible, and drops each marker either way.
    * Idempotent: a marker is gone in the same transaction as its handover. */
-  function adoptPendingHandovers(signal: AbortSignal) {
+  async function adoptPendingHandovers(signal: AbortSignal) {
+    const stopped = () => signal.aborted;
     const markers = db.prepare(`SELECT key, value FROM plugin_meta WHERE key LIKE ?`).all(`${PENDING_HANDOVER}%`) as { key: string; value: string }[];
     // The cache may predate the old generation's late commit: read both rows from persisted state (no reload, so no sweep) before judging a marker.
     if (markers.length) store.refresh();
+    const dead = ["failed", "deleted", "archived", "complete"];
     for (const marker of markers) {
-      if (signal.aborted) return;
-      const next = store.get(marker.key.slice(PENDING_HANDOVER.length));
-      const previous = store.get(marker.value);
+      if (stopped()) return;
+      const nextId = marker.key.slice(PENDING_HANDOVER.length);
       const drop = () => db.prepare(`DELETE FROM plugin_meta WHERE key=?`).run(marker.key);
-      if (next && previous && next.role === "chief" && !["failed", "deleted", "archived", "complete"].includes(next.state)
+      const candidate = store.get(nextId);
+      if (candidate?.role === "chief" && !dead.includes(candidate.state)) {
+        // The insert recorded `starting`: an archive or delete that raced it was missed by the events and by reconcile (the row was not cached then), so read the live thread.
+        const read = await ctx.reconcileThread(candidate, await ctx.ensureSection(stopped), signal);
+        if (stopped()) return;
+        if (!read) continue; // transient lookup failure: the marker stays for the next tick
+      }
+      const next = store.get(nextId);
+      const previous = store.get(marker.value);
+      if (next && previous && next.role === "chief" && !dead.includes(next.state)
         && previous.state !== "complete" && !ctx.isCoordinator(previous) && !ctx.isCoordinator(next) && ctx.compatibleSuccessor(previous, next)) {
         // handOver nests its own batch inside this one: the outermost reloads once, and owns the signal.
         store.batch(() => { handOver(previous.thread_id, next.thread_id, previous.project_id); drop(); }, signal);
