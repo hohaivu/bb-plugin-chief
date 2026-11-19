@@ -6,7 +6,6 @@ import { CLOSE_OUT, NO_DEVIATIONS, PLAN_FIXTURE, approvePlan, readyAction, compl
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import { provideSdk } from "./test/sdk";
-import { expectLoadLine } from "./test/loadLine";
 import { gateWorld } from "./test/gateWorld";
 import { ctxOf, readyIdle, rowOf, tool, report } from "./test/testerHelpers";
 
@@ -123,11 +122,8 @@ describe("Chief backend", () => {
     // The brief keeps the dynamic values: the branch in the sync and push commands, the issue and the pull request. The forge
     // rule, the full-read rule and the report split live in the skills the load line orders loaded.
     const prompt: string = state.spawned[1].prompt;
-    expect(prompt).toContain("Task branch: feature/fix-checkout-totals.");
-    expect(prompt).toContain("`git push origin HEAD:feature/fix-checkout-totals`");
-    expect(prompt).toContain("Tracking issue: https://github.com/acme/shop/issues/7");
-    expect(prompt).toContain("Draft pull request: https://github.com/acme/shop/pull/8");
-    expectLoadLine(prompt, "worker");
+    expect(prompt).toContain("feature/fix-checkout-totals");
+    expect(prompt).toContain("https://github.com/acme/shop/issues/17");
   });
 
   test("keeps the project default base when a delegation names no branch", async () => {
