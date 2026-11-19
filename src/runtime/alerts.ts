@@ -85,6 +85,10 @@ export function createAlerts(ctx: Ctx) {
       const row = store.get(source);
       return row && row.state === "active" && row.active_cycle === Number(parts[0]) ? null : "stall no longer applies";
     }
+    if (kind === "noreport") {
+      const row = store.get(source);
+      return row && row.state === "idle" && row.active_cycle === Number(parts[0]) ? null : "noreport no longer applies";
+    }
     if (!kind.startsWith("coordinator-") || kind === "coordinator-ended") return null;
     const child = store.get(source);
     if (!child) return `${kind} source is gone`;

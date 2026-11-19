@@ -86,6 +86,8 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
       visibility: "visible",
       title,
       ...prepared.execution,
+      // Chief's own report alert replaces BB's completed notice; failures and needs-attention still come from BB.
+      parentNotifications: "stuck",
       ...extra,
       ...(await lifecycleOwner(chiefThreadId)),
       prompt,
