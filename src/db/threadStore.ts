@@ -32,6 +32,8 @@ export interface ThreadInsert<Role extends string = string, State extends string
   researchDesign?: boolean | null;
   researchThreadId?: string | null;
   researchReportSeq?: number | null;
+  /** Worker row, kind tester only: true for an evidence-only tester (its instructions carry no test-writing rules). */
+  evidenceOnly?: boolean | null;
 }
 
 /** The columns a report writes to its row; reserveReport maps them onto the UPDATE's parameters. */
@@ -134,8 +136,8 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id, research_design, research_thread_id, research_report_seq
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id, research_design, research_thread_id, research_report_seq, evidence_only
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -144,7 +146,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
       reviewed_report_seq=excluded.reviewed_report_seq, reviewed_head_sha=excluded.reviewed_head_sha, unplanned_reason=excluded.unplanned_reason,
       replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
-      kind=excluded.kind, verify_command=excluded.verify_command,
+      kind=excluded.kind, verify_command=excluded.verify_command, evidence_only=excluded.evidence_only,
       planner_on=COALESCE(excluded.planner_on, managed_threads.planner_on),
       research_design=COALESCE(excluded.research_design, managed_threads.research_design),
       research_thread_id=COALESCE(excluded.research_thread_id, managed_threads.research_thread_id),
@@ -160,6 +162,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now, input.coordinatorThreadId ?? null,
       input.researchDesign == null ? null : input.researchDesign ? 1 : 0, input.researchThreadId ?? null, input.researchReportSeq ?? null,
+      input.evidenceOnly ? 1 : null,
     );
     wrote();
   }

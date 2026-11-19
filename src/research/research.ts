@@ -3,7 +3,7 @@ import { z } from "zod";
 import { worktreeEnvironment, type ManagedSpawn } from "./managedSpawn";
 import type { ThreadInsert } from "../db/threadStore";
 import { type ManagedRow, type ModelSelection } from "../types";
-import { READ_ONLY, RESEARCH_ONLY } from "../core/roles";
+import { READ_ONLY } from "../core/roles";
 
 export { modelSelectionSchema, type ModelSelection } from "../types";
 
@@ -44,7 +44,6 @@ export function researcherBrief(input: {
     `You are the managed researcher for Chief thread ${chiefThreadId}. Report to that Chief.`,
     "", "## Ticket", "With no separate ticket, this is the ticket.", question,
     "", "## Working contract",
-    `- ${RESEARCH_ONLY}`,
     "- Stage 1, Context: read the ticket, then write neutral research questions about how the code works today (for example \"how do endpoints work\", \"trace the flow for X\", \"find the workers that handle Y\"). A question never names the goal or the proposed change and never uses should, fix, add or better. Do not show the questions to the user.",
     `- Stage 2, Research: group the questions into vertical slices and spawn one helper per slice, at least 1 and at most ${RESEARCH_MAX_HELPERS}. Do not answer the questions yourself before the helpers report.`,
     `- Spawn a helper with: ${spawn}`,
@@ -66,7 +65,6 @@ export function researcherBrief(input: {
       "- Ask the user only your design questions, through AskUserQuestion in stage 3 or the blocked fallback above; never ask anything else.",
     ] : [
       `- Report with chief_report state ready: \`result\` is the full report within ${maxResultLength} characters, \`summary\` at most 800 characters, and the first line of result says \`Helpers: <n>\`, then the fact report. When nothing usable came back, report blocked with the cause as blocker and your recommended next step as recommendation.`,
-      "- Do not ask the user directly from this thread.",
     ]),
   ].join("\n");
 }
@@ -130,7 +128,7 @@ export function createResearch(deps: ResearchDeps) {
     // The managed role is recorded as soon as it is known, so a rejected call is still attributed to it.
     if (row) call.role = row.role;
     if (!row || terminal(row.state) || row.role !== "chief") {
-      throw new Error("chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads (chief-role-read-only skill).");
+      throw new Error("chief_research is available only to an active Chief. A planner splits a broad scan across read-only helper threads (your planner rules).");
     }
     if (!isActiveChief(row)) throw new Error("chief_research requires an active registered Chief thread.");
     if (!(await researchSettings()).enabled) {

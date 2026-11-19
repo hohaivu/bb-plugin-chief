@@ -4,7 +4,7 @@ import { rpcContract } from "../rpcContract";
 import { clip } from "../core/text";
 import { spawnMetadataSchema } from "../tools/shapes";
 import { BUILT_IN_RULES } from "./prompts";
-import { CHIEF_PROCEDURE } from "../core/roleRules";
+import { CHIEF_PROCEDURE, roleRules } from "../core/roleRules";
 import type { Ctx } from "./context";
 
 /** Sent to Chief on every turn, in the order identity, tool line, roster, wait, planner, research, core rules, Chief procedure, project rules (chief.md or BUILT_IN_RULES), lessons, so an override cannot push them past the SDK's 32768-char cut (PLUGIN_DYNAMIC_INSTRUCTIONS_MAX_CHARS). The single statement of each rule; other prompts point here. */
@@ -122,16 +122,24 @@ export function registerHost(ctx: Ctx) {
     const lessons = newestLessons(`(role IS NULL OR role='advisor')`);
     const reviewLessons = role === "reviewer" ? newestLessons(`role='reviewer'`) : [];
     // BUILT_IN_RULES are Chief's own (continue, complete, chief_review), so a managed thread
-    // gets only a project's chief.md; its brief and the chief-worker skills cover the rest.
+    // gets only a project's chief.md; its role rules and its brief cover the rest.
     const tools = ["chief_report", ...(role === "worker" && (row?.plan_thread_id ?? (seeded?.success ? seeded.data.planThreadId : undefined)) ? ["chief_log"] : [])];
+    // A designer, tester or spec-writer is a worker row with its kind; the row wins, seeded metadata covers the pre-insertThread race.
+    const kind = row ? row.kind : seeded?.success ? seeded.data.kind : undefined;
+    const evidenceOnly = row ? row.evidence_only === 1 : Boolean(seeded?.success && seeded.data.evidenceOnly);
     return {
       tools,
-      // A designer is a worker row with kind "designer"; seeded metadata covers the pre-insertThread race.
-      skills: managedSkills(role, row?.kind ?? (seeded?.success ? seeded.data.kind : undefined)),
+      // The reviewer keeps its skills until its rules move into reviewerPrompt.
+      skills: role === "reviewer" ? managedSkills(role, kind) : [],
+      // Order for the SDK's 32768-char cut: header, role rules, then the variable chief.md and lessons last.
       instructions: [
-        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: follow the chief-worker skill's report contract; after reporting, end with one line.`,
-        "After any context compaction, before acting, reload in full the chief-* skills your brief names (Skill tool, or read each SKILL.md in full) and re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
+        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: its schema states the report contract; after reporting, end with one line.`,
+        role === "reviewer"
+          ? "After any context compaction, before acting, reload in full the chief-* skills your brief names (Skill tool, or read each SKILL.md in full) and re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names."
+          : "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
         ...(claudeCode ? [toolSchemaLine(tools)] : []),
+        "",
+        roleRules(role, kind, evidenceOnly),
         ...(rules === BUILT_IN_RULES ? [] : ["", rules]),
         ...(lessons.length ? ["", clip(["## Lessons from earlier review rounds", ...lessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
         ...(reviewLessons.length ? ["", clip(["## Review lessons (known false positives and checks)", ...reviewLessons.map((lesson) => `- ${lesson.text}`)].join("\n"), 3_000)] : []),
