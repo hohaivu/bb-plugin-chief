@@ -112,7 +112,7 @@ export function createAlerts(ctx: Ctx) {
     }
   }
 
-  async function deliverAlert(key: string) {
+  async function deliverAlert(key: string, signal?: AbortSignal) {
     const existing = ctx.state.alertDeliveries.get(key);
     if (existing) return existing;
     const delivery = (async () => {
@@ -134,11 +134,11 @@ export function createAlerts(ctx: Ctx) {
           const text = clip(alert.message);
           const marker = `[alert ${createHash("sha1").update(key).digest("hex").slice(0, 10)}]`;
           const matches = (part: { type: string; text?: string }) => part.type === "text" && !!part.text && (part.text.includes(marker) || part.text === text);
-          const queued = await bounded(() => bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id }), ALERT_CALL_MS);
+          const queued = await bounded(() => bb.sdk.threads.queuedMessages.list({ threadId: alert.target_thread_id }), ALERT_CALL_MS, signal);
           const alreadySent = queued.some((message) => message.content.some(matches))
             || (await bounded(() => bb.sdk.threads.events.list({
               threadId: alert.target_thread_id, types: ["item/completed"], order: "desc", limit: "50",
-            }), ALERT_CALL_MS)).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
+            }), ALERT_CALL_MS, signal)).some((event) => event.type === "item/completed" && event.data.item.type === "userMessage"
               && event.data.item.content.some(matches));
           if (alreadySent) {
             db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
@@ -156,7 +156,7 @@ export function createAlerts(ctx: Ctx) {
           ...(alert.source_thread_id !== alert.target_thread_id ? { senderThreadId: alert.source_thread_id } : {}),
           mode: "queue-if-active",
           input: [{ type: "text", text: clip(alert.message), mentions: [] }],
-        }), ALERT_CALL_MS);
+        }), ALERT_CALL_MS, signal);
         db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=NULL WHERE dedupe_key=?`).run(Date.now(), key);
         return true;
       } catch (error) {
@@ -181,9 +181,9 @@ export function createAlerts(ctx: Ctx) {
     return deliverAlert(dedupeKey);
   }
 
-  async function alertChief(row: ManagedRow, key: string, message: string) {
+  async function alertChief(row: ManagedRow, key: string, message: string, signal?: AbortSignal) {
     const outboxKey = enqueueAlert(row, key, message);
-    return deliverAlert(outboxKey);
+    return deliverAlert(outboxKey, signal);
   }
 
   /** The managed rows a Chief owns. */
@@ -301,10 +301,10 @@ export function createAlerts(ctx: Ctx) {
     }
   }
 
-  async function retryAlerts(stopped?: () => boolean) {
+  async function retryAlerts(signal?: AbortSignal) {
     for (const alert of pendingAlerts.all(Date.now() - 60_000, Date.now()) as AlertRow[]) {
-      if (stopped?.()) break;
-      await deliverAlert(alert.dedupe_key);
+      if (signal?.aborted) break;
+      await deliverAlert(alert.dedupe_key, signal);
     }
   }
   return { alertChief, alertCoordinator, alertSelf, baselineDone, deliverAlert, enqueueAlert, insertAlert, needYouAt, recordFailure, retryAlerts, writeAlert };

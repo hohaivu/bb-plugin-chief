@@ -73,7 +73,7 @@ export function createLifecycle(ctx: Ctx) {
     return "idle";
   }
 
-  async function reconcileThread(row: ManagedRow, sectionId: string) {
+  async function reconcileThread(row: ManagedRow, sectionId: string, stopped?: () => boolean) {
     let thread;
     try {
       thread = await bb.sdk.threads.get({ threadId: row.thread_id });
@@ -81,6 +81,8 @@ export function createLifecycle(ctx: Ctx) {
       bb.log.warn(`Transient thread read failure for ${row.thread_id}; will retry: ${String(error)}`);
       return false;
     }
+    // An abandoned supervisor tick writes nothing from a read that settled after it was abandoned.
+    if (stopped?.()) return false;
     const now = Date.now();
     if (thread.deletedAt !== null) {
       store.markDeleted(row.thread_id, now);
@@ -98,6 +100,7 @@ export function createLifecycle(ctx: Ctx) {
         bb.log.warn(`Transient thread filing failure for ${row.thread_id}; will retry: ${String(error)}`);
       }
     }
+    if (stopped?.()) return false;
     // The reads above may have spanned a report or lifecycle event: decide from the row as it is now (#127), never the one captured before them.
     const current = store.get(row.thread_id);
     if (!current) return true;
@@ -124,13 +127,17 @@ export function createLifecycle(ctx: Ctx) {
     // A complete or deleted row never changes state again (stateFromLive), so only open rows cost a read.
     for (const row of store.all()) {
       if (stopped?.()) return;
-      if (row.state !== "deleted" && row.state !== "complete") await reconcileThread(row, sectionId);
+      if (row.state !== "deleted" && row.state !== "complete") await reconcileThread(row, sectionId, stopped);
     }
     if (stopped?.()) return;
-    const projects = new Set(store.all().map((row) => row.project_id));
     const configured = (await settings.get()).chiefProject;
+    if (stopped?.()) return;
+    const projects = new Set(store.all().map((row) => row.project_id));
     if (configured) projects.add(configured);
-    for (const projectId of projects) await ctx.readRules(projectId);
+    for (const projectId of projects) {
+      if (stopped?.()) return;
+      await ctx.readRules(projectId);
+    }
   }
 
   async function lifecycle(kind: string, thread: { id: string; status?: string }, lastText?: string | null) {
@@ -219,7 +226,8 @@ export function registerLifecycle(ctx: Ctx) {
   bb.events.on("thread.archived", ({ thread }) => ctx.lifecycle("archived", thread));
   bb.events.on("thread.deleted", ({ thread }) => ctx.lifecycle("deleted", thread));
 
-  async function supervisorTick(stopped: () => boolean) {
+  async function supervisorTick(abandon: AbortSignal) {
+    const stopped = () => abandon.aborted;
     try {
       if (stopped()) return;
       await ctx.reconcile(stopped);
@@ -227,6 +235,7 @@ export function registerLifecycle(ctx: Ctx) {
       await ctx.sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
       if (stopped()) return;
       const values = await settings.get();
+      if (stopped()) return;
       ctx.state.cleanupActive = values.cleanupApproved;
       const threshold = stallThresholdMs(values);
       const now = Date.now();
@@ -242,6 +251,7 @@ export function registerLifecycle(ctx: Ctx) {
         // Every tick until sent re-enters here; the primary key keeps one row.
         const unrecorded = ctx.recordFailure(row, hard ? "hard_stall" : "stall", null);
         const output = await ctx.lastOutput(row.thread_id);
+        if (stopped()) return;
         const minutes = Math.round(threshold / 60_000);
         const sent = await ctx.alertChief(row, `stall:${row.active_cycle}${hard ? ":hard" : ""}`, [
           `${row.role} “${row.title}” (${row.thread_id}) has been active for ${Math.round(elapsed / 60_000)} minutes${hard ? `, twice the ${minutes}-minute stall threshold` : ` (stall threshold ${minutes})`}.`,
@@ -251,7 +261,8 @@ export function registerLifecycle(ctx: Ctx) {
             : `Inspect it with chief_inspect. If it is progressing, leave it. If it is stuck or looping, chief_stop it: its worktree and branch are kept. At ${2 * minutes} minutes you will be told to stop it.`,
           ctx.rerouteSteps(row),
           ...(unrecorded ? [unrecorded] : []),
-        ].join("\n"));
+        ].join("\n"), abandon);
+        if (stopped()) return;
         if (sent) {
           store.markStallAlerted(row.thread_id, row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle);
         }
@@ -270,17 +281,19 @@ export function registerLifecycle(ctx: Ctx) {
       for (const orphaned of orphanedChiefs) {
         if (stopped()) return;
         const next = await ctx.ensureChief(orphaned.project_id);
+        if (stopped()) return;
         if (next.threadId === orphaned.thread_id) continue;
         // Work never moves to a Chief of another Coordinator: that case gets a dedicated successor.
         if (ctx.compatibleSuccessor(orphaned, store.get(next.threadId))) ctx.handOver(orphaned.thread_id, next.threadId, orphaned.project_id);
         else await ctx.replaceChief(orphaned);
+        if (stopped()) return;
       }
       if (stopped()) return;
       if (values.autoSpawn && values.chiefProject) await ctx.ensureChief(values.chiefProject);
       // Replace terminal Chiefs and retarget their queued alerts before any
       // pending delivery is attempted.
       if (stopped()) return;
-      await ctx.retryAlerts(stopped);
+      await ctx.retryAlerts(abandon);
       if (stopped()) return;
       await ctx.observeCleanup();
       if (stopped()) return;
@@ -299,13 +312,14 @@ export function registerLifecycle(ctx: Ctx) {
         signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
       });
       while (!signal.aborted) {
-        let abandoned = false;
+        // Aborting `abandon` stops new steps and clears the tick's in-flight alert deadlines.
+        const abandon = new AbortController();
         // Terminal catch: an abandoned tick may throw after BB invalidates the handle.
-        const tick = supervisorTick(() => abandoned).catch(() => {});
+        const tick = supervisorTick(abandon.signal).catch(() => {});
         let graceTimer: ReturnType<typeof setTimeout> | undefined;
         let release = () => {};
         const grace = new Promise<void>((resolve) => { release = resolve; });
-        const onAbort = () => { graceTimer = setTimeout(() => { abandoned = true; release(); }, STOP_GRACE_MS); graceTimer.unref?.(); };
+        const onAbort = () => { graceTimer = setTimeout(() => { abandon.abort(); release(); }, STOP_GRACE_MS); graceTimer.unref?.(); };
         if (signal.aborted) onAbort();
         else signal.addEventListener("abort", onAbort, { once: true });
         await Promise.race([tick, grace]);
