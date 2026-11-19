@@ -301,8 +301,11 @@ export function createAlerts(ctx: Ctx) {
     }
   }
 
-  async function retryAlerts() {
-    for (const alert of pendingAlerts.all(Date.now() - 60_000, Date.now()) as AlertRow[]) await deliverAlert(alert.dedupe_key);
+  async function retryAlerts(stopped?: () => boolean) {
+    for (const alert of pendingAlerts.all(Date.now() - 60_000, Date.now()) as AlertRow[]) {
+      if (stopped?.()) break;
+      await deliverAlert(alert.dedupe_key);
+    }
   }
   return { alertChief, alertCoordinator, alertSelf, baselineDone, deliverAlert, enqueueAlert, insertAlert, needYouAt, recordFailure, retryAlerts, writeAlert };
 }

@@ -5,6 +5,7 @@ import { delegate, disposals, disposeAll, setup, start, status } from "./harness
 import { forgeAnswers, forged } from "./gateForge";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
+import { STOP_GRACE_MS } from "../src/runtime/lifecycle";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
@@ -96,6 +97,27 @@ describe("Chief backend", () => {
     service.controller.abort();
     await expect(service.done).resolves.toBeUndefined();
   });
+
+  test("abandons a supervisor tick still running STOP_GRACE_MS after abort, starting no further step", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await delegate(state, chief.threadId);
+    let reads = 0;
+    let hung!: () => void;
+    const pending = new Promise<void>((resolve) => { hung = resolve; });
+    state.harness.sdk.stub("threads.get", async () => { reads += 1; hung(); return new Promise(() => {}); });
+    const sentBefore = state.sent.length;
+    const service = state.harness.behavior.runService("supervisor");
+    await pending;
+    const aborted = Date.now();
+    service.controller.abort();
+    await service.done;
+    expect(Date.now() - aborted).toBeLessThan(STOP_GRACE_MS + 1_000);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The first reconcile row hung; the second row and every later step never started.
+    expect(reads).toBe(1);
+    expect(state.sent.length).toBe(sentBefore);
+  }, STOP_GRACE_MS + 5_000);
 
   test("alerts a stalled thread once with evidence and a ladder, then once to stop it at twice the threshold", async () => {
     const state = await setup();
