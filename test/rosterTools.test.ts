@@ -79,12 +79,20 @@ describe("Chief backend", () => {
     // Each ready-but-unreviewed worker contributes one full pending line; enough
     // of them push the Pending block itself (not just the whole roster) past
     // 6,000 characters, so the block's own clip has to kick in.
+    // The complete (unclipped) entry of worker 0, read while the roster is still small: the template every retained entry must equal.
+    const entry = (line: string) => line.replaceAll(/\bthr_\d+\b/g, "<id>").replaceAll(/Worker \d+/g, "<title>");
+    let complete = "";
     for (let i = 0; i < 60; i += 1) {
       const worker = await delegate(state, chief.threadId, `Worker ${i}`);
       await state.harness.behavior.callAgentTool("chief_report", {
         state: "ready", result: "Done",
       }, { threadId: worker.threadId, projectId: "proj_1" });
+      if (i === 0) {
+        const small = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
+        complete = entry(small.split("\n").find((line) => line.startsWith("- worker “Worker 0”"))!);
+      }
     }
+    expect(complete).toContain("chief_review");
 
     const roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     // The rest of the roster (row details) is clipped too, so find the pending block's own end by
@@ -101,6 +109,8 @@ describe("Chief backend", () => {
       const id = /^- worker “Worker \d+” \((thr_\d+)\): /.exec(line)?.[1];
       expect(id).toBeDefined();
       expect(line).toContain(`chief_review (workerThreadId: ${id})`);
+      // Never cut after the call: the entry is the complete one, id and title aside.
+      expect(entry(line)).toBe(complete);
     }
     expect(lines.at(-1)).toBe(suffixMatch![0]);
   });

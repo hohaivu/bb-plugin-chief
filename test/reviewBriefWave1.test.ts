@@ -42,6 +42,11 @@ const brief = (targets: BriefTarget[], over: Partial<ReviewBriefInput> = {}): Re
   recordedLines: ["npm test → exit 0"], previous: null, chiefThreadId: "thr_c", contextPath: "/ctx/review-context.md", ...over,
 });
 const single = (over: Partial<ReviewBriefInput> = {}) => brief([pinned("thr_a", PR1)], over);
+/** The counts in the plan-review header (the text before its first comma): its numbers, and whether it names pull requests and branches. */
+const headerCounts = (prompt: string) => {
+  const head = prompt.split("\n").find((line) => line.startsWith("Independently review"))!.split(",")[0]!;
+  return { numbers: (head.match(/\d+/g) ?? []).map(Number), pullRequests: head.includes("pull request"), branches: head.includes("branch") };
+};
 /** The target lines of a plan review: a pull request line starts "- <url> (", an unpinned one "- branch ". */
 const targetLines = (prompt: string) => prompt.split("\n").filter((line) => line.startsWith("- https://") || line.startsWith("- branch "));
 
@@ -56,6 +61,7 @@ describe("reviewBrief: one line per pull request", () => {
     expect(lines[0]!.match(/sha1\w*/g)!.every((sha) => sha === "sha1".padEnd(12, "0"))).toBe(true);
     for (const id of ["thr_a", "thr_t"]) expect(lines[0]).toContain(`${id} “Task ${id}”`);
     expect(lines[0]).toContain("designer thr_t");
+    expect(headerCounts(prompt)).toEqual({ numbers: [1], pullRequests: true, branches: false });
   });
 
   test("two pull requests with four workers: two lines, each worker named once, header says 2 pull requests", () => {
@@ -68,6 +74,7 @@ describe("reviewBrief: one line per pull request", () => {
     expect(lines[0]).toContain("designer thr_b");
     expect(lines[1]).toContain("designer thr_t");
     for (const id of ["thr_a", "thr_b", "thr_c", "thr_t"]) expect(count(lines.join("\n"), `${id} “`)).toBe(1);
+    expect(headerCounts(prompt)).toEqual({ numbers: [2], pullRequests: true, branches: false });
   });
 
   // Contract: unpinned targets get one line per distinct branch, the header never calls them a pull request, and the line keeps "the verdict binds to its report N" per worker.
@@ -79,17 +86,24 @@ describe("reviewBrief: one line per pull request", () => {
     expect(lines[0]).toContain("feature/x");
     // Each worker is named with its own report number, in order.
     expect(lines[0]).toMatch(/thr_a “Task thr_a”[^;]*\b2\b[^;]*; designer thr_t “Task thr_t”[^;]*\b3\b/);
+    expect(headerCounts(prompt)).toEqual({ numbers: [1], pullRequests: false, branches: true });
   });
 
   test("two unpinned branches: header says 2 branches", () => {
     const { prompt } = reviewBrief(brief([loose("thr_a", "feature/x"), loose("thr_b", "feature/y")]));
     expect(targetLines(prompt)).toHaveLength(2);
+    expect(headerCounts(prompt)).toEqual({ numbers: [2], pullRequests: false, branches: true });
   });
 
   test("a mix: the header counts the pull request and the unpinned branch separately, and a PR with no readable head still counts as its branch", () => {
     const { prompt } = reviewBrief(brief([pinned("thr_a", PR1), pinned("thr_t", PR1, { kind: "designer" }), loose("thr_b", "feature/x"), loose("thr_c", "feature/x")]));
     expect(targetLines(prompt)).toHaveLength(2);
-    const unreadable = targetLines(reviewBrief(brief([pinned("thr_a", PR1), loose("thr_b", "feature/y", { prUrl: PR2 })])).prompt);
+    // The pull request is counted before the branch: one of each.
+    const mixed = headerCounts(prompt);
+    expect(mixed).toEqual({ numbers: [1, 1], pullRequests: true, branches: true });
+    const unreadablePrompt = reviewBrief(brief([pinned("thr_a", PR1), loose("thr_b", "feature/y", { prUrl: PR2 })])).prompt;
+    expect(headerCounts(unreadablePrompt)).toEqual(mixed);
+    const unreadable = targetLines(unreadablePrompt);
     expect(unreadable[0]!.startsWith(`- ${PR1}`)).toBe(true);
     expect(unreadable[1]!.startsWith("- branch ")).toBe(true);
     expect(unreadable[1]).toContain("feature/y");
