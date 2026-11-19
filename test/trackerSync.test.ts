@@ -78,6 +78,7 @@ function world() {
     prMerged: vi.fn(async (_url: string, _project: string): Promise<boolean | null> => null),
     answerAlert: vi.fn((_thread: string, key: string, _message: string): string | null => `out:${key}`),
     deliver: vi.fn(async (_key: string) => {}),
+    recordAnswer: vi.fn((_thread: string, _text: string, _why: string) => {}),
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     get maxInflight() { return maxInflight; },
     add(row: Partial<ManagedRow> & { thread_id: string; role: ManagedRow["role"] }) {
@@ -115,6 +116,7 @@ function world() {
     prMerged: (url, project) => w.prMerged(url, project),
     answerAlert: (thread, key, message) => w.answerAlert(thread, key, message),
     deliver: (key) => w.deliver(key),
+    recordAnswer: (thread, text, why) => w.recordAnswer(thread, text, why),
   });
   return w;
 }
@@ -570,6 +572,9 @@ describe("answers", () => {
   test("one owner comment becomes one alert for the concerned thread, delivered once, and the flag clears", async () => {
     const { w } = await asked("Pick A or B.");
     owner(w, "o1", "Use option A.");
+    let seen: { inTransaction: boolean; alerts: number } | undefined;
+    // better-sqlite3's own flag: a same-connection read would see an uncommitted insert, this does not.
+    w.recordAnswer.mockImplementation(() => { seen = { inTransaction: (w.db as unknown as { inTransaction: boolean }).inTransaction, alerts: w.answerAlert.mock.calls.length }; });
     await w.sync.sync();
     expect(w.answerAlert).toHaveBeenCalledTimes(1);
     expect(w.answerAlert).toHaveBeenCalledWith("P1", `decision-${sha12("Pick A or B.")}:answer`, expect.stringContaining("Use option A."));
@@ -577,6 +582,9 @@ describe("answers", () => {
     expect(w.answerAlert.mock.calls[0]![2]).toContain("Alpha");
     expect(w.deliver).toHaveBeenCalledTimes(1);
     expect(w.deliver).toHaveBeenCalledWith(`out:decision-${sha12("Pick A or B.")}:answer`);
+    expect(w.recordAnswer).toHaveBeenCalledTimes(1);
+    expect(w.recordAnswer).toHaveBeenCalledWith("P1", "Use option A.", "Owner answer to decision #1 on tracker task “Alpha”");
+    expect(seen).toEqual({ inTransaction: false, alerts: 1 }); // recording runs after the receipt and the alert transaction has committed
     expect(w.receipts("answer")).toMatchObject([{ ref: "o1", state: "sent", result: sha12("Pick A or B.") }]);
     expect(w.receipts("decision")[0].answered_at).not.toBeNull();
     // The next pass closes the flag; seeing the same comment again does nothing.
@@ -598,6 +606,15 @@ describe("answers", () => {
     expect(w.receipts("decision").map((d) => d.answered_at !== null)).toEqual([false, true]);
   });
 
+  test("an answer with no live Chief to tell is not recorded in a decisions file", async () => {
+    const { w } = await asked("Pick A or B.");
+    w.answerAlert.mockReturnValue(null);
+    owner(w, "o1", "Use option A.");
+    await w.sync.sync();
+    expect(w.recordAnswer).not.toHaveBeenCalled();
+    expect(w.receipts("answer")).toEqual([]); // the transaction rolled back; the next poll retries
+  });
+
   test("a comment with no #N while two decisions are open is one unmatched alert and closes nothing", async () => {
     const { w } = await asked("Pick A or B.", "Ship now or wait?");
     owner(w, "o1", "Sounds fine to me.");
@@ -609,6 +626,7 @@ describe("answers", () => {
     expect(message).toContain("Sounds fine to me.");
     expect(w.receipts("decision").map((d) => d.answered_at)).toEqual([null, null]);
     expect(w.receipts("answer")).toMatchObject([{ ref: "o1", result: null }]);
+    expect(w.recordAnswer).not.toHaveBeenCalled();
   });
 
   test("Chief's own decision comments are never answers, even though the tracker stores them as owner comments", async () => {

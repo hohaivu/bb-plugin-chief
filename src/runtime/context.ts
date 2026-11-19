@@ -12,6 +12,7 @@ import type { createCompletion } from "./completion";
 import type { createAlerts } from "./alerts";
 import type { createForgeWiring } from "./forgeWiring";
 import type { createArtifacts } from "./artifacts";
+import type { createDecisions } from "./decisions";
 import type { createLifecycle } from "./lifecycle";
 import type { createRoster } from "./roster";
 import type { createInspect } from "./inspect";
@@ -41,6 +42,8 @@ export interface State {
   delegating: Promise<unknown>;
   dataDirs: Map<string, string | null>;
   forgeRuns: Promise<unknown>;
+  /** Per decisions.md owner: the tail of its write chain, so two writes to one file never interleave. */
+  decisionWrites: Map<string, Promise<unknown>>;
 }
 
 export const createState = (): State => ({
@@ -58,6 +61,7 @@ export const createState = (): State => ({
   delegating: Promise.resolve(),
   dataDirs: new Map(),
   forgeRuns: Promise.resolve(),
+  decisionWrites: new Map(),
 });
 
 /** Everything the factories share. Each factory returns its functions into this one object; a function from a later factory is read at call time, so a factory that needs one at construction passes a thunk.
@@ -193,8 +197,12 @@ export interface Ctx {
   writePlan: ReturnType<typeof createArtifacts>["writePlan"];
   writeStorageFile: ReturnType<typeof createArtifacts>["writeStorageFile"];
   readStorageFile: ReturnType<typeof createArtifacts>["readStorageFile"];
+  readStorageFileIfPresent: ReturnType<typeof createArtifacts>["readStorageFileIfPresent"];
   retryWhileProvisioning: ReturnType<typeof createArtifacts>["retryWhileProvisioning"];
   publishHeavy: ReturnType<typeof createArtifacts>["publishHeavy"];
+  writeDecisions: ReturnType<typeof createDecisions>["writeDecisions"];
+  recordDecision: ReturnType<typeof createDecisions>["recordDecision"];
+  copyDecisions: ReturnType<typeof createDecisions>["copyDecisions"];
   intake: ReturnType<typeof createLifecycle>["intake"];
   lifecycle: ReturnType<typeof createLifecycle>["lifecycle"];
   managedRow: ReturnType<typeof createLifecycle>["managedRow"];

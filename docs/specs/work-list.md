@@ -111,11 +111,21 @@ A Chief reads its own work first. A fresh Chief spent about 3k tokens on the tod
 - The existing caps stay: `clipPendingBlock` still clips the Pending block, and the roster total is still clipped.
 - `bb chief status` lists every todo, as at base. Todo add, update and close, the cross-Chief edit warning and the `includeComplete` closed-todo lines do not change.
 
+## Todo after reasons in the decisions file
+
+A Chief's decisions file lists its own open todos that wait on an `after:` condition. See `decisions-file.md`.
+
+- A todo change through `chief_roster` rebuilds the after-section of the caller's decisions file.
+- The after-section lines use the Pending block's todo-line format: `- todo #N: text (after: …)`.
+- The Pending block does not change. The after-section is a second output of the same todos.
+- `handOver` also copies the predecessor's decisions file to the successor. The copied after-section is rebuilt from the successor's own todos on the copy's write.
+
 ## Entry points
 
 | Item | Code |
 | --- | --- |
 | Roster Pending block | `server.ts`: `pendingBlock`, `pendingLines`, `todoLines`, `clipPendingBlock` |
+| Decisions after-section | `src/runtime/decisions.ts`: `writeDecisions`. `src/tools/roster.ts` calls it for a todo-only change. |
 | Todo storage | `server.ts`: `chief_todos`, `todosForProject`, `closedTodosForProject` |
 | Chief to another Chief | `server.ts`: `handOver` |
 | Startup unpin | `server.ts`: `unpinPendingTab`, the place where `pendingReady` is set |

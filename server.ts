@@ -16,6 +16,7 @@ import { createCompletion } from "./src/runtime/completion";
 import { createAlerts } from "./src/runtime/alerts";
 import { createForgeWiring } from "./src/runtime/forgeWiring";
 import { createArtifacts } from "./src/runtime/artifacts";
+import { createDecisions } from "./src/runtime/decisions";
 import { createLifecycle, registerLifecycle } from "./src/runtime/lifecycle";
 import { createRoster } from "./src/runtime/roster";
 import { createInspect } from "./src/runtime/inspect";
@@ -65,6 +66,7 @@ export default async function plugin(bb: BbPluginApi) {
   Object.assign(ctx, createAlerts(ctx));
   Object.assign(ctx, createForgeWiring(ctx));
   Object.assign(ctx, createArtifacts(ctx));
+  Object.assign(ctx, createDecisions(ctx));
   Object.assign(ctx, createLifecycle(ctx));
   registerLifecycle(ctx);
   Object.assign(ctx, createRoster(ctx));

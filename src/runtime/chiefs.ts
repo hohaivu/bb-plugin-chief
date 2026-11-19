@@ -78,6 +78,8 @@ export function createChiefs(ctx: Ctx) {
         WHERE target_thread_id=? AND delivered_at IS NULL`).run(nextId, previousId);
       db.prepare(`UPDATE chief_todos SET chief_thread_id=? WHERE chief_thread_id=?`).run(nextId, previousId);
     });
+    // Best effort and async (never rejects); the successor's row may not exist yet, so the project comes from the caller.
+    void ctx.copyDecisions(previousId, nextId, projectId);
   }
 
   /** Best-effort: drops the pending panel tab an earlier version pinned on a Chief thread. Never throws. */

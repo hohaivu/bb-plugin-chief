@@ -831,7 +831,7 @@ describe("Coordinator", () => {
       await call(state, "chief_roster", { todo: { text: "Far todo" } }, far, "proj_2");
       await call(state, "chief_roster", { todo: { text: "Own todo" } }, coord);
       const text = await call(state, "chief_roster", {}, coord);
-      expect(text.startsWith("## Children\n")).toBe(true);
+      expect(text.startsWith("Decisions: $BB_THREAD_STORAGE/decisions.md\n## Children\n")).toBe(true);
       expect(text).toMatch(new RegExp(`^- “[^”]*Near child” \\(${near}\\) · project proj_1 · \\w+$`, "m"));
       expect(text).toMatch(new RegExp(`^- “[^”]*Far child” \\(${far}\\) · project proj_2 · \\w+$`, "m"));
       expect(text).not.toContain(stranger);
@@ -888,9 +888,37 @@ describe("Coordinator", () => {
         const child = (await spawnChild(state, coord, { title: `Child ${index}` })).id;
         for (let item = 0; item < 3; item += 1) await call(state, "chief_roster", { todo: { text: `Todo ${index}.${item} ${"x".repeat(300)}` } }, child);
       }
+      const path = "Decisions: $BB_THREAD_STORAGE/decisions.md\n";
       const text = await call(state, "chief_roster", {}, coord);
       expect(text.length).toBeLessThanOrEqual(6_000);
-      expect(text.startsWith("## Children\n")).toBe(true);
+      expect(text.startsWith(`${path}## Children\n`)).toBe(true);
+      // The Coordinator's own Pending block and a decisions.md write-failure note survive the crowded Children block.
+      state.failWritesMatching(/decisions\.md/);
+      const failed = await call(state, "chief_roster", { todo: { text: "Own todo" } }, coord);
+      state.failWritesMatching(null);
+      expect(failed.length).toBeLessThanOrEqual(6_000);
+      expect(failed.startsWith(path)).toBe(true);
+      expect(failed).toMatch(/Note: decisions\.md was not updated \(see the plugin log\)\.\nPending:\n- todo #\d+: Own todo/);
+    });
+
+    // The Children block is clipped to what the own Pending block and the failure note leave. Each child line is clipped to its share of 4,000 characters,
+    // so the blocks fit 6,000 at any size up to 4,000 children. At 4,001 the share is 0, clip() then keeps every line whole, and only that clip keeps the output in the cap.
+    test("a Coordinator's own Pending block and failure note survive an overflowing Children block", { timeout: 30_000 }, async () => {
+      const state = await setup();
+      const coord = await coordinator(state);
+      await spawnChild(state, coord, { title: "Seed child" });
+      const insert = state.db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, coordinator_thread_id, created_at, updated_at) VALUES (?, 'chief', 'proj_1', ?, 'active', 'idle', ?, 1, 1)");
+      for (let index = 0; index < 4_001; index += 1) insert.run(`thr_crowd${index}`, `Crowd ${index}`, coord);
+      for (let item = 0; item < 3; item += 1) await call(state, "chief_roster", { todo: { text: `Own todo ${item} ${"x".repeat(80)}` } }, coord);
+      state.failWritesMatching(/decisions\.md/);
+      const text = await call(state, "chief_roster", { todo: { text: "Last own todo" } }, coord);
+      state.failWritesMatching(null);
+      const own = text.slice(text.lastIndexOf("\nPending:\n") + 1);
+      expect(text.length).toBeLessThanOrEqual(6_000);
+      expect(text.startsWith("Decisions: $BB_THREAD_STORAGE/decisions.md\n## Children\n")).toBe(true);
+      expect(text).toContain(`\nNote: decisions.md was not updated (see the plugin log).\nPending:\n`);
+      // The own block fits whole: all three todos and the last one, exactly as the Pending block renders them.
+      expect(own).toBe(`Pending:\n${[1, 2, 3].map((n) => `- todo #${n}: Own todo ${n - 1} ${"x".repeat(80)}`).join("\n")}\n- todo #4: Last own todo`);
     });
   });
 
@@ -1746,9 +1774,14 @@ describe("Coordinator", () => {
       const other = await coordinator(state, "proj_2");
       const foreign = (await spawnChild(state, other, { projectId: "proj_1" }, "proj_2")).id;
       const before = { ...row(state, foreign) };
+      await call(state, "chief_roster", { decision: { text: "carry me" } }, child);
       await archive(state, child);
       await state.supervisorCycle();
       const successor = row(state, worker).chief_thread_id as string;
+      // The dedicated successor (replaceChief's hand-over) gets the orphan's decisions.
+      const successorFile = join(state.storageRoot, successor, "decisions.md");
+      for (let i = 0; i < 200 && !(await readFile(successorFile, "utf8").catch(() => "")).includes("carry me"); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(await readFile(successorFile, "utf8")).toContain("carry me");
       expect(successor).not.toBe(foreign);
       expect(successor).not.toBe(child);
       expect(row(state, successor)).toMatchObject({ role: "chief", coordinator_thread_id: coord });

@@ -7,6 +7,11 @@ import type { Ctx } from "./context";
 
   export type ThreadInput = ThreadInsert<ManagedRow["role"], ManagedRow["state"]>;
 
+// shortcut: the host's message text is how we detect a missing file (see cleanup.ts MISSING); upgrade when the SDK exposes a status.
+const MISSING_FILE = /not found|404|ENOENT|no such file/i;
+// Stricter, for files whose absence decides an overwrite: the message must open with the missing-file response, so a path like thr_404 in another error never matches.
+const FILE_ABSENT = /^(HTTP 404\b|ENOENT\b)/;
+
 export function createArtifacts(ctx: Ctx) {
   const { bb, db } = ctx;
   // A disposed instance's writes fail on a stale handle: its row stays for the next generation to replay.
@@ -69,14 +74,20 @@ export function createArtifacts(ctx: Ctx) {
     return atomicWrite(hostId, join(storageRootPath, relPath), content);
   }
 
-  /** A file under a thread's own storage root, or null when it is missing or unreadable. */
-  async function readStorageFile(threadId: string, relPath: string) {
+  /** A file under a thread's own storage root, or null only when it is missing; any other failure (also the storage lookup) throws. */
+  async function readStorageFileIfPresent(threadId: string, relPath: string) {
+    const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
     try {
-      const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({ threadId });
       return await readFile(hostId, join(storageRootPath, relPath));
-    } catch {
-      return null;
+    } catch (error) {
+      if (FILE_ABSENT.test(String((error as Error)?.message ?? error))) return null;
+      throw error;
     }
+  }
+
+  /** A file under a thread's own storage root, or null when it is missing or unreadable. Never throws. */
+  async function readStorageFile(threadId: string, relPath: string) {
+    return readStorageFileIfPresent(threadId, relPath).catch(() => null);
   }
 
   /** The content lands under a temp name and is moved into place, so a failed write never leaves a partial file under
@@ -135,8 +146,7 @@ export function createArtifacts(ctx: Ctx) {
     try {
       return { path, text: await readFile(hostId, path) };
     } catch (error) {
-      // shortcut: the host's message text is how we detect a missing file (see cleanup.ts MISSING); upgrade when the SDK exposes a status.
-      if (/not found|404|ENOENT|no such file/i.test(String((error as Error)?.message ?? error))) return null;
+      if (MISSING_FILE.test(String((error as Error)?.message ?? error))) return null;
       throw error;
     }
   }
@@ -203,6 +213,6 @@ export function createArtifacts(ctx: Ctx) {
     }
     for (const row of rows) void persistBrief(row.thread_id, row.project_id, row.prompt);
   }
-  return { persistBrief, resumeBriefs, readArtifact, readArtifactIfPresent, writeArtifact, writePlan, writeStorageFile, readStorageFile, retryWhileProvisioning, publishHeavy };
+  return { persistBrief, resumeBriefs, readArtifact, readArtifactIfPresent, writeArtifact, writePlan, writeStorageFile, readStorageFile, readStorageFileIfPresent, retryWhileProvisioning, publishHeavy };
 }
 
