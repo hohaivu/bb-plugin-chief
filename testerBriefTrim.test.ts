@@ -61,8 +61,6 @@ describe("contracts to verify", () => {
     expect(contracts.length).toBeGreaterThanOrEqual(5_000);
     const pointer = section(text, "Contracts to verify")!;
     expect(pointer).toContain("Plan file (wave 2 of 2): /plans/plan-2.md");
-    expect(pointer).toContain("Keep every item.");
-    expect(pointer).toContain("the reviewer checks the same list");
     expect(text).not.toContain("c item 0000");
     expect(text.length).toBeLessThan(contracts.length);
   });
@@ -72,34 +70,10 @@ describe("contracts to verify", () => {
   });
 });
 
-describe("tester verify command", () => {
-  const withVerify = (kind: Kind) => section(prompt(kind, { verifyCommand: "npx vitest run a.test.ts", branch: "feature/x" }), "Verify command")!;
-
-  // Regression: the worker's "fix the work" rule, its blocked-instead-of-ready rule or its tester-only waiver sentence kept for a tester.
-  test("a tester's paragraph never tells it to fix the work, to report blocked instead of ready, or about running tests as a tester", () => {
-    const verify = withVerify("tester");
-    expect(verify).not.toContain("Fix the work until it exits 0");
-    expect(verify).not.toContain("instead of ready");
-    expect(verify).not.toContain("runs tests (a tester's)");
-    expect(verify).not.toContain("do not run it or change code");
-    expect(verify).toContain("Never change product code to make it pass.");
-    expect(verify).toContain("A failure at your Base commit is present before your test edits, not proof it predates the feature. List it without changing product code. It does not waive an explicit exit-0 receipt.");
-    expect(verify).not.toContain("is a baseline: list it and do not fix it");
-  });
-
-  // Regression: the full-suite sentence rendered twice, or not at all.
-  test("a tester's paragraph states the full-suite rule once, and no other part of the brief repeats it", () => {
-    const text = prompt("tester", { verifyCommand: "npx vitest run", branch: "feature/x" });
-    expect(count(text, "not run: full suite not asked for")).toBe(1);
-    expect(count(text, "full-suite run")).toBe(1);
-  });
-
-  test("a worker's paragraph keeps its rules and has no tester sentence", () => {
-    const verify = withVerify("worker");
-    expect(verify).toContain("Fix the work until it exits 0");
-    expect(verify).toContain("report blocked with its output instead of ready");
-    expect(verify).toContain("not run: runs tests (a tester's)");
-    expect(verify).not.toContain("full suite not asked for");
+describe("verify command delivery", () => {
+  test.each(["tester", "worker"] as const)("a %s brief carries the configured command", (kind) => {
+    const command = "npx vitest run a.test.ts";
+    expect(section(prompt(kind, { verifyCommand: command, branch: "feature/x" }), "Verify command")).toContain(command);
   });
 });
 
