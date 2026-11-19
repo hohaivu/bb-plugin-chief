@@ -8,6 +8,8 @@ import type { ThreadInput } from "./artifacts";
 import type { Ctx } from "./context";
 
 const RECONCILE_INTERVAL_MS = 30_000;
+// BB marks the plugin degraded when a service has not settled 5 s after the abort.
+export const STOP_GRACE_MS = 3_000;
 
 export function createLifecycle(ctx: Ctx) {
   const { bb, db, ledger, settings, store } = ctx;
@@ -117,12 +119,14 @@ export function createLifecycle(ctx: Ctx) {
     return true;
   }
 
-  async function reconcile() {
+  async function reconcile(stopped?: () => boolean) {
     const sectionId = await ctx.ensureSection();
     // A complete or deleted row never changes state again (stateFromLive), so only open rows cost a read.
     for (const row of store.all()) {
+      if (stopped?.()) return;
       if (row.state !== "deleted" && row.state !== "complete") await reconcileThread(row, sectionId);
     }
+    if (stopped?.()) return;
     const projects = new Set(store.all().map((row) => row.project_id));
     const configured = (await settings.get()).chiefProject;
     if (configured) projects.add(configured);
@@ -215,6 +219,78 @@ export function registerLifecycle(ctx: Ctx) {
   bb.events.on("thread.archived", ({ thread }) => ctx.lifecycle("archived", thread));
   bb.events.on("thread.deleted", ({ thread }) => ctx.lifecycle("deleted", thread));
 
+  async function supervisorTick(stopped: () => boolean) {
+    try {
+      if (stopped()) return;
+      await ctx.reconcile(stopped);
+      if (stopped()) return;
+      await ctx.sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
+      if (stopped()) return;
+      const values = await settings.get();
+      ctx.state.cleanupActive = values.cleanupApproved;
+      const threshold = stallThresholdMs(values);
+      const now = Date.now();
+      for (const row of store.all()) {
+        if (stopped()) return;
+        if (row.role === "chief" || row.state !== "active" || row.active_since === null) continue;
+        // A design researcher waiting on the user has no timeout.
+        if (row.role === "researcher" && row.waiting_on_user === 1) continue;
+        const elapsed = now - row.active_since;
+        if (elapsed < threshold) continue;
+        const hard = elapsed >= 2 * threshold;
+        if ((hard ? row.stop_alerted_cycle : row.stall_alerted_cycle) === row.active_cycle) continue;
+        // Every tick until sent re-enters here; the primary key keeps one row.
+        const unrecorded = ctx.recordFailure(row, hard ? "hard_stall" : "stall", null);
+        const output = await ctx.lastOutput(row.thread_id);
+        const minutes = Math.round(threshold / 60_000);
+        const sent = await ctx.alertChief(row, `stall:${row.active_cycle}${hard ? ":hard" : ""}`, [
+          `${row.role} “${row.title}” (${row.thread_id}) has been active for ${Math.round(elapsed / 60_000)} minutes${hard ? `, twice the ${minutes}-minute stall threshold` : ` (stall threshold ${minutes})`}.`,
+          `Last output: ${output ? clip(output, 400) : "(none available)"}`,
+          hard
+            ? "Stop it now with chief_stop unless that output shows it finishing. Its worktree and branch are kept."
+            : `Inspect it with chief_inspect. If it is progressing, leave it. If it is stuck or looping, chief_stop it: its worktree and branch are kept. At ${2 * minutes} minutes you will be told to stop it.`,
+          ctx.rerouteSteps(row),
+          ...(unrecorded ? [unrecorded] : []),
+        ].join("\n"));
+        if (sent) {
+          store.markStallAlerted(row.thread_id, row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle);
+        }
+      }
+      if (stopped()) return;
+      for (const row of store.all()) if (ctx.isLinkedChild(row)) ctx.alertCoordinator(row, { kind: "stalled", thresholdMs: threshold });
+      // Hand an archived or deleted Chief's open work to the project's live Chief, starting
+      // one if none is left. A failed Chief is not replaced: a failed turn is recoverable
+      // (touchCallerChief), and its next event returns it to idle or active. Alerts from
+      // open work follow the work; an alert whose source is already finished is not worth
+      // a new Chief the user just deleted.
+      const orphanedChiefs = store.all().filter((row) =>
+        row.role === "chief" && (row.state === "archived" || row.state === "deleted")
+        && store.all().some((child) => child.chief_thread_id === row.thread_id && !["failed", "deleted", "archived", "complete"].includes(child.state)));
+      if (stopped()) return;
+      for (const orphaned of orphanedChiefs) {
+        if (stopped()) return;
+        const next = await ctx.ensureChief(orphaned.project_id);
+        if (next.threadId === orphaned.thread_id) continue;
+        // Work never moves to a Chief of another Coordinator: that case gets a dedicated successor.
+        if (ctx.compatibleSuccessor(orphaned, store.get(next.threadId))) ctx.handOver(orphaned.thread_id, next.threadId, orphaned.project_id);
+        else await ctx.replaceChief(orphaned);
+      }
+      if (stopped()) return;
+      if (values.autoSpawn && values.chiefProject) await ctx.ensureChief(values.chiefProject);
+      // Replace terminal Chiefs and retarget their queued alerts before any
+      // pending delivery is attempted.
+      if (stopped()) return;
+      await ctx.retryAlerts(stopped);
+      if (stopped()) return;
+      await ctx.observeCleanup();
+      if (stopped()) return;
+      void ctx.forgeComments.drain();
+      void ctx.trackerSync.sync();
+    } catch (error) {
+      bb.log.warn(`Supervisor reconciliation failed: ${String(error)}`);
+    }
+  }
+
   bb.background.service("supervisor", {
     async start(signal) {
       const wake = () => new Promise<void>((resolve) => {
@@ -223,64 +299,19 @@ export function registerLifecycle(ctx: Ctx) {
         signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
       });
       while (!signal.aborted) {
-        try {
-          await ctx.reconcile();
-          await ctx.sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
-          const values = await settings.get();
-          ctx.state.cleanupActive = values.cleanupApproved;
-          const threshold = stallThresholdMs(values);
-          const now = Date.now();
-          for (const row of store.all()) {
-            if (row.role === "chief" || row.state !== "active" || row.active_since === null) continue;
-            // A design researcher waiting on the user has no timeout.
-            if (row.role === "researcher" && row.waiting_on_user === 1) continue;
-            const elapsed = now - row.active_since;
-            if (elapsed < threshold) continue;
-            const hard = elapsed >= 2 * threshold;
-            if ((hard ? row.stop_alerted_cycle : row.stall_alerted_cycle) === row.active_cycle) continue;
-            // Every tick until sent re-enters here; the primary key keeps one row.
-            const unrecorded = ctx.recordFailure(row, hard ? "hard_stall" : "stall", null);
-            const output = await ctx.lastOutput(row.thread_id);
-            const minutes = Math.round(threshold / 60_000);
-            const sent = await ctx.alertChief(row, `stall:${row.active_cycle}${hard ? ":hard" : ""}`, [
-              `${row.role} “${row.title}” (${row.thread_id}) has been active for ${Math.round(elapsed / 60_000)} minutes${hard ? `, twice the ${minutes}-minute stall threshold` : ` (stall threshold ${minutes})`}.`,
-              `Last output: ${output ? clip(output, 400) : "(none available)"}`,
-              hard
-                ? "Stop it now with chief_stop unless that output shows it finishing. Its worktree and branch are kept."
-                : `Inspect it with chief_inspect. If it is progressing, leave it. If it is stuck or looping, chief_stop it: its worktree and branch are kept. At ${2 * minutes} minutes you will be told to stop it.`,
-              ctx.rerouteSteps(row),
-              ...(unrecorded ? [unrecorded] : []),
-            ].join("\n"));
-            if (sent) {
-              store.markStallAlerted(row.thread_id, row.active_cycle, hard ? row.active_cycle : row.stop_alerted_cycle);
-            }
-          }
-          for (const row of store.all()) if (ctx.isLinkedChild(row)) ctx.alertCoordinator(row, { kind: "stalled", thresholdMs: threshold });
-          // Hand an archived or deleted Chief's open work to the project's live Chief, starting
-          // one if none is left. A failed Chief is not replaced: a failed turn is recoverable
-          // (touchCallerChief), and its next event returns it to idle or active. Alerts from
-          // open work follow the work; an alert whose source is already finished is not worth
-          // a new Chief the user just deleted.
-          const orphanedChiefs = store.all().filter((row) =>
-            row.role === "chief" && (row.state === "archived" || row.state === "deleted")
-            && store.all().some((child) => child.chief_thread_id === row.thread_id && !["failed", "deleted", "archived", "complete"].includes(child.state)));
-          for (const orphaned of orphanedChiefs) {
-            const next = await ctx.ensureChief(orphaned.project_id);
-            if (next.threadId === orphaned.thread_id) continue;
-            // Work never moves to a Chief of another Coordinator: that case gets a dedicated successor.
-            if (ctx.compatibleSuccessor(orphaned, store.get(next.threadId))) ctx.handOver(orphaned.thread_id, next.threadId, orphaned.project_id);
-            else await ctx.replaceChief(orphaned);
-          }
-          if (values.autoSpawn && values.chiefProject) await ctx.ensureChief(values.chiefProject);
-          // Replace terminal Chiefs and retarget their queued alerts before any
-          // pending delivery is attempted.
-          await ctx.retryAlerts();
-          await ctx.observeCleanup();
-          void ctx.forgeComments.drain();
-          void ctx.trackerSync.sync();
-        } catch (error) {
-          bb.log.warn(`Supervisor reconciliation failed: ${String(error)}`);
-        }
+        let abandoned = false;
+        // Terminal catch: an abandoned tick may throw after BB invalidates the handle.
+        const tick = supervisorTick(() => abandoned).catch(() => {});
+        let graceTimer: ReturnType<typeof setTimeout> | undefined;
+        let release = () => {};
+        const grace = new Promise<void>((resolve) => { release = resolve; });
+        const onAbort = () => { graceTimer = setTimeout(() => { abandoned = true; release(); }, STOP_GRACE_MS); graceTimer.unref?.(); };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+        await Promise.race([tick, grace]);
+        signal.removeEventListener("abort", onAbort);
+        clearTimeout(graceTimer);
+        if (signal.aborted) return;
         await wake();
       }
     },
