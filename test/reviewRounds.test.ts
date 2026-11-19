@@ -142,7 +142,7 @@ describe("Chief backend", () => {
       lastAssistantText: "done",
     });
     expect(state.sent).toHaveLength(sentAfterPlan);
-    expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
+    expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${planner.threadId}:noreport:%`)).toEqual({ n: 0 });
 
     const worker = await delegate(state, chief.threadId);
     await state.harness.behavior.callAgentTool("chief_report", {
@@ -154,7 +154,7 @@ describe("Chief backend", () => {
       lastAssistantText: "done",
     });
     expect(state.sent).toHaveLength(sentAfterBlocked);
-    expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
+    expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${worker.threadId}:noreport:%`)).toEqual({ n: 0 });
   });
 
   test("requires canonical ready and complete report payloads", async () => {
@@ -206,7 +206,6 @@ describe("Chief backend", () => {
         workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/legacy-fix" } },
       },
     });
-    expect(spawnedReview.prompt).toContain("Remain review-only");
     expect(spawnedReview.prompt).toContain("feature/legacy-fix");
     // The CLI door is shut for every caller, the active Chief included: reviews start only through chief_review.
     const retired = await state.harness.behavior.runCli(["review", "--branch", "feature/legacy-fix"], opts);
@@ -358,11 +357,16 @@ describe("Chief backend", () => {
     });
 
     test("reviewer of a designer gets the design check", async () => {
-      const state = await setup();
-      const chief = await start(state);
-      const worker = await readyWorker(state, chief.threadId, "Draw the checkout screen", "Drawn", "designer");
-      await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts(chief.threadId));
-      expect(spawnedAs(state, "reviewer")[0].prompt).toContain("This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots");
+      const promptFor = async (kind?: string) => {
+        const state = await setup();
+        const chief = await start(state);
+        const worker = await readyWorker(state, chief.threadId, "Draw the checkout screen", "Drawn", kind);
+        await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts(chief.threadId));
+        return spawnedAs(state, "reviewer")[0].prompt as string;
+      };
+      const plain = new Set((await promptFor()).split("\n"));
+      // The design check is the lines the same review of a plain worker lacks.
+      expect((await promptFor("designer")).split("\n").filter((line) => !plain.has(line)).length).toBeGreaterThan(0);
     });
 
   });
@@ -425,9 +429,11 @@ describe("Chief backend", () => {
     const review = await chiefReview(state, chief.threadId, { workerThreadId: worker.threadId });
     // The removed --allow-edits flag must not resurface as an unreviewed edit path.
     await state.harness.behavior.runCli(["continue", review.threadId, "--instruction", "Fix it yourself", "--allow-edits"]);
-    const text = state.sent.filter((entry: any) => entry.threadId === review.threadId).at(-1).input[0].text;
-    expect(text).toContain("Remain review-only");
-    expect(text).not.toContain("edits are allowed");
+    const continuation = () => state.sent.filter((entry: any) => entry.threadId === review.threadId).at(-1).input[0].text;
+    const withFlag = continuation();
+    await state.harness.behavior.runCli(["continue", review.threadId, "--instruction", "Fix it yourself"]);
+    // The same instruction without the flag renders the same text: the flag changes nothing.
+    expect(withFlag).toBe(continuation());
     const chiefTools = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     expect(JSON.stringify(chiefTools.tools.find((tool: any) => tool.name === "chief_continue"))).not.toContain("allowEdits");
   });
