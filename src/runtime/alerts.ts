@@ -124,6 +124,7 @@ export function createAlerts(ctx: Ctx) {
       if (alert.attempts > 0 || deadTarget) {
         if (alert.attempts > 0 && !retryDue(alert, Date.now())) return false;
         const stale = await stillDue(alert);
+        if (signal?.aborted) return false;
         if (stale) {
           db.prepare(`UPDATE alert_outbox SET delivered_at=?, last_error=? WHERE dedupe_key=?`).run(Date.now(), clip(`stale: ${stale}`, 1_000), key);
           return true;
@@ -148,6 +149,8 @@ export function createAlerts(ctx: Ctx) {
           // Fall through to the send below.
         }
       }
+      // An abandoned tick counts no attempt and starts no send: the row stays retryable.
+      if (signal?.aborted) return false;
       // Counted before the send: a crash after it leaves attempts > 0, so the retry checks for the marker.
       db.prepare(`UPDATE alert_outbox SET attempts=attempts+1, last_attempt_at=? WHERE dedupe_key=?`).run(Date.now(), key);
       try {

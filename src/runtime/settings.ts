@@ -13,12 +13,15 @@ const MODEL_DISCOVERY_TIMEOUT_MS = 5_000;
 
 export function createSettingsRuntime(ctx: Ctx) {
   const { activeChiefForProject, anyCooldown, bb, cooldownFor, db, roleModelRow, settings, store } = ctx;
-  async function ensureSection(): Promise<string> {
+  /** `stopped` is the abandoned supervisor tick's check: the flight it starts creates and records nothing once it reads true (a caller that joins that flight then gets the rejection). */
+  async function ensureSection(stopped?: () => boolean): Promise<string> {
     if (ctx.state.sectionEnsuring) return ctx.state.sectionEnsuring;
+    const abandoned = () => { if (stopped?.()) throw new Error("abandoned"); };
     ctx.state.sectionEnsuring = (async () => {
       const sections = await bb.sdk.threadSections.list();
+      abandoned();
       let section = sections.find((candidate) => candidate.name === SECTION_NAME);
-      if (!section) section = await bb.sdk.threadSections.create({ name: SECTION_NAME });
+      if (!section) { section = await bb.sdk.threadSections.create({ name: SECTION_NAME }); abandoned(); }
       db.prepare(`INSERT INTO plugin_meta (key, value) VALUES ('section_id', ?)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(section.id);
       return section.id;
