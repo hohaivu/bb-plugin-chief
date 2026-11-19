@@ -206,8 +206,7 @@ describe("review-context.md: one read line or one inline copy", () => {
   // Contract: with a path the prompt holds one read line and no copy of the context; with null it ends with `## review-context.md` and the context; an empty context renders neither.
   test("with a path: one read line, no inline heading, no wait rule, no Context list", () => {
     const { prompt, context } = reviewBrief(single());
-    const lines = prompt.split("
-");
+    const lines = prompt.split("\n");
     const boundary = lines.indexOf("## This review");
     const reads = lines.filter((line) => contextRead.test(line));
     const rules = lines.filter((line) => contextRule.test(line));
