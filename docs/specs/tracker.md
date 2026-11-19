@@ -316,7 +316,7 @@ For each candidate, one `db.transaction` does these steps:
 
 After the commit, the sync runs `void deliver(key)`.
 
-**Decisions file.** After the commit, a matched answer also records one `owner-answer` entry in the live Chief's decisions file. Its `thread` is the concerned thread of the decision, and its reason names the decision number and the task title. A comment that names no decision records nothing. A failed record logs a warning and changes nothing else. See `decisions-file.md`.
+**Decisions file.** After the commit, a matched answer also records one `owner-answer` entry in the live Chief's decisions file. Its `thread` is the concerned thread of the decision, and its reason names the decision number and the task title. A comment that matches no decision (step 6 above) records nothing. A failed record logs a warning and changes nothing else. See `decisions-file.md`.
 
 | Case | Alert key | Alert source | Alert text |
 | --- | --- | --- | --- |

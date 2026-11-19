@@ -125,7 +125,7 @@ A Chief's decisions file lists its own open todos that wait on an `after:` condi
 | Item | Code |
 | --- | --- |
 | Roster Pending block | `server.ts`: `pendingBlock`, `pendingLines`, `todoLines`, `clipPendingBlock` |
-| Decisions after-section | `src/runtime/decisions.ts`: `refreshDecisions`, `writeDecisions` |
+| Decisions after-section | `src/runtime/decisions.ts`: `writeDecisions`. `src/tools/roster.ts` calls it for a todo-only change. |
 | Todo storage | `server.ts`: `chief_todos`, `todosForProject`, `closedTodosForProject` |
 | Chief to another Chief | `server.ts`: `handOver` |
 | Startup unpin | `server.ts`: `unpinPendingTab`, the place where `pendingReady` is set |
