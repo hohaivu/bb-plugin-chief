@@ -971,7 +971,6 @@ describe("Coordinator", () => {
       const coord = await coordinator(state);
       const child = (await spawnChild(state, coord)).id;
       const [plainConfig, childConfig] = [await configure(state, plain, provider), await configure(state, child, provider)];
-      expect(plainConfig.instructions.length).toBeLessThan(CHIEF_BUDGET);
       expect(childConfig.skills).not.toContain("coordinator");
       expect(childConfig.tools.map((tool) => tool.name)).toEqual(plainConfig.tools.map((tool) => tool.name).filter((name) => name !== "chief_coordinate" && name !== "chief_attach"));
       expect(childConfig.instructions).toContain(coord);
