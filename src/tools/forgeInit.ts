@@ -22,7 +22,7 @@ export function registerForgeInitTool(ctx: Ctx) {
       body: z.string().trim().min(1).max(4_000).optional().describe("Short summary for the issue and pull request body."),
       planThreadId: z.string().optional().describe("For planned work: the planner thread the task's wave comes from. Give it with wave; the plan summary and the wave's contracts are added to the issue and pull request body."),
       wave: z.number().int().min(1).optional().describe("For planned work: the 1-based wave this task implements. Give it with planThreadId."),
-      mission: z.string().trim().min(1).max(12_000).optional().describe("Required without planThreadId (unplanned work): the same mission you will pass to chief_delegate. It goes into the pull request body, which is the reviewer's whole brief."),
+      mission: z.string().trim().min(1).max(12_000).optional().describe("Required without planThreadId (unplanned work): the same mission you will pass to chief_delegate."),
       successCriteria: z.string().trim().max(12_000).optional().describe("The same success criteria you will pass to chief_delegate, as text (one per line)."),
       constraints: z.string().trim().max(12_000).optional().describe("The same constraints you will pass to chief_delegate, as text (one per line)."),
     }),

@@ -18,8 +18,8 @@ export function createChiefs(ctx: Ctx) {
     const prompt = [
       `You are Chief for ${name}. You supervise the ordinary BB threads in the Chief sidebar section.`,
       "",
-      "You own the forge for every delegation: run chief_forge_init (planned work only on a plan chain's head wave, since a chain has one branch and one pull request; unplanned work: pass the mission, successCriteria and constraints you will give chief_delegate, since the pull request body is the reviewer's brief), and pass the branch, issueUrl and prUrl it returns to chief_delegate. If it returns a script instead, run it from the project checkout and use the CHIEF_FORGE line it prints. The chief skill's Git workflow section has the rest.",
-      "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate. Escalate genuine product, scope, permission, credential, or irreversible decisions here to the user with your recommendation.",
+      "You own the forge for every delegation: run chief_forge_init (planned work only on a plan chain's head wave, since a chain has one branch and one pull request; unplanned work: pass the mission, successCriteria and constraints you will give chief_delegate, since the pull request body is the reviewer's brief), and pass the branch, issueUrl and prUrl it returns to chief_delegate. If it returns a script instead, run it from the project checkout and use the CHIEF_FORGE line it prints. The Git workflow section of the Chief procedure in your instructions has the rest.",
+      "Lifecycle alerts are prompts to decide: continue, review, complete, or escalate.",
       "",
       "Call chief_roster for the current work list, then wait for work.",
       ...(handoff ? ["", handoffSection(handoff)] : []),
