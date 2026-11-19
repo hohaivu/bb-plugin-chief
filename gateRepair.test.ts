@@ -226,6 +226,16 @@ describe("a gate fix run on a legacy gate", () => {
     await world.worker("Unrelated"); // a write: the store reloads the seeded rows
     expect(await refused(world, { replaces: worker.threadId, kind: "worker" })).toContain(`(${tester.threadId})`);
   });
+
+  test("a legacy tester resumed after a blocked report still holds the branch", async () => {
+    const world = await gateWorld();
+    const { worker } = await inFix(world);
+    const tester = await world.worker("Legacy tester");
+    world.state.db.prepare("UPDATE review_gates SET tester_thread_id=? WHERE gate_key=?").run(tester.threadId, world.gate().gate_key);
+    world.state.db.prepare("UPDATE managed_threads SET branch=?, kind='tester', state='active', last_report_state='blocked' WHERE thread_id=?").run(worker.branch, tester.threadId);
+    await world.worker("Unrelated"); // a write: the store reloads the seeded rows
+    expect(await refused(world, { replaces: worker.threadId, kind: "worker" })).toContain(`(${tester.threadId})`);
+  });
 });
 
 test("replacing a gate's second target names the gate's first target", async () => {

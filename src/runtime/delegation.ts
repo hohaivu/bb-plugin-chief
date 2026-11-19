@@ -335,9 +335,9 @@ export function createDelegation(ctx: Ctx) {
         && !(fix?.gate && fix.gate.targets.some((target) => target.threadId === row.thread_id))
         // A docs repair does not wait on a gate's fixer that is no longer busy; a busy one still holds the branch.
         && !(isWriter(kind) && gate && !BUSY_STATUSES.has(row.state) && gate.fixer_thread_id === row.thread_id)
-        // A legacy tester or corrector that stopped working does not hold the branch on the gate's repair paths; a working one still does.
+        // A legacy tester or corrector that is not busy does not hold the branch on the gate's repair paths; a busy one still does, whatever it last reported.
         && !((fix?.gate || isWriter(kind)) && gate && [gate.tester_thread_id, gate.corrector_thread_id].includes(row.thread_id)
-          && (isReady(row) || ["blocked", "failed"].includes(row.state) || row.last_report_state === "blocked")))
+          && !BUSY_STATUSES.has(row.state)))
       : undefined;
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);
