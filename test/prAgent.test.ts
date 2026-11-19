@@ -301,6 +301,25 @@ describe("prAgentScript: invalid output is exit 6, never a guess", () => {
   });
 });
 
+describe("prAgentScript: job control is scoped to the background launch", () => {
+  // Top-level `set -m` makes every foreground command try setpgid and can print an extra stderr line under load.
+  const lines = prAgentScript("/d").split("\n").map((line) => line.trim());
+  const at = (text: string, from = 0) => lines.findIndex((line, i) => i >= from && line === text);
+  test("monitor mode is only on inside run_bounded, around the step and watcher launches", () => {
+    const fn = lines.findIndex((line) => line.startsWith("run_bounded()"));
+    const on = lines.reduce<number[]>((acc, line, i) => (line === "set -m" ? [...acc, i] : acc), []);
+    expect(fn).toBeGreaterThan(-1);
+    expect(on).toHaveLength(1);
+    expect(on[0]).toBeGreaterThan(fn);
+    const step = at('"$@" &', on[0]);
+    const watcher = lines.findIndex((line, i) => i > step && line.startsWith("WATCH_PID=$!"));
+    const off = at("set +m", on[0]);
+    expect(step).toBeGreaterThan(on[0]);
+    expect(watcher).toBeGreaterThan(step);
+    expect(off).toBeGreaterThan(watcher);
+  });
+});
+
 describe("prAgentScript: pr-agent never publishes", () => {
   test("every pr-agent call carries all five variables with the stated values, in argument order, in the configured directory", async () => {
     const run = await runScript({ output: review("no_concerns_found", []) });
