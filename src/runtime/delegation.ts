@@ -288,7 +288,7 @@ export function createDelegation(ctx: Ctx) {
     const gate = prior ? store.gateFor(prior.thread_id) : params.planThreadId ? store.gate(`plan:${params.planThreadId}`) : undefined;
     if (!fix && gate?.targets.some((target) => store.get(target.threadId)?.state !== "complete")) {
       if (prior && gate.targets.some((target) => target.threadId === prior.thread_id) && params.kind !== "spec-writer") {
-        throw new Error(`The review gate pinned ${prior.thread_id}; fixes go through the gate's fix run. ${ctx.gateLine(gate, ctx.gateOf(prior)!.decision)}`);
+        throw new Error(`The review gate pinned ${prior.thread_id}; fixes go through the gate's fix run on its first target ${gate.targets[0]!.threadId}. ${ctx.gateLine(gate, ctx.gateOf(prior)!.decision)}`);
       }
       // One writable owner per gate: a docs repair waits for the fix run.
       const busyFixer = isWriter(params.kind) && gate.fixer_thread_id ? store.get(gate.fixer_thread_id) : undefined;
@@ -334,7 +334,10 @@ export function createDelegation(ctx: Ctx) {
         // A gate fix run works on the pinned targets' branch: its targets do not hold it.
         && !(fix?.gate && fix.gate.targets.some((target) => target.threadId === row.thread_id))
         // A docs repair does not wait on a gate's fixer that is no longer busy; a busy one still holds the branch.
-        && !(isWriter(kind) && gate && !BUSY_STATUSES.has(row.state) && gate.fixer_thread_id === row.thread_id))
+        && !(isWriter(kind) && gate && !BUSY_STATUSES.has(row.state) && gate.fixer_thread_id === row.thread_id)
+        // A legacy tester or corrector that stopped working does not hold the branch on the gate's repair paths; a working one still does.
+        && !((fix?.gate || isWriter(kind)) && gate && [gate.tester_thread_id, gate.corrector_thread_id].includes(row.thread_id)
+          && (isReady(row) || ["blocked", "failed"].includes(row.state) || row.last_report_state === "blocked")))
       : undefined;
     if (holder) {
       throw new Error(`Branch ${branch} already carries the active worker “${holder.title}” (${holder.thread_id}). Complete that worker, or give this delegation its own branch and pull request.`);

@@ -202,3 +202,40 @@ describe("a chat fix: a change after completion", () => {
     expect(message).not.toContain("review gate");
   });
 });
+
+describe("a gate fix run on a legacy gate", () => {
+  test("a ready legacy tester on the first target's branch does not hold the branch for the fix run", async () => {
+    const world = await gateWorld();
+    const { worker } = await inFix(world);
+    const targetEnvironment = world.state.live.get(worker.threadId)!.environmentId;
+    const tester = await world.worker("Legacy tester");
+    world.state.db.prepare("UPDATE managed_threads SET branch=?, kind='tester' WHERE thread_id=?").run(worker.branch, tester.threadId);
+    world.state.db.prepare("UPDATE review_gates SET tester_thread_id=? WHERE gate_key=?").run(tester.threadId, world.gate().gate_key);
+    await world.ready(tester.threadId); // a write: the store reloads the seeded rows
+    const fix = await world.delegateTo({ replaces: worker.threadId, kind: "worker" });
+    expect(world.gate().fixer_thread_id).toBe(fix.threadId);
+    expect(world.state.live.get(fix.threadId)!.environmentId).toBe(targetEnvironment);
+  });
+
+  test("a working legacy tester on the branch still holds it", async () => {
+    const world = await gateWorld();
+    const { worker } = await inFix(world);
+    const tester = await world.worker("Legacy tester");
+    world.state.db.prepare("UPDATE review_gates SET tester_thread_id=? WHERE gate_key=?").run(tester.threadId, world.gate().gate_key);
+    world.state.db.prepare("UPDATE managed_threads SET branch=?, kind='tester' WHERE thread_id=?").run(worker.branch, tester.threadId);
+    await world.worker("Unrelated"); // a write: the store reloads the seeded rows
+    expect(await refused(world, { replaces: worker.threadId, kind: "worker" })).toContain(`(${tester.threadId})`);
+  });
+});
+
+test("replacing a gate's second target names the gate's first target", async () => {
+  const world = await gateWorld();
+  const { worker } = await world.gated();
+  const second = await world.worker("Second target");
+  const gate = world.gate();
+  const targets = JSON.parse(gate.targets);
+  world.state.db.prepare("UPDATE review_gates SET targets=? WHERE gate_key=?").run(JSON.stringify([...targets, { ...targets[0], threadId: second.threadId }]), gate.gate_key);
+  await world.ready(second.threadId);
+  const message = await refused(world, { replaces: second.threadId, kind: "worker" });
+  expect(message).toContain(worker.threadId);
+});
