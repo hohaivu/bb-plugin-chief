@@ -32,6 +32,7 @@ async function abandon(state: Awaited<ReturnType<typeof setup>>, hit: Promise<vo
   await service.done;
 }
 
+const researcherStates = (state: Awaited<ReturnType<typeof setup>>) => state.db.prepare("SELECT thread_id, state FROM managed_threads WHERE role='researcher' ORDER BY thread_id").all();
 const absorbedResearcher = (db: any, id: string) => db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, created_at, updated_at) VALUES (?, 'researcher', 'proj_1', ?, 'ready', 'idle', 1, 1)").run(id, id);
 
 describe("an abandoned supervisor tick", () => {
@@ -217,8 +218,6 @@ describe("an abandoned supervisor tick", () => {
     await pause(100);
     expect(reads).toEqual(["thr_r1", "thr_r1"]);
   }, STOP_GRACE_MS + 5_000);
-
-  const researcherStates = (state: Awaited<ReturnType<typeof setup>>) => state.db.prepare("SELECT thread_id, state FROM managed_threads WHERE role='researcher' ORDER BY thread_id").all();
 
   test("a sweep started by the tick's own reconcile write reads and completes nothing after abandonment", async () => {
     const reads: string[] = [];
@@ -454,6 +453,15 @@ const archive = async (state: S, id: string) => {
 };
 const row = (state: S, id: string) => rowOf(state, id);
 const pendingMarkers = (state: S) => state.db.prepare("SELECT key, value FROM plugin_meta WHERE key LIKE 'pending_handover:%' ORDER BY key").all();
+/** An undelivered alert and an open todo of `chief`: the work a late spawn must leave alone until the live tick adopts it. */
+const seedTargets = (state: S, chief: string) => {
+  state.db.prepare("INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, created_at) VALUES ('test:undelivered', ?, ?, 'undelivered alert', ?)").run(chief, chief, Date.now());
+  state.db.prepare("INSERT INTO chief_todos (project_id, text, state, created_at, updated_at, chief_thread_id) VALUES ('proj_1', 'carry todo', 'open', 1, 1, ?)").run(chief);
+};
+const targetsOf = (state: S) => ({
+  alert: (state.db.prepare("SELECT target_thread_id FROM alert_outbox WHERE dedupe_key='test:undelivered'").get() as any).target_thread_id,
+  todo: (state.db.prepare("SELECT chief_thread_id FROM chief_todos WHERE text='carry todo'").get() as any).chief_thread_id,
+});
 const decisionsOf = async (state: S, id: string) => {
   const file = join(state.storageRoot, id, "decisions.md");
   for (let i = 0; i < 200 && !(await readFile(file, "utf8").catch(() => "")).includes("carry me"); i++) await pause(5);
@@ -481,6 +489,7 @@ describe("an abandoned supervisor tick's Chief spawn", () => {
     await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
     await state.harness.behavior.setSettings({ chiefProject: "proj_1", autoSpawn: true });
     await archive(state, old);
+    seedTargets(state, old);
     const spawnedBefore = state.spawned.length;
     gate.current = parked();
     await abandon(state, gate.current.hit);
@@ -495,10 +504,12 @@ describe("an abandoned supervisor tick's Chief spawn", () => {
     expect(pendingMarkers(state)).toEqual([{ key: `pending_handover:${next}`, value: old }]);
     expect(row(state, old).state).not.toBe("complete");
     expect(row(state, worker).chief_thread_id).toBe(old);
+    expect(targetsOf(state)).toEqual({ alert: old, todo: old });
     expect(await readFile(join(state.storageRoot, next, "decisions.md"), "utf8").catch(() => "")).not.toContain("carry me");
 
     await state.supervisorCycle();
     expect(state.spawned).toHaveLength(spawnedBefore + 1); // the live tick adopted the late Chief: no second
+    expect(targetsOf(state)).toEqual({ alert: next, todo: next });
     expect(row(state, worker).chief_thread_id).toBe(next);
     expect(row(state, old).state).toBe("complete");
     expect(pendingMarkers(state)).toEqual([]);
@@ -518,6 +529,7 @@ describe("an abandoned supervisor tick's Chief spawn", () => {
     const foreignBefore = { ...row(state, foreign) };
     await call(state, "chief_roster", { decision: { text: "carry me" } }, child);
     await archive(state, child);
+    seedTargets(state, child);
     const spawnedBefore = state.spawned.length;
     gate.current = parked();
     await abandon(state, gate.current.hit);
@@ -533,16 +545,100 @@ describe("an abandoned supervisor tick's Chief spawn", () => {
     const next = markers[0]!.key.slice("pending_handover:".length);
     expect(row(state, worker).chief_thread_id).toBe(child);
     expect(row(state, child).state).not.toBe("complete");
+    expect(targetsOf(state)).toEqual({ alert: child, todo: child });
 
     await state.supervisorCycle();
     expect(state.spawned).toHaveLength(spawnedBefore + 1);
     expect(row(state, worker).chief_thread_id).toBe(next);
+    expect(targetsOf(state)).toEqual({ alert: next, todo: next });
     expect(row(state, next)).toMatchObject({ role: "chief", coordinator_thread_id: coord });
     expect(row(state, child).state).toBe("complete");
     expect(pendingMarkers(state)).toEqual([]);
     expect(await decisionsOf(state, next)).toContain("carry me");
     expect(row(state, foreign)).toMatchObject({ coordinator_thread_id: other, title: foreignBefore.title, chief_thread_id: foreignBefore.chief_thread_id });
   }, STOP_GRACE_MS + 10_000);
+
+  test("a late spawn's aborted reload starts no sweep flight, so a later independent request still sweeps", async () => {
+    const gate: { current: ReturnType<typeof parked> | null } = { current: null };
+    const state = await setup({ onSpawn: async () => { await gate.current?.hold(); }, seed: ({ db }) => absorbedResearcher(db, "thr_r1") });
+    const base = state.live.values().next().value;
+    let busy = true;
+    state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) =>
+      threadId === "thr_r1" ? { ...base, id: threadId, status: busy ? "active" : "idle", archivedAt: null, deletedAt: null } : state.live.get(threadId));
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1", autoSpawn: true });
+    gate.current = parked();
+    await abandon(state, gate.current.hit);
+    const held = gate.current;
+    gate.current = null;
+    held.release();
+    await pause(100);
+    expect(state.spawned).toHaveLength(1); // the late spawn recorded its row through the abandoned tick's own reload
+
+    busy = false;
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: base, lastAssistantText: "done" });
+    await pause(100);
+    // A stranded flight would leave this request queued for a pass nobody runs.
+    expect(state.db.prepare("SELECT state FROM managed_threads WHERE thread_id='thr_r1'").get()).toEqual({ state: "complete" });
+  }, STOP_GRACE_MS + 5_000);
+
+  test("the handover and insert reloads of a spawn that returned before abandonment read, write and alert no more once the tick is abandoned", async () => {
+    let armed = false;
+    let spawns = 0; // spawns: the old Chief, its worker, then the tick's replacement
+    const sweepRead = parked();
+    const probe = parked();
+    const reads: string[] = [];
+    const state = await setup({ onSpawn: () => { if (++spawns === 3) armed = true; }, seed: ({ db }) => { absorbedResearcher(db, "thr_r1"); absorbedResearcher(db, "thr_r2"); } });
+    const base = state.live.values().next().value;
+    const old = (await start(state)).threadId;
+    const worker = (await delegate(state, old, "Fix totals")).threadId;
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1", autoSpawn: true });
+    await archive(state, old);
+    // A retryable alert follows the work to the new Chief: the tick stays parked on its marker probe after the spawn returned.
+    state.db.prepare("INSERT INTO alert_outbox (dedupe_key, target_thread_id, source_thread_id, message, created_at, attempts, last_attempt_at) VALUES ('test:retry', ?, ?, 'retried alert', ?, 1, ?)")
+      .run(old, old, Date.now() - 600_000, Date.now() - 600_000);
+    const sends: string[] = [];
+    state.harness.sdk.stub("threads.queuedMessages.list", probe.hold);
+    state.harness.sdk.stub("threads.send", async (args: any) => { sends.push(args.input[0].text); return { ok: true, delivery: "sent" }; });
+    // Busy until the tick's spawn is dispatched, so the tick's earlier sweeps complete nothing; then the first read (the handover's reload sweep) is parked.
+    state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      if (threadId !== "thr_r1" && threadId !== "thr_r2") return state.live.get(threadId);
+      if (!armed) return { ...base, id: threadId, status: "active", archivedAt: null, deletedAt: null };
+      reads.push(threadId);
+      if (reads.length === 1) await sweepRead.hold();
+      return { ...base, id: threadId, status: "idle", archivedAt: null, deletedAt: null };
+    });
+    await abandon(state, probe.hit);
+    const next = (state.db.prepare("SELECT thread_id FROM managed_threads WHERE role='chief' AND thread_id<>?").get(old) as { thread_id: string }).thread_id;
+    expect(row(state, worker).chief_thread_id).toBe(next); // the spawn returned and handed over before the abandonment
+    const readsAtAbandon = [...reads];
+    const statesAtAbandon = researcherStates(state);
+    const alertsAtAbandon = state.db.prepare("SELECT COUNT(*) AS n FROM alert_outbox").get();
+    sweepRead.release();
+    probe.release([]);
+    await pause(100);
+    expect(readsAtAbandon).toEqual(["thr_r1"]);
+    expect(reads).toEqual(readsAtAbandon);
+    expect(researcherStates(state)).toEqual(statesAtAbandon);
+    expect(state.db.prepare("SELECT COUNT(*) AS n FROM alert_outbox").get()).toEqual(alertsAtAbandon);
+    expect(sends).toEqual([]);
+  }, STOP_GRACE_MS + 10_000);
+
+  test("adoption hands over from persisted rows when the store cache predates the other generation's late commit", async () => {
+    const state = await setup();
+    const old = await makeChief(state);
+    await archive(state, old);
+    seedTargets(state, old);
+    // Another plugin generation committed the late Chief and its marker after this store loaded; nothing here reloads before the tick adopts it.
+    state.addLive("thr_late", "proj_1", "Chief · late");
+    state.db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, created_at, updated_at) VALUES ('thr_late', 'chief', 'proj_1', 'Chief · late', 'starting', 'idle', ?, ?)").run(Date.now(), Date.now());
+    state.db.prepare("INSERT INTO plugin_meta (key, value) VALUES ('pending_handover:thr_late', ?)").run(old);
+    await state.supervisorCycle();
+    expect(targetsOf(state)).toEqual({ alert: "thr_late", todo: "thr_late" });
+    expect(row(state, old).state).toBe("complete");
+    expect(pendingMarkers(state)).toEqual([]);
+  });
 
   test("a live tick drops every marker it cannot hand over, and moves no work for them", async () => {
     const state = await setup();
@@ -624,5 +720,31 @@ describe("an abandoned supervisor tick's host and notice lookups", () => {
     await pause(100);
     expect(notices()).toHaveLength(1);
     expect(state.db.prepare("SELECT attempts, delivered_at IS NOT NULL AS delivered FROM alert_outbox WHERE dedupe_key=?").get(key)).toEqual({ attempts: 1, delivered: 1 });
+  }, STOP_GRACE_MS + 5_000);
+
+  test("a Coordinator-gone notice a tick-owned sweep dispatched sends nothing and counts no attempt when its marker probe returns after abandonment, and a live tick retries it", async () => {
+    const state = await setup();
+    const coord = await makeCoordinator(state);
+    const child = await spawnChild(state, coord);
+    await archive(state, coord);
+    const key = `${child}:coordinator-gone:${coord}`;
+    const notices = () => state.sent.filter((sent) => sent.threadId === child && String(sent.input[0].text).includes("chief_attach"));
+    expect(notices()).toHaveLength(1);
+    // A retryable row the archive's send left behind: attempted once, long ago, undelivered. Only the sweep's notice (before retryAlerts) can reach its probe first.
+    state.db.prepare("UPDATE alert_outbox SET delivered_at=NULL, attempts=1, last_attempt_at=? WHERE dedupe_key=?").run(Date.now() - 86_400_000, key);
+    state.sent.length = 0;
+    const probe = parked();
+    state.harness.sdk.stub("threads.queuedMessages.list", probe.hold);
+    await abandon(state, probe.hit);
+    probe.release([]);
+    await pause(100);
+    expect(notices()).toEqual([]);
+    expect(state.db.prepare("SELECT attempts, delivered_at FROM alert_outbox WHERE dedupe_key=?").get(key)).toEqual({ attempts: 1, delivered_at: null });
+
+    state.harness.sdk.stub("threads.queuedMessages.list", async () => []);
+    await state.supervisorCycle();
+    await pause(100);
+    expect(notices()).toHaveLength(1);
+    expect(state.db.prepare("SELECT attempts, delivered_at IS NOT NULL AS delivered FROM alert_outbox WHERE dedupe_key=?").get(key)).toEqual({ attempts: 2, delivered: 1 });
   }, STOP_GRACE_MS + 5_000);
 });

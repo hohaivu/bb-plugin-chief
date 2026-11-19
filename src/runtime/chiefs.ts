@@ -66,8 +66,8 @@ export function createChiefs(ctx: Ctx) {
       }, signal);
       throw new Error("abandoned");
     }
-    if (replaced) handOver(replaced.thread_id, thread.id, target);
-    store.insert(row);
+    if (replaced) handOver(replaced.thread_id, thread.id, target, signal);
+    store.batch(() => store.insert(row), signal);
     return { threadId: thread.id, created: true as const };
   }
 
@@ -110,6 +110,8 @@ export function createChiefs(ctx: Ctx) {
    * Idempotent: a marker is gone in the same transaction as its handover. */
   function adoptPendingHandovers(signal: AbortSignal) {
     const markers = db.prepare(`SELECT key, value FROM plugin_meta WHERE key LIKE ?`).all(`${PENDING_HANDOVER}%`) as { key: string; value: string }[];
+    // The cache may predate the old generation's late commit: read both rows from persisted state (no reload, so no sweep) before judging a marker.
+    if (markers.length) store.refresh();
     for (const marker of markers) {
       if (signal.aborted) return;
       const next = store.get(marker.key.slice(PENDING_HANDOVER.length));

@@ -41,6 +41,8 @@ export function createSweep(ctx: Ctx) {
    * `signal` is an abandoned supervisor tick's: a pass only it asked for reads, writes and alerts no more once it aborts.
    * A request without a signal is independent: its pass runs unsignalled, whoever else is queued with it. */
   function sweep(signal?: AbortSignal) {
+    // An abandoned tick's pass would do nothing: starting one would clear `sweeping` before this call stores the flight, and strand every later request.
+    if (signal?.aborted) return ctx.state.sweeping ?? Promise.resolve();
     if (ctx.state.sweeping) {
       const queued = ctx.state.sweepAgain ??= { independent: false };
       if (signal) queued.signal = signal; else queued.independent = true;

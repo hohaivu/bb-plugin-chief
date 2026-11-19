@@ -267,6 +267,7 @@ export async function prMerged(pullRequest: string, cwd: string | null, signal?:
         : ["glab", ["mr", "view", target, "-F", "json", ...(repo ? ["--repo", repo] : [])]];
       try {
         const { stdout } = await execFileAsync(cli as string, args as string[], { cwd: cwd ?? undefined, timeout: FORGE_CLI_TIMEOUT_MS, env: forgeEnv() });
+        if (signal?.aborted) return null; // a lookup abandoned while its command ran accepts no answer
         const parsed = JSON.parse(stdout) as { state?: unknown; headRefOid?: unknown; sha?: unknown; diff_refs?: { head_sha?: unknown } };
         const sha = String((candidate === "github" ? parsed.headRefOid : parsed.sha ?? parsed.diff_refs?.head_sha) ?? "").trim().toLowerCase();
         return { merged: String(parsed.state).toLowerCase() === "merged", open: /^open(ed)?$/i.test(String(parsed.state)), head: SHA_PATTERN.test(sha) ? sha : null };
