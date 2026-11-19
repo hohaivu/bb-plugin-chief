@@ -402,6 +402,21 @@ describe("an abandoned supervisor tick's cleanup", () => {
     expect(jobs(world)).toEqual([]);
   }, STOP_GRACE_MS + 5_000);
 
+  test("an abandoned forge lookup caches no merge answer, so the next live tick asks the forge again", async () => {
+    const world = await gateWorld({ cleanup: true });
+    const { worker } = await world.passed("Fix", { prUrl: PR_A });
+    await world.complete(worker.threadId);
+    const lookup = parkForge();
+    await abandon(world.state, lookup.hit);
+    lookup.release();
+    await pause();
+    expect(jobs(world)).toEqual([]);
+    // A cached "not merged" answer would hold the next tick off for five minutes.
+    await world.state.supervisorCycle();
+    await pause(100);
+    expect(jobs(world)).toEqual(expect.arrayContaining([expect.objectContaining({ thread_id: worker.threadId })]));
+  }, STOP_GRACE_MS + 5_000);
+
   test("does not run a following job with no managed row when the lookup of the job before it was interrupted", async () => {
     const world = await gateWorld({ cleanup: true });
     const { threadId } = await world.worker("Fix", { prUrl: PR_A });
