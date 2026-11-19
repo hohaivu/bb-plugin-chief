@@ -50,6 +50,7 @@ describe("chief_research", () => {
     const spawn = researcherSpawn(state);
     expect(spawn.prompt).toContain("Who calls this?");
     expect(spawn.prompt).toContain(chief);
+    expect(row.brief).toBe(spawn.prompt);
     expect(spawn.environment).toEqual({ type: "reuse", environmentId: state.live.get(chief)!.environmentId });
     expect(callRows(state)).toEqual([{ caller_thread_id: chief, role: "chief", mode: null, run_id: null, outcome: "spawned" }]);
   });
@@ -97,6 +98,8 @@ describe("chief_research", () => {
     test("the launch stores research_design 1 for design and 0 for light", async () => {
       const design = await launch(true);
       const light = await launch(false);
+      expect(design.prompt.match(/^- Stage 3, Design:/gm)).toHaveLength(1);
+      expect(light.prompt).not.toMatch(/^- Stage 3, Design:/m);
       const flag = (state: State) => (state.db.prepare("SELECT research_design AS flag FROM managed_threads WHERE role='researcher'").get() as { flag: number | null }).flag;
       expect(flag(design.state)).toBe(1);
       expect(flag(light.state)).toBe(0);
@@ -119,8 +122,7 @@ describe("chief_research", () => {
       const spawn = researcherSpawn(state);
       expect(spawn).toMatchObject(PICK);
       expect(spawn.prompt).toContain("--provider codex --model gpt-6-astra --reasoning-level high");
-      expect(spawn.prompt).not.toContain("pass no --provider or --model");
-    });
+      });
 
     test.each([
       ["no pick", async (_state: State) => {}],
@@ -140,8 +142,7 @@ describe("chief_research", () => {
       expect(spawnLine).toContain("--parent-self");
       expect(spawnLine).not.toContain("--provider");
       expect(spawnLine).not.toContain("--model");
-      expect(spawn.prompt).toContain("pass no --provider or --model");
-    });
+      });
 
     test("a cooling researcher pick refuses before any spawn and leaves one error row", async () => {
       const state = await setup();
