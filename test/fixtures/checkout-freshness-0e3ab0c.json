@@ -1000,12 +1000,8 @@
     "CLI plan --json, shared, behind (fast-forward)": {
       "replies": {
         "exitCode": 0,
-        "stderr": "",
-        "json": {
-          "threadId": "thr_2",
-          "title": "Plan · Plan 1",
-          "projectId": "proj_1"
-        }
+        "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\"\n}\n",
+        "stderr": ""
       },
       "head": "origin tip",
       "threads": {
@@ -1073,13 +1069,8 @@
     "CLI plan --json, shared, dirty": {
       "replies": {
         "exitCode": 0,
-        "stderr": "",
-        "json": {
-          "threadId": "thr_2",
-          "title": "Plan · Plan 1",
-          "projectId": "proj_1",
-          "warning": true
-        }
+        "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\",\n  \"warning\": \"Did not fast-forward your checkout to origin/main: it has uncommitted changes. The planner reads it as it is.\"\n}\n",
+        "stderr": ""
       },
       "head": "c0",
       "threads": {
@@ -1101,13 +1092,8 @@
     "CLI plan --json, sharing unknown": {
       "replies": {
         "exitCode": 0,
-        "stderr": "",
-        "json": {
-          "threadId": "thr_2",
-          "title": "Plan · Plan 1",
-          "projectId": "proj_1",
-          "warning": true
-        }
+        "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\",\n  \"warning\": \"Did not fast-forward your checkout to origin/the default branch: could not tell whether the planner shares it (no checkout path). The planner reads it as it is.\"\n}\n",
+        "stderr": ""
       },
       "head": "c0",
       "threads": {

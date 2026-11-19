@@ -126,10 +126,21 @@ describe("checkout freshness", () => {
     expect(stamp).toContain(tip.slice(0, 12));
     expect(stamp).toContain(branch);
   };
-  /** A CLI plan result without its prose: exit code, stderr, and for --json the parsed object with `warning` reduced to its presence. */
-  const cliShape = (result: { exitCode?: number; stdout?: string; stderr?: string }, json: boolean) => {
-    const { warning, ...rest } = json ? JSON.parse(result.stdout!) : ({} as Record<string, unknown>);
-    return { exitCode: result.exitCode, stderr: result.stderr, ...(json ? { json: { ...rest, ...(warning === undefined ? {} : { warning: true }) } } : {}) };
+  /** A CLI plan result as recorded in the goldens: exit code and stderr always; stdout only for --json (text-mode stdout is reply prose). */
+  const cliShape = (result: { exitCode?: number; stdout?: string; stderr?: string }, json: boolean) =>
+    ({ exitCode: result.exitCode, ...(json ? { stdout: result.stdout } : {}), stderr: result.stderr });
+  /** The skip reasons a --json `warning` can carry; a warning is compared by which reason it names, never by its surrounding prose. */
+  const WARNING_REASONS: Record<string, RegExp> = { dirty: /uncommitted changes/, "sharing unknown": /could not tell whether the planner shares it/ };
+  /** Parses every `stdout` string in a recorded output (--json mode) and reduces `warning` to its reason; every other field stays exact. */
+  const settle = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(settle);
+    if (typeof value !== "object" || value === null) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, field]) => {
+      if (key !== "stdout" || typeof field !== "string") return [key, settle(field)];
+      const { warning, ...rest } = JSON.parse(field) as Record<string, unknown>;
+      const reason = typeof warning === "string" ? Object.entries(WARNING_REASONS).find(([, pattern]) => pattern.test(warning))?.[0] ?? warning : warning;
+      return [key, { ...rest, ...(warning === undefined ? {} : { warning: reason }) }];
+    }));
   };
 
   const flush = async (ms = 0) => {
@@ -931,7 +942,7 @@ describe("checkout freshness", () => {
       const golden = JSON.parse(await readFile(GOLDEN, "utf8")) as { meta: { head: string; fixtureHash: string }; outputs: Record<string, unknown> };
       expect(golden.meta.head).toBe("948c49cb6cac6f2e3066fe0e2164e22c809c8a4f");
       expect(golden.meta.fixtureHash).toBe(fixtureHash);
-      expect(actual).toEqual(golden.outputs);
+      expect(settle(actual)).toEqual(settle(golden.outputs));
     }, 60_000);
   });
 
@@ -1042,7 +1053,7 @@ describe("checkout freshness", () => {
       const golden = JSON.parse(await readFile(GOLDEN, "utf8")) as { meta: { head: string; fixtureHash: string }; outputs: Record<string, unknown> };
       expect(golden.meta.head).toBe("0e3ab0c4b7f6aa27cd2bba93ef757e19b3a57610");
       expect(golden.meta.fixtureHash).toBe(fixtureHash);
-      expect(actual).toEqual(golden.outputs);
+      expect(settle(actual)).toEqual(settle(golden.outputs));
     }, 120_000);
   });
 });

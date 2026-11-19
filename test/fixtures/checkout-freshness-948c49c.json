@@ -17,30 +17,18 @@
     },
     "CLI plan --json, shared checkout, behind": {
       "exitCode": 0,
-      "stderr": "",
-      "json": {
-        "threadId": "thr_2",
-        "title": "Plan · Plan 1",
-        "projectId": "proj_1"
-      }
+      "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\"\n}\n",
+      "stderr": ""
     },
     "CLI plan --json, shared checkout, current": {
       "exitCode": 0,
-      "stderr": "",
-      "json": {
-        "threadId": "thr_2",
-        "title": "Plan · Plan 1",
-        "projectId": "proj_1"
-      }
+      "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\"\n}\n",
+      "stderr": ""
     },
     "CLI plan --json, confirmed separate checkout": {
       "exitCode": 0,
-      "stderr": "",
-      "json": {
-        "threadId": "thr_2",
-        "title": "Plan · Plan 1",
-        "projectId": "proj_1"
-      }
+      "stdout": "{\n  \"threadId\": \"thr_2\",\n  \"title\": \"Plan · Plan 1\",\n  \"projectId\": \"proj_1\"\n}\n",
+      "stderr": ""
     }
   }
 }
