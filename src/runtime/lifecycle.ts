@@ -123,16 +123,16 @@ export function createLifecycle(ctx: Ctx) {
   }
 
   async function reconcile(stopped?: () => boolean) {
-    const sectionId = await ctx.ensureSection();
+    const sectionId = await ctx.ensureSection(stopped);
     // A complete or deleted row never changes state again (stateFromLive), so only open rows cost a read.
     for (const row of store.all()) {
       if (stopped?.()) return;
       if (row.state !== "deleted" && row.state !== "complete") await reconcileThread(row, sectionId, stopped);
     }
     if (stopped?.()) return;
+    const projects = new Set(store.all().map((row) => row.project_id));
     const configured = (await settings.get()).chiefProject;
     if (stopped?.()) return;
-    const projects = new Set(store.all().map((row) => row.project_id));
     if (configured) projects.add(configured);
     for (const projectId of projects) {
       if (stopped?.()) return;
@@ -232,7 +232,7 @@ export function registerLifecycle(ctx: Ctx) {
       if (stopped()) return;
       await ctx.reconcile(stopped);
       if (stopped()) return;
-      await ctx.sweep(); // safety net for idle events missed across a reload, or a blocker archived without idling
+      await ctx.sweep(stopped); // safety net for idle events missed across a reload, or a blocker archived without idling
       if (stopped()) return;
       const values = await settings.get();
       if (stopped()) return;
@@ -295,7 +295,7 @@ export function registerLifecycle(ctx: Ctx) {
       if (stopped()) return;
       await ctx.retryAlerts(abandon);
       if (stopped()) return;
-      await ctx.observeCleanup();
+      await ctx.observeCleanup(abandon);
       if (stopped()) return;
       void ctx.forgeComments.drain();
       void ctx.trackerSync.sync();
