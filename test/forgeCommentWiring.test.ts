@@ -7,7 +7,6 @@ import { APPROVE, NO_DEVIATIONS, chiefReview, completeWorker, delegate, disposal
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
 import { dropSkippedNote } from "./docsOwnership";
-import { inPlaceLine } from "./blockedAlerts";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
@@ -70,13 +69,15 @@ describe("forge comments", () => {
     /** The one Report alert Chief receives, in full; null when the caller sends none. */
     report: { from: string; text: string } | null;
   };
+  const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const CALLERS: [string, (state: State, pr: string) => Promise<Scenario>][] = [
     ["blocked report", async (state, pr) => {
       const { chief, worker, act } = await blockedWorker(state, { prUrl: pr });
       return {
         chief: chief.threadId, prefix: "blocked:", act, result: "Report delivered to Chief.",
         row: { id: worker.threadId, fields: { state: "blocked", last_report_state: "blocked", report_seq: 1, blocker: "Totals test fails", recommendation: "Fix the product code", result: "Tests fail" } },
-        report: { from: worker.threadId, text: `[Chief lifecycle alert]\nWorker report from Fix totals (${worker.threadId})\nState: blocked\nBlocked: Totals test fails — decide or escalate to the user. ${inPlaceLine(worker.threadId)}\nBlocker: Totals test fails\nRecommendation: Fix the product code\nResult: Tests fail` },
+        report: { from: worker.threadId, // The Blocked line names the blocker and the in-place chief_continue route for this worker; the other lines are exact.
+        text: expect.stringMatching(new RegExp(`^${escapeRegExp(`[Chief lifecycle alert]\nWorker report from Fix totals (${worker.threadId})\nState: blocked\nBlocked: Totals test fails`)}[^\\n]*${escapeRegExp(`chief_continue (threadId: ${worker.threadId}`)}[^\\n]*${escapeRegExp("\nBlocker: Totals test fails\nRecommendation: Fix the product code\nResult: Tests fail")}$`)) },
       };
     }],
     ["reviewer verdict", async (state, pr) => {

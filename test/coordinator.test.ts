@@ -6,7 +6,7 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server";
 import { MIGRATIONS } from "../src/db/migrations";
 import { forgeAnswers, forged, startGate } from "./gateForge";
-import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, elapse, readyAction, rowOf, setup, start, status, wave } from "./harness";
+import { CLOSE_OUT, NO_DEVIATIONS, completeWorker, configurationContext, delegate, disposeAll, elapse, rowOf, setup, start, status, wave } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
 
@@ -1053,7 +1053,7 @@ describe("Coordinator", () => {
       expect(reportPath).toBeTruthy();
       expect(stored.message.length).toBeLessThanOrEqual(3_000);
       expect(stored.message.endsWith(`\n${markerOf(stored.dedupe_key)}`)).toBe(true);
-      expect(stored.message.split("\n")).toContain(readyAction(worker));
+      expect(stored.message.split("\n").some((line) => line.includes(`chief_review (workerThreadId: ${worker})`))).toBe(true);
       expect(stored.message).toContain(reportPath);
       expect(textsTo(state, chief)).toContain(stored.message);
     });

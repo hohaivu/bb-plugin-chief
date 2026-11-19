@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { APPROVE, PLAN_FIXTURE, REQUEST_CHANGES, chiefReview, completeWorker, configurationContext, delegate, disposeAll, elapse, execFileMock, ghHead, readyAction, setup, start, status } from "./harness";
+import { APPROVE, PLAN_FIXTURE, REQUEST_CHANGES, chiefReview, completeWorker, configurationContext, delegate, disposeAll, elapse, execFileMock, ghHead, setup, start, status } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
 
@@ -261,7 +261,7 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const worker = await readyWorker(state, chief.threadId);
     // The report itself already names the exact next call.
-    expect(state.sent.at(-1).input[0].text).toContain(readyAction(worker.threadId));
+    expect(state.sent.at(-1).input[0].text).toContain(`chief_review (workerThreadId: ${worker.threadId})`);
     const sentBeforeIdle = state.sent.length;
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,

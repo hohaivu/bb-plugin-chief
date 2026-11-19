@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { PLAN_FIXTURE, REVIEWER_NATIVE_LINE, chiefReview, configurationContext, delegate, disposeAll, execFileMock, ghHead, planFile, setup, start, status, wave } from "./harness";
-import { NATIVE_NO_RESHAPE_LINE } from "./reviewWave1";
+import { PLAN_FIXTURE, chiefReview, nativeLines, configurationContext, delegate, disposeAll, execFileMock, ghHead, planFile, setup, start, status, wave } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
 
@@ -596,8 +595,8 @@ describe("Chief backend", () => {
   // Contract (wave 1): the stored flags reach the reviewer: native-design line only for a feature wave, its reshape sentences only with a reshape wave, absent for explicit false.
   // The plan goes through the real report intake, the worker through delegation, and the prompt is the one chief_review launched.
   test.each([
-    ["feature only", { feature: true }, NATIVE_NO_RESHAPE_LINE],
-    ["feature and reshape", { feature: true, reshape: true }, REVIEWER_NATIVE_LINE],
+    ["feature only", { feature: true }, "noReshape"],
+    ["feature and reshape", { feature: true, reshape: true }, "full"],
     ["no flag on the wave (explicit false)", {}, null],
   ])("a plan wave with %s gives the reviewer the matching native-design line", async (_label, flags, line) => {
     forgeAnswers();
@@ -611,10 +610,10 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done\n\n## Deviations from plan\nNone" }, { threadId: worker.threadId, projectId: "proj_1" });
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
     const prompt = state.spawned.filter((entry: any) => entry.title === "Review · Fix checkout totals").at(-1)!.prompt as string;
-    if (line) {
-      expect(prompt.split(line).length - 1).toBe(1);
-      expect(prompt.split("Native-design check, for feature work only").length - 1).toBe(1);
-    } else expect(prompt).not.toContain("Native-design check");
+    const native = nativeLines();
+    const lines = prompt.split("\n");
+    // Exactly the expected native line renders, once; neither variant otherwise.
+    for (const key of ["full", "noReshape"] as const) expect(lines.filter((l) => l === native[key])).toHaveLength(key === line ? 1 : 0);
   });
 
   test("a single-wave reviewer gets the Contracts to verify list even when the brief is clipped", async () => {

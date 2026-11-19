@@ -9,7 +9,6 @@ import { READY, type State, ctxOf, delegateWave, followRoute, plan, planWave, pl
 import { TEST_FILES, approvePlan, delegate, disposals, disposeAll, latestReviewContext, legacyWave, planFile, setup, start, status, wave } from "./harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
-import { inPlaceLine } from "./blockedAlerts";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
@@ -428,10 +427,15 @@ describe("worker kinds", () => {
       await report(state, writer, { state: "blocked", result: "Cannot write the delta", blocker: "Delta names no domain", recommendation: "Re-plan" });
       const alert = lastAlert(state);
       const paths = [1].map((n) => planFile(state, planner.threadId, n)).join(", ");
-      const full = `Spec Writer blocked: Delta names no domain. ${inPlaceLine(writer)} Retry it with the fix: chief_delegate (replaces: ${writer}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route (the retry gets a fresh worktree from ${rowOf(state, writer).branch}). The retry gets this wave's \`## Docs needed\` items with the blocker; one repair per wave, not separate fix and fold writers. `
+      const inPlace = `chief_continue (threadId: ${writer}`;
+      expect(alert).toContain(inPlace);
+      const full = `Retry it with the fix: chief_delegate (replaces: ${writer}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route (the retry gets a fresh worktree from ${rowOf(state, writer).branch}). The retry gets this wave's \`## Docs needed\` items with the blocker; one repair per wave, not separate fix and fold writers. `
         + `If the Spec delta cannot be written: start a fresh chief_plan with the plan files (${paths}), this blocked report (bb chief inspect ${writer}), branch ${rowOf(state, writer).branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${writer}, kind: spec-writer.`;
+      expect(alert).toContain("Spec Writer blocked: Delta names no domain.");
       expect(alert).toContain(full.slice(0, full.indexOf("with the plan files")));
-      expect(await roster(state, chief.threadId)).toContain(full);
+      const rosterText = await roster(state, chief.threadId);
+      expect(rosterText).toContain(inPlace);
+      expect(rosterText).toContain(full);
       expect(alert).not.toContain("kind: worker");
       expect(full).not.toContain("kind: worker");
     });
@@ -443,8 +447,10 @@ describe("worker kinds", () => {
       const state = await setup();
       const { chief, worker } = await withBoth(state);
       await report(state, worker, { state: "blocked", result: "Command denied", blocker: "git push is denied", recommendation: "Allow it" });
-      expect(lastAlert(state)).toContain(`Blocked: git push is denied — decide or escalate to the user. ${inPlaceLine(worker)}`);
-      expect(await roster(state, chief.threadId)).toContain(`${inPlaceLine(worker)} If the spec is wrong: chief_delegate (replaces: ${worker}, kind: spec-writer) with the fix, with the docs items in the mission.`);
+      expect(lastAlert(state)).toContain("Blocked: git push is denied");
+      expect(lastAlert(state)).toContain(`chief_continue (threadId: ${worker}`);
+      expect(await roster(state, chief.threadId)).toContain(`chief_continue (threadId: ${worker}`);
+      expect(await roster(state, chief.threadId)).toContain(`If the spec is wrong: chief_delegate (replaces: ${worker}, kind: spec-writer) with the fix, with the docs items in the mission.`);
 
     });
 
