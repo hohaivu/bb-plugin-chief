@@ -268,8 +268,8 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ...(specSources.length && specWriter ? [
       "", "## Read-only context",
       side
-        ? "Read each plan file in full; the `## Spec delta` of each spec: true wave is your work list. Each plan file's `## Contracts to verify` belongs to the worker and the tester: never write code or tests for them."
-        : "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below are your wave's; they belong to the worker and the tester: never write code or tests for them.",
+        ? "Read each plan file in full; the `## Spec delta` of each spec: true wave is your work list. Each plan file's `## Contracts to verify` belongs to the worker: never write code or tests for them."
+        : "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below are your wave's; they belong to the worker: never write code or tests for them.",
       ...specSources,
     ] : []),
     ...(docsSection?.lines ?? []),
@@ -292,7 +292,6 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Verify command",
       ...fenced(verifyCommand),
       "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
-      "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
       ...(heavyPath ? [
         "Run it once through the slot wrapper; that run counts as running this exact command. Pool: sim if it boots or drives a simulator, emulator or device; test if it runs tests; else build:",
         ...fenced(`bash ${quote(heavyPath)} <pool> -- sh -c ${quote(verifyCommand)}`),
@@ -325,7 +324,6 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     // Static rules are in the role's instructions; the Working contract holds only mode lines. An empty one goes.
     ...((contract) => contract.length ? ["", "## Working contract", ...contract] : [])([
-      ...(fixRun && !specWriter ? ["- This is a fix run: run the tests as `## Fix run` says."] : []),
       // A worker or designer gets the deviations rule in its instructions.
       ...(planContextLine !== undefined && specWriter ? [deviationsLine] : []),
     ]),
@@ -334,7 +332,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "- Pick the mode the brief describes; if it describes none, use No spec. Design tool: create or edit in a design tool (Paper, Figma, or similar). Design in code: implement a design-tool artboard in the UI files the brief names. No spec: decide and implement the look within the project's existing design system, in the UI files the brief names or, when it names none, the files that render that UI.",
       "- Design tool and design in code use the tool's MCP. If that tool is not connected here, report blocked naming the missing tool. Before any other call to it, load its guide (Paper: `get_guide({ topic: \"paper-mcp-instructions\" })`) and follow it.",
       "- Design tool: after each meaningful change, verify it with the tool's screenshot (Paper: `get_screenshot`), and when done creating or editing call its finish call (Paper: `finish_working_on_nodes`). Design tool work changes no code or files unless the brief names them.",
-      "- Design in code: read the artboard through the tool's MCP (read-only; do not edit the design), edit only the UI files the brief names, then compare a simulator or browser screenshot of the running app with the artboard's screenshot. Never write golden or screenshot tests; a tester does.",
+      "- Design in code: read the artboard through the tool's MCP (read-only; do not edit the design), edit only the UI files the brief names, then compare a simulator or browser screenshot of the running app with the artboard's screenshot. Never write golden or screenshot tests.",
       "- No spec: capture a simulator or browser screenshot of the running app.",
       "- In your ready result, put screenshot evidence under Automated: for each PNG, the command or tool call that produced it, its exit status when it has one, and the PNG path. For design in code, also list the differences that remain against the artboard. Taste and brand fit go under Manual.",
       "- Design in code or No spec: if you cannot run the app to capture a screenshot, report blocked naming what is missing; do not add screenshot tooling yourself.",
@@ -445,9 +443,9 @@ export function advisorBrief(input: AdvisorBriefInput): string {
     "- Scope drift from the mission.",
     "- Migration or compatibility risk.",
     "- State transitions that are not total.",
-    "- A test wave, test criteria, a full-suite run, or test work inside an implementation wave: the tester runs once in the review gate.",
+    "- A test wave, or an implementation wave without its own tests or Verify command where its change needs them.",
     "- UI whose look no approved design or explicit visual spec fixes with no `design: true` wave before the wave that builds it, or app code inside a design wave.",
-    "- A big feature (3+ modules or 10+ files of new behaviour) whose chain does not end with a reshape wave, a reshape wave on a bug fix, refactor or smaller change, or a reshape wave that writes or runs tests.",
+    "- A big feature (3+ modules or 10+ files of new behaviour) whose chain does not end with a reshape wave, a reshape wave on a bug fix, refactor or smaller change.",
     "- A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.",
   ].join("\n");
 }
