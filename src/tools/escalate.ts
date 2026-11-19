@@ -7,7 +7,7 @@ export function registerEscalateTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_escalate",
     presentation: { label: { pending: "Posting escalation…", completed: "Posted escalation" } },
-    description: "Before you write a **Need you** request in chat, post it on the managed thread's pull request (else its tracking issue) with an @mention of the owner, so it is on record where the work is. threadId is the managed thread the request concerns; request is the full request. It returns at once; the post happens in the background. A planner with no tracking issue yet returns \"chat only\": then write the request in chat alone. Calling it again with the same request posts nothing new. Omit threadId only when no managed thread concerns the request yet.",
+    description: "Before you write a **Need you** request in chat, post it on the managed thread's pull request (else its tracking issue) with an @mention of the owner. threadId is the managed thread the request concerns; omit it only when none concerns the request yet. It returns at once and posts in the background. A planner with no tracking issue yet returns \"chat only\": then write the request in chat alone. The same request again posts nothing new.",
     parameters: z.object({
       threadId: z.string().optional(),
       request: z.string().trim().min(1).max(12_000).describe("The full request, as you will write it in chat under Need you."),

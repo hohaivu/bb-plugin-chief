@@ -6,7 +6,7 @@ export function registerAttachTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_attach",
     presentation: { label: { pending: "Attaching Chiefs…", completed: "Attached Chiefs" } },
-    description: "Coordinator only: link existing Chief threads as your children, in any project. Give the thread ids the owner names (1-20). One result line per id; a bad id never blocks the others. An id that is not a Chief row needs `bb chief adopt --thread <id>` first.",
+    description: "Coordinator only: link the existing Chief threads the owner names (1-20 ids) as your children, in any project. One result line per id; a bad id never blocks the others. An id that is not a Chief row needs `bb chief adopt --thread <id>` first.",
     parameters: z.object({ threadIds: z.array(z.string().trim().min(1)).min(1).max(20) }),
     async execute({ threadIds }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

@@ -5,7 +5,7 @@ import type { Ctx } from "../runtime/context";
 // Oversize input is refused, never clipped. With a todo attached, `\n\nTodo #<id>: <text>` (text <= 500) is
 // appended to context, so the handoff's context is at most 12_000 + that prefix + 500 characters.
 const spawnParams = z.object({
-  title: z.string().trim().min(1).max(160).optional().describe("A literal task label, used in the new Chief's thread title. Optional: defaults to the first line of request, clipped to 160 characters."),
+  title: z.string().trim().min(1).max(160).optional().describe("Literal task label for the new Chief's thread title. Defaults to the first line of request, clipped to 160 characters."),
   request: z.string().trim().min(1).max(4_000).describe("The owner's words asking for this task, verbatim."),
   context: z.string().trim().min(1).max(12_000).describe("Goal and success criteria, evidence, linked threads/issues/PRs/branches, plan and verdict file paths, and open decisions."),
   todoId: z.number().int().optional().describe("Your own open todo to move to the new Chief."),
@@ -17,7 +17,7 @@ export function registerSpawnTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_spawn",
     presentation: { label: { pending: "Starting new Chief…", completed: "Started new Chief" } },
-    description: "Hand one task to a new Chief for this project when the user asks to do it in a new Chief. Pass a literal title, the user's request verbatim, and the context it needs (goal, evidence, linked threads, issues, PRs, branches, plan and verdict files, open decisions). todoId moves your own open todo to it. It never takes over your managed threads: hand over only a task with no unfinished worker — every worker on it complete (chief_stop and a ready report do not release a worker's branch); otherwise keep the task.",
+    description: "Hand one task to a new Chief for this project when the user asks for a new Chief to do it. It never takes over your managed threads: hand over only a task with no unfinished worker (every worker on it complete; chief_stop and a ready report do not release a worker's branch); otherwise keep the task.",
     parameters: spawnParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
