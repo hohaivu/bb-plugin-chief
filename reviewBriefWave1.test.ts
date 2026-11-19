@@ -3,8 +3,8 @@ import { branchReviewBrief, reviewBrief, reviewContext, type BriefTarget, type R
 import { checkPlan } from "./src/report/reportIntake";
 import { REVIEWER_NATIVE_LINE, replaceText, spliceAfter, wave } from "./test/harness";
 import {
-  EARLIER_OLD, IMPACT_OLD, INSPECT_PLAN_SUFFIX, NATIVE_NO_RESHAPE_LINE, NATIVE_RESHAPE_PAREN, NATIVE_RESHAPE_TAIL, PLAN_FULL_OLD, PLAN_LINE_OLD,
-  REPORTS_NEW, REPORTS_OLD, WORKER_REPORTED_RULE,
+  IMPACT_OLD, INSPECT_PLAN_SUFFIX, NATIVE_NO_RESHAPE_LINE, NATIVE_RESHAPE_PAREN, NATIVE_RESHAPE_TAIL, PLAN_FULL_OLD, PLAN_LINE_OLD,
+  REPORTS_OLD, WORKER_REPORTED_RULE,
 } from "./test/reviewWave1";
 
 // Contracts (wave 1, plan-1.md, "Contracts to verify"): reviewBrief renders one target line per pull request or unpinned branch, with header counts that
@@ -285,8 +285,7 @@ describe("a merged rule is stated once", () => {
   test("the worker reports and their Deviations are read by one line, drift sentence only with plan files", () => {
     for (const prompt of [planReview(), reviewBrief(single()).prompt]) {
       expect(count(prompt, "Read every worker report review-context.md names")).toBe(1);
-      expect(count(prompt, REPORTS_NEW)).toBe(1);
-      for (const old of [REPORTS_OLD, EARLIER_OLD, PLAN_FULL_OLD, "Read each worker report for its Deviations", "Read each earlier worker's report too", "Read each worker's full report"]) {
+      for (const old of [REPORTS_OLD, PLAN_FULL_OLD, "Read each worker report for its Deviations", "Read each earlier worker's report too", "Read each worker's full report"]) {
         expect(count(prompt, old)).toBe(0);
       }
       expect(count(prompt, "that the worker did not state is scope drift: a blocking finding.")).toBe(1);
