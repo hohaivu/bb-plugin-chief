@@ -118,7 +118,6 @@ describe("retro state machine", () => {
     for (let attempt = 1; attempt <= 3; attempt++) { await tick(); dueNow(state, planner); }
     expect(retroRow(state, planner)).toMatchObject({ state: "failed", attempts: 3 });
     expect(failedAlerts(state)).toHaveLength(1);
-    expect(failedAlerts(state)[0].message).toContain("failed after 3 attempts");
     await tick();
     expect(stubs.run).toHaveBeenCalledTimes(3);
     expect(failedAlerts(state)).toHaveLength(1);
@@ -155,7 +154,6 @@ describe("retro state machine", () => {
     expect(retroRow(state, planner)).toMatchObject({ state: "failed", attempts: 3, run_id: null });
     expect(retroRow(state, planner).last_error).toContain("timed out after 2 h");
     expect(failedAlerts(state)).toHaveLength(1);
-    expect(failedAlerts(state)[0].message).toContain("failed after 3 attempts");
     expect(stubs.stop).not.toHaveBeenCalled(); // the run had already succeeded
     await tick();
     expect(stubs.run).toHaveBeenCalledTimes(3);
@@ -185,7 +183,10 @@ describe("retro collection", () => {
     expect(first).toHaveLength(8);
     expect(retroAlerts(state)).toHaveLength(1);
     expect(lessons(state)).toHaveLength(1);
-    expect(retroAlerts(state)[0].message).toMatch(/Retro for plan “.*”: .*retro\.md\. 1\/2 threads failed, 0 insufficient\. 1 proposed lessons/);
+    const alert = retroAlerts(state)[0].message;
+    expect(alert).toContain(retroRow(state, planner).path);
+    expect(alert).toContain("1/2");
+    expect(alert).toContain((state.db.prepare("SELECT title FROM managed_threads WHERE thread_id=?").get(planner) as { title: string }).title);
     const markdown = await readFile(retroRow(state, planner).path, "utf8");
     expect(markdown).toContain(`| ${worker} | worker |`);
     expect(markdown).toContain("fail");

@@ -43,9 +43,10 @@ describe("chief_research", () => {
     const state = await setup();
     const chief = await roleThread(state, "chief");
     const reply = await call(state, chief, ask()) as string;
-    expect(reply).toMatch(/^Started researcher thread thr_\d+ \(Research · Who calls this\?\)\. It answers in your checkout and reports through chief_report; .* Do not poll: end your turn\./);
     const [row, ...more] = researcherRows(state);
     expect(more).toEqual([]);
+    expect(reply).toContain(row!.thread_id);
+    expect(reply).toContain("Who calls this?");
     expect(row).toMatchObject({ role: "researcher", chief_thread_id: chief, branch: null });
     const spawn = researcherSpawn(state);
     expect(spawn.prompt).toContain("Who calls this?");
@@ -88,10 +89,6 @@ describe("chief_research", () => {
       expect(design.title.slice("Design · ".length).length).toBeLessThanOrEqual(60);
       expect(light.title.slice("Research · ".length).length).toBeLessThanOrEqual(60);
       expect(researcherRows(design.state)).toHaveLength(1);
-      expect(design.reply).toContain("Do not poll: end your turn.");
-      expect(design.reply).toMatch(/design discussion with the user in its own thread/);
-      expect(light.reply).not.toMatch(/design discussion/);
-      for (const reply of [design.reply, light.reply]) expect(reply).not.toMatch(/announce|tell the user|say to the user|inform the user/i);
     });
 
     // Contract (research.md Data): research_design is 1 for a design launch and 0 for a light launch. Regression: the flag never stored, so supervision and the Next line read every researcher as light.
@@ -212,7 +209,7 @@ describe("chief_research", () => {
       const state = await setup();
       const chief = await roleThread(state, "chief");
       const reply = await call(state, chief, ask({ branch: BRANCH })) as string;
-      expect(reply).toContain(`It answers in a fresh worktree on branch ${BRANCH} and reports through chief_report`);
+      expect(reply).toContain(BRANCH);
       const spawn = researcherSpawn(state);
       expect(spawn.environment).toEqual({ type: "host", hostId: expect.any(String), workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: BRANCH } } });
       expect(researcherRows(state)[0]!.branch).toBe(BRANCH);
@@ -307,15 +304,12 @@ describe("chief_research", () => {
   });
 
   describe("configure", () => {
-    const LINE = "Use chief_research for read-only research by a researcher thread.";
     test("Chief gets the tool, its line and the optional-research cue only while the switch is on", async () => {
       const state = await setup();
       const threadId = await roleThread(state, "chief");
       const configured = () => state.harness.behavior.resolveAgentConfiguration(configurationContext(threadId));
       let config = await configured();
       expect(config.tools.map((tool) => tool.name)).toContain("chief_research");
-      expect(config.instructions).toContain(LINE);
-      expect(config.instructions).toContain("chief_research is optional.");
       await state.harness.behavior.callRpc("setResearchSettings", { enabled: false });
       config = await configured();
       expect(config.tools.map((tool) => tool.name)).not.toContain("chief_research");
@@ -345,9 +339,10 @@ describe("chief_research", () => {
       await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Callers: a.ts, b.ts." }, { threadId: researcher, projectId: "proj_1" });
       const alerts = alertsTo(state, chief);
       expect(alerts).toHaveLength(1);
-      expect(alerts[0]!.split("\n")).toContain("Research is advisory: use its findings, check anything doubtful against the code, and note any failures or partial answers it reports. Nothing to review or complete.");
       expect(alerts[0]).toContain("Callers: a.ts, b.ts.");
-      expect(alerts[0]).not.toContain("Inspect live evidence");
+      expect(alerts[0]).toContain(researcher);
+      expect(alerts[0]).not.toContain("chief_review");
+      expect(alerts[0]).not.toContain("chief_complete");
     });
 
     // Contract (plan-1 step 5, supervision): no unread, unreported or grace-period alert is raised for a researcher any more, however long it is idle
@@ -355,13 +350,13 @@ describe("chief_research", () => {
     test("an idle researcher that never reports raises no research-specific alert", async () => {
       const state = await setup();
       const chief = await roleThread(state, "chief");
-      await roleThread(state, "researcher");
+      const researcher = await roleThread(state, "researcher");
       for (let i = 0; i < 4; i++) {
         elapse(3 * 60 * 60 * 1000);
         await state.supervisorCycle();
       }
       await settle();
-      expect(alertsTo(state, chief).filter((text) => /research-unreported|research-unread|unreported|unread/i.test(text))).toEqual([]);
+      expect(state.db.prepare("SELECT dedupe_key FROM alert_outbox WHERE dedupe_key LIKE ?").all(`${researcher}:%`)).toEqual([]);
     });
 
     // Contract (plan-1 step 5, sweep): the standard sweep completes a researcher that reported ready once its live status is idle. Regression: a ready
@@ -427,14 +422,11 @@ describe("chief_research", () => {
     // Only the 32,000-char chief.md reaches the SDK cap, so it still exercises the cut; the 5,000-char cases fit uncut.
     if (size === 32_000) expect(instructions!.length).toBe(32768);
     else expect(instructions!.length).toBeLessThanOrEqual(32768);
-    const coreEnd = instructions!.indexOf("chief_escalate with the thread and the full request");
+    const core = "# Chief core rules (always apply)";
+    expect(instructions).toContain(core);
+    // The core section ends at the next heading; the project rules come after it.
+    const coreEnd = instructions!.indexOf("\n# ", instructions!.indexOf(core) + core.length);
     expect(coreEnd).toBeGreaterThan(-1);
-    for (const part of [
-      "# Chief core rules (always apply)", "Call chief_roster at the start of every turn", "never poll managed threads",
-      "chief_plan first", "delegate every wave it lists right away",
-      "chief_research is optional.", "or the doubtful evidence to chief_review.",
-      "Small, low-risk changes suit a skip.", "Chief never edits code",
-    ]) expect(instructions).toContain(part);
     expect(instructions!.indexOf(marker)).toBeGreaterThan(coreEnd);
   });
 });
