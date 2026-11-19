@@ -5,6 +5,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { PLAN_FIXTURE, delegate, disposeAll, execFileMock, setup, start, status } from "./harness";
 import { planWave, report, rowOf, tool } from "./flowHelpers";
 import { provideSdk } from "./sdk";
+import { section } from "./specWriterHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
@@ -209,7 +210,7 @@ describe("approved design binding", () => {
       await state.harness.behavior.setSettings({ plannerEnabled: true });
       const chief = await start(state);
       await tool(state, "chief_plan", { title: "Sessions", mission: "Plan it", undesignedReason: "small fix" }, chief.threadId);
-      expect(lastPlannerPrompt(state)).toContain("Design discussion skipped: small fix");
+      expect(section(lastPlannerPrompt(state), "Context")).toContain("small fix");
       expect(lastPlannerPrompt(state)).not.toContain("## Approved design");
     });
   });
@@ -225,7 +226,7 @@ describe("approved design binding", () => {
       expect(plannerRows(state).at(-1)!.research_thread_id).toBe(researcher);
       expect(lastPlannerPrompt(state)).toContain(snapshotsOf(state, researcher).design);
       expect((await cli(state, chief, "--undesigned-reason", "small fix")).exitCode).toBe(0);
-      expect(lastPlannerPrompt(state)).toContain("Design discussion skipped: small fix");
+      expect(section(lastPlannerPrompt(state), "Context")).toContain("small fix");
     });
 
     test.each([

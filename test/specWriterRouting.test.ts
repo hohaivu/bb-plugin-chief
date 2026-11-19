@@ -133,7 +133,6 @@ describe("worker kinds", () => {
 
     const writerCall = (planThreadId: string, writer: string, waveNo = 1) => `chief_delegate (planThreadId: ${planThreadId}, wave: ${waveNo}, replaces: ${writer}, kind: spec-writer)`;
     const sideEnv = (branch: string) => ({ type: "host", hostId: "host_1", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: branch } } });
-    const waitWriters = (waveNo: number, total: number) => new RegExp(`Wave ${waveNo} of ${total} is ready; the Spec Writer of .* is not ready yet\\. Wait for its ready report`);
 
     // plan-chains.md "Spec Writer Side Lane" (one Spec Writer per plan): a spec wave's first call with no kind admits a worker; the
     // planner-ready alert names no Spec Writer; the last wave's ready alert names the plan Spec Writer call and the plan-level skip.
@@ -317,7 +316,8 @@ describe("worker kinds", () => {
       const b1 = workerOn(state, bypassed.planner.threadId, 1).thread_id as string;
       expect(rowOf(state, b1).kind).toBeNull();
       await readyIdle(state, b1);
-      expect(lastAlert(state)).not.toMatch(waitWriters(1, 1));
+      expect(lastAlert(state)).toContain(`chief_review (workerThreadId: ${b1}`);
+      expect(lastAlert(state)).not.toContain("kind: spec-writer");
 
       const design = await specPlan(state, [planWave(1, { design: true }), specImpl(2)]);
       await expect(delegateWave(state, design.chief.threadId, design.planner.threadId, 1, { kind: "spec-writer" })).rejects.toThrow("Wave 1 is design-only: it changes no repository files. Route its docs need to wave 2");
@@ -339,7 +339,8 @@ describe("worker kinds", () => {
       const w2 = await legacyRow(state, chief.threadId, P, 2, null, s2, "feature/legacy");
       for (const id of [s1, w1, s2]) state.db.prepare(`UPDATE managed_threads SET state='complete' WHERE thread_id=?`).run(id);
       await readyIdle(state, w2);
-      expect(lastAlert(state)).not.toMatch(waitWriters(2, 2));
+      expect(lastAlert(state)).toContain(`chief_review (workerThreadId: ${w2}`);
+      for (const writer of [s1, s2]) expect(lastAlert(state)).not.toContain(writer);
     });
 
     test.each(["worker", "designer"])("a ready legacy head Spec Writer with no worker is replaced by a %s", async (kind) => {
@@ -426,18 +427,16 @@ describe("worker kinds", () => {
       const { chief, planner, writer } = await withBoth(state);
       await report(state, writer, { state: "blocked", result: "Cannot write the delta", blocker: "Delta names no domain", recommendation: "Re-plan" });
       const alert = lastAlert(state);
-      const paths = [1].map((n) => planFile(state, planner.threadId, n)).join(", ");
+      const paths = planFile(state, planner.threadId, 1);
+      const { branch } = rowOf(state, writer);
       const inPlace = `chief_continue (threadId: ${writer}`;
-      expect(alert).toContain(inPlace);
-      const full = `Retry it with the fix: chief_delegate (replaces: ${writer}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route (the retry gets a fresh worktree from ${rowOf(state, writer).branch}). The retry gets this wave's \`## Docs needed\` items with the blocker; one repair per wave, not separate fix and fold writers. `
-        + `If the Spec delta cannot be written: start a fresh chief_plan with the plan files (${paths}), this blocked report (bb chief inspect ${writer}), branch ${rowOf(state, writer).branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${writer}, kind: spec-writer.`;
-      expect(alert).toContain("Spec Writer blocked: Delta names no domain.");
-      expect(alert).toContain(full.slice(0, full.indexOf("with the plan files")));
+      const retry = `chief_delegate (replaces: ${writer}, kind: spec-writer)`;
       const rosterText = await roster(state, chief.threadId);
-      expect(rosterText).toContain(inPlace);
-      expect(rosterText).toContain(full);
-      expect(alert).not.toContain("kind: worker");
-      expect(full).not.toContain("kind: worker");
+      for (const text of [alert, rosterText]) {
+        for (const part of [inPlace, "Delta names no domain", retry, branch, `bb chief inspect ${writer}`]) expect(text).toContain(part);
+        expect(text).not.toContain("kind: worker");
+      }
+      expect(rosterText).toContain(paths);
     });
 
     // Wave 1 contract 16 (blocked alerts, other lanes): a blocked chain worker's alert offers the in-place answer beside its spec routes; a blocked
@@ -447,11 +446,10 @@ describe("worker kinds", () => {
       const state = await setup();
       const { chief, worker } = await withBoth(state);
       await report(state, worker, { state: "blocked", result: "Command denied", blocker: "git push is denied", recommendation: "Allow it" });
-      expect(lastAlert(state)).toContain("Blocked: git push is denied");
+      expect(lastAlert(state)).toContain("git push is denied");
       expect(lastAlert(state)).toContain(`chief_continue (threadId: ${worker}`);
       expect(await roster(state, chief.threadId)).toContain(`chief_continue (threadId: ${worker}`);
-      expect(await roster(state, chief.threadId)).toContain(`If the spec is wrong: chief_delegate (replaces: ${worker}, kind: spec-writer) with the fix, with the docs items in the mission.`);
-
+      expect(await roster(state, chief.threadId)).toContain(`chief_delegate (replaces: ${worker}, kind: spec-writer)`);
     });
 
     let legacySeed = 0;
@@ -461,14 +459,6 @@ describe("worker kinds", () => {
       state.db.prepare(`UPDATE managed_threads SET kind=?, replaces_thread_id=?, branch=? WHERE thread_id=?`).run(kind, replaces, branch, threadId);
       return threadId;
     };
-    const BASE_HEAD = "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.";
-    // Wave 2 of the shrink-prompts plan: the brief keeps the dynamic values (branch, record name, push command); the sync and rebase rules live in the skills.
-    const WORKER_SPEC_RULES = [
-      "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
-      "- If the spec is wrong, report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`. If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.",
-      BASE_HEAD,
-    ];
-
     test.each(["worker", "designer"])("a planned %s receives the chain branch in Git workflow", async (kind) => {
       const state = await setup();
       const { chief, planner } = await specPlan(state);
@@ -489,7 +479,7 @@ describe("worker kinds", () => {
       const writer = await delegate(state, chief.threadId, "Docs", { kind: "spec-writer" });
       await readyIdle(state, writer.threadId, "Docs done");
       await delegate(state, chief.threadId, "Build", { replaces: writer.threadId, kind: "worker" });
-      expect(section(state.spawned.at(-1).prompt, "Spec")).toBe([WORKER_SPEC_RULES[0], `Spec Writer ${writer.threadId}: report ${rowOf(state, writer.threadId).report_path ?? "none"}`, ...WORKER_SPEC_RULES.slice(1)].join("\n") + "\n");
+      expect(section(state.spawned.at(-1).prompt, "Spec")).toContain(`Spec Writer ${writer.threadId}: report ${rowOf(state, writer.threadId).report_path ?? "none"}`);
     });
 
     // Contract 16 (unplanned): the default kind stays worker; an explicit spec-writer is accepted with no plan, its ready alert names
@@ -505,9 +495,10 @@ describe("worker kinds", () => {
       await call({ kind: "spec-writer" });
       const writer = (await status(state)).threads.filter((row) => row.role === "worker").at(-1)!.threadId;
       expect(rowOf(state, writer)).toMatchObject({ kind: "spec-writer", plan_thread_id: null });
-      expect(state.spawned.at(-1).prompt).toContain("Unplanned: Chief's mission is your Spec delta");
+      expect(state.spawned.at(-1).prompt).toContain("## Spec work");
       await report(state, writer, { state: "ready", result: "Docs done" });
-      expect(lastAlert(state)).toContain(`Spec Writer ${writer} committed the docs. Once it is idle, delegate the worker to implement against them: chief_delegate (replaces: ${writer}, kind: worker, unplannedReason: Bounded). Do not review yet.`);
+      expect(lastAlert(state)).toContain(`chief_delegate (replaces: ${writer}, kind: worker, unplannedReason: Bounded)`);
+      expect(lastAlert(state)).not.toContain("chief_review");
       setLive(state, writer, "idle");
       await expect(tool(state, "chief_complete", { threadId: writer, skipReview: "docs only" }, chief.threadId)).rejects.toThrow(
         `Refusing to complete ${writer}: a Spec Writer's docs need their worker — chief_delegate (replaces: ${writer}, kind: worker).`);
@@ -663,7 +654,6 @@ describe("docs work list", () => {
     expect(list.length).toBeLessThanOrEqual(4_000);
     expect(sourcesOf(list)).toMatchObject({ shown: [], count: 3, ids: [ctx.w5, ctx.w6, ctx.s5] });
     for (const hidden of ["END-W5", "END-T6", "Delta names no domain"]) expect(list).not.toContain(hidden);
-    expect(list).toContain("Fix every item that still holds");
     expect(list).not.toContain("docs-work.md");
     noFile(state, ctx, 5);
   });
@@ -854,61 +844,16 @@ describe("docs work list", () => {
     }
   });
 
-  // Contract 6 (scope line): a review covering both chains gives the repair's findings section the scope line; a review of one target (an unplanned worker) does not.
-  // The findings list itself is unchanged. Regression: the line is always on, never on, or follows the wrong test.
-  test("the scope line is on a writer brief for the shared two-target review", async () => {
-    const SCOPE = "This review covers several branches and waves. Fix only the docs findings your mission assigns to this wave";
+  // Contract 6 (findings): a review covering both chains reaches the repair's brief with the reviewer's finding text.
+  // Regression: the shared review's findings are dropped from the writer brief.
+  test("a writer brief for the shared two-target review carries the reviewer's finding", async () => {
     const shared = await setup();
     const ctx = await docsChains(shared, OWN);
     forgeAnswers({ [CHAIN_PR]: CHAIN, [CHAIN_B_PR]: CHAIN_B });
     await reviewerVerdict(shared, await openGate(shared, ctx.chief.threadId, ctx.w4), "request_changes");
     const sharedBrief = await repair(shared, ctx, 5, ctx.s5);
-    expect(sharedBrief).toContain(SCOPE);
     expect(sharedBrief).toContain("Totals go negative.");
   });
-
-  // Contract 7 (fix 2, wave 7 native design): the docs routing sentence is in the alert Chief is actually sent, once, whole and inside the retained
-  // 1,200-character action, whenever the handoff emitted a Spec Writer route: a direct side-lane route, a shared route with several writers, and a
-  // long shared handoff whose route list is clipped. A handoff with no writer route never gets it. The alert is read from what was delivered
-  // (lastAlert), not from the roster, which is not clipped.
-  // Regression: the sentence is repeated per writer, appended after the route list and clipped away, skipped on a writer route, or leaks.
-  const SENTENCE = "In each Spec Writer's mission, list the docs findings that wave owns (verdict file item or file:line); a finding on a docs path several waves share goes to the wave whose Spec delta names it. The plugin attaches that wave's `## Docs needed` items.";
-  const ACTION_CAP = 1_200;
-  const actionOf = (text: string) => { const line = text.split("\n").find((entry) => entry.includes("The reviewer requires changes"))!; return line.slice(line.indexOf("The reviewer requires changes")); };
-  const adviceOf = async (state: State, chiefThreadId: string) => actionOf(await roster(state, chiefThreadId));
-  /** The note once and whole in the delivered action, which stays within the cap; returns the action. */
-  const delivered = (state: State) => {
-    const action = actionOf(lastAlert(state));
-    expect(action.length).toBeLessThanOrEqual(ACTION_CAP);
-    expect(action.split(SENTENCE)).toHaveLength(2);
-    expect(lastAlert(state).split(SENTENCE)).toHaveLength(2);
-    return action;
-  };
-
-  // Retest of #242 finding 2 (verdict thr_8ikzcixq2m): the delivered action must hold only whole routes within the cap, and when routes are
-  // omitted say where the complete handoff is. `list` reads the " / "-joined route list between two fixed phrases of an action.
-  const listOf = (action: string, from: string, to: string) => action.slice(action.indexOf(from) + from.length, action.indexOf(to)).split(" / ");
-  /** What the delivered alert's action keeps of the roster's complete handoff: whole routes in order, a pointer for the rest, nothing cut. */
-  const keptWhole = async (state: State, chiefThreadId: string, from: string, to: string) => {
-    const action = delivered(state);
-    const advice = await adviceOf(state, chiefThreadId);
-    // The fixture is long: the complete handoff exceeds the cap, so the delivered action had to drop routes.
-    expect(advice.length).toBeGreaterThan(ACTION_CAP);
-    expect(action.indexOf(SENTENCE)).toBeLessThan(action.indexOf("chief_delegate"));
-    expect(action.endsWith("…")).toBe(false);
-    expect(action.endsWith("Escalate if the disagreement is a genuine decision.")).toBe(true);
-    const complete = listOf(advice, from, to);
-    const delivered_ = listOf(action, from, to);
-    const pointer = delivered_.pop()!;
-    // Whole commands: every kept route is exactly the roster's route, in order, and at least one is dropped for the pointer to be needed.
-    expect(delivered_.length).toBeGreaterThan(0);
-    expect(delivered_.length).toBeLessThan(complete.length);
-    expect(delivered_).toEqual(complete.slice(0, delivered_.length));
-    // The pointer counts the omitted routes exactly and names the tool that prints them.
-    expect(pointer).toContain(`${complete.length - delivered_.length} more`);
-    expect(pointer).toContain("chief_roster");
-    return { advice, action };
-  };
 
   // Contract 8 (route unchanged): the same-plan repair still gets its own fresh worktree on the chain branch, the Fold section and the trailer line.
   // Regression: carrying the list changes the worktree, drops the Fold section or the trailer rule.

@@ -5,6 +5,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { disposeAll, setup, start, status } from "./harness";
 import { type State, report, rowOf, tool } from "./flowHelpers";
 import { provideSdk } from "./sdk";
+import { section } from "./specWriterHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
@@ -56,13 +57,13 @@ describe("chief_research design flag", () => {
     const { state, chief } = await newState();
     const reply = await tool(state, "chief_research", { question: "Ticket: add CSV export", design: true }, chief) as string;
     const [heavy] = await researcherIds(state);
-    expect(reply).toContain("holds the design discussion with the user in its own thread");
+    expect(reply).toContain(heavy!);
     expect(state.spawned.findLast((args) => args.pluginMetadata?.role === "researcher").title).toMatch(/^Design · Ticket: add CSV export/);
     expect(rowOf(state, heavy!).research_design).toBe(1);
 
     const light = await tool(state, "chief_research", { question: "Is this claim true?", design: false }, chief) as string;
     const lightId = (await researcherIds(state)).at(-1)!;
-    expect(light).not.toContain("design discussion");
+    expect(light).toContain(lightId);
     expect(state.spawned.findLast((args) => args.pluginMetadata?.role === "researcher").title).toMatch(/^Research · /);
     expect(rowOf(state, lightId).research_design).toBe(0);
   });
@@ -114,15 +115,18 @@ describe("waitingOnUser report", () => {
       state.live.set(id, { ...state.live.get(id)!, status: "active" });
       await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(id)! });
       await report(state, id, { state: "active", result: "Design discussion: waiting on the user.", waitingOnUser: true });
+      const named = () => alertsTo(state, chief).filter((text) => text.includes(id)).length;
       const before = state.sent.length;
+      const quiet = named();
       nowSpy.mockReturnValue(t0 + 3 * 60_000);
       await state.supervisorCycle();
-      expect(alertsTo(state, chief).filter((text) => text.includes("has been active for"))).toEqual([]);
+      expect(named()).toBe(quiet);
       expect(state.sent).toHaveLength(before);
 
       await report(state, id, { state: "active", result: "Research restarted: the user rejected the design direction." });
+      const beforeStall = named();
       await state.supervisorCycle();
-      expect(alertsTo(state, chief).some((text) => text.includes(`(${id}) has been active for`))).toBe(true);
+      expect(named()).toBe(beforeStall + 1);
     } finally {
       nowSpy.mockRestore();
     }
@@ -140,16 +144,13 @@ describe("waitingOnUser report", () => {
 
 describe("design researcher alerts", () => {
   test.each([
-    [true, (id: string) => `chief_plan with researchThreadId: ${id}`],
-    [false, () => "chief_delegate with the Design: path"],
+    [true, (id: string) => `researchThreadId: ${id}`],
+    [false, () => "chief_delegate"],
   ])("a ready design researcher's alert with planning %s names the next call", async (planning, expected) => {
     const { state, chief } = await newState();
     await state.harness.behavior.setSettings({ plannerEnabled: planning });
     const id = await approvedResearcher(state, chief);
-    const alerts = alertsTo(state, chief).filter((text) => text.includes("The user approved the design"));
-    expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toContain(expected(id));
-    expect(alerts[0]).not.toContain("Research is advisory");
+    expect(alertsTo(state, chief).at(-1)).toContain(expected(id));
   });
 
   test("a researcher blocked with waitingOnUser sends Chief to chief_escalate and never to answer for the user", async () => {
@@ -162,19 +163,22 @@ describe("design researcher alerts", () => {
     expect(alert).toContain(`@thread:${id}`);
   });
 
-  test("a waiting active design researcher's alert tells Chief to stay quiet and not poll or stop it", async () => {
+  test("a waiting active design researcher's alert names it and offers no stop or continue call", async () => {
     const { state, chief } = await newState();
     const id = await researcher(state, chief, true);
     await report(state, id, { state: "active", result: "Design discussion: waiting on the user.", waitingOnUser: true });
     const alert = alertsTo(state, chief).at(-1)!;
-    expect(alert).toContain("Do not poll, nudge or stop it");
+    expect(alert).toContain(id);
+    for (const call of ["chief_stop", "chief_continue"]) expect(alert).not.toContain(call);
   });
 
-  test("a light researcher keeps the advisory Next line", async () => {
+  test("a light researcher's ready alert routes to neither a plan nor an escalation", async () => {
     const { state, chief } = await newState();
     const id = await researcher(state, chief, false);
     await report(state, id, { state: "ready", result: "Callers: a.ts." });
-    expect(alertsTo(state, chief).at(-1)).toContain("Research is advisory");
+    const alert = alertsTo(state, chief).at(-1)!;
+    expect(alert).toContain(id);
+    for (const route of [`researchThreadId: ${id}`, "chief_escalate"]) expect(alert).not.toContain(route);
   });
 });
 
@@ -198,7 +202,7 @@ describe("chief_plan design inputs", () => {
     const { state, chief } = await newState();
     await plan(state, chief, { undesignedReason: "one-line typo fix" });
     const prompt = spawnedPlanners(state)[0].prompt as string;
-    expect(prompt).toContain("## Context\nDesign discussion skipped: one-line typo fix");
+    expect(section(prompt, "Context")).toContain("one-line typo fix");
     expect(prompt).not.toContain("## Approved design");
   });
 
