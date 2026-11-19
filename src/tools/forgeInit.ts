@@ -15,16 +15,16 @@ export function registerForgeInitTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_forge_init",
     presentation: { label: { pending: "Running forge pre-flight…", completed: "Ran forge pre-flight" } },
-    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan while a plan advisor you started is still running. For a plan, call it only on a chain head (a wave nothing precedes) that has no worker yet: a chain has one branch and one pull request, its later waves continue it with chief_delegate replaces:, and the pull request body lists every wave of the chain. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief: planned work carries the plan summary and wave contracts (planThreadId and wave); unplanned work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
+    description: "Run the forge pre-flight for one task — tracking issue, task branch, draft pull request — before chief_delegate. Refused for a plan while a plan advisor you started is still running. For a plan, call it only on a chain head (a wave nothing precedes) with no worker yet: a chain has one branch and one pull request (the pull request body lists every wave of the chain); later waves continue it with chief_delegate replaces:. Returns the values, or a script to run yourself when the server could not. The pull request body is the reviewer's whole brief; unplanned work must pass mission, successCriteria and constraints, the same text you will pass to chief_delegate.",
     parameters: z.object({
       title: z.string().trim().min(1).max(160).describe("The exact title this task will be delegated with."),
-      base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack deliberately on an open pull request. Stack only when this work builds on that pull request's changes; independent work gets its own PR on the default base. Omit on a plan wave: a stacked or branch-based plan fixes it."),
+      base: z.string().trim().min(1).max(300).optional().describe("Branch to cut from and target the pull request at. Omit for the project default; name one only to stack on an open pull request whose changes this work builds on (independent work gets its own PR on the default base). Omit on a plan wave: a stacked or branch-based plan fixes it."),
       body: z.string().trim().min(1).max(4_000).optional().describe("Short summary for the issue and pull request body."),
-      planThreadId: z.string().optional().describe("For planned work: the planner thread the task's wave comes from. Give it with wave; the plan summary and the wave's contracts are added to the issue and pull request body."),
-      wave: z.number().int().min(1).optional().describe("For planned work: the 1-based wave this task implements. Give it with planThreadId."),
-      mission: z.string().trim().min(1).max(12_000).optional().describe("Required without planThreadId (unplanned work): the same mission you will pass to chief_delegate."),
-      successCriteria: z.string().trim().max(12_000).optional().describe("The same success criteria you will pass to chief_delegate, as text (one per line)."),
-      constraints: z.string().trim().max(12_000).optional().describe("The same constraints you will pass to chief_delegate, as text (one per line)."),
+      planThreadId: z.string().optional().describe("Planned work: the planner thread of the task's wave; give it with wave. The plan summary and the wave's contracts go into the issue and pull request body."),
+      wave: z.number().int().min(1).optional().describe("Planned work: the 1-based wave to implement; give it with planThreadId."),
+      mission: z.string().trim().min(1).max(12_000).optional().describe("Required without planThreadId (unplanned work)."),
+      successCriteria: z.string().trim().max(12_000).optional().describe("As text, one per line."),
+      constraints: z.string().trim().max(12_000).optional().describe("As text, one per line."),
     }),
     async execute({ planThreadId, wave, mission, successCriteria, constraints, ...params }, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;

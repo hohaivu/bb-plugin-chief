@@ -6,7 +6,7 @@ export function registerPlanTool(ctx: Ctx) {
   ctx.registerChiefTool({
     name: "chief_plan",
     presentation: { label: { pending: "Starting planner…", completed: "Started planner" } },
-    description: "Send one unit of work to a read-only planner. It proposes an implementation plan, split into waves; its ready alert names the exact next call. With revises, a fresh planner revises a plan whose one advisor review asked for changes; the revision is delegated with no second review. With researchThreadId, the user-approved design of a design researcher becomes the brief; while research is on, a plan without one needs undesignedReason. The brief gives the problem, the owner's decisions and the real constraints, not the planner's own rules. Write a constraint as a role's work (\"a spec: true wave updates docs/<file>\", not \"keep docs/<file> current\"). Cite a line number only in a file the brief names, after reading that line. Settle each decision first, or pass it as an open question with your default answer.",
+    description: "Send one unit of work to a read-only planner that proposes an implementation plan split into waves; its ready alert names the exact next call. The brief gives the problem, the owner's decisions and the real constraints, not the planner's own rules. Write a constraint as a role's work (\"a spec: true wave updates docs/<file>\", not \"keep docs/<file> current\"). Cite a line number only in a file the brief names, after reading that line. Settle each decision first, or pass it as an open question with your default answer.",
     parameters: planParams,
     async execute(params, context) {
       const caller = context.threadId ? store.get(context.threadId) : undefined;
