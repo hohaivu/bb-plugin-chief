@@ -46,7 +46,7 @@ export function world({ realPlan = false, projectPath = null, heads = {}, engine
     prepare: vi.fn(async (_projectId: string, _pick: unknown) => ({ execution: {}, sectionId: "section" })),
     launch: vi.fn(async (_prepared: unknown, args: any, row: any, inTransaction?: (threadId: string) => void) => {
       const id = `R${++launched}`;
-      events.push(`launch:${row.kind === "tester" ? "tester" : row.role}`);
+      events.push(`launch:${row.role}`);
       launches.push({ id, args, row });
       db.transaction(() => {
         store.insert({ ...row, threadId: id, projectId: args.projectId, parentThreadId: row.chiefThreadId, title: args.title, state: "starting", status: "idle" });
@@ -123,7 +123,7 @@ export function world({ realPlan = false, projectPath = null, heads = {}, engine
   /** review-context.md is written before the launch, to the attempt folder on the reviewer's host (host.writeArtifact), never to the reviewer's storage. */
   const contexts = () => host.writeArtifact.mock.calls.filter(([, , name]) => name.endsWith("/review-context.md")).map(([, , , content]) => content);
   return {
-    db, store, ledger, schedule, progress, review, chief, managedSpawn, launches, events, reviewerLaunch: (index = 0) => launches.filter(({ row }) => row.role === "reviewer").at(index), testerLaunch: (index = 0) => launches.filter(({ row }) => row.kind === "tester").at(index), forge, host, worker, nextReport, row, setState, targetRows, contexts,
+    db, store, ledger, schedule, progress, review, chief, managedSpawn, launches, events, reviewerLaunch: (index = 0) => launches.filter(({ row }) => row.role === "reviewer").at(index), forge, host, worker, nextReport, row, setState, targetRows, contexts,
     covering: (ids: string[]) => { covers = ids; },
   };
 }

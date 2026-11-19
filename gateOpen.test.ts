@@ -14,7 +14,7 @@ vi.mock("node:child_process", async (importOriginal) => (await import("./test/ex
 provideSdk(sdkTesting);
 
 // Contract (plan-4 steps A, B, E; plan-5 step 2): chief_review opens ONE review gate per plan (`plan:<planner>`), pins every target's head once,
-// then starts one reviewer and one tester, each in its own fresh worktree. A second call starts nothing; only a missing or failed side is
+// then starts one reviewer in its own fresh worktree. A second call starts nothing; only a missing or failed reviewer is
 // launched again. The pin comes from the forge's pull request head, else `git ls-remote origin`; the builder's checkout must be clean and
 // contained in the pin. The doubles are the forge, the host and spawn; the real parts are SQLite, the ThreadStore, the wave schedule and plan progress,
 // and (for the no-PR pin and the builder check) temporary Git repositories.
@@ -36,9 +36,9 @@ function twoChains(over: { waves?: PlanWave[] } = {}) {
 const gateRows = (w: ReturnType<typeof world>) => w.db.prepare(`SELECT * FROM review_gates`).all() as any[];
 
 describe("one gate per plan", () => {
-  // Contract: two chains, two pinned targets, one reviewer, one tester, in one review_gates row keyed plan:<planner>.
-  // Regression: a gate per target (two reviewers, two testers), or a gate keyed by the worker that made the call.
-  test("a two-chain plan opens one gate with both targets pinned, one reviewer and one tester", async () => {
+  // Contract: two chains, two pinned targets, one reviewer, in one review_gates row keyed plan:<planner>.
+  // Regression: a gate per target (two reviewers), or a gate keyed by the worker that made the call.
+  test("a two-chain plan opens one gate with both targets pinned and one reviewer", async () => {
     const w = twoChains();
     const out = await w.review.startReview(w.chief, "W1");
 
@@ -49,44 +49,31 @@ describe("one gate per plan", () => {
       { threadId: "W1", reportSeq: 1, branch: "feature/one", prUrl: pr(1), headSha: SHA_A, base: "main" },
       { threadId: "W2", reportSeq: 1, branch: "feature/two", prUrl: pr(2), headSha: SHA_B, base: "main" },
     ]);
-    expect(w.launches.map((launch) => launch.row.role === "reviewer" ? "reviewer" : launch.row.kind).sort()).toEqual(["reviewer", "tester"]);
+    expect(w.launches.map((launch) => launch.row.role)).toEqual(["reviewer"]);
     expect(gates[0].reviewer_thread_id).toBe(w.reviewerLaunch()!.id);
-    expect(gates[0].tester_thread_id).toBe(w.testerLaunch()!.id);
+    expect(gates[0].tester_thread_id).toBeNull();
     expect(out).toMatchObject({ created: true, threadId: w.reviewerLaunch()!.id });
     expect(w.targetRows(w.reviewerLaunch()!.id).map((target) => [target.worker_thread_id, target.report_seq, target.head_sha])).toEqual([["W1", 1, SHA_A], ["W2", 1, SHA_B]]);
   });
 
   // Contract: the same call from either chain's worker is the same gate.
-  // Regression: the second chain's call opens a second gate and a second reviewer and tester.
-  test("a call from the other chain's worker opens nothing new and names both live actors", async () => {
+  // Regression: the second chain's call opens a second gate and a second reviewer.
+  test("a call from the other chain's worker opens nothing new and names the live reviewer", async () => {
     const w = twoChains();
     await w.review.startReview(w.chief, "W1");
-    const [reviewer, tester] = [w.reviewerLaunch()!.id, w.testerLaunch()!.id];
+    const reviewer = w.reviewerLaunch()!.id;
     const again = await w.review.startReview(w.chief, "W2");
 
-    expect(w.launches).toHaveLength(2);
+    expect(w.launches).toHaveLength(1);
     expect(gateRows(w)).toHaveLength(1);
     expect(again).toMatchObject({ created: false, threadId: reviewer });
     expect(again.reply).toContain(KEY);
     expect(again.reply).toContain(reviewer);
-    expect(again.reply).toContain(tester);
   });
 
-  // Contract: the tester is not a wave worker: it replaces nothing and holds no plan wave; both builders stay ready and remain review targets, pinned.
-  // Regression: the tester supersedes a builder (replaces_thread_id set), takes a wave, or moves a builder off ready.
-  test("the tester replaces nothing and holds no wave; both builders stay ready, pinned", async () => {
-    const w = twoChains();
-    await w.review.startReview(w.chief, "W1");
-    const tester = w.row(w.testerLaunch()!.id);
-
-    expect(tester).toMatchObject({ role: "worker", kind: "tester", plan_thread_id: "P", plan_wave: null, replaces_thread_id: null });
-    for (const id of ["W1", "W2"]) expect(w.row(id)).toMatchObject({ state: "ready", report_seq: 1 });
-    expect(w.store.gate(KEY)!.targets.map((target) => [target.threadId, target.reportSeq])).toEqual([["W1", 1], ["W2", 1]]);
-  });
-
-  // Contract: each side is launched in a fresh managed worktree cut from the first target's branch, never in the builder's environment.
-  // Regression: the reviewer or tester reuses the builder's environment (the removed builder-environment launch), or a stored reviewer environment.
-  test("the reviewer and the tester each get a fresh managed worktree on the first target's branch, not the builder's environment", async () => {
+  // Contract: the reviewer is launched in a fresh managed worktree cut from the first target's branch, never in the builder's environment.
+  // Regression: the reviewer reuses the builder's environment (the removed builder-environment launch), or a stored reviewer environment.
+  test("the reviewer gets a fresh managed worktree on the first target's branch, not the builder's environment", async () => {
     const w = twoChains();
     await w.review.startReview(w.chief, "W1");
 
@@ -94,7 +81,7 @@ describe("one gate per plan", () => {
       expect(launch.args.environment).toEqual({ type: "host", hostId: "host_proj", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: "feature/one" } } });
     }
     expect(w.host.reusableEnvironment).not.toHaveBeenCalled();
-    expect(w.managedSpawn.prepare.mock.calls.map(([, pick]) => (pick as any).role).sort()).toEqual(["reviewer", "tester"]);
+    expect(w.managedSpawn.prepare.mock.calls.map(([, pick]) => (pick as any).role)).toEqual(["reviewer"]);
   });
 
   // Contract: the heads are pinned once at open; a retry reviews the pinned heads, whatever the forge says now.
@@ -107,66 +94,31 @@ describe("one gate per plan", () => {
     w.forge.head.mockImplementation(async (url) => url === pr(1) ? headOf("feature/one", fresh[0]!) : headOf("feature/two", fresh[1]!));
     await w.review.startReview(w.chief, "W1");
     expect(w.store.gate(KEY)!.targets).toEqual(initial);
-    expect(w.launches).toHaveLength(2);
+    expect(w.launches).toHaveLength(1);
 
     w.setState(w.reviewerLaunch()!.id, "failed");
     await w.review.startReview(w.chief, "W1");
     expect(w.store.gate(KEY)!.targets).toEqual(initial.map((target, i) => ({ ...target, headSha: fresh[i] })));
-    expect(w.targetRows(w.launches[2]!.id).map((target) => target.head_sha)).toEqual(fresh);
+    expect(w.targetRows(w.launches[1]!.id).map((target) => target.head_sha)).toEqual(fresh);
   });
 });
 
-describe("retry launches only the side that is missing", () => {
-  // Contract: a failed (or blocked) reviewer is launched again alone; the live tester stays.
-  // Regression: a retry starts a second tester, or leaves the gate without a reviewer.
+describe("retry launches the reviewer only when it is missing", () => {
+  // Contract: a failed (or blocked) reviewer is launched again.
+  // Regression: the retry leaves the gate without a reviewer.
   test.each(["failed", "blocked", "archived"])("a %s reviewer: only a reviewer starts", async (state) => {
     const w = twoChains();
     await w.review.startReview(w.chief, "W1");
-    const [oldReviewer, tester] = [w.reviewerLaunch()!.id, w.testerLaunch()!.id];
-    w.setState(oldReviewer!, state);
+    w.setState(w.reviewerLaunch()!.id, state);
     const out = await w.review.startReview(w.chief, "W2");
 
-    expect(w.launches).toHaveLength(3);
-    expect(w.launches[2]!.row.role).toBe("reviewer");
-    expect(out).toMatchObject({ created: true, threadId: w.launches[2]!.id });
-    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: w.launches[2]!.id, tester_thread_id: tester });
+    expect(w.launches).toHaveLength(2);
+    expect(w.launches[1]!.row.role).toBe("reviewer");
+    expect(out).toMatchObject({ created: true, threadId: w.launches[1]!.id });
+    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: w.launches[1]!.id, tester_thread_id: null });
   });
 
-  // Contract: a failed tester is launched again alone; the live reviewer stays.
-  // Regression: a retry starts a second reviewer (two reviewers on one gate).
-  test.each(["failed", "blocked", "archived"])("a %s tester: only a tester starts", async (state) => {
-    const w = twoChains();
-    await w.review.startReview(w.chief, "W1");
-    const [reviewer, oldTester] = [w.reviewerLaunch()!.id, w.testerLaunch()!.id];
-    w.setState(oldTester!, state);
-    const out = await w.review.startReview(w.chief, "W1");
-
-    expect(w.launches).toHaveLength(3);
-    expect(w.launches[2]!.row).toMatchObject({ role: "worker", kind: "tester", replacesThreadId: null, planWave: null });
-    expect(out).toMatchObject({ created: false, threadId: reviewer });
-    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: reviewer, tester_thread_id: w.launches[2]!.id });
-  });
-
-  // Contract: a launch that throws leaves the gate open and pinned; the next call finishes it without a second pin.
-  // Regression: the failed tester launch rolls the gate back, or the retry starts a second reviewer.
-  test("a tester launch that fails after the reviewer started: the retry starts only the tester", async () => {
-    const w = twoChains();
-    const launch = w.managedSpawn.launch.getMockImplementation()!;
-    let allowTester = false;
-    w.managedSpawn.launch.mockImplementation((prepared, args, row, commit) => row.kind === "tester" && !w.testerLaunch() && !allowTester
-      ? Promise.reject(new Error("no capacity")) : launch(prepared, args, row, commit));
-    await expect(w.review.startReview(w.chief, "W1")).rejects.toThrow("no capacity");
-    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: w.reviewerLaunch()!.id, tester_thread_id: null });
-    const pinned = w.forge.head.mock.calls.length;
-
-    allowTester = true;
-    await w.review.startReview(w.chief, "W1");
-    expect(w.launches.map((entry) => entry.row.role === "reviewer" ? "reviewer" : entry.row.kind)).toEqual(["reviewer", "tester"]);
-    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: w.reviewerLaunch()!.id, tester_thread_id: w.testerLaunch()!.id });
-    expect(w.forge.head).toHaveBeenCalledTimes(pinned + 2);
-  });
-
-  // Contract: a reviewer launch that throws leaves the gate open and pinned with no actor; the next call starts both sides on the same pins.
+  // Contract: a reviewer launch that throws leaves the gate open and pinned with no actor; the next call starts the reviewer on the same pins.
   // Regression: the retry opens a second gate, or pins again.
   test("a reviewer launch that fails: the retry starts only the reviewer on the same pins", async () => {
     const w = twoChains();
@@ -175,13 +127,13 @@ describe("retry launches only the side that is missing", () => {
     w.managedSpawn.launch.mockImplementation((prepared, args, row, commit) => row.role === "reviewer" && !allowReviewer
       ? Promise.reject(new Error("no capacity")) : launch(prepared, args, row, commit));
     await expect(w.review.startReview(w.chief, "W1")).rejects.toThrow("no capacity");
-    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: null, tester_thread_id: w.testerLaunch()!.id });
-    expect(w.launches).toHaveLength(1);
+    expect(w.store.gate(KEY)).toMatchObject({ reviewer_thread_id: null, tester_thread_id: null });
+    expect(w.launches).toHaveLength(0);
     const pinned = w.forge.head.mock.calls.length;
 
     allowReviewer = true;
     await w.review.startReview(w.chief, "W1");
-    expect(w.launches).toHaveLength(2);
+    expect(w.launches).toHaveLength(1);
     expect(gateRows(w)).toHaveLength(1);
     expect(w.forge.head).toHaveBeenCalledTimes(pinned + 2);
   });
@@ -246,25 +198,24 @@ describe("wave scheduling does not see the gate's actor rows", () => {
     };
   };
 
-  // Contract: planWavesFor, pendingWaves, latestWorker, chainOwner, reviewTargetsFor and reviewBlock answer the same with a gate's tester and fixer
-  // rows present as without them.
-  // Regression: the tester becomes a wave worker (a third review target, a latest worker, a plan that is no longer fully delegated).
-  test("the same answers before the gate opens, with its tester, and with a fixer", async () => {
+  // Contract: planWavesFor, pendingWaves, latestWorker, chainOwner, reviewTargetsFor and reviewBlock answer the same with a gate's fixer
+  // row present as without it.
+  // Regression: the fixer becomes a wave worker (a third review target, a latest worker, a plan that is no longer fully delegated).
+  test("the same answers before the gate opens, with its reviewer, and with a fixer", async () => {
     const w = twoChains();
     const before = answers(w);
     expect(before.targets).toEqual(["W1", "W2"]);
     expect(before.block).toBeNull();
 
     await w.review.startReview(w.chief, "W1");
-    expect(w.store.isGateActor(w.testerLaunch()!.id)).toBe(true);
     expect(answers(w)).toEqual(before);
-    // Control: a schedule that does not hide gate actors does see the tester, so the comparison above can fail.
-    expect(createWaveSchedule(w.store.rows).waveWorkers("P").map((row) => row.thread_id)).toContain(w.testerLaunch()!.id);
 
     w.store.insert({ threadId: "F1", role: "worker", projectId: "proj", chiefThreadId: "chief", title: "Fix F1", state: "ready", status: "idle", kind: "worker", planThreadId: "P", branch: "feature/one" });
     w.store.batch(() => w.store.setGateActor(KEY, "fixer_thread_id", "F1"));
     w.store.reload();
     expect(answers(w)).toEqual(before);
+    // Control: a schedule that does not hide gate actors does see the fixer, so the comparison above can fail.
+    expect(createWaveSchedule(w.store.rows).waveWorkers("P").map((row) => row.thread_id)).toContain("F1");
   });
 });
 
@@ -313,7 +264,7 @@ describe("a target with no pull request is pinned at the tip of its branch on or
 
     expect(w.forge.head).not.toHaveBeenCalled();
     expect(w.store.gate("task:W1")!.targets).toEqual([{ threadId: "W1", reportSeq: 1, branch: "feature/one", prUrl: null, headSha: origin.tip("feature/one"), base: "main" }]);
-    expect(w.launches.map((launch) => launch.row.role === "reviewer" ? "reviewer" : launch.row.kind).sort()).toEqual(["reviewer", "tester"]);
+    expect(w.launches.map((launch) => launch.row.role)).toEqual(["reviewer"]);
   });
 
   // Contract: no fallback to a mutable checkout: a branch missing from origin is refused even when the builder's checkout has it.
@@ -343,7 +294,7 @@ describe("the builder's checkout must be clean and contained in the pin", () => 
   const recovery = /chief_continue \(threadId: W1\) to commit and push.*chief_forge_init/;
 
   // Contract: uncommitted work is refused with the named recovery.
-  // Regression: the gate pins a head that does not hold the builder's work, so the reviewer and tester read stale code.
+  // Regression: the gate pins a head that does not hold the builder's work, so the reviewer reads stale code.
   test.each([
     ["a modified file", (dir: string) => writeFileSync(join(dir, "f.txt"), "edited\n")],
     ["an untracked file", (dir: string) => writeFileSync(join(dir, "new.txt"), "new\n")],
