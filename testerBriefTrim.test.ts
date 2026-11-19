@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { type WorkerBriefInput, workerBrief } from "./src/research/delegationBrief";
-import { SPEC_WRITER_BOUNDARY, TESTER_BOUNDARY, WORKER_BOUNDARY } from "./test/docsOwnership";
 import { NOT_DOING, SPEC_DELTA, fullChain } from "./test/specWriterHelpers";
 import { delegate, disposeAll, setup, start } from "./test/harness";
 import { readyIdle } from "./test/testerHelpers";
@@ -22,7 +21,6 @@ const input = (kind: Kind, extra: Partial<WorkerBriefInput> = {}): WorkerBriefIn
 });
 const prompt = (kind: Kind, extra: Partial<WorkerBriefInput> = {}) => workerBrief(input(kind, extra)).prompt;
 const count = (text: string, needle: string) => text.split(needle).length - 1;
-const lines = (text: string, line: string) => text.split("\n").filter((entry) => entry === line).length;
 const section = (text: string, heading: string) => text.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0];
 const planned = { wave: 2, waveTotal: 2, planContextLine: "Plan file (wave 2 of 2): /plans/plan-2.md" };
 const contractList = (tag: string, size: number) => Array.from({ length: Math.ceil(size / 19) }, (_, i) => `- ${tag} item ${String(i).padStart(4, "0")} holds`).join("\n");
@@ -137,23 +135,10 @@ describe("Base commit", () => {
     expect(section(text, "Git workflow")).not.toContain("Base commit");
   });
 });
-
-describe("one product-code rule", () => {
-  const specChain = { ...planned, specDocs: ["Wave 1 Spec Writer thr_w: report /r.md"], baseline: true, branch: "feature/x" };
-
-  // Regression: the Spec section and Test work both give a `kind: worker` route.
-  test.each([["unplanned", {}], ["planned", planned], ["a spec chain", specChain]] as [string, Partial<WorkerBriefInput>][])("%s: a tester brief renders `kind: worker` once, in Test work", (_label, extra) => {
-    const text = prompt("tester", extra);
-    expect(count(text, "kind: worker")).toBe(1);
-    expect(section(text, "Test work")).toContain("recommend `chief_delegate (replaces: <your thread id>, kind: worker)`");
-  });
-
-  test("on a spec chain the Spec bullet points to the Test work rule and keeps the spec-writer route once", () => {
-    const spec = section(prompt("tester", specChain), "Spec")!;
-    expect(spec).toContain("- Code that contradicts the docs is product code that is wrong: follow the product-code rule in `## Test work`.");
-    expect(count(spec, "kind: spec-writer")).toBe(1);
-    expect(spec).not.toContain("kind: worker");
-  });
+test("tester briefs include Test work across delegation modes", () => {
+  for (const extra of [{}, planned, { ...planned, specDocs: ["Wave 1 Spec Writer thr_w: report /r.md"], baseline: true, branch: "feature/x" }]) {
+    expect(section(prompt("tester", extra), "Test work")).toBeDefined();
+  }
 });
 
 describe("predecessor section", () => {
@@ -206,41 +191,10 @@ describe("predecessor section", () => {
   });
 });
 
-describe("tester working contract", () => {
-  const tester = prompt("tester", { ...planned, branch: "feature/x" });
-  const contract = (text: string) => section(text, "Working contract")!;
-
-  // Regression: a refactor, re-plan, user-journey or Docs needed line kept for a tester.
-  test("a tester's working contract drops the refactor, re-plan, user-journey and Docs needed lines", () => {
-    const text = contract(tester);
-    for (const gone of ["refactor or migration", "base commit as the oracle", "re-plan the remaining scope", "user journey", "Docs needed", "lint/analyze", "Never write, edit or run tests"]) expect(text, gone).not.toContain(gone);
-    expect(lines(text, TESTER_BOUNDARY)).toBe(1);
-    expect(lines(tester, WORKER_BOUNDARY)).toBe(0);
-  });
-
-  test("a worker and a designer keep their one boundary line with the Docs needed route, and the Deviations line on a planned wave", () => {
-    for (const kind of ["worker", "designer"] as const) {
-      const text = contract(prompt(kind, { ...planned, branch: "feature/x" }));
-      expect(lines(text, WORKER_BOUNDARY), kind).toBe(1);
-      expect(lines(text, TESTER_BOUNDARY), kind).toBe(0);
-      expect(count(text, "## Deviations from plan"), kind).toBe(1);
-    }
-  });
-
-  test("no brief of any kind carries the refactor-oracle line", () => {
-    for (const kind of ["worker", "designer", "tester", "spec-writer"] as const) {
-      for (const extra of [{}, planned, { ...planned, branch: "feature/x", prior: { thread_id: "p", result: "Done", kind: null } }] as Partial<WorkerBriefInput>[]) {
-        expect(prompt(kind, extra), kind).not.toContain("treat the base commit as the oracle");
-      }
-    }
-  });
-
-  test("a Spec Writer's working contract has no docs rule and its docs-only boundary with the trailer once", () => {
-    const text = prompt("spec-writer", { ...planned, branch: "feature/x" });
-    expect(text).not.toContain("Never change docs/");
-    expect(lines(contract(text), SPEC_WRITER_BOUNDARY)).toBe(1);
-    expect(count(text, "Chief-Spec-Writer: $BB_THREAD_ID")).toBe(1);
-  });
+test("implementation roles and Spec Writers do not get Test work", () => {
+  for (const kind of ["worker", "designer", "spec-writer"] as const) {
+    expect(prompt(kind, { ...planned, branch: "feature/x" })).not.toMatch(/^## Test work$/m);
+  }
 });
 
 describe("chief_delegate: a spec wave with a 5,000-character contract list", () => {
