@@ -144,13 +144,13 @@ describe("waitingOnUser report", () => {
 
 describe("design researcher alerts", () => {
   test.each([
-    [true, (id: string) => `researchThreadId: ${id}`],
-    [false, () => "chief_delegate"],
+    [true, (id: string) => ["chief_plan", `researchThreadId: ${id}`]],
+    [false, () => ["chief_delegate"]],
   ])("a ready design researcher's alert with planning %s names the next call", async (planning, expected) => {
     const { state, chief } = await newState();
     await state.harness.behavior.setSettings({ plannerEnabled: planning });
     const id = await approvedResearcher(state, chief);
-    expect(alertsTo(state, chief).at(-1)).toContain(expected(id));
+    for (const part of expected(id)) expect(alertsTo(state, chief).at(-1)).toContain(part);
   });
 
   test("a researcher blocked with waitingOnUser sends Chief to chief_escalate and never to answer for the user", async () => {
