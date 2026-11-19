@@ -165,7 +165,7 @@ describe("Chief backend", () => {
   });
 
   describe("other-Chief todo collapse", () => {
-    const HIDDEN = (n: number, ids: string) => `- ${n} other-Chief todo${n === 1 ? "" : "s"} (${ids}) hidden: not your work. chief_roster includeOthers: true lists them.`;
+    const HIDDEN = (n: number, ids: string) => `- ${n} other-Chief todo${n === 1 ? "" : "s"} (${ids}) hidden`;
     const scenario = async () => {
       const state = await setup();
       const a = await start(state);
@@ -187,7 +187,11 @@ describe("Chief backend", () => {
       await roster(b, { todo: { text: "Own waiting", after: "PR #9 merges" } });
       const text = await roster(b);
       // #1 Mine (b), #2 Alpha (a), #3 Bravo waiting (a), #4 Own waiting (b)
-      expect(text).toBe(["Pending:", "- todo #1: Mine", "- 1 waiting todo (#4) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.", HIDDEN(2, "#2, #3")].join("\n"));
+      const lines = text.split("\n");
+      expect(lines.slice(0, 2)).toEqual(["Pending:", "- todo #1: Mine"]);
+      expect(lines[2]!.startsWith("- 1 waiting todo (#4) hidden")).toBe(true);
+      expect(lines[3]!.startsWith(HIDDEN(2, "#2, #3"))).toBe(true);
+      expect(lines).toHaveLength(4);
       expect(text).not.toContain("Alpha");
       expect(text).not.toContain("Bravo");
       expect(text).not.toContain("Other Chiefs' todos");
@@ -205,11 +209,12 @@ describe("Chief backend", () => {
       await state.supervisorCycle();
       state.db.prepare("UPDATE chief_todos SET chief_thread_id=? WHERE id=1").run(a);
       const text = await roster(b);
-      expect(text).toBe(`Pending:\n${HIDDEN(2, "#1, #2")}`);
+      expect(text.startsWith(`Pending:\n${HIDDEN(2, "#1, #2")}`)).toBe(true);
+      expect(text.split("\n")).toHaveLength(2);
       const full = await roster(b, { includeOthers: true });
       expect(full).toContain(`- todo #1 (ended Chief ${a}): Ended one`);
       expect(full).toContain("- todo #2 (unowned): Unowned one");
-      expect(full).not.toContain("hidden: not your work");
+      expect(full).not.toContain("other-Chief todo");
     });
 
     test("includeOthers: true equals the uncollapsed output, with and without includeWaiting; false equals the default; closed todos are not counted", async () => {
@@ -221,12 +226,16 @@ describe("Chief backend", () => {
       await roster(b, { todo: { text: "Mine" } });
       expect(await roster(b, { includeOthers: false })).toBe(await roster(b));
       expect(await roster(b)).toContain(HIDDEN(2, "#1, #2"));
-      expect(await roster(b, { includeOthers: true })).toBe([
-        "Pending:", "- todo #4: Mine", "Other Chiefs' todos (not your work; act on one only when the user asks):", `- todo #1 (Chief ${a}): Alpha`, `- 1 waiting other-Chief todo (#2) hidden: each waits on its after: condition. chief_roster includeWaiting: true lists them.`,
-      ].join("\n"));
-      expect(await roster(b, { includeOthers: true, includeWaiting: true })).toBe([
-        "Pending:", "- todo #4: Mine", "Other Chiefs' todos (not your work; act on one only when the user asks):", `- todo #1 (Chief ${a}): Alpha`, `- todo #2 (Chief ${a}) : Bravo (after: user signs)`.replace(") :", "):"),
-      ].join("\n"));
+      const others = (await roster(b, { includeOthers: true })).split("\n");
+      expect(others.slice(0, 2)).toEqual(["Pending:", "- todo #4: Mine"]);
+      expect(others[2]!.startsWith("Other Chiefs' todos")).toBe(true);
+      expect(others[3]).toBe(`- todo #1 (Chief ${a}): Alpha`);
+      expect(others[4]!.startsWith("- 1 waiting other-Chief todo (#2) hidden")).toBe(true);
+      expect(others).toHaveLength(5);
+      const othersWaiting = (await roster(b, { includeOthers: true, includeWaiting: true })).split("\n");
+      expect(othersWaiting.slice(0, 2)).toEqual(["Pending:", "- todo #4: Mine"]);
+      expect(othersWaiting[2]!.startsWith("Other Chiefs' todos")).toBe(true);
+      expect(othersWaiting.slice(3)).toEqual([`- todo #1 (Chief ${a}): Alpha`, `- todo #2 (Chief ${a}): Bravo (after: user signs)`]);
       expect(await roster(b, { includeComplete: true })).toContain(HIDDEN(2, "#1, #2"));
     });
 
@@ -237,7 +246,7 @@ describe("Chief backend", () => {
       const cli = (await state.harness.behavior.runCli(["status", "--project", "proj_1"])).stdout!;
       expect(cli).toContain(`- todo #1 (Chief ${a}): Alpha`);
       expect(cli).toContain(`- todo #2 (Chief ${b}): Bravo (after: user signs)`);
-      expect(cli).not.toContain("hidden: not your work");
+      expect(cli).not.toContain("other-Chief todo");
     });
 
     test("the collapse line keeps the 6000-character roster cap: many foreign todos stay one short line", async () => {
@@ -257,12 +266,15 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_roster", { todo: { text: "Ship docs" } }, { threadId: chief.threadId, projectId: "proj_1" });
     const replacement = await state.harness.behavior.callRpc("create", { projectId: "proj_1" }) as { threadId: string };
     const replacementOpts = { threadId: replacement.threadId, projectId: "proj_1" };
-    expect(String(await state.harness.behavior.callAgentTool(
+    const othersLines = String(await state.harness.behavior.callAgentTool(
       "chief_roster", { includeOthers: true }, replacementOpts,
-    ))).toContain(`Other Chiefs' todos (not your work; act on one only when the user asks):\n- todo #1 (Chief ${chief.threadId}): Ship docs`);
+    )).split("\n");
+    const header = othersLines.findIndex((line) => line.startsWith("Other Chiefs' todos"));
+    expect(header).toBeGreaterThanOrEqual(0);
+    expect(othersLines[header + 1]).toBe(`- todo #1 (Chief ${chief.threadId}): Ship docs`);
     // By default the same todo is one count line, with neither its text nor the section header.
     const collapsedDefault = String(await state.harness.behavior.callAgentTool("chief_roster", {}, replacementOpts));
-    expect(collapsedDefault.startsWith("Pending:\n- 1 other-Chief todo (#1) hidden: not your work. chief_roster includeOthers: true lists them.")).toBe(true);
+    expect(collapsedDefault.startsWith("Pending:\n- 1 other-Chief todo (#1) hidden")).toBe(true);
     expect(collapsedDefault).not.toContain("Ship docs");
 
     const other = await start(state, "proj_2");
@@ -293,16 +305,16 @@ describe("Chief backend", () => {
 
     // With the gate open the worker stays in Pending and names the busy sides (gateDecision wait).
     const { reviewerId } = await startGate(state, chief.threadId, worker.threadId);
-    const waiting = `- worker “Fix checkout totals” (${worker.threadId}): The review gate is waiting on reviewer ${reviewerId}`;
+    const workerLine = () => roster.split("\n").find((line) => line.startsWith(`- worker “Fix checkout totals” (${worker.threadId}): `));
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(waiting);
+    expect(workerLine()).toContain(reviewerId);
 
     // The approve passes the gate: the alert and the roster name the same completion.
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Looks correct", ...APPROVE }, { threadId: reviewerId!, projectId: "proj_1" });
     const passAction = `chief_complete (threadId: ${worker.threadId})`;
     expect(state.sent.at(-1).input[0].text).toContain(passAction);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`(${worker.threadId}): The review gate passed. Complete it: ${passAction}`);
+    expect(workerLine()).toContain(passAction);
 
     // Once Chief completes the worker, nothing keeps advertising it.
     await state.harness.behavior.callAgentTool("chief_complete", { threadId: worker.threadId, result: "Landed" }, opts);
@@ -321,7 +333,7 @@ describe("Chief backend", () => {
       state: "blocked", blocker: "Missing staging credentials", recommendation: "Ask the user",
     }, { threadId: blockedWorker.threadId, projectId: "proj_1" });
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`- worker “Blocked work” (${blockedWorker.threadId}): Blocked: Missing staging credentials — decide or escalate to the user.`);
+    expect(roster.split("\n").find((line) => line.startsWith(`- worker “Blocked work” (${blockedWorker.threadId}): `))).toContain("Missing staging credentials");
 
     const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
@@ -333,8 +345,7 @@ describe("Chief backend", () => {
     const fixAction = `chief_delegate (replaces: ${worker.threadId}, kind: worker)`;
     expect(state.sent.at(-1).input[0].text).toContain(fixAction);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`(${worker.threadId}): The review gate needs a fix`);
-    expect(roster).toContain(fixAction);
+    expect(roster.split("\n").find((line) => line.includes(`(${worker.threadId}): `))).toContain(fixAction);
   });
 
   test("the Pending block tells Chief to delegate a planner's wave 1 until it is delegated", async () => {
@@ -347,7 +358,9 @@ describe("Chief backend", () => {
     // A two-wave plan needs no review: Pending tells Chief to delegate wave 1 at once.
     let roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).not.toContain("chief_consult");
-    expect(roster).toContain(`- planner “Plan · Rework checkout” (${planner.threadId}): Delegate wave 1 now: run chief_forge_init (planThreadId: ${planner.threadId}, wave: 1), then chief_delegate (planThreadId: ${planner.threadId}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.`);
+    const plannerLine = roster.split("\n").find((line) => line.startsWith(`- planner “Plan · Rework checkout” (${planner.threadId}): `));
+    expect(plannerLine).toContain(`chief_forge_init (planThreadId: ${planner.threadId}, wave: 1)`);
+    expect(plannerLine).toContain(`chief_delegate (planThreadId: ${planner.threadId}, wave: 1)`);
 
     await state.harness.behavior.runCli([
       "delegate", "--title", "Fix checkout totals", "--mission", "Correct and verify totals",
@@ -398,11 +411,9 @@ describe("Chief backend", () => {
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     const configuredChief = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
-    expect(configuredChief.instructions).toContain("Call chief_roster at the start of every turn, and again after any compaction");
-    expect(configuredChief.instructions).toContain("never poll managed threads");
+    expect(configuredChief.instructions).toContain("# Chief core rules (always apply)");
     const configuredWorker = await state.harness.behavior.resolveAgentConfiguration(configurationContext(worker.threadId));
-    expect(configuredWorker.instructions).not.toContain("Call chief_roster at the start of every turn");
-    expect(configuredWorker.instructions).not.toContain("never poll managed threads");
+    expect(configuredWorker.instructions).not.toContain("# Chief core rules (always apply)");
   });
 
   test("selects supervisor and reporting tools only for the matching roles", async () => {

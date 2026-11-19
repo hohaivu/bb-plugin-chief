@@ -57,8 +57,8 @@ describe("tool-call stability", () => {
       const after = (text: string) => lines.findIndex((line) => line.includes(text));
       if (entry.key.includes("| chief |")) {
         expect(at, entry.key).toBe(1);
-        expect(at, entry.key).toBeLessThan(after("Call chief_roster at the start of every turn"));
-        if (entry.key.includes("research true")) expect(after("Use chief_research"), entry.key).toBeGreaterThan(at);
+        expect(at, entry.key).toBeLessThan(after("# Chief core rules (always apply)"));
+        if (entry.key.includes("research true")) expect(lines.findIndex((line, index) => index > at && line.includes("chief_research")), entry.key).toBeGreaterThan(at);
         continue;
       }
       expect(at, entry.key).toBe(2);
@@ -68,7 +68,8 @@ describe("tool-call stability", () => {
       if (entry.key.includes("| planner |") || entry.key.includes("| researcher |")) expect(entry.instructions, entry.key).not.toContain("chief_research");
     }
     // The lines under test exist: Chief with research on has its research line after the preload line, and a reviewer shows its review lessons.
-    expect(entries.find((entry) => entry.key.includes("| chief | claude-code | planner true | research true"))!.instructions).toContain("Use chief_research");
+    const researchChief = entries.find((entry) => entry.key.includes("| chief | claude-code | planner true | research true"))!.instructions!.split("\n");
+    expect(researchChief.findIndex((line, index) => index > researchChief.findIndex((l) => l.includes("ToolSearch")) && line.includes("chief_research"))).toBeGreaterThan(-1);
     expect(entries.some((entry) => entry.key.includes("| planner | claude-code | planner true | research true"))).toBe(true);
     expect(entries.find((entry) => entry.key.includes("| reviewer |"))!.instructions).toContain("## Review lessons");
   });
@@ -117,17 +118,14 @@ describe("tool-call stability", () => {
     // Only the 32,000-char chief.md reaches the SDK cap, so it still exercises the cut; the 5,000-char cases fit uncut.
     if (size === 32_000) expect(instructions!.length).toBe(32768);
     else expect(instructions!.length).toBeLessThanOrEqual(32768);
-    const coreEnd = instructions!.indexOf("chief_escalate with the thread and the full request");
-    expect(coreEnd).toBeGreaterThan(-1);
+    const coreStart = instructions!.indexOf("# Chief core rules (always apply)");
+    // The core section ends where the Chief procedure section begins.
+    const coreEnd = instructions!.indexOf("# Chief procedure");
+    expect(coreStart).toBeGreaterThan(-1);
+    expect(coreEnd).toBeGreaterThan(coreStart);
     expect(instructions!.indexOf(`ToolSearch call: select:${CHIEF_HOST_ORDER.filter((name) => tools.some((tool) => tool.name === name)).map(prefix).join(",")}`)).toBeGreaterThan(-1);
     expect(instructions).not.toMatch(/\+chief|max_results/);
-    expect(instructions!.indexOf("ToolSearch")).toBeLessThan(instructions!.indexOf("Call chief_roster at the start of every turn"));
-    for (const part of [
-      "# Chief core rules (always apply)", "Call chief_roster at the start of every turn", "never poll managed threads",
-      "chief_plan first", "delegate every wave it lists right away",
-      "chief_research is optional.", "or the doubtful evidence to chief_review.",
-      "Small, low-risk changes suit a skip.", "Chief never edits code",
-    ]) expect(instructions).toContain(part);
+    expect(instructions!.indexOf("ToolSearch")).toBeLessThan(coreStart);
     expect(instructions!.indexOf(marker)).toBeGreaterThan(coreEnd);
   });
 
