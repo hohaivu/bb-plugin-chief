@@ -177,7 +177,7 @@ describe("Chief backend", () => {
     expect((await status(state)).threads.find((row) => row.threadId === worker.threadId)!.state).toBe("complete");
   });
 
-  test("starts a read-only reviewer and a tester once, and deduplicates concurrent requests", async () => {
+  test("starts one reviewer once, and deduplicates concurrent requests", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await readyWorker(state, chief.threadId);
@@ -187,11 +187,6 @@ describe("Chief backend", () => {
     ]);
     expect(first.threadId).toBe(second.threadId);
     expect(spawnedAs(state, "reviewer")).toHaveLength(1);
-    expect(spawnedAs(state, "tester")).toHaveLength(1);
-    const reviewerPrompt: string = spawnedAs(state, "reviewer")[0].prompt;
-    expect(reviewerPrompt).toContain("Remain review-only");
-    // The reviewer confirms the automated criteria ran instead of taking the worker's word for it.
-    expect(reviewerPrompt).toContain("Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.");
   });
 
   test("starts a review for a plain branch with no managed worker, on a fresh worktree based on it", async () => {
@@ -296,7 +291,6 @@ describe("Chief backend", () => {
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, as(chief.threadId));
 
     expect(spawnedAs(state, "reviewer")).toHaveLength(1);
-    expect(spawnedAs(state, "tester")).toHaveLength(1);
   });
 
   test("a reviewer's rejection must be a verdict field, and reaches Chief and inspect", async () => {
@@ -319,29 +313,6 @@ describe("Chief backend", () => {
     expect(JSON.stringify(await state.harness.behavior.callAgentTool(
       "chief_inspect", { threadId: reviewer.threadId }, { threadId: chief.threadId },
     ))).toContain("Verdict: request_changes");
-  });
-
-  test("tester model: a kind tester spawn uses the Tester pick when set, else the Worker pick", async () => {
-    const state = await setup();
-    await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "worker", selection: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" },
-    });
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    const unset = await delegate(state, chief.threadId, "Test unset", { kind: "tester", replaces: worker.threadId });
-    expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
-
-    await state.harness.behavior.callRpc("setRoleModel", {
-      hostId: "host_1", role: "tester", selection: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" },
-    });
-    await delegate(state, chief.threadId, "Test set", { kind: "tester", replaces: unset.threadId });
-    expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-astra" });
-    // The Tester pick is not the Worker pick: a plain worker stays on the Worker model.
-    await delegate(state, chief.threadId, "Plain work");
-    expect(state.spawned.at(-1)).toMatchObject({ providerId: "codex", model: "gpt-6-mini" });
-
-    const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);
-    expect(configuration.hosts[0]!.selections.tester).toMatchObject({ providerId: "codex", model: "gpt-6-astra" });
   });
 
   describe("designer kind", () => {
