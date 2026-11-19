@@ -14,7 +14,7 @@ import { inPlaceLine } from "./test/blockedAlerts";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
-describe("tester role", () => {
+describe("worker kinds", () => {
   describe("Spec Writer role", () => {
     const workerCall = (planThreadId: string, writer: string, waveNo = 1) => `chief_delegate (planThreadId: ${planThreadId}, wave: ${waveNo}, replaces: ${writer}, kind: worker)`;
     const skipCall = (planThreadId: string) => `chief_skip_specs (planThreadId: ${planThreadId}, reason)`;
@@ -135,7 +135,6 @@ describe("tester role", () => {
     const writerCall = (planThreadId: string, writer: string, waveNo = 1) => `chief_delegate (planThreadId: ${planThreadId}, wave: ${waveNo}, replaces: ${writer}, kind: spec-writer)`;
     const sideEnv = (branch: string) => ({ type: "host", hostId: "host_1", workspace: { type: "managed-worktree", baseBranch: { kind: "named", name: branch } } });
     const waitWriters = (waveNo: number, total: number) => new RegExp(`Wave ${waveNo} of ${total} is ready; the Spec Writer of .* is not ready yet\\. Wait for its ready report`);
-    const testerCall = (planThreadId: string, waveNo: number, owner: string) => `chief_delegate (planThreadId: ${planThreadId}, wave: ${waveNo}, replaces: ${owner}, kind: tester)`;
 
     // plan-chains.md "Spec Writer Side Lane" (one Spec Writer per plan): a spec wave's first call with no kind admits a worker; the
     // planner-ready alert names no Spec Writer; the last wave's ready alert names the plan Spec Writer call and the plan-level skip.
@@ -211,7 +210,7 @@ describe("tester role", () => {
         `Wave 1's Spec Writer ${writer} is still live: fix its docs with chief_delegate (planThreadId: ${P}, wave: 1, replaces: ${writer}, kind: spec-writer).`);
       await putWriter(state, chief.threadId, writer, "blocked");
       const rows = countRows(state);
-      for (const kind of ["worker", "designer", "tester"]) {
+      for (const kind of ["worker", "designer"]) {
         await expect(delegateWave(state, chief.threadId, P, 1, { replaces: writer, kind })).rejects.toThrow(
           new RegExp(`${writer} is wave 1's Spec Writer, which works in its own side worktree: only its docs fix replaces it — chief_delegate \\(planThreadId: ${P}, wave: 1, replaces: ${writer}, kind: spec-writer\\)\\. Product and test work continues the chain's implementation row — .*${worker}`));
       }
@@ -488,7 +487,7 @@ describe("tester role", () => {
     });
 
     // Contract 16 (unplanned): the default kind stays worker; an explicit spec-writer is accepted with no plan, its ready alert names
-    // the worker call with the unplannedReason and says not to review, a tester cannot follow it, and it never completes.
+    // the worker call with the unplannedReason and says not to review, and it never completes.
     // Regression: the unplanned default flips to spec-writer, or the writer is treated as finished work (review or complete).
     test("an unplanned Spec Writer is opt-in, hands off to a worker and is never completed", async () => {
       const state = await setup();
@@ -506,8 +505,6 @@ describe("tester role", () => {
       setLive(state, writer, "idle");
       await expect(tool(state, "chief_complete", { threadId: writer, skipReview: "docs only" }, chief.threadId)).rejects.toThrow(
         `Refusing to complete ${writer}: a Spec Writer's docs need their worker — chief_delegate (replaces: ${writer}, kind: worker).`);
-      await expect(tool(state, "chief_delegate", { title: "Tests", mission: "Test it", replaces: writer, kind: "tester" }, chief.threadId)).rejects.toThrow(
-        `Spec Writer ${writer} hands off to its worker: chief_delegate (replaces: ${writer}, kind: worker).`);
       expect(rowOf(state, writer).state).toBe("ready");
     });
 
@@ -844,7 +841,7 @@ describe("docs work list", () => {
 
     const kinds = await setup();
     const k = await docsChains(kinds, OWN);
-    for (const kind of ["worker", "tester"]) {
+    for (const kind of ["worker"]) {
       await swap(kinds, k.chief, k.P, 6, kinds.db.prepare(`SELECT thread_id FROM managed_threads WHERE plan_thread_id=? AND plan_wave=6 AND role='worker' ORDER BY rowid DESC`).get(k.P)!.thread_id, kind);
       expect(lastPrompt(kinds)).not.toContain("Docs work list");
       await readyIdle(kinds, workerOn(kinds, k.P, 6).thread_id);
