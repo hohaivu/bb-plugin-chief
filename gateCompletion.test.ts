@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { PLAN_FIXTURE, disposeAll, wave } from "./test/harness";
 import { type GateWorld, gateWorld } from "./test/gateWorld";
-import { delegateWave, plan } from "./test/testerHelpers";
+import { delegateWave, plan } from "./test/flowHelpers";
 import { provideSdk } from "./test/sdk";
 
 provideSdk(sdkTesting);
@@ -10,119 +10,78 @@ vi.mock("node:child_process", async () => (await import("./test/execMock")).chil
 afterEach(disposeAll);
 
 // Contracts (the one review gate, src/runtime/completion.ts): chief_complete on a gate's target completes only when the gate decision is pass
-// (approve and green tests, or a fix run / corrector that ended green). Every other decision refuses and names its next step.
+// (reviewer approve, or the gate's one fix run reported ready). Every other decision refuses and names its next step.
 // skipReview completes with no gate and no cleanup; override completes without the gate, also with no cleanup. A pass stamps cleanup_approved_at.
 const refused = (world: GateWorld, threadId: string, extra: object = {}) => world.refusal(world.complete(threadId, extra));
-const asThread = (threadId: string) => ({ threadId, projectId: "proj_1" });
 
 describe("a passed gate completes the target", () => {
-  test("approve and green tests: the worker completes", async () => {
+  test("approve: the worker completes", async () => {
     const world = await gateWorld();
     const { worker } = await world.passed();
     await world.complete(worker.threadId);
     expect(world.row(worker.threadId).state).toBe("complete");
   });
 
-  test("red tests, then a fix run that ends green: the worker completes", async () => {
+  // The fix run replaces the gate's first target, but the target stays live until the gate passes.
+  test("request_changes, then a ready fix run: the target is not completed by the delegation, and completes once the fix is ready", async () => {
     const world = await gateWorld();
-    const { worker, reviewer, tester } = await world.gated();
-    await world.verdict(reviewer, "approve");
-    await world.testReport(tester, false);
-    const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
-    await world.ready(fix.threadId, { testsPassed: true });
-    await world.complete(worker.threadId);
-    expect(world.row(worker.threadId).state).toBe("complete");
-  });
-
-  test("a fix run that is blocked on a wrong test, then a corrector that ends green: the worker completes", async () => {
-    const world = await gateWorld();
-    const { worker, reviewer, tester } = await world.gated();
-    await world.verdict(reviewer, "approve");
-    await world.testReport(tester, false);
-    const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
-    await world.block(fix.threadId, "totals.test.ts:12 contradicts the plan.");
-    const corrector = await world.delegateTo({ replaces: fix.threadId, kind: "tester" });
-    await world.testReport(corrector.threadId, true);
-    world.setIdle(corrector.threadId);
+    const { worker, reviewer } = await world.gated();
+    await world.verdict(reviewer, "request_changes");
+    const fix = await world.delegateTo({ replaces: worker.threadId, kind: "worker" });
+    expect(world.row(fix.threadId)).toMatchObject({ replaces_thread_id: worker.threadId, fix_run: "gate" });
+    expect(world.gate().fixer_thread_id).toBe(fix.threadId);
+    expect(world.row(worker.threadId).state).not.toBe("complete");
+    expect(await refused(world, worker.threadId)).toContain("has not passed (wait)");
+    await world.ready(fix.threadId);
     await world.complete(worker.threadId);
     expect(world.row(worker.threadId).state).toBe("complete");
   });
 });
 
 describe("a gate that has not passed refuses completion with its next step", () => {
-  test("red tests with no fix run: refused, with the fix line", async () => {
+  test("request_changes with a code finding and no fix run: refused, with the fix line naming the first target", async () => {
     const world = await gateWorld();
-    const { worker, reviewer, tester } = await world.gated();
-    await world.verdict(reviewer, "approve");
-    await world.testReport(tester, false);
+    const { worker, reviewer } = await world.gated();
+    await world.verdict(reviewer, "request_changes");
     const message = await refused(world, worker.threadId);
     expect(message).toContain("has not passed (fix)");
-    expect(message).toContain(`chief_delegate (replaces: ${tester}, kind: worker)`);
+    expect(message).toContain(`chief_delegate (replaces: ${worker.threadId}, kind: worker)`);
     expect(world.row(worker.threadId).state).not.toBe("complete");
   });
 
-  test("request_changes with a code finding: refused, with the fix line", async () => {
-    const world = await gateWorld();
-    const { worker, reviewer, tester } = await world.gated();
-    await world.verdict(reviewer, "request_changes");
-    await world.testReport(tester, true);
-    expect(await refused(world, worker.threadId)).toContain("has not passed (fix)");
-  });
-
-  test("the review's two sides still running: refused, waiting", async () => {
+  test("the reviewer still running: refused, waiting", async () => {
     const world = await gateWorld();
     const { worker } = await world.gated();
     expect(await refused(world, worker.threadId)).toContain("has not passed (wait)");
   });
 
   test.each([
-    ["the tester blocked", "tester", (world: GateWorld, id: string) => world.block(id)],
-    ["the reviewer blocked", "reviewer", (world: GateWorld, id: string) => world.block(id, "Cannot read the diff.")],
-    ["the tester archived", "tester", async (world: GateWorld, id: string) => { world.state.live.set(id, { ...world.state.live.get(id)!, archivedAt: Date.now() } as any); await world.state.supervisorCycle(); }],
-  ])("%s: refused, with the restart line", async (_name, side, down) => {
+    ["the reviewer blocked", (world: GateWorld, id: string) => world.block(id, "Cannot read the diff.")],
+    ["the reviewer archived", async (world: GateWorld, id: string) => { world.state.live.set(id, { ...world.state.live.get(id)!, archivedAt: Date.now() } as any); await world.state.supervisorCycle(); }],
+  ])("%s: refused, with the restart line", async (_name, down) => {
     const world = await gateWorld();
     const gated = await world.gated();
-    if (side === "tester") await world.verdict(gated.reviewer, "approve"); else await world.testReport(gated.tester, true);
-    await down(world, side === "tester" ? gated.tester : gated.reviewer);
+    await down(world, gated.reviewer);
     const message = await refused(world, gated.worker.threadId);
     expect(message).toContain("has not passed (restart)");
     expect(message).toContain(`chief_review (workerThreadId: ${gated.worker.threadId})`);
   });
 
-  test("a fix run's ready report without testsPassed is refused at intake, and so is testsPassed: false", async () => {
+  test("a blocked fix run: the gate escalates and the worker is refused", async () => {
     const world = await gateWorld();
-    const { worker, reviewer, tester } = await world.gated();
-    await world.verdict(reviewer, "approve");
-    await world.testReport(tester, false);
-    const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
-    const ready = { state: "ready", result: "Fixed.\n\n## Deviations from plan\nNone" };
-    expect(await world.refusal(world.call("chief_report", ready, asThread(fix.threadId)))).toContain("testsPassed is missing");
-    expect(await world.refusal(world.call("chief_report", { ...ready, testsPassed: false }, asThread(fix.threadId)))).toContain("A fix run reports ready only with testsPassed: true");
-    expect(world.row(fix.threadId).tests_passed).toBeNull();
+    const { worker, reviewer } = await world.gated();
+    await world.verdict(reviewer, "request_changes");
+    const fix = await world.delegateTo({ replaces: worker.threadId, kind: "worker" });
+    await world.block(fix.threadId, "The totals contract contradicts the plan.");
+    const message = await refused(world, worker.threadId);
+    expect(message).toContain("has not passed (escalate)");
+    expect(message).toContain("Escalate to the user");
   });
 
-  test("a corrector that ends red, or blocked: the gate escalates and the worker is refused", async () => {
-    for (const ending of ["red", "blocked"] as const) {
-      const world = await gateWorld();
-      const { worker, reviewer, tester } = await world.gated();
-      await world.verdict(reviewer, "approve");
-      await world.testReport(tester, false);
-      const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
-      await world.block(fix.threadId, "totals.test.ts:12 contradicts the plan.");
-      const corrector = await world.delegateTo({ replaces: fix.threadId, kind: "tester" });
-      if (ending === "red") await world.testReport(corrector.threadId, false); else await world.block(corrector.threadId);
-      const message = await refused(world, worker.threadId);
-      expect(message).toContain("has not passed (escalate)");
-      expect(message).toContain("Escalate to the user");
-      await disposeAll();
-    }
-  });
-
-  test("the target reports again after the gate pinned it: the gate escalates, even with approve and green tests", async () => {
+  test("the target reports again after the gate pinned it: the gate escalates, even with approve", async () => {
     const world = await gateWorld();
-    const { worker, reviewer, tester } = await world.gated();
+    const { worker, reviewer } = await world.gated();
     await world.verdict(reviewer, "approve");
-    await world.testReport(tester, true);
     await world.ready(worker.threadId, { result: "Changed it again.\n\n## Deviations from plan\nNone" });
     const message = await refused(world, worker.threadId);
     expect(message).toContain("has not passed (escalate)");
@@ -150,12 +109,14 @@ describe("skipReview", () => {
     expect(world.gate()).toBeUndefined();
   });
 
-  test("is refused while the gate's reviewer or tester is still working", async () => {
+  test("is refused while the gate's reviewer or fix run is still working", async () => {
     const world = await gateWorld();
-    const { worker, reviewer, tester } = await world.gated();
+    const { worker, reviewer } = await world.gated();
     expect(await refused(world, worker.threadId, { skipReview: "Quick." })).toContain(`review ${reviewer} is still running`);
-    await world.verdict(reviewer, "approve");
-    expect(await refused(world, worker.threadId, { skipReview: "Quick." })).toContain(`review gate ${world.gate().gate_key} is still running ${tester}`);
+    await world.verdict(reviewer, "request_changes");
+    world.setIdle(reviewer);
+    const fix = await world.delegateTo({ replaces: worker.threadId, kind: "worker" });
+    expect(await refused(world, worker.threadId, { skipReview: "Quick." })).toContain(`review gate ${world.gate().gate_key} is still running ${fix.threadId}`);
     expect(world.row(worker.threadId).state).not.toBe("complete");
   });
 
@@ -188,9 +149,8 @@ describe("skipReview", () => {
 describe("override", () => {
   test("completes a worker whose gate has not passed, records the reason, and queues no cleanup", async () => {
     const world = await gateWorld({ cleanup: true });
-    const { worker, reviewer, tester } = await world.gated();
-    await world.verdict(reviewer, "approve");
-    await world.testReport(tester, false);
+    const { worker, reviewer } = await world.gated();
+    await world.verdict(reviewer, "request_changes");
     const text = await world.complete(worker.threadId, { override: "The test is known flaky." });
     expect(world.row(worker.threadId)).toMatchObject({ state: "complete", cleanup_approved_at: null });
     expect(world.row(worker.threadId).result).toContain("Completed without the review gate: The test is known flaky.");
@@ -199,34 +159,36 @@ describe("override", () => {
 });
 
 describe("cleanup approval", () => {
-  test("a pass stamps cleanup_approved_at on the worker, and the idle reviewer and tester complete with it", async () => {
+  test("a pass stamps cleanup_approved_at on the worker, and the idle reviewer completes with it", async () => {
     const world = await gateWorld({ cleanup: true });
-    const { worker, reviewer, tester } = await world.passed();
+    const { worker, reviewer } = await world.passed();
+    world.setIdle(reviewer);
     const text = await world.complete(worker.threadId);
-    for (const id of [worker.threadId, reviewer, tester]) expect(world.row(id)).toMatchObject({ state: "complete" });
-    for (const id of [worker.threadId, reviewer, tester]) expect(world.row(id).cleanup_approved_at).not.toBeNull();
+    for (const id of [worker.threadId, reviewer]) expect(world.row(id)).toMatchObject({ state: "complete" });
+    for (const id of [worker.threadId, reviewer]) expect(world.row(id).cleanup_approved_at).not.toBeNull();
     expect(text).toContain("Cleanup queued");
   });
 
   test("with cleanup off, a pass completes the actors and stamps nothing", async () => {
     const world = await gateWorld({ cleanup: false });
-    const { worker, reviewer, tester } = await world.passed();
+    const { worker, reviewer } = await world.passed();
+    world.setIdle(reviewer);
     const text = await world.complete(worker.threadId);
-    for (const id of [worker.threadId, reviewer, tester]) expect(world.row(id)).toMatchObject({ state: "complete", cleanup_approved_at: null });
+    for (const id of [worker.threadId, reviewer]) expect(world.row(id)).toMatchObject({ state: "complete", cleanup_approved_at: null });
     expect(text).toContain("the cleanupApproved setting is off");
   });
 
-  test("a fix run's pass stamps the worker, the reviewer and the fix run; the replaced tester is eligible through its replacement", async () => {
+  test("a fix run's pass stamps the worker, the reviewer and the fix run", async () => {
     const world = await gateWorld({ cleanup: true });
-    const { worker, reviewer, tester } = await world.gated();
-    await world.verdict(reviewer, "approve");
-    await world.testReport(tester, false);
-    const fix = await world.delegateTo({ replaces: tester, kind: "worker" });
-    await world.ready(fix.threadId, { testsPassed: true });
+    const { worker, reviewer } = await world.gated();
+    await world.verdict(reviewer, "request_changes");
+    world.setIdle(reviewer);
+    const fix = await world.delegateTo({ replaces: worker.threadId, kind: "worker" });
+    await world.ready(fix.threadId);
     await world.complete(worker.threadId);
-    for (const id of [worker.threadId, reviewer, tester, fix.threadId]) expect(world.row(id)).toMatchObject({ state: "complete" });
+    for (const id of [worker.threadId, reviewer, fix.threadId]) expect(world.row(id)).toMatchObject({ state: "complete" });
     for (const id of [worker.threadId, reviewer, fix.threadId]) expect(world.row(id).cleanup_approved_at).not.toBeNull();
-    expect(world.row(fix.threadId).replaces_thread_id).toBe(tester);
+    expect(world.row(fix.threadId).replaces_thread_id).toBe(worker.threadId);
   });
 });
 

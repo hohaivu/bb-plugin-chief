@@ -2,11 +2,11 @@
 
 ## Context
 
-A gate reviewer asks for changes. The fix run then makes the tests pass. Until now the gate never starts a second review, so the fixed code reaches the human without a review.
+A gate reviewer asks for changes. The fix run then fixes the findings. Until now the gate never starts a second review, so the fixed code reaches the human without a review.
 
 ## Decision
 
-- After a green fix run or corrector on a `request_changes` review, one more `chief_review` starts one advisory re-reviewer.
+- After a ready fix run on a `request_changes` review, one more `chief_review` starts one advisory re-reviewer.
 - The gate still passes on the green run. The re-review never starts a fix.
 - A gate gets at most one re-review.
 

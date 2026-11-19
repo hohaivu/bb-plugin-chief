@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { gateTesterBrief, verdictPreview } from "../research/delegationBrief";
+import { verdictPreview } from "../research/delegationBrief";
 import { computeImpactSlice, gitWithin, reviewedAncestry, type ImpactSlice } from "./impactSlice";
 import { worktreeEnvironment, type ManagedSpawn } from "../research/managedSpawn";
 import { helperPrompt, isPinned, PR_AGENT_DIR, prAgentScript, prAgentSection, type EngineTarget, type ReviewEngine } from "./prAgent";
@@ -38,13 +38,13 @@ export function reviewerPrompt(opts: {
   return [
     REVIEW_ONLY,
     "Confirm the automated criteria actually ran with their exit status; list the manual criteria that still need a human to confirm.",
-    "Review by reading the code. Never run builds, linters, typecheckers or tests yourself, at any commit: the implementing worker owns the lint/analyze, build and Verify command evidence, and the tester owns the test evidence. Judge its reported Automated Verification and the commands BB recorded; a check the brief, plan or project requires with no passing record is missing verification evidence.",
-    "Classify the change, then check it by type: a bug fix fixes the root cause, not the symptom, and has a reproducing check from the worker or a regression test from the tester; a refactor or migration leaves behaviour unchanged, with the base commit as the oracle: the tester's report should compare old and new behaviour on the same inputs (the same test or fixture against the base); treat an unexplained behaviour difference as a regression, and a missing comparison where one was practical as missing verification evidence; a feature aligns with the contract and spec in the brief; a mixed change is checked part by part by each part's type.",
+    "Review by reading the code. Never run builds, linters, typecheckers or tests yourself, at any commit: the implementing worker owns the lint/analyze, build, Verify command and test evidence. Judge its reported Automated Verification and the commands BB recorded; a check the brief, plan or project requires with no passing record is missing verification evidence.",
+    "Classify the change, then check it by type: a bug fix fixes the root cause, not the symptom, and has a regression test from the worker; a refactor or migration leaves behaviour unchanged, with the base commit as the oracle: the worker's report should compare old and new behaviour on the same inputs (the same test or fixture against the base); treat an unexplained behaviour difference as a regression, and a missing comparison where one was practical as missing verification evidence; a feature aligns with the contract and spec in the brief; a mixed change is checked part by part by each part's type.",
     ...(feature ? [`Native-design check, for feature work only (never a bug fix, nor a refactor or migration on its own; in a mixed change, only its feature part): look for these smells on lines the diff introduced: an alias that re-derives a value an existing function or field already returns; an \`if (newKind)\` branch in code that already dispatches on kind; a new file or component that mirrors an existing one for one variant; a new flag, option or boolean that duplicates what a type already encodes; a validation or download path beside the shared one; a test whose only purpose is "nothing else changed" (a test that proves a listed equivalence or preservation contract is not one); a second system for a concern that already has one (a counter, logger, retry helper, config reader, …). Report each as a finding whose message names, at file:line, the existing value, dispatch, component, type or system it duplicates, and whose fix folds the feature into it. Genuinely different behaviour is not a smell. A smell is a nit unless a listed contract rules it out${reshape ? " (a reshape wave's contracts do)" : ""}; then it is an unmet contract.${reshape ? " A reshape commit belongs to its feature: judge the feature and its reshape together as one feature against the plan's contracts, not the reshape commit as a refactor with the base commit as the oracle." : ""}`] : []),
     "Evidence rules: a blocking finding needs a traced input → code path → failure; never reject on speculation. Never approve only because tests pass; read the change. Report only problems this diff introduced; a pre-existing problem is at most a nit, unless the diff makes it reachable. When a signature or exported contract changed, inspect its callers.",
     "Do not report, as blocking or nit: what a linter, typechecker or compiler would catch (when the worker's recorded or reported check failed, that failed check is the finding); code explicitly silenced by a lint-ignore, ts-ignore or similar comment; code that looks like a bug but is correct; nitpicks a senior engineer would not raise; an issue that depends on specific inputs or state when you have not traced an input that triggers it; subjective suggestions; general quality concerns such as test coverage, unless a guideline file or the brief requires them (the bug-fix regression check and the test audit still apply). If you are not certain a problem is real, leave it out: a false positive costs the worker a fix round.",
     "Guideline files are the CLAUDE.md and AGENTS.md files in the repository root and in each directory on a changed file's path; review-context.md lists them when it can, otherwise find them yourself. A guideline violation on a line this diff introduced is blocking only when the finding's message quotes the exact rule and the changed file sits inside that guideline file's directory; otherwise do not report it.",
-    "A missing test or test run is never a finding against a worker or designer: workers never test. Against a tester's work it is missing verification evidence.",
+    "A missing regression test for a bug fix, or for a contract that names a test, is a blocking finding (missing verification evidence). Any other missing test is a nit.",
     "Test audit: when the diff adds or changes tests, check that each would fail on a plausible wrong implementation (an off-by-one, a missed boundary, a swapped branch, a dropped case). A test that asserts a tautology, a trivial constant, or only what the mock returns proves nothing. Vacuous tests count as missing verification evidence for the behaviour they claim to cover.",
     "A contract stated as a property (round-trip, idempotency, invariant or bound, equivalence, must-never-happen) holds for inputs beyond the worker's own examples: check at least one boundary or adversarial input the worker did not choose.",
     "Classify every finding as blocking or nit. Blocking means the change cannot ship as it stands. These are always blocking: a bug or incorrect behaviour, an unmet listed contract, a regression, missing or false verification evidence, a designer mismatch the brief does not accept, scope drift the worker did not state, and functional code replaced by a comment, TODO or placeholder. A nit is style, naming, a minor simplification, or an optional improvement.",
@@ -55,9 +55,9 @@ export function reviewerPrompt(opts: {
     "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
     "Set chief_report `lesson` (at most 400 characters) only for a durable, project-level review rule or known false positive a future reviewer should know; never for something specific to this task.",
     "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
-    "Review gate, only when this review is a managed-work review gate (not a review of a branch or pull request no managed worker owns): you run once per gate, on the pinned heads in this brief, beside the gate's tester. Tests are out of your scope: the tester writes and runs them, and you never wait for or judge its test runs. The gate's one fix run follows your verdict and its green run passes the gate; at most one advisory re-review follows it (the brief then names the previous verdict), and its code findings do not reopen the gate. Put every blocking finding in this one report.",
-    "Doc-text tests: a test the diff adds or changes that reads README, CHANGELOG, docs/, a skill file, any other markdown or prose file, or a spec file and asserts on its wording is a vacuous test, so it is missing verification evidence: a blocking finding against the tester, with fix \"delete the test; test the behaviour the doc describes\". Text the product emits at runtime and fields a program parses from such a file (frontmatter, a config block the product loads) are not doc text.",
-    `Docs ownership, only when the brief has a Docs ownership section: only a Spec Writer changes docs/. A docs/ commit is in scope only when its Chief-Spec-Writer trailer names one of the Spec Writers that section lists, or it lies inside one of their reported ranges (Base commit..Head commit, or Fold base..Fold head; \`Fold: none\` with equal Fold base and Fold head is an empty scope: nothing to check, never fall back to its Base commit). Check with: git log --no-merges --format='%H %(trailers:key=Chief-Spec-Writer,valueonly)' <base>..<head> -- docs/. Any other docs/ commit is an ownership violation and is blocking. Exception: a later Spec Writer of this task lists that commit under "## Adopted docs commits" in its report, and the final docs/ content is correct. Then name it as a non-blocking note. A missing trailer means unknown ownership, not proof that a non-writer made the commit. A docs/ path in a worker's, designer's or tester's own range is a violation. The repair is never a worker change: it is a Spec Writer (kind: spec-writer).`,
+    "Review gate, only when this review is a managed-work review gate (not a review of a branch or pull request no managed worker owns): you run once per gate, on the pinned heads in this brief. The gate's one fix run follows your verdict and its ready report passes the gate; at most one advisory re-review follows it (the brief then names the previous verdict), and its code findings do not reopen the gate. Put every blocking finding in this one report.",
+    "Doc-text tests: a test the diff adds or changes that reads README, CHANGELOG, docs/, a skill file, any other markdown or prose file, or a spec file and asserts on its wording is a vacuous test, so it is missing verification evidence: a blocking finding against the worker, with fix \"delete the test; test the behaviour the doc describes\". Text the product emits at runtime and fields a program parses from such a file (frontmatter, a config block the product loads) are not doc text.",
+    `Docs ownership, only when the brief has a Docs ownership section: only a Spec Writer changes docs/. A docs/ commit is in scope only when its Chief-Spec-Writer trailer names one of the Spec Writers that section lists, or it lies inside one of their reported ranges (Base commit..Head commit, or Fold base..Fold head; \`Fold: none\` with equal Fold base and Fold head is an empty scope: nothing to check, never fall back to its Base commit). Check with: git log --no-merges --format='%H %(trailers:key=Chief-Spec-Writer,valueonly)' <base>..<head> -- docs/. Any other docs/ commit is an ownership violation and is blocking. Exception: a later Spec Writer of this task lists that commit under "## Adopted docs commits" in its report, and the final docs/ content is correct. Then name it as a non-blocking note. A missing trailer means unknown ownership, not proof that a non-writer made the commit. A docs/ path in a worker's or designer's own range is a violation. The repair is never a worker change: it is a Spec Writer (kind: spec-writer).`,
     ...(opts.contextFile ? ["Review context, only when this brief names a review-context.md file: read it in full before reviewing; it holds the reports, plan files and pointers the brief refers to."] : []),
     "## This review",
     opts.subject,
@@ -91,19 +91,19 @@ export interface BriefTarget {
   head: PinnedHead | null;
   /** Not pinned only: the target's plan base (stacked or branch-based wave), `skipped` while unresolved; absent = the project default branch. */
   planBase?: { base: string } | { skipped: string } | null;
-  kind?: "designer" | "tester" | "spec-writer" | null;
+  kind?: "designer" | "spec-writer" | null;
   /** side: a Spec Writer that works in its own side worktree and folds docs/ onto the chain branch; its own commits are its Fold base..Fold head range.
    * Absent or implementation: every other worker, checked from its Base commit. */
   lane?: "side" | "implementation";
   /** The earlier implementation-lane workers of its replaces: chain that reported, newest first (at most 4); a side-lane writer is a target of its own and
    * is never listed here (a side writer's own target lists its replaced writers). recorded is set for a single-target review. */
-  earlier?: { threadId: string; kind: "designer" | "tester" | "spec-writer" | null; reportPath: string | null; lane?: "side" | "implementation"; recorded?: string[] }[];
+  earlier?: { threadId: string; kind: "designer" | "spec-writer" | null; reportPath: string | null; lane?: "side" | "implementation"; recorded?: string[] }[];
 }
 
 export interface ReviewBriefInput {
   /** The worker chief_review named; its head is `head`, and it is one of `targets` unless a plan review reaches it through another. */
   worker: BriefTarget & {
-    kind: "designer" | "tester" | "spec-writer" | null;
+    kind: "designer" | "spec-writer" | null;
     /** Its brief, already cut to fit; null when it has none. */
     brief: string | null;
     /** What it reported, already cut to fit: its summary, else the start of its result. */
@@ -253,11 +253,10 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
   const groupCount = !branchGroups ? count(pinnedGroups, "pull request", "pull requests")
     : !pinnedGroups ? count(branchGroups, "branch", "branches")
       : `${count(pinnedGroups, "pull request", "pull requests")} and ${count(branchGroups, "branch", "branches")} without a pinned pull request`;
-  const testerTargets = (many ? targets : [worker]).filter((target) => target.kind === "tester");
   const specWriterTargets = (many ? targets : [worker]).filter((target) => isWriter(target.kind) && target.lane !== "side");
   const sideWriterTargets = (many ? targets : [worker]).filter((target) => isWriter(target.kind) && target.lane === "side");
   // On a spec-bearing chain every earlier worker is checked on its own interval: a docs/ path outside a Spec Writer's is scope drift.
-  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.lane !== "side" && (specGate || earlier.kind === "tester" || isWriter(earlier.kind))));
+  const earlierScoped = withEarlier.flatMap((target) => target.earlier!.filter((earlier) => earlier.lane !== "side" && (specGate || isWriter(earlier.kind))));
   const readsReports = reportSection.length > 0 || earlierSection.length > 0;
   const prompt = reviewerPrompt({
     pinned: pinnedAll,
@@ -292,9 +291,6 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ...(worker.kind === "designer" ? [
         "", "This is design work (a Designer). Check it read-only against the brief's mode. Design tool: check the result with the tool's screenshots and confirm the worker called its finish call (e.g. `finish_working_on_nodes`). Design in code: read the artboard through the tool's MCP and compare the worker's golden or simulator PNGs against it; any visible mismatch the brief does not accept means request_changes. Never edit the design or the code.",
       ] : []),
-      ...(testerTargets.length ? [
-        `A tester changes only tests, fixtures, test helpers and test config: check its commits since the Base commit its report names (git diff <base>..<head> --stat); a product-code change there is scope drift. The rest of the branch is the implementing workers' change.${many ? ` Testers here: ${testerTargets.map((target) => target.threadId).join(", ")}.` : ""}`,
-      ] : []),
       ...(specWriterTargets.length ? [
         `A Spec Writer changes only docs/: check its commits from the Base commit its report names to the reviewed head (git diff <base>..<head> --stat); any other path is scope drift.${many ? ` Spec Writers here: ${specWriterTargets.map((target) => target.threadId).join(", ")}.` : ""}`,
       ] : []),
@@ -303,8 +299,8 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ] : []),
       ...(earlierScoped.length ? [
         specGate
-          ? `Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind ?? "worker"} ${earlier.threadId}`))].join(", ")}.`
-          : `Check each earlier tester and Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind} ${earlier.threadId}`))].join(", ")}.`,
+          ? `Check each earlier worker on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A Spec Writer's path outside docs/ is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind ?? "worker"} ${earlier.threadId}`))].join(", ")}.`
+          : `Check each earlier Spec Writer on its own commits only: from the Base commit its report names to the Head commit it names, else to the Base commit the next newer worker's report names. Never attribute a later worker's commits to it. A Spec Writer's path outside docs/ is scope drift. Earlier here: ${[...new Set(earlierScoped.map((earlier) => `${earlier.kind} ${earlier.threadId}`))].join(", ")}.`,
       ] : []),
       ...(docs ? [
         "", "## Docs ownership",
@@ -328,7 +324,7 @@ export function reviewBrief(input: ReviewBriefInput): { prompt: string; context:
       ] : []),
       ...(readsReports || wavePaths.length ? [
         [
-          ...(readsReports ? ["Read every worker report review-context.md names, earlier workers included, in full (its Full report path, not the summary): the implementing worker's report holds its lint/build evidence, Automated Verification and `## Deviations from plan`; a tester's report holds the test evidence. Judge each stated deviation on its merits."] : []),
+          ...(readsReports ? ["Read every worker report review-context.md names, earlier workers included, in full (its Full report path, not the summary): the implementing worker's report holds its lint/build and test evidence, Automated Verification and `## Deviations from plan`. Judge each stated deviation on its merits."] : []),
           ...(wavePaths.length ? ["A change outside the plan, or a planned step skipped, that the worker did not state is scope drift: a blocking finding."] : []),
         ].join(" "),
       ] : []),
@@ -366,7 +362,7 @@ interface ReviewRow {
   chief_thread_id: string | null;
   title: string;
   state: string;
-  kind: "designer" | "tester" | "spec-writer" | null;
+  kind: "designer" | "spec-writer" | null;
   brief: string | null;
   result: string | null;
   summary: string | null;
@@ -385,7 +381,6 @@ interface ReviewRow {
   reviewed_head_sha: string | null;
   created_at: number;
   last_report_state: string | null;
-  tests_passed: number | null;
 }
 
 /** What a chief_review call answers: the reviewer thread and the reply text the handler forwards. */
@@ -409,8 +404,6 @@ export interface ReviewHost<Row> {
   environmentHost: (environmentId: string) => Promise<string | null>;
   /** The checkout path of an environment when it is on the plugin server's host, else null. Never throws; bounded. */
   localPath: (environmentId: string) => Promise<string | null>;
-  /** The published slot wrapper's path on a host, or null. Never throws. */
-  heavyPath: (hostId: string) => Promise<string | null>;
   /** Why the project's checkout cannot be read here, or null. Never throws. */
   checkoutSkip: (projectId: string) => Promise<string | null>;
   recordedCommands: (threadId: string) => Promise<RecordedCommand[] | null>;
@@ -546,8 +539,8 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
   const startedReply = (created: boolean, title: string, threadId: string) => `${created ? "Started" : "Using existing"} “${title}” in thread ${threadId}.`;
 
   /** Opens, or resumes, the review gate of W's plan (or unplanned task): pins every target's head once, then starts
-   * one reviewer and one tester in parallel, each in a fresh worktree. Only a missing, failed or blocked side is launched again;
-   * with both sides live the call starts nothing and names them. */
+   * one reviewer in a fresh worktree. Only a missing, failed or blocked reviewer is launched again;
+   * with a live reviewer the call starts nothing and names it. */
   async function startReview(caller: Row, workerThreadId: string, focus?: string, acceptedGaps?: string): Promise<ReviewStarted> {
     const worker = store.get(workerThreadId);
     if (!worker || worker.role !== "worker") throw new Error(`No managed worker ${workerThreadId}.`);
@@ -562,22 +555,21 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const down = (id: string | null) => { const actor = id ? store.get(id) : undefined; return !actor || ["failed", "blocked", "archived", "deleted"].includes(actor.state); };
       let gate = store.gate(gateKey);
       const existing = !!gate;
-      // After the fix run, the reviewer side is advisory: one re-review when the review asked for changes, the gate's last fix row is green
+      // After the fix run, the reviewer side is advisory: one re-review when the review asked for changes, the gate's fix run is ready
       // and only one reviewer has a verdict since the gate opened. A failed no-verdict advisory attempt uses no budget and is retried with the prior verdict.
       const ids = gate ? gate.targets.map((target) => target.threadId) : [];
       const settled = gate ? store.get(ledger.newestVerdictReviewer(ids) ?? "") : undefined;
-      const lastFix = gate ? store.get(gate.corrector_thread_id ?? gate.fixer_thread_id ?? "") : undefined;
+      const lastFix = gate ? store.get(gate.fixer_thread_id ?? "") : undefined;
       const afterFix = !!gate?.fixer_thread_id;
       const advisoryRunning = afterFix && !down(gate!.reviewer_thread_id) && gate!.reviewer_thread_id !== settled?.thread_id;
       const rereview = afterFix && !advisoryRunning && (gate!.reviewer_thread_id === settled?.thread_id || down(gate!.reviewer_thread_id))
-        && settled?.verdict === "request_changes" && !!lastFix && (isReady(lastFix) || lastFix.state === "complete") && lastFix.tests_passed === 1
+        && settled?.verdict === "request_changes" && !!lastFix && (isReady(lastFix) || lastFix.state === "complete")
         && ledger.reviewersWithVerdict(ids, gate!.created_at) === 1;
       const startReviewer = !gate || (afterFix ? rereview : down(gate.reviewer_thread_id));
-      const startTester = !gate || (!advisoryRunning && down(gate.tester_thread_id));
-      if (gate && !startReviewer && !startTester) {
+      if (gate && !startReviewer) {
         return {
           threadId: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)!.title, created: false,
-          reply: `The review gate ${gateKey} already runs reviewer ${gate.reviewer_thread_id} and tester ${gate.tester_thread_id}; nothing started.`,
+          reply: `The review gate ${gateKey} already runs reviewer ${gate.reviewer_thread_id}; nothing started.`,
         };
       }
       const projectDir = await host.projectPath(worker.project_id);
@@ -605,22 +597,13 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         gate = store.gate(gateKey)!;
       }
       const previous = rereview && settled ? { threadId: settled.thread_id, preview: verdictPreview(settled), recommendation: settled.recommendation } : null;
-      // Each missing side starts independently and persists on success, so a retry starts only the side that failed.
-      const open = gate;
-      const [reviewerRun, testerRun] = await Promise.allSettled([
-        startReviewer ? launchReviewer(open, worker, focus, acceptedGaps, projectDir, previous) : Promise.resolve(null),
-        startTester ? launchTester(open, worker) : Promise.resolve(null),
-      ]);
-      const reviewer = reviewerRun.status === "fulfilled" ? reviewerRun.value : null;
-      const started: string[] = [];
-      if (reviewer) started.push(`reviewer ${reviewer.id}`);
-      if (testerRun.status === "fulfilled" && testerRun.value) started.push(`tester ${testerRun.value}`);
-      const failures = [reviewerRun.status === "rejected" ? `reviewer: ${String(reviewerRun.reason)}` : null, testerRun.status === "rejected" ? `tester: ${String(testerRun.reason)}` : null].filter(Boolean);
-      if (failures.length) throw new Error(`Review gate ${gateKey}${started.length ? ` started ${started.join(" and ")} but` : ""} could not start ${failures.join("; ")}. Call chief_review again to start only the missing side.`);
-      const shown = reviewer ?? { id: gate.reviewer_thread_id!, title: store.get(gate.reviewer_thread_id!)?.title ?? "" };
+      // The reviewer persists on success, so a retry after a failed launch starts it again.
+      const reviewer = await launchReviewer(gate, worker, focus, acceptedGaps, projectDir, previous).catch((error: unknown) => {
+        throw new Error(`Review gate ${gateKey} could not start its reviewer: ${String(error)}. Call chief_review again to retry.`);
+      });
       return {
-        threadId: shown.id, title: shown.title, created: !!reviewer,
-        reply: `Review gate ${gateKey} pinned ${gate.targets.map((target) => `${target.threadId} at ${target.headSha.slice(0, 12)}`).join(", ")}. Started ${started.join(" and ")}.`,
+        threadId: reviewer.id, title: reviewer.title, created: true,
+        reply: `Review gate ${gateKey} pinned ${gate.targets.map((target) => `${target.threadId} at ${target.headSha.slice(0, 12)}`).join(", ")}. Started reviewer ${reviewer.id}.`,
       };
     });
   }
@@ -687,13 +670,13 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
       const sideRows = (worker.plan_thread_id ? plan.specWriters?.(worker.plan_thread_id) ?? [] : []).filter((row) => specWaves.includes(row.plan_wave!));
       const sideIds = new Set(sideRows.map((row) => row.thread_id));
       const laneOf = (row: Row): "side" | "implementation" => sideIds.has(row.thread_id) ? "side" : "implementation";
-      // Each target's earlier reported workers on its branch: the implementer's evidence when the target is a tester.
+      // Each target's earlier reported workers on its branch.
       const earlier = new Map<string, NonNullable<BriefTarget["earlier"]>>();
       for (const target of new Set([worker, ...targets])) {
         // A side-lane writer is a target of its own: an implementation row's earlier list never holds one.
         const reported = ledger.taskChain(target.thread_id).slice(1).flatMap((id) => { const row = store.get(id); return row?.result && (laneOf(target) === "side" || laneOf(row) !== "side") ? [row] : []; });
-        // Every review keeps every Spec Writer report (a legacy writer's range has no trailer); a spec-bearing chain also keeps every Tester's. The 4-row cap applies to the others.
-        const keep = (row: Row) => isWriter(row.kind) || (specChain && row.kind === "tester");
+        // Every review keeps every Spec Writer report (a legacy writer's range has no trailer). The 4-row cap applies to the others.
+        const keep = (row: Row) => isWriter(row.kind);
         const others = new Set(reported.filter((row) => !keep(row)).slice(0, 4));
         const rows = reported.filter((row) => keep(row) || others.has(row));
         earlier.set(target.thread_id, await Promise.all(rows.map(async (row) => ({
@@ -797,34 +780,6 @@ export function createReviewStart<Row extends ReviewRow>(deps: ReviewStartDeps<R
         store.batch(() => store.setGateActor(gate.gate_key, "reviewer_thread_id", threadId));
       });
     return { id: thread.id, title };
-  }
-
-  /** Starts the gate's tester in a fresh worktree on the first target's branch. It supersedes no row. Returns its id. */
-  async function launchTester(gate: ReviewGate, worker: Row) {
-    const first = gate.targets[0]!;
-    const hostId = await host.projectHost(worker.project_id);
-    const prepared = await managedSpawn.prepare(worker.project_id, { role: "tester", hostId });
-    const title = `Test · ${worker.title}`;
-    const waves = plan.planWavesFor(worker.plan_thread_id);
-    const writers = new Map<string, Row>();
-    for (const target of gate.targets) {
-      const row = store.get(target.threadId);
-      if (!row) continue;
-      const chainIds = ledger.taskChain(row.thread_id);
-      for (const found of plan.taskWriters?.(row, chainIds) ?? chainIds.flatMap((id) => store.get(id) ?? []).filter((candidate) => isWriter(candidate.kind))) writers.set(found.thread_id, found);
-    }
-    const prompt = gateTesterBrief({
-      title: worker.title, chiefThreadId: worker.chief_thread_id, gateKey: gate.gate_key, targets: gate.targets,
-      planFiles: waves.map((wave) => wave.path), writers: [...writers.values()].map((row) => ({ threadId: row.thread_id, reportPath: row.report_path })),
-      verifyCommand: worker.verify_command ?? null, heavyPath: await host.heavyPath(hostId),
-    });
-    const thread = await managedSpawn.launch(prepared, {
-      projectId: worker.project_id, environment: worktreeEnvironment(hostId, first.branch), title, prompt,
-    }, {
-      role: "worker", kind: "tester", chiefThreadId: worker.chief_thread_id, planThreadId: gate.plan_thread_id, planWave: null,
-      replacesThreadId: null, branch: first.branch, prUrl: first.prUrl, verifyCommand: worker.verify_command ?? null,
-    }, (threadId) => store.batch(() => store.setGateActor(gate.gate_key, "tester_thread_id", threadId)));
-    return thread.id;
   }
 
   /** The chief_review counterpart to startReview for a pull request or branch no

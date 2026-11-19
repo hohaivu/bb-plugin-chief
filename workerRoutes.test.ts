@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { delegateWave, forgeAnswers, openGate, readyIdle, readyImpl, refusal, report, rowOf, setLive, tool, PR_URL } from "./test/testerHelpers";
+import { delegateWave, forgeAnswers, openGate, readyIdle, readyImpl, refusal, report, rowOf, setLive, tool, PR_URL } from "./test/flowHelpers";
 import { delegate, disposeAll, setup, start } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -8,22 +8,7 @@ provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
 
-// The tester role after the review gate: the gate starts its one tester itself, so Chief delegates a tester only for evidence.
-describe("tester role", () => {
-  // Contract (plan-5 gate admission): once a review gate pinned its targets, a tester cannot replace a target or the gate's own
-  // tester; both refusals name the gate's one fix run (kind: worker). Regression: Chief starts a second test writer beside the gate.
-  test("a tester replacing a gate target or the gate tester is refused and routed to the gate's fix run", async () => {
-    const state = await setup();
-    forgeAnswers();
-    const { chief, planner, impl } = await readyImpl(state, { branch: "feature/x", prUrl: PR_URL });
-    const gate = await openGate(state, chief.threadId, impl);
-    const rows = () => (state.db.prepare(`SELECT COUNT(*) AS n FROM managed_threads`).get() as { n: number }).n;
-    const before = rows();
-    expect(await refusal(delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: impl, kind: "tester" }))).toContain(`The review gate pinned ${impl}; fixes go through the gate's fix run.`);
-    expect(await refusal(delegateWave(state, chief.threadId, planner.threadId, 1, { replaces: gate.tester_thread_id, kind: "tester" }))).toContain(`replaces: ${gate.tester_thread_id}, kind: worker`);
-    expect(rows()).toBe(before);
-  });
-
+describe("worker completion routes", () => {
   // Contract: skipReview completes a ready implementation with no gate, and a one-wave plan completes with it.
   test("skipReview on the only implementation wave completes the plan", async () => {
     const state = await setup();

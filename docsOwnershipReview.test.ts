@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { delegate, reviewContextOf, disposeAll, setup, start } from "./test/harness";
-import { PR_URL, type State, delegateWave, forgeAnswers, openGate, plan, readyIdle, rowOf, workerOn } from "./test/testerHelpers";
+import { PR_URL, type State, delegateWave, forgeAnswers, openGate, plan, readyIdle, rowOf, workerOn } from "./test/flowHelpers";
 import { CHAIN, CHAIN_PR, fullChain, writerOn } from "./test/specWriterHelpers";
 
 provideSdk(sdkTesting);
@@ -19,7 +19,7 @@ const reviewOf = async (state: State, chiefThreadId: string, workerThreadId: str
   const index = Number(gate.reviewer_thread_id.slice("thr_".length)) - 1;
   return { prompt: state.spawned[index].prompt as string, context: await reviewContextOf(state, gate.reviewer_thread_id) };
 };
-const earlierRows = (context: string) => context.split("\n").filter((line) => /^- (worker|tester|spec-writer|designer) thr_/.test(line));
+const earlierRows = (context: string) => context.split("\n").filter((line) => /^- (worker|spec-writer|designer) thr_/.test(line));
 const ownership = (prompt: string) => prompt.split("\n## Docs ownership\n")[1]!.split("\n")[0]!;
 const paragraphs = (prompt: string) => prompt.split("\n## Docs ownership\n").length - 1;
 
@@ -34,7 +34,6 @@ describe("review prompt: Docs ownership", () => {
     expect(prefix).toContain("Chief-Spec-Writer trailer");
     expect(ownership(prompt)).toBe(`The Spec Writers of this task: ${writer}.`);
     expect(prompt).toContain("(4) a docs/ ownership violation (see Docs ownership)");
-    expect(prompt).not.toContain("(4) a docs/ change in a worker's, designer's or tester's own commit range");
     expect(prompt).not.toContain("## Context\n");
     expect(context).toContain(`## The report of worker ${writer}`);
     expect(context).toContain(`- wave 1 Spec Writer ${writer}: bb chief inspect ${writer}`);

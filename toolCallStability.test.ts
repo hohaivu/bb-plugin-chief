@@ -140,7 +140,6 @@ describe("tool-call stability", () => {
     const chief = await start(state);
     const opts = ctxOf(state, chief.threadId);
     const worker = await delegate(state, chief.threadId);
-    const tester = await delegate(state, chief.threadId, "Tests for totals", { replaces: worker.threadId, kind: "tester" });
     const designer = await delegate(state, chief.threadId, "Design totals", { kind: "designer" });
     const specWriter = await delegate(state, chief.threadId, "Spec totals", { kind: "spec-writer" });
     // A two-wave plan with its one advisor review: the planner and advisor rows.
@@ -158,7 +157,7 @@ describe("tool-call stability", () => {
     const env = (providerId: string, threadId: string) => state.harness.behavior.resolveProviderEnv(providerId, { threadId, projectId: "proj_1", hostId: "host_1" });
     const chiefIds = new Set([chief.threadId, child]);
     expect(rows.filter((row) => row.role === "chief").map((row) => row.threadId).sort()).toEqual([...chiefIds].sort());
-    for (const id of [worker.threadId, tester.threadId, designer.threadId, specWriter.threadId]) expect(rows.map((row) => row.threadId)).toContain(id);
+    for (const id of [worker.threadId, designer.threadId, specWriter.threadId]) expect(rows.map((row) => row.threadId)).toContain(id);
     // A thread seeded as a Chief by this plugin whose row insertThread has not written yet.
     state.addLive("thr_seeded_chief", "proj_1", "Chief · seeded", "chief");
     state.seedPluginMetadata("thr_seeded_chief", { role: "chief" });

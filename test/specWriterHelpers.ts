@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { READY, type State, delegateWave, plan, planWaves, readyIdle, report, rowOf, setLive, tool, workerOn } from "./testerHelpers";
+import { READY, type State, delegateWave, plan, planWaves, readyIdle, report, rowOf, setLive, tool, workerOn } from "./flowHelpers";
 import { approvePlan, start, wave } from "./harness";
 
 export const SPEC_DELTA = "## Spec delta\n- docs/specs/totals.md: CHANGED totals never go negative";

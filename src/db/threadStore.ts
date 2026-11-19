@@ -32,8 +32,6 @@ export interface ThreadInsert<Role extends string = string, State extends string
   researchDesign?: boolean | null;
   researchThreadId?: string | null;
   researchReportSeq?: number | null;
-  /** Worker row, kind tester only: true for an evidence-only tester (its instructions carry no test-writing rules). */
-  evidenceOnly?: boolean | null;
 }
 
 /** The columns a report writes to its row; reserveReport maps them onto the UPDATE's parameters. */
@@ -53,8 +51,6 @@ export interface ReportReservation {
   fails: string | null;
   /** A reviewer's findings JSON; every report replaces it (null clears). */
   findings: string | null;
-  /** A gate tester's ready testsPassed (1/0); null on every other report keeps the stored value. */
-  testsPassed: 0 | 1 | null;
   /** A design researcher waiting on the user; every report rewrites it. */
   waitingOnUser: 0 | 1;
   now: number;
@@ -77,6 +73,7 @@ export interface ReviewGate {
   gate_key: string; project_id: string; chief_thread_id: string; plan_thread_id: string | null; targets: GateTarget[];
   reviewer_thread_id: string | null; tester_thread_id: string | null; fixer_thread_id: string | null; corrector_thread_id: string | null; created_at: number;
 }
+// tester_thread_id and corrector_thread_id are legacy: nothing writes them; read only for old gates.
 export type GateActor = "reviewer_thread_id" | "tester_thread_id" | "fixer_thread_id" | "corrector_thread_id";
 const GATE_ACTORS: GateActor[] = ["reviewer_thread_id", "tester_thread_id", "fixer_thread_id", "corrector_thread_id"];
 
@@ -136,8 +133,8 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     const now = Date.now();
     db.prepare(`INSERT INTO managed_threads (
       thread_id, role, project_id, chief_thread_id, worker_thread_id, parent_thread_id, title,
-      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id, research_design, research_thread_id, research_report_seq, evidence_only
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      state, status, brief, branch, issue_url, pr_url, plan_thread_id, plan_wave, reviewed_report_seq, reviewed_head_sha, unplanned_reason, replaces_thread_id, kind, planner_on, verify_command, active_since, active_cycle, created_at, updated_at, coordinator_thread_id, research_design, research_thread_id, research_report_seq
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(thread_id) DO UPDATE SET role=excluded.role, project_id=excluded.project_id,
       worker_thread_id=excluded.worker_thread_id,
       parent_thread_id=COALESCE(excluded.parent_thread_id, managed_threads.parent_thread_id),
@@ -146,7 +143,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       plan_thread_id=excluded.plan_thread_id, plan_wave=excluded.plan_wave,
       reviewed_report_seq=excluded.reviewed_report_seq, reviewed_head_sha=excluded.reviewed_head_sha, unplanned_reason=excluded.unplanned_reason,
       replaces_thread_id=COALESCE(excluded.replaces_thread_id, managed_threads.replaces_thread_id),
-      kind=excluded.kind, verify_command=excluded.verify_command, evidence_only=excluded.evidence_only,
+      kind=excluded.kind, verify_command=excluded.verify_command,
       planner_on=COALESCE(excluded.planner_on, managed_threads.planner_on),
       research_design=COALESCE(excluded.research_design, managed_threads.research_design),
       research_thread_id=COALESCE(excluded.research_thread_id, managed_threads.research_thread_id),
@@ -162,7 +159,6 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
       input.state === "active" ? now : null,
       input.state === "active" ? 1 : 0, now, now, input.coordinatorThreadId ?? null,
       input.researchDesign == null ? null : input.researchDesign ? 1 : 0, input.researchThreadId ?? null, input.researchReportSeq ?? null,
-      input.evidenceOnly && input.kind === "tester" ? 1 : null,
     );
     wrote();
   }
@@ -173,7 +169,7 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     gate: (gateKey: string) => gates.find((gate) => gate.gate_key === gateKey),
     /** The newest gate whose targets or actor columns hold this thread, or undefined. */
     gateFor: (threadId: string) => [...gates].reverse().find((gate) => gate.targets.some((target) => target.threadId === threadId) || GATE_ACTORS.some((column) => gate[column] === threadId)),
-    /** The thread is a gate's reviewer, tester, fixer or corrector. */
+    /** The thread is a gate's reviewer or fixer (or a legacy tester or corrector). */
     isGateActor: (threadId: string) => gates.some((gate) => GATE_ACTORS.some((column) => gate[column] === threadId)),
     /** Opens a gate with its pinned targets. Batch only: the caller writes the actor ids in the same transaction. */
     openGate(gate: { gateKey: string; projectId: string; chiefThreadId: string; planThreadId: string | null; targets: GateTarget[]; now: number }) {
@@ -326,12 +322,12 @@ export function createThreadStore<Row extends { thread_id: string; role: string;
     /** chief_report: reserves the next report_seq and stores the report's columns; returns the reserved seq and result_rev. */
     reserveReport(report: ReportReservation) {
       const reserved = db.prepare(`UPDATE managed_threads SET state=?, result=?, summary=?, blocker=?, recommendation=?, verdict=?,
-        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), findings=?, tests_passed = COALESCE(?, tests_passed), waiting_on_user=?, report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
+        plan_waves = COALESCE(?, plan_waves), regression=?, report_path=NULL, fails = COALESCE(?, fails), findings=?, waiting_on_user=?, report_seq = report_seq + 1, stall_resets = CASE WHEN ?='active' THEN stall_resets ELSE 0 END,
         last_report_state=?, owner_approval=NULL, owner_approved_at=NULL,
         active_since = CASE WHEN ?='active' THEN active_since ELSE NULL END, updated_at=? WHERE thread_id=? RETURNING report_seq, result_rev`).get(
         report.state, report.result, report.summary, report.blocker,
         report.recommendation, report.verdict,
-        report.planWaves, report.regression, report.fails, report.findings, report.testsPassed, report.waitingOnUser,
+        report.planWaves, report.regression, report.fails, report.findings, report.waitingOnUser,
         report.state, report.state, report.state, report.now, report.threadId,
       ) as { report_seq: number; result_rev: number };
       wrote();

@@ -24,7 +24,7 @@ describe("Chief backend", () => {
     });
   });
 
-  test("files planner, worker, reviewer and tester threads as children of their Chief", async () => {
+  test("files planner, worker and reviewer threads as children of their Chief", async () => {
     const world = await gateWorld({ before: async (state) => { await state.harness.behavior.setSettings({ plannerEnabled: true }); } });
     const { state, chief } = world;
     const opts = { threadId: chief, projectId: state.live.get(chief)!.projectId };
@@ -35,7 +35,7 @@ describe("Chief backend", () => {
     await world.ready(worker.threadId);
     await chiefReview(state, chief, { workerThreadId: worker.threadId });
     expect(state.spawned.slice(1).map((entry: any) => entry.parentThreadId))
-      .toEqual([chief, chief, chief, chief]);
+      .toEqual([chief, chief, chief]);
   });
 
   test.each([false, true])("sets lifecycleOwnerThreadId on child spawns only when cascadeArchive is %s", async (cascadeArchive) => {
@@ -50,7 +50,7 @@ describe("Chief backend", () => {
     await chiefReview(state, chief, { workerThreadId: worker.threadId });
     expect(state.spawned[0].lifecycleOwnerThreadId).toBeUndefined();
     expect(state.spawned.slice(1).map((entry: any) => entry.lifecycleOwnerThreadId))
-      .toEqual(Array(4).fill(cascadeArchive ? chief : undefined));
+      .toEqual(Array(3).fill(cascadeArchive ? chief : undefined));
   });
 
   test("after a transfer only the current owner sees and controls the work", async () => {

@@ -7,7 +7,7 @@ import { provideSdk } from "./test/sdk";
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
-// ---- Reviewer result (plan thr_hh3bvcnaqs, wave 2, tester A): frozen on base 2351b05 ----
+// ---- Reviewer result (plan thr_hh3bvcnaqs, wave 2): frozen on base 2351b05 ----
 // Contract: docs/specs/report-intake.md baseline (validation, findings trim, ledger, lesson write) and the configure lesson read.
 // These two groups run unchanged on base 2351b05 and on every later head; they go through chief_report and configure only.
 describe("chief_report reviewer findings acceptance", () => {

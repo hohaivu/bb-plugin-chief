@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { plan, planWave } from "./test/testerHelpers";
+import { plan, planWave } from "./test/flowHelpers";
 import { delegate, disposeAll, execFileMock, setup, start, status } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
@@ -8,8 +8,8 @@ provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());
 afterEach(disposeAll);
 
-// Contract (header badge, `role` rpc): the badge asks which role a thread has. A designer, tester or spec-writer is a worker row
-// whose kind names it; a worker row without a kind is "worker"; every other managed role answers its own role; a thread with no
+// Contract (header badge, `role` rpc): the badge asks which role a thread has. A designer or spec-writer is a worker row
+// whose kind names it; a worker row without a kind is "worker"; every other managed role answers its own role; a legacy tester kind answers "worker"; a thread with no
 // managed row answers null. Regression: answering the row's role for a kind-bearing worker makes the badge read "Worker".
 describe("role rpc", () => {
   const roleOf = async (state: Awaited<ReturnType<typeof setup>>, threadId: string) =>
@@ -22,13 +22,12 @@ describe("role rpc", () => {
     expect(await roleOf(state, worker.threadId)).toBe(kind);
   });
 
-  test("a tester worker row answers tester", async () => {
+  test("an old kind=tester worker row reads as worker", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
-    const tester = await delegate(state, chief.threadId, "Evidence", { replaces: worker.threadId, kind: "tester" });
-    expect(await roleOf(state, tester.threadId)).toBe("tester");
+    state.db.prepare(`UPDATE managed_threads SET kind='tester' WHERE thread_id=?`).run(worker.threadId);
+    expect(await roleOf(state, worker.threadId)).toBe("worker");
   });
 
   test("a worker row without a kind answers worker, and chief answers chief", async () => {

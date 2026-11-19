@@ -44,8 +44,8 @@ type PriorRow = VerdictRow & {
   pr_url: string | null;
   plan_thread_id: string | null;
   plan_wave: number | null;
-  kind: "designer" | "tester" | "spec-writer" | null;
-  /** The brief the worker was given: an unplanned tester's or Spec Writer's source of truth is its chain head's. */
+  kind: "designer" | "spec-writer" | null;
+  /** The brief the worker was given: an unplanned Spec Writer's source of truth is its chain head's. */
   brief: string | null;
   verify_command: string | null;
   unplanned_reason: string | null;
@@ -115,11 +115,11 @@ export type WorkerBriefInput = {
   findings: (VerdictRow & { recommendation: string | null }) | undefined;
   structured: Finding[] | undefined;
   ruledOut: FailEntry[];
-  /** A tester's or Spec Writer's source lines (plan files, contracts, approved design, or the head worker's brief); [] otherwise. */
+  /** A Spec Writer's source lines (plan files, contracts, approved design, or the head worker's brief); [] otherwise. */
   specSources: string[];
-  /** On a spec-bearing chain: one line per Spec Writer whose docs a product worker, designer or tester follows; [] or absent otherwise. */
+  /** On a spec-bearing chain: one line per Spec Writer whose docs a product worker or designer follows; [] or absent otherwise. */
   specDocs?: string[];
-  /** Spec Writer: its own wave has a `## Spec baseline` before that wave's worker ran. Tester: its wave or an ancestor has one. Optional: older callers omit it. */
+  /** Spec Writer: its own wave has a `## Spec baseline` before that wave's worker ran. Optional: older callers omit it. */
   baseline?: boolean;
   /** A worker or designer on a spec wave: it builds from the plan alone; the plan's Spec Writer records the docs after the last wave. Optional: older callers omit it. */
   specWave?: boolean;
@@ -129,66 +129,45 @@ export type WorkerBriefInput = {
   docsWork?: DocsWorkItem[];
   /** The replaced worker's open review covers more than one target, so its findings are not all this thread's. */
   sharedReview?: boolean;
-  /** Tester only: a compact no-commit evidence brief. Optional: older callers omit it. */
-  evidenceOnly?: boolean;
   /** The published slot wrapper's path; set, every kind but a Spec Writer gets `## Heavy commands`. Optional: older callers omit it. */
   heavyPath?: string | null;
-  /** A fix run: the gate's evidence for a gate fix or corrector; a chat fix replays none. Absent on every other delegation. */
+  /** A fix run: the gate's evidence for a gate fix; a chat fix replays none. Absent on every other delegation. */
   fixRun?: FixRunInput;
 };
 
 export type FixRunInput =
   | { run: "chat"; branch: string | null }
   | {
-    run: "gate" | "corrector";
-    /** Corrector: the blocked fix run it follows and its report path (or blocker). */
-    fixerThreadId: string | null;
-    fixerReport: string | null;
+    run: "gate";
     targets: { threadId: string; branch: string; prUrl: string | null; headSha: string }[];
     reviewer: { threadId: string; verdict: string | null; verdictPath: string | null; findings: Finding[] } | null;
-    tester: { threadId: string; reportPath: string | null; failingTests: string | null } | null;
   };
 
-/** The `## Fix run` section: the evidence, the rules and the report contract of a gate fix, a corrector or a chat fix. */
+/** The `## Fix run` section: the evidence, the rules and the report contract of a gate fix or a chat fix. */
 function fixRunLines(fix: FixRunInput, heavy: string): string[] {
-  const report = "Report ready with `testsPassed: true` and every test command you ran with exit 0 under Automated Verification.";
+  const report = "Report ready only when every test command you ran, lint, build and the Verify command exited 0, each listed with its exit status under Automated Verification.";
   if (fix.run === "chat") {
     return [
       "", "## Fix run",
-      "You continue completed work on its unmerged pull request; your mission is the change the user asked for in chat. No review follows: your green run completes it.",
+      "You continue completed work on its unmerged pull request; your mission is the change the user asked for in chat. No review follows: your ready run completes it.",
       `- Before editing, on a clean tree run \`git fetch origin && git merge --ff-only origin/${fix.branch ?? "<branch>"}\`; if it fails, report blocked.`,
       `- Commit, then \`git push origin HEAD:${fix.branch ?? "<branch>"}\`. Run the tests of the files you touched${heavy}, then lint, build and the Verify command.`,
-      `- ${report} A failing test is yours to fix in product code; report blocked only with wrong-test evidence (test file:line, the text it contradicts, command output).`,
+      `- ${report}`,
     ];
   }
   const targets = fix.targets.map((target) => `- ${target.threadId}: branch ${target.branch}${target.prUrl ? `, ${target.prUrl}` : ""}, pinned ${target.headSha}`);
-  const evidence = [
-    ...(fix.reviewer ? [
-      `Reviewer ${fix.reviewer.threadId}: ${fix.reviewer.verdict ?? "no verdict"}${fix.reviewer.verdictPath ? `; verdict file: ${fix.reviewer.verdictPath} (read it in full)` : ""}.`,
-      ...findingLines(fix.reviewer.findings.filter((entry) => !entry.file.startsWith("docs/")), "blocking"),
-    ] : []),
-    ...(fix.tester ? [
-      `Tester ${fix.tester.threadId}${fix.tester.reportPath ? `; report: ${fix.tester.reportPath} (read it in full)` : ` (bb chief inspect ${fix.tester.threadId})`}.`,
-      ...(fix.tester.failingTests ? ["### Failing tests", fix.tester.failingTests] : []),
-    ] : []),
-  ];
-  if (fix.run === "corrector") {
-    return [
-      "", "## Fix run",
-      `You are the review gate's corrector. Fix run ${fix.fixerThreadId} reported a wrong test${fix.fixerReport ? ` (${fix.fixerReport})` : ""}. Fix only the test(s) it names, on the branch, and only where its evidence holds; never product code or docs/. This section wins over \`## Test work\`.`,
-      "### Gate targets", ...targets, ...evidence,
-      `- Per branch: \`git fetch origin && git checkout --detach origin/<branch>\`, edit, commit, \`git push origin HEAD:<branch>\` (stacked targets: the tip branch only).`,
-      `- Then rerun every failing test command above${heavy}. Report ready with \`testsPassed\` (true only when every one passed), with each command and its exit status.`,
-    ];
-  }
+  const evidence = fix.reviewer ? [
+    `Reviewer ${fix.reviewer.threadId}: ${fix.reviewer.verdict ?? "no verdict"}${fix.reviewer.verdictPath ? `; verdict file: ${fix.reviewer.verdictPath} (read it in full)` : ""}.`,
+    ...findingLines(fix.reviewer.findings.filter((entry) => !entry.file.startsWith("docs/")), "blocking"),
+  ] : [];
   return [
     "", "## Fix run",
-    "You are the review gate's one fix run. There is no second fix: make the tests pass. The gate passes on your green run; any re-review is advisory.",
+    "You are the review gate's one fix run. There is no second fix. The gate passes on your ready report; any re-review is advisory.",
     "### Gate targets", ...targets, ...evidence,
-    "- Verify each code finding against the code and the plan; fix every blocking one that holds, and the product code behind each failing test. List a finding that does not hold under `## Disputed findings` with evidence.",
+    "- Verify each code finding against the code and the plan; fix every blocking one that holds. List a finding that does not hold under `## Disputed findings` with evidence.",
     `- Per branch: \`git fetch origin && git checkout --detach origin/<branch>\`, commit, \`git push origin HEAD:<branch>\` (stacked targets: the tip branch only).`,
-    `- Run each failing test command and the tests of the files you touched${heavy} until each exits 0, then lint, build and the Verify command.`,
-    `- ${report} Report blocked ONLY with wrong-test evidence: the test file:line, the plan or docs text it contradicts, and the command output; recommend \`chief_delegate (replaces: <your thread id>, kind: tester)\`.`,
+    `- Run the tests of the files you touched${heavy} until each exits 0, then lint, build and the Verify command.`,
+    `- ${report}`,
   ];
 }
 
@@ -198,7 +177,7 @@ const DOCS_WORK_MAX = 4_000;
 /** The file name, under the repair's own thread storage, that holds the full work list when the section cannot name every omitted id. */
 export const DOCS_WORK_FILE = "docs-work.md";
 
-/** One docs item of the repair's work list, with where it came from: a worker, designer or tester `## Docs needed`, or the prior writer's blocker. */
+/** One docs item of the repair's work list, with where it came from: a worker or designer `## Docs needed`, or the prior writer's blocker. */
 export type DocsWorkItem = { id: string; kind: string; wave: number | null; blocker?: boolean; text: string };
 
 /** The repair's docs work list. The section is at most DOCS_WORK_MAX characters. It shows the longest prefix of whole items (possibly none)
@@ -234,24 +213,15 @@ function docsWorkSection(wave: number | undefined, items: DocsWorkItem[]): { lin
 /** The worker's prompt, its brief, and the cut-down brief its reviewer judges against. */
 export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: string; reviewerBrief: string; /** The full docs work list, only when the brief's section points to it. */ docsWorkFile: string | undefined } {
   const { title, chiefThreadId, params, wave, waveTotal, waveNext, waveIndependent, stackBase, designWave, implementsDesign, contracts, planContextLine,
-    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", evidenceOnly = false, docsWork, sharedReview = false, heavyPath = null, fixRun } = input;
-  const tester = kind === "tester";
-  const evidence = evidenceOnly && tester;
+    kind, verifyCommand, branch, issueUrl, prUrl, prior, findings, structured, ruledOut, specSources, specDocs = [], baseline = false, specWave = false, lane = "implementation", docsWork, sharedReview = false, heavyPath = null, fixRun } = input;
   const specWriter = isWriter(kind);
   const docsSection = specWriter && docsWork?.length ? docsWorkSection(wave, docsWork) : undefined;
   const side = specWriter && lane === "side" && branch !== undefined;
   const context = [params.context, planContextLine].filter((value): value is string => Boolean(value)).join("\n\n") || undefined;
-  // Evidence mode: with no Chief constraints, the blocking findings' fixes become the constraints (each fix once).
-  const moved = evidence && !params.constraints?.length && findings?.result
-    ? (structured ?? []).filter((entry) => entry.severity === "blocking" && entry.fix)
-    : [];
-  const constraints = moved.length ? moved.map((entry) => `${entry.file}${entry.line ? `:${entry.line}` : ""}: ${entry.fix}`) : params.constraints;
-  // A tester brief drops an empty list's section; every other kind keeps "None stated.".
-  const listed = (heading: string, values?: string[]) => tester && !values?.length ? [] : ["", heading, bullets(values)];
   const render = (mission: string, contextText?: string) => [
     "## Mission", mission,
-    ...listed("## Success criteria", params.successCriteria),
-    ...listed("## Constraints", constraints),
+    "", "## Success criteria", bullets(params.successCriteria),
+    "", "## Constraints", bullets(params.constraints),
     ...(contextText ? ["", "## Context", contextText] : []),
   ].join("\n");
   const brief = render(params.mission, context);
@@ -263,24 +233,21 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
   // A fence longer than any backtick run in the text, so a ``` line in it cannot close it.
   const fenced = (text: string) => ((fence) => [`${fence}sh`, text, fence])("`".repeat(Math.max(3, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1))));
   const prompt = [
-    `You are the managed ${evidence ? "tester" : "worker"} for “${title}”. Report to Chief thread ${chiefThreadId}.`,
+    `You are the managed worker for “${title}”. Report to Chief thread ${chiefThreadId}.`,
     "", brief,
     ...(findings?.result ? [
       "", `## Review findings to fix (${findings.thread_id})`,
       ...(structured ? [
         ...(findings.verdict_path ? [`Verdict file: ${findings.verdict_path}`] : []),
-        // A fix that became a constraint is not repeated on its finding.
-        ...findingLines(structured.map((entry) => moved.includes(entry) ? { ...entry, fix: undefined } : entry), "blocking"),
+        ...findingLines(structured, "blocking"),
         ...(structured.some((entry) => entry.severity === "nit") ? ["Optional nits:", ...findingLines(structured, "nit")] : []),
       ] : verdictPreview(findings)),
       ...(specWriter && sharedReview ? ["This review covers several branches and waves. Fix only the docs findings your mission assigns to this wave; leave the others to their owners and do not list them as disputed."] : []),
       ...(findings.recommendation ? [`Recommendation: ${clip(findings.recommendation, 600)}`] : []),
-      ...(evidence ? ["Verify each finding first; list one that does not hold under `## Disputed findings` with evidence. An `[AMBIGUOUS: …]` item is a question for Chief."] : [
-        "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
-        "Do not apply a finding that is wrong, or that contradicts the brief or plan. List it in your ready result under `## Disputed findings`, with evidence: file:line, command output, or the brief or plan text it contradicts.",
-        "Nits are optional: fix one only when it is trivial and inside this task's scope.",
-        "An `[AMBIGUOUS: …]` item is a question for Chief, not a finding to fix.",
-      ]),
+      "First verify each finding against the code and the brief. Fix every blocking finding that holds.",
+      "Do not apply a finding that is wrong, or that contradicts the brief or plan. List it in your ready result under `## Disputed findings`, with evidence: file:line, command output, or the brief or plan text it contradicts.",
+      "Nits are optional: fix one only when it is trivial and inside this task's scope.",
+      "An `[AMBIGUOUS: …]` item is a question for Chief, not a finding to fix.",
     ] : []),
     ...(fixRun ? fixRunLines(fixRun, heavyPath ? " through the slot wrapper, pool `test`" : "") : []),
     ...(ruledOut.length ? [
@@ -292,7 +259,7 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Wave",
       specWriter
         ? `Wave ${wave} of ${waveTotal}: ${side ? `you are the plan's one Spec Writer. You run after every wave of the plan is ready, in your own worktree on a side branch cut from ${branch}. Your work is the \`## Spec delta\` of every spec: true wave in the plan files below, the docs work list when present, and your Spec Writer rules.` : "its worker continues from your branch once you report ready. Your work is only its `## Spec delta` and your Spec Writer rules."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`
-        : `Wave ${wave} of ${waveTotal}.${evidence ? "" : " Implement only this wave's plan file."} Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
+        : `Wave ${wave} of ${waveTotal}. Implement only this wave's plan file. Name "Wave ${wave} of ${waveTotal}" in your ready result.`,
       waveNext !== null ? "No review runs after this wave." : "Chief starts the one review of the whole plan after every wave is ready. Never start or request a review yourself.",
       ...(stackBase ? [`This wave heads its own chain, stacked on ${stackBase}: its branch and PR are based on ${stackBase}; do not rebase onto the default branch.`] : waveIndependent ? ["This wave heads its own chain: it has its own branch, PR and worktree from the default base; do not build on another chain's branch."] : []),
       ...(implementsDesign !== null ? [`This wave implements the artboards that wave ${implementsDesign} drew and the owner approved. Read them through the design tool's MCP (read-only; never edit the design) and match them; the artboard names are in your mission or wave ${implementsDesign}'s report.`] : []),
@@ -301,47 +268,30 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ...(specSources.length && specWriter ? [
       "", "## Read-only context",
       side
-        ? "Read each plan file in full; the `## Spec delta` of each spec: true wave is your work list. Each plan file's `## Contracts to verify` belongs to the worker and the tester: never write code or tests for them."
-        : "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below are your wave's; they belong to the worker and the tester: never write code or tests for them.",
-      ...specSources,
-    ] : specSources.length && !evidence ? [
-      "", "## Source of truth for test cases",
-      "Read each in full, with the docs they name. Derive every test case from these, never from the implementation.",
+        ? "Read each plan file in full; the `## Spec delta` of each spec: true wave is your work list. Each plan file's `## Contracts to verify` belongs to the worker: never write code or tests for them."
+        : "Read each plan file in full; the implementation wave's `## Spec delta` is your work list. The contracts below are your wave's; they belong to the worker: never write code or tests for them.",
       ...specSources,
     ] : []),
     ...(docsSection?.lines ?? []),
-    ...((specDocs.length || specWave) && !specWriter && !evidence ? [
+    ...((specDocs.length || specWave) && !specWriter ? [
       "", "## Spec",
-      tester
-        ? "The committed docs are the source of truth. Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed. Derive tests from those docs and the plan contracts, not from the code."
-        : specWave
-          ? "The plan file is your source of truth. Pre-plan specs may be stale for the domains this wave touches: where they conflict with the plan, follow the plan and name the conflict in your report. A Spec Writer records this change in docs/ after the last wave of the plan is ready: do not wait for it and do not implement against its docs."
-          : "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
+      specWave
+        ? "The plan file is your source of truth. Pre-plan specs may be stale for the domains this wave touches: where they conflict with the plan, follow the plan and name the conflict in your report. A Spec Writer records this change in docs/ after the last wave of the plan is ready: do not wait for it and do not implement against its docs."
+        : "Read each Spec Writer report below (`bb chief inspect <id>`), docs/INDEX.md and the specs those reports changed, and implement to match them.",
       ...specDocs,
-      ...(tester ? [
-        "- Before you derive tests, for each Spec Writer listed above run `git merge-base --is-ancestor <Fold head> HEAD`, using the Fold head from that writer's report. If it fails, report blocked: that writer's docs are not in your HEAD. A report with no Fold head (an implementation-lane writer) needs no check.",
-        "- Code that contradicts the docs is product code that is wrong: follow the product-code rule in your rules. Docs that are wrong: report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`.",
-        ...(baseline ? ["- A new spec's baseline (the current behaviour a Spec Writer documented, listed in its report) is a source for regression tests, the same as the Spec delta's contracts. When the Spec delta changes a baseline statement, test only the delta's value. Behaviour under a Spec Writer's Open questions is not a contract."] : []),
-      ] : [
         specWave
           ? "- If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan."
           : "- If the spec is wrong, report blocked and recommend `chief_delegate (replaces: <your thread id>, kind: spec-writer)`. If the Spec delta cannot be built, report blocked and recommend a fresh chief_plan.",
         "- Record `git rev-parse HEAD` as `Base commit: <sha>` when you start and as `Head commit: <sha>` when you report.",
-      ]),
     ] : []),
-    ...(contracts && !specWriter && !evidence ? [
+    ...(contracts && !specWriter ? [
       "", "## Contracts to verify",
       `Read the \`## Contracts to verify\` section of your plan file (${planContextLine}) in full: it is your checklist. Keep every item. Your ready result confirms each one with its evidence (test, command or file:line); the reviewer checks the same list.`,
     ] : []),
-    ...(verifyCommand !== null && !specWriter && !evidence ? [
+    ...(verifyCommand !== null && !specWriter ? [
       "", "## Verify command",
       ...fenced(verifyCommand),
-      ...(tester ? [
-        "Run this exact command after your last commit and list it with its exit status under Automated Verification. Never change product code to make it pass. A failure at your Base commit is present before your test edits, not proof it predates the feature. List it without changing product code. It does not waive an explicit exit-0 receipt. Any other failure in product code follows the product-code rule in your rules. If this command runs the whole test suite, run it only when your mission or your plan file's `## Contracts to verify` asks for a full-suite run; otherwise list it as \"not run: full suite not asked for\".",
-      ] : [
-        "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
-        "If this command runs any test, do not run it or change code to make it pass: list it as \"not run: runs tests (a tester's)\" under Automated Verification and still run lint/analyze and build.",
-      ]),
+      "Run this exact command in your worktree after your last commit and before reporting ready. Fix the work until it exits 0, then list it with its exit status under Automated Verification. No one reruns it; your recorded run is the evidence. If it cannot exit 0 for a reason outside this task (a missing tool, a failure already on the base), report blocked with its output instead of ready.",
       ...(heavyPath ? [
         "Run it once through the slot wrapper; that run counts as running this exact command. Pool: sim if it boots or drives a simulator, emulator or device; test if it runs tests; else build:",
         ...fenced(`bash ${quote(heavyPath)} <pool> -- sh -c ${quote(verifyCommand)}`),
@@ -351,10 +301,10 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
       "", "## Heavy commands",
       `Slot wrapper: ${span(`bash ${quote(heavyPath)} <sim|test|build> -- <command>`)}. Run every build and test command through it in the foreground, choosing the pool as your rules say.`,
     ] : []),
-    ...(evidence ? (branch ? ["", "## Git workflow", `Before you read any file, on a clean tree run \`git fetch origin ${branch}\` then \`git merge --ff-only origin/${branch}\`; if either fails, report blocked.`] : []) : branch || issueUrl || prUrl ? [
+    ...(branch || issueUrl || prUrl ? [
       "", "## Git workflow",
       ...(side ? [`Side branch cut from ${branch}: commit only docs/ on it and push only through the \`## Fold\` steps.`]
-        : branch ? [`Task branch: ${branch}. Before any file read, sync and record \`${tester ? "Base commit" : "Local sync"}: <sha>\`; push every commit with \`git push origin HEAD:${branch}\`.`] : []),
+        : branch ? [`Task branch: ${branch}. Before any file read, sync and record \`Local sync: <sha>\`; push every commit with \`git push origin HEAD:${branch}\`.`] : []),
       ...(prior ? [`${side
         ? `Your worktree is fresh from ${branch}; it does not hold the previous Spec Writer's (${prior.thread_id}) commits. Write the Spec delta again on the current docs of ${branch}; never cherry-pick or merge the previous writer's commits.`
         : `This worktree already holds the previous worker's changes (${prior.thread_id}); continue from them.`}${prior.result ? "" : ` Its last report: bb chief inspect ${prior.thread_id}`}`] : []),
@@ -367,58 +317,27 @@ export function workerBrief(input: WorkerBriefInput): { prompt: string; brief: s
     ] : []),
     ...(prior?.result ? [
       "", "## Predecessor's last report",
-      ...(tester && !evidence ? ((text) => {
-        const sha = (label: string) => text.match(new RegExp(`${label}:\\s*\`?([0-9a-f]{7,40})`))?.[1];
-        const head = sha("Head commit");
-        const base = sha("Base commit");
-        return [head
-          ? `Head commit: ${head}.${base ? ` Changed files: \`git diff --name-only ${base}..${head}\`.` : ""}`
-          : "Its report names no Head commit: read the full report."];
-      })([prior.result, prior.blocker, prior.summary].filter(Boolean).join("\n")) : [
-        evidence ? prior.report_path ?? `bb chief inspect ${prior.thread_id}` : prior.summary ?? clip(prior.result, 1_500),
-        ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
-        ...(!evidence && prior.recommendation ? [`Recommendation: ${clip(prior.recommendation, 600)}`] : []),
-      ]),
-      ...(!evidence && prior.report_path ? [`Full report: ${prior.report_path}`] : []),
-    ] : []),
-    ...(evidence ? [
-      "", "## Evidence work",
-      "- Run only the commands your mission names, on the commits it names, in this worktree. Commit nothing, push nothing, edit no tracked file; never use stash, autostash or another worktree. Chief owns the forge.",
-      "- Record `git rev-parse HEAD` as `Head commit: <sha>` before any run.",
-      "- Base runs: `git switch --detach <base>` on a clean tree; afterwards `git switch -` and check HEAD equals Head commit. After each switch, reinstall dependencies if the lockfile differs, and reset any database or state the suites write.",
-      "- Run each command alone and record `echo exit=$?` right after it (before a pipe, `set -o pipefail`), with per-file pass counts.",
-      "- Ready: per command, base and head side by side (commit, exit status, pass counts); explain every difference, since an unexplained one is a regression. Before you report, HEAD equals Head commit and `git status --porcelain` prints nothing.",
-      "- Blocked: name the command, its exit status and an output excerpt; recommend `chief_delegate (replaces: <your thread id>, kind: tester)` for a wrong test, `kind: worker` for product code.",
+      prior.summary ?? clip(prior.result, 1_500),
+      ...(prior.blocker ? [`Blocker: ${clip(prior.blocker, 600)}`] : []),
+      ...(prior.recommendation ? [`Recommendation: ${clip(prior.recommendation, 600)}`] : []),
+      ...(prior.report_path ? [`Full report: ${prior.report_path}`] : []),
     ] : []),
     // Static rules are in the role's instructions; the Working contract holds only mode lines. An empty one goes.
-    ...((contract) => contract.length ? ["", "## Working contract", ...contract] : [])(evidence ? [
-      ...(findings?.result && findings.verdict_path ? ["- Read the verdict file in full."] : []),
-      "- Report with chief_report: state ready and a `result` listing each command, its commit and exit status under Automated Verification, and under Manual what only a human can confirm; also a `summary` of at most 800 characters. Only Chief can mark it complete.",
-      ...(planContextLine !== undefined ? [deviationsLine] : []),
-    ] : [
-      ...(fixRun && !tester && !specWriter ? ["- This is a fix run: run the tests as `## Fix run` says."] : []),
+    ...((contract) => contract.length ? ["", "## Working contract", ...contract] : [])([
       // A worker or designer gets the deviations rule in its instructions.
-      ...(planContextLine !== undefined && (tester || specWriter) ? [deviationsLine] : []),
+      ...(planContextLine !== undefined && specWriter ? [deviationsLine] : []),
     ]),
     ...(kind === "designer" ? [
       "", "## Design work",
       "- Pick the mode the brief describes; if it describes none, use No spec. Design tool: create or edit in a design tool (Paper, Figma, or similar). Design in code: implement a design-tool artboard in the UI files the brief names. No spec: decide and implement the look within the project's existing design system, in the UI files the brief names or, when it names none, the files that render that UI.",
       "- Design tool and design in code use the tool's MCP. If that tool is not connected here, report blocked naming the missing tool. Before any other call to it, load its guide (Paper: `get_guide({ topic: \"paper-mcp-instructions\" })`) and follow it.",
       "- Design tool: after each meaningful change, verify it with the tool's screenshot (Paper: `get_screenshot`), and when done creating or editing call its finish call (Paper: `finish_working_on_nodes`). Design tool work changes no code or files unless the brief names them.",
-      "- Design in code: read the artboard through the tool's MCP (read-only; do not edit the design), edit only the UI files the brief names, then compare a simulator or browser screenshot of the running app with the artboard's screenshot. Never write golden or screenshot tests; a tester does.",
+      "- Design in code: read the artboard through the tool's MCP (read-only; do not edit the design), edit only the UI files the brief names, then compare a simulator or browser screenshot of the running app with the artboard's screenshot. Never write golden or screenshot tests.",
       "- No spec: capture a simulator or browser screenshot of the running app.",
       "- In your ready result, put screenshot evidence under Automated: for each PNG, the command or tool call that produced it, its exit status when it has one, and the PNG path. For design in code, also list the differences that remain against the artboard. Taste and brand fit go under Manual.",
       "- Design in code or No spec: if you cannot run the app to capture a screenshot, report blocked naming what is missing; do not add screenshot tooling yourself.",
       "- In your report prose, name design nodes by layer name, never by raw node ID.",
       ...(designWave ? ["- Design-only wave: use Design tool mode. Draw or edit the artboards only; write no app code and change no repo files. In your ready result, list each artboard by layer name with its screenshot path so the owner can approve it."] : []),
-    ] : []),
-    ...(tester && !evidence ? [
-      "", "## Test work",
-      "- Change only test files, fixtures, test helpers and test config; never product code.",
-      ...(branch === undefined ? ["- When you start, record `git rev-parse HEAD` as `Base commit: <sha>` in your report."] : []),
-      "- Ready: tests committed and pushed; Automated Verification lists each filtered test command with its exit status and maps each test to the contract it proves and, per new test, the regression it catches.",
-      `- Blocked when a test fails because product code is wrong: commit and push the tests, name the failing tests, the filtered command, its exit status and an output excerpt, and recommend \`chief_delegate (replaces: <your thread id>, kind: worker)\` with the failures as its mission.`,
-      "- When you report, record `git rev-parse HEAD` as `Head commit: <sha>`.",
     ] : []),
     ...(specWriter ? [
       "", "## Spec work",
@@ -524,31 +443,10 @@ export function advisorBrief(input: AdvisorBriefInput): string {
     "- Scope drift from the mission.",
     "- Migration or compatibility risk.",
     "- State transitions that are not total.",
-    "- A test wave, test criteria, a full-suite run, or test work inside an implementation wave: the tester runs once in the review gate.",
+    "- A test wave, or an implementation wave without its own tests or Verify command where its change needs them.",
     "- UI whose look no approved design or explicit visual spec fixes with no `design: true` wave before the wave that builds it, or app code inside a design wave.",
-    "- A big feature (3+ modules or 10+ files of new behaviour) whose chain does not end with a reshape wave, a reshape wave on a bug fix, refactor or smaller change, or a reshape wave that writes or runs tests.",
+    "- A big feature (3+ modules or 10+ files of new behaviour) whose chain does not end with a reshape wave, a reshape wave on a bug fix, refactor or smaller change.",
     "- A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.",
-  ].join("\n");
-}
-
-/** The review gate's tester: one tester per gate, in parallel with its reviewer, over every pinned target. Pure. */
-export function gateTesterBrief(input: {
-  title: string; chiefThreadId: string | null; gateKey: string;
-  targets: { threadId: string; branch: string; prUrl: string | null; headSha: string; base: string }[];
-  planFiles: string[]; writers: { threadId: string; reportPath: string | null }[];
-  verifyCommand: string | null; heavyPath: string | null;
-}): string {
-  const { targets, heavyPath } = input;
-  return [
-    `You are the review gate's tester for “${input.title}” (gate ${input.gateKey}). Report to Chief thread ${input.chiefThreadId ?? "Chief"}.`,
-    "", "## Gate targets",
-    ...targets.map((target) => `- ${target.threadId}: branch ${target.branch}${target.prUrl ? `, ${target.prUrl}` : ""}, pinned ${target.headSha}, base ${target.base}`),
-    "", "## Test scope",
-    ...(input.planFiles.length ? [`- Plan files: ${input.planFiles.join(", ")}`] : []),
-    ...input.writers.map((writer) => `- Spec Writer ${writer.threadId}${writer.reportPath ? `: report ${writer.reportPath}` : ""}`),
-    ...(input.verifyCommand ? [`- Verify command: ${span(input.verifyCommand)}.`] : []),
-    ...(heavyPath ? [`- Slot wrapper: ${span(`bash ${quote(heavyPath)} <sim|test|build> -- <command>`)}. Run every build and test command through it in the foreground.`] : []),
-    ...(input.planFiles.length ? ["", "## Report", deviationsLine] : []),
   ].join("\n");
 }
 

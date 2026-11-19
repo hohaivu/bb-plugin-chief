@@ -34,7 +34,7 @@ export function createCore(ctx: Ctx) {
     heavySlots: {
       type: "string",
       label: "Heavy-command slots",
-      description: "How many builds and how many test runs Chief's workers and testers may run at once on this computer, each (1 to 8, default 2). Simulators and emulators always get one slot. Takes effect at the next delegation.",
+      description: "How many builds and how many test runs Chief's workers may run at once on this computer, each (1 to 8, default 2). Simulators and emulators always get one slot. Takes effect at the next delegation.",
       default: "2",
     },
     plannerEnabled: {

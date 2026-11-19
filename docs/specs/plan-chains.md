@@ -22,7 +22,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Spec wave**: a plan wave marked `spec: true` that a design or skipped-specs rule does not exclude.
 - **Side-lane Spec Writer**: a planned `spec-writer` row on a spec wave. Every row in its `replaces:` ancestry is also a `spec-writer`. It runs in its own side worktree.
 - **Plan Spec Writer wave**: the highest-numbered spec wave of a plan that no bypass removes. The plan's one side-lane Spec Writer runs on it, after every wave of the plan is ready. `planWriterWave` returns it, or null when the plan has no such wave.
-- **Implementation lane**: every other worker row. This includes worker, designer, and tester rows. It also includes a `spec-writer` that replaced a worker, designer, or tester.
+- **Implementation lane**: every other worker row. This includes worker and designer rows. It also includes a `spec-writer` that replaced a worker or designer. A legacy `tester` row counts as a worker.
 - **Side worktree**: a private managed worktree on a `bb/` side branch cut from the task branch. A side-lane Spec Writer uses it.
 - **Fold**: the push of the docs commits of a side-lane Spec Writer onto the task branch. The push is fast-forward only.
 - **Fold base**: the task branch commit that the Spec Writer rebased onto before the successful fold push.
@@ -36,8 +36,7 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Cleanup claim**: a persistent record in `cleanup_environment_claims` that assigns an environment action to one thread.
 - **Merge proof**: the forge answer that a pull request is merged. Cleanup needs it before it archives a row that has a pull request.
 - **Spec Writers of this task**: the Spec Writers in the `replaces:` chain of a task row, plus the side-lane writers on the waves of its chain. `taskWriters` returns them.
-- **Evidence-only tester**: a Tester that Chief delegates with `evidenceOnly: true`. It runs commands that already exist, compares the results, writes no test, and makes no commit.
-- **Heavy command**: a build, a test run, or a simulator, emulator or device run that a worker, designer or tester starts.
+- **Heavy command**: a build, a test run, or a simulator, emulator or device run that a worker or designer starts.
 - **Slot pool**: one of three independent groups of heavy-command slots: `sim`, `test` and `build`.
 - **Slot wrapper**: the host script `chief-heavy-<hash>.sh` that admits a heavy command into a slot of its pool.
 
@@ -111,7 +110,7 @@ A plan with spec waves gets one Spec Writer, which runs after the last wave:
    4. Check that the diff `U..HEAD` lists only `docs/` paths.
    5. Push `HEAD` to the task branch with a plain push. A rejected push sets `B` to this attempt's `U` and repeats the steps from the fetch.
 6. The Spec Writer records Fold base and Fold head, or `Fold: none`.
-7. `chief_review` refuses to start while the plan's Spec Writer is missing or not settled, or while a legacy writer of another spec wave is not settled. While the plan's Spec Writer has no row, the refusal names the same two routes as the last ready alert. Once every writer reports ready, the review gate starts its reviewer and its tester. After the skip route, the review starts once no legacy writer is unsettled. A spec wave that never had a writer never blocks the review.
+7. `chief_review` refuses to start while the plan's Spec Writer is missing or not settled, or while a legacy writer of another spec wave is not settled. While the plan's Spec Writer has no row, the refusal names the same two routes as the last ready alert. Once every writer reports ready, the review gate starts its reviewer. After the skip route, the review starts once no legacy writer is unsettled. A spec wave that never had a writer never blocks the review.
 
 Independent chains run in parallel:
 
@@ -127,7 +126,7 @@ A designed plan binds its approved design before its first wave:
 3. The planner brief names both snapshot paths.
 4. Chief calls `chief_forge_init`, and the pull request body gets the design block.
 
-Reviewers never reuse a worktree. Each gate review gets a fresh managed worktree on the pinned commit. See [review-engine.md](review-engine.md) under Reviewer and tester.
+Reviewers never reuse a worktree. Each gate review gets a fresh managed worktree on the pinned commit. See [review-engine.md](review-engine.md) under Reviewer.
 
 Shared worktree cleanup coordinates action ownership:
 
@@ -151,8 +150,8 @@ Shared worktree cleanup coordinates action ownership:
   - A second live side-lane Spec Writer on one wave is rejected, unless it replaces the first.
   - A second live implementation-lane row is rejected.
   - A holder from another plan, or an unplanned holder, is rejected.
-  - A Spec Writer delegation ignores a review gate's fixer, corrector or tester that is not busy. Reason: the owner chose this rule, because a ready fix run blocked every docs repair.
-  - A busy gate fixer, corrector or tester still holds the branch for a Spec Writer. Busy means `starting`, `pending`, `active` or `stopping`. Reason: two writable rows must not share one worktree branch.
+  - A Spec Writer delegation ignores a review gate's fix run that is not busy. Reason: the owner chose this rule, because a ready fix run blocked every docs repair.
+  - A busy gate fix run still holds the branch for a Spec Writer. Busy means `starting`, `pending`, `active` or `stopping`. Reason: two writable rows must not share one worktree branch.
   - Reason: a side worktree checks out its own `bb/` side branch, so it never blocks the task branch.
 - `startWorker` rejects a delegation when `params.branch` differs from the branch of the prior worker. Reason: replacement workers must remain on the established chain branch.
 
@@ -176,67 +175,16 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` rejects a non-head implementation delegation when `replaces:` is absent. Reason: non-head waves must continue on the existing worktree and branch of the chain.
 - `admitDelegation` names `replaces: <chain owner>` when it rejects a non-head wave without a replacement target. Reason: callers must know the latest implementation thread to continue the chain.
 - `admitDelegation` rejects an implementation delegation without `replaces:` when any wave in the chain already has an implementation-lane row. Reason: started chains must not allocate duplicate workers or environments.
-- `admitDelegation` refuses `kind: tester` while a review gate is open, unless `evidenceOnly` is true, the call is the corrector of the gate's fix run, or it replaces a corrector that never reported. Reason: the gate starts its own tester.
-- While a review gate is open, `admitDelegation` admits only the gate's fix run (`kind: worker`, replacing the gate tester). It also admits a fix run that replaces a fix run that never reported. Reason: one writable owner holds the gate at a time. See [review-engine.md](review-engine.md) under Fix Run and Corrector.
-- A later implementation wave is admitted while a Spec Writer is pending. Reason: Spec Writers never gate implementation waves.
-- `admitDelegation` rejects a replacement target from another chain of the same plan. Reason: independent chains must not inherit foreign branches or environments.
-- `admitDelegation` permits a fresh plan wave 1 delegation with `replaces:` targeting a blocked worker of another plan. Reason: re-planning allows recovery on the blocked worktree.
-- `admitDelegation` permits a tester to start fresh on a new branch when the tested worker completed. Reason: post-merge testing verifies code after branch deletion.
-- `admitDelegation` admits `kind: tester` without `replaces:` on unplanned work when `branch` is set. The optional `prUrl` names the pull request of that branch. Reason: test-only work has no worker row to replace.
-- `admitDelegation` refuses `kind: tester` without `replaces:` on unplanned work when `branch` is not set. The text names both routes: `replaces:` and `branch`. Reason: the tester must name the work that it tests.
-- `admitDelegation` refuses `kind: tester` without `replaces:` on a plan wave. Reason: a plan tests the workers of its own chain.
-- An admitted unplanned tester row carries the given `branch` and `prUrl`. It gets a fresh worktree on that branch and supersedes no row. Reason: superseding another row would leave an empty worker row, which must never happen.
-- The review gate of an admitted unplanned tester pins the pull request head of its `branch`. Reason: the gate must review the code that the tester tests.
-- Admission with `replaces:` for `kind: tester` keeps its existing behaviour. Reason: existing tester hand-offs must not change.
+- `admitDelegation` needs an explicit `kind` only when `replaces:` names a Spec Writer (`src/plan/planLifecycle.ts`). Reason: a worker replaces a worker, and only a Spec Writer repair needs the kind to pick its lane.
+- `chief_delegate` has no `kind: tester` and no `evidenceOnly` input. Schema validation refuses `kind: tester`, and `--evidence-only` does not exist. A stored row with `kind: tester` reads as a worker. Reason: workers write and run their own tests, so no tester role exists. See [the decision](../decisions/2026-11-19-workers-write-tests.md).
+- While a review gate is open, `admitDelegation` admits only the gate's fix run: `chief_delegate (replaces: <gate's first target>, kind: worker)` (`fixAdmission` in `src/runtime/delegation.ts`). It also admits a fix run that replaces a fix run that never reported. Reason: one writable owner holds the gate at a time. See [review-engine.md](review-engine.md) under Fix Run.
+- The gate fix run reuses the first target's worktree, branch and pull request. `startWorker` does not supersede that target. The target stays live and completes with the gate. Reason: the open-gate guard, the gate line and the chat-fix order read the target row.
+- Replacing another pinned target of an open gate is refused. The text names `replaces: <first target>`. Reason: a gate has one fix run, and it replaces the first target.
+- The brief of a gate fix run has a `## Fix run` section. It carries the reviewer verdict and the findings. Reason: the fix run needs the same evidence as the gate.
 - `admitDelegation` permits a fresh plan wave 1 delegation to replace a blocked row of another plan. The rule applies to each lane. Reason: re-planning allows recovery on the blocked worktree or side worktree.
 - `admitDelegation` refuses a fresh delegation (without `replaces:`) to a chain head with a plan base, while that base waits or is unresolved. Reason: the head must not build before its parent code exists.
 - `admitDelegation` refuses a fresh delegation to such a head without `branch`, and it never falls back to the project default. Reason: forge init cuts the branch from the plan base, so admission, forge and review agree on one value.
 - `undelegatedHeads` excludes the waiting and unresolved heads, and returns them as `waiting`. Reason: the planner must see why a head does not launch.
-
-### Evidence-Only Tester Brief
-
-An evidence-only tester runs only the commands that the mission names, on the commits that the mission names. It returns exit statuses and a base-to-head comparison. Reason: the mission is the only source of a run's commands and commits.
-
-- `chief_delegate` accepts the optional input `evidenceOnly: true`. The CLI flag is `--evidence-only`. Reason: Chief needs one explicit way to ask for run evidence instead of tests.
-- `startWorker` refuses `evidenceOnly: true` when the kind that `admitDelegation` resolves is not `tester`. Reason: workers never run tests, and a run of suites on base and head is test running.
-  - The refusal text names `kind: tester`.
-  - The refusal happens before `managedSpawn.prepare`.
-  - Nothing launches, no row is written, and the prior row is not completed or superseded.
-- The flag is not stored on the row and `replaces:` does not carry it. A successor of an evidence-only tester gets a normal brief, unless Chief passes the flag again. Reason: each hand-off states its own mode, and no migration is needed.
-- Without the flag, `workerBrief` returns the same `prompt`, `brief`, and `reviewerBrief` as before. The same holds when the flag is `false` or the kind is not `tester`. Reason: normal briefs must not change.
-- The evidence brief starts with `You are the managed tester for`. Reason: the agent must know its role before it reads the other lines.
-- The evidence brief omits these items. Reason: a tester that writes no test needs none of them, and the brief stays short.
-  - `## Source of truth for test cases`
-  - The `## Spec` block, with its merge-base checks and baseline line.
-  - `## Contracts to verify`
-  - `## Verify command`
-  - `## Test work`
-  - The push workflow, the previous-worker line, and the issue and pull request lines.
-  - The summary text of the predecessor. The brief gives the report file path, or `bb chief inspect <thread id>`, and the blocker when one exists.
-- The first line of `## Wave` in an evidence brief names the wave number and total, and drops `Implement only this wave's plan file.`. Reason: the tester implements no plan file.
-- `## Git workflow` renders only when the call has a branch. It has one line: fetch the task branch, then fast-forward to it, and report blocked on a failure. Reason: the tester reads the folded docs and code of the task.
-- `## Evidence work` orders the tester to follow these rules. Reason: a run is evidence only when the commit, the state, and the exit status are known.
-  - Run only the commands that the mission names, in this worktree.
-  - Write no test.
-  - Commit nothing, push nothing, and edit no tracked file.
-  - Never use stash, autostash, or another worktree.
-  - Record `git rev-parse HEAD` as `Head commit` before any run.
-  - Run base commits with `git switch --detach <base>` on a clean tree. Afterwards, `git switch -` returns to the head and HEAD must equal `Head commit`.
-  - After each switch, reinstall dependencies when the lockfile differs, and reset any database or state that the suites write.
-  - Run each command alone as `<cmd> > "$BB_THREAD_STORAGE/<name>.log" 2>&1; echo exit=$?`, then read the last 80 lines of the log. Read more only when the tail does not show the failure. Record the pass count of each file. Reason: the full output stays in the log, and the tail keeps the context short.
-  - A ready report lists base and head side by side for each command, with commit, exit status, and pass counts. It explains every difference. Reason: an unexplained difference is a regression.
-  - Before the report, HEAD equals `Head commit` and `git status --porcelain` prints nothing.
-  - A blocked report names the command, its exit status, and an output excerpt. It recommends `kind: tester` for a wrong test and `kind: worker` for product code.
-- When Chief gives no constraints, each blocking finding that has a structured `fix` becomes one constraint. Reason: the fix is the constraint, and Chief need not restate it.
-  - `Constraints` lists the fix as `<file>:<line>: <fix>`, and not `None stated.`.
-  - The fix text and the finding message each appear once in the prompt. The finding then omits its `(fix: …)` suffix.
-  - `reviewerBrief` carries the same `Constraints`.
-  - Constraints that Chief gives win. The fixes then stay with their findings.
-  - A nit fix never moves.
-- The findings section keeps one guidance line instead of four. The line orders the tester to verify each finding first, and to list a finding that does not hold under `## Disputed findings`. Reason: the evidence brief must stay short.
-- The line `Read the verdict file in full.` appears only when the call attaches a verdict file path. An evidence tester without findings gets no findings section and no verdict line. Reason: the line must not point to a file that does not exist.
-- A plan-linked evidence brief keeps the `## Deviations from plan` line. Reason: report intake refuses a plan-linked ready report without that heading.
-- The example brief of 13,996 bytes renders at 5,000 UTF-8 bytes or fewer. The plugin never clips the mission, constraints, findings, or prompt to reach this size. Reason: a clipped obligation can hide a required step.
 
 ### Spec Writer Side Lane
 
@@ -253,9 +201,8 @@ An evidence-only tester runs only the commands that the mission names, on the co
 - `replaces:` a side-lane Spec Writer with `kind: spec-writer` is a docs repair. The new writer gets a fresh managed worktree cut from the task branch, completes the old writer, and repoints the reviewer ledger. It writes the Spec delta again and never imports the old writer's commits. Reason: the old side checkout can hold stale or half-rebased docs commits.
 - `replaces:` a side-lane Spec Writer with another kind is rejected, and the text names the chain owner. Reason: a product repair belongs to the implementation lane.
 - A worker or designer may replace a ready writer only when the wave has no implementation-lane row. Reason: this legacy hand-off covers a head Spec Writer that ran before its worker.
-- A `spec-writer` that replaced a worker, designer, or tester is in the implementation lane, and its hand-off stays normal. A `spec-writer` without a plan is never in the side lane. Reason: no data migration is needed.
-- `chief_review` refuses to start while the plan Spec Writer is missing or not settled, or while a legacy writer delegated on another spec wave is not settled. The text names the writer, or the plan Spec Writer wave that has no writer. A spec wave that never had a writer does not block the review. Reason: the Tester derives tests from the committed docs.
-- The gate tester has no `replaces:`. It gets a fresh worktree on the first target branch. Reason: the tester supersedes no row.
+- A `spec-writer` that replaced a worker or designer is in the implementation lane, and its hand-off stays normal. A `spec-writer` without a plan is never in the side lane. Reason: no data migration is needed.
+- `chief_review` refuses to start while the plan Spec Writer is missing or not settled, or while a legacy writer delegated on another spec wave is not settled. The text names the writer, or the plan Spec Writer wave that has no writer. A spec wave that never had a writer does not block the review. Reason: the review must see the folded docs.
 - `planProgress` returns a `waitWriters` step when the parent implementation row reports ready while a writer is pending. It returns the exact `chief_review` call when the last writer reports ready. Reason: Chief must not call a step that admission rejects.
 - A ready report and an idle thread after a ready report count the same for both triggers. Reason: the thread convention is the same in every ready check.
 - The plan review is rejected while a spec wave has a pending writer. Reason: the review must see the folded docs.
@@ -270,11 +217,10 @@ An evidence-only tester runs only the commands that the mission names, on the co
 - Before the fold, the Spec Writer may check each identifier that its docs name with `git grep` at HEAD. The workers have pushed by then, so a missing name is a gap. The writer lists it under `## Unverified names` and continues. Reason: the writer starts after the last wave is ready, so a missing name is not work in progress.
 - The Spec Writer model is the per-machine `spec-writer` pick in Chief settings. Without a pick, it uses the Worker pick (`MODEL_FALLBACK` in `src/core/roles.ts`). Reason: a cheaper model can apply a precise delta.
 - An implementation-lane agent that reuses the chain worktree first requires a clean tree, fetches the task branch, and fast-forwards to it. It reports blocked when the fast-forward fails. Reason: the folded docs must be in the checkout before the agent reads files.
-- A Tester checks that the Fold head of each listed Spec Writer is an ancestor of its HEAD. Reason: the Tester must test against the folded docs.
 - The Reviewer scopes a side-lane writer by Fold base to Fold head. `Fold: none` means an empty scope. A docs commit inside a fold range is not drift in the range of a worker. Reason: the fold commits land in the task branch while the worker runs.
 - A worker or designer on a spec wave treats the plan as its source of truth, and pre-plan specs can be stale. Reason: the Spec Writer records the change after the last wave.
 - A first plan Spec Writer and a same-plan side-lane repair get a `## Docs work list (wave <w>)` section. Reason: one writer fixes and folds every known docs item.
-- The section lists the `## Docs needed` of each worker, designer and tester row on the owned waves. Reason: those rows report the docs that their waves need.
+- The section lists the `## Docs needed` of each worker and designer row on the owned waves. Reason: those rows report the docs that their waves need.
 - The owned waves of the plan Spec Writer are every wave of the plan, across all chains. Reason: it covers the delta of every spec wave after the last wave.
 - The owned waves of a legacy repair on another spec wave are wave `w` and each later wave of its chain before the next `spec: true` wave. Reason: a legacy writer owns the docs of its chain segment only.
 - Each item carries its source thread id and wave. Reason: the writer checks each item against the docs and finds its owner.
@@ -283,7 +229,7 @@ An evidence-only tester runs only the commands that the mission names, on the co
 - The section lists the prior writer's blocker only when its last report was blocked. Reason: an open blocker is docs work that the repair must fix.
 - The section holds whole items within 4,000 characters. Reason: a cut item loses its meaning.
 - The section shows the longest whole-item prefix that leaves room, within 4,000 characters, for the exact omitted count and every omitted source thread id. The prefix may be empty. Reason: inline items let the writer fix them without a file read.
-- When no prefix leaves that room, the section shows the exact omitted count and the path of one file in `$BB_THREAD_STORAGE`. The file holds the full work list. It has every collected worker, designer and tester `## Docs needed` item of the owned waves. It also has the prior writer's blocker when its last report was blocked. Reason: no item is dropped without a way to recover it.
+- When no prefix leaves that room, the section shows the exact omitted count and the path of one file in `$BB_THREAD_STORAGE`. The file holds the full work list. It has every collected worker and designer `## Docs needed` item of the owned waves. It also has the prior writer's blocker when its last report was blocked. Reason: no item is dropped without a way to recover it.
 - A work list with no items gets no section, on a first delegation or a repair. Reason: an empty section adds only noise.
 - An unplanned first writer, an implementation-lane or unplanned repair, a writer adopted by a new plan, and every non-writer kind get no section. Reason: only a same-plan side-lane writer owns the docs of its owned waves.
 - The writer fixes each item that still holds, then folds once. Reason: one repair replaces separate fix and fold writers.
@@ -293,8 +239,7 @@ An evidence-only tester runs only the commands that the mission names, on the co
 
 ### Blocked Alerts
 
-- A blocked worker, Tester or Spec Writer alert offers `chief_continue` for an environment or permission blocker, beside its existing replacement route. Examples are a blocked command, a dirty build-cache file, or a needed permission. The alert names the allowed step, and the thread keeps its worktree. Reason: a fresh thread for a blocked command repeats the same blocked step.
-- A blocked Tester alert starts `Tester blocked:`, never `Tests failed:`. Reason: the wrong label routes Chief to a product fix.
+- A blocked worker or Spec Writer alert offers `chief_continue` for an environment or permission blocker, beside its existing replacement route. Examples are a blocked command, a dirty build-cache file, or a needed permission. The alert names the allowed step, and the thread keeps its worktree. Reason: a fresh thread for a blocked command repeats the same blocked step.
 - The core rule names this in-place answer as its one exception to the fresh-worker rule (`chiefCoreRules` in `src/runtime/host.ts`). Code, test and spec defects, review findings and ready or complete follow-up still go to a fresh worker. Reason: an environment blocker has no product defect to fix, so a fresh thread repeats the same blocked step.
 - A side-lane Spec Writer alert says the retry gets a fresh worktree. An implementation-lane or unplanned writer alert makes no worktree claim. Reason: only a side-lane writer gets a fresh worktree on repair.
 - `continueThread` refusals for a side-lane Spec Writer say `starts a fresh worktree on the same branch and pull request`. Other refusals keep `keeps the same worktree, branch, and pull request`. Reason: the text must match the worktree that the repair gets.
@@ -303,13 +248,12 @@ An evidence-only tester runs only the commands that the mission names, on the co
 
 Only a Spec Writer changes `docs/`. The sections above define the lanes. This section defines who may change docs, how the plugin attributes a docs commit, and when `skipReview` refuses.
 
-- A worker, designer, or tester never changes `docs/`, on any plan wave or on unplanned work. Reason: the owner gives docs to the Spec Writer.
+- A worker or designer never changes `docs/`, on any plan wave or on unplanned work. A fix run never changes `docs/` either. Reason: the owner gives docs to the Spec Writer.
 - A worker or designer brief states the rule and its route. A needed docs change goes under `## Docs needed` in the ready result, and Chief delegates a Spec Writer. Reason: a needed change must reach the owner of docs.
-- A tester brief states the rule only. Its route lives in the tester's instructions. Reason: a tester brief carries no worker-only block, and the route keeps one owner.
 - `admitDelegation` admits an implementation-lane Spec Writer on any non-design wave. The writer replaces the chain owner. The wave can be a non-spec wave, a waived spec wave, or a spec wave whose prior row is the worker. Reason: every non-design wave needs a legal docs route, and the chain owner holds the checkout.
 - `admitDelegation` rejects a Spec Writer that replaces a row other than the chain owner. The text names the call that replaces the owner. Reason: a second row on the checkout would break the single implementation owner.
 - `admitDelegation` rejects a Spec Writer on a design-only wave. The text names the successor wave and the call for it. Reason: a design wave changes no repository files, so its docs need goes to the successor wave.
-- Such a writer shares the chain worktree and never completes on its own. It is not a retest fix. Reason: its worker, or a tester rerun, follows it.
+- Such a writer shares the chain worktree and never completes on its own. Reason: its worker follows it.
 - On unplanned work, a Spec Writer is opt-in, with or without `replaces:`. Without `replaces:` it is a separate docs task on its own branch. Reason: unplanned work has no wave graph to route by.
 - Every Spec Writer commit carries the trailer `Chief-Spec-Writer: <thread id>`. A rebase keeps it. Reason: on a shared task branch, a docs commit must be attributable.
 - `taskWriters` is the one definition of the Spec Writers of this task. The reviewer and the `skipReview` check both use it. Reason: one provenance rule, and no writer of another task counts.
@@ -328,14 +272,12 @@ Only a Spec Writer changes `docs/`. The sections above define the lanes. This se
 
 `workerBrief` in `src/research/delegationBrief.ts` renders the brief of every kind. `admitDelegation` in `src/plan/planLifecycle.ts` fills the source list for the brief. The "prior row" is the row that a delegation replaces.
 
-- A worker or tester brief renders `## Contracts to verify` as a pointer to that section of its plan file. The pointer names the plan file path. The brief still orders the agent to keep every item and to confirm each one with evidence. It also says that the reviewer checks the same list. Reason: the brief already orders a full read of the plan file, so an inline copy doubled the text.
+- A worker brief renders `## Contracts to verify` as a pointer to that section of its plan file. The pointer names the plan file path. The brief still orders the agent to keep every item and to confirm each one with evidence. It also says that the reviewer checks the same list. Reason: the brief already orders a full read of the plan file, so an inline copy doubled the text.
 - The reviewer brief keeps its full-plan read order and its inline contracts preview. Reason: the reviewer checks the contracts against the plan.
-- A Spec Writer brief and an evidence-only brief have no `## Contracts to verify`.
-- An implementation-lane Spec Writer brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Read-only context`. It lists the approved-design line when one exists. It adds the contracts of its own wave only, clipped at 3,000 characters. Reason: the contracts of the other waves belong to their workers and to the Tester. The writer can read each plan file.
-- A side-lane Spec Writer brief lists one `Wave n of N: <plan path>` line for each non-absent wave of the plan, across all chains. It adds no contracts. Reason: the plan Spec Writer covers the delta of every spec wave, and the contracts belong to the workers and to the Tester.
+- A Spec Writer brief has no `## Contracts to verify`.
+- An implementation-lane Spec Writer brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Read-only context`. It lists the approved-design line when one exists. It adds the contracts of its own wave only, clipped at 3,000 characters. Reason: the contracts of the other waves belong to their workers. The writer can read each plan file.
+- A side-lane Spec Writer brief lists one `Wave n of N: <plan path>` line for each non-absent wave of the plan, across all chains. It adds no contracts. Reason: the plan Spec Writer covers the delta of every spec wave, and the contracts belong to the workers.
 - The plan Spec Writer brief adds a `Baseline` line when any unbypassed spec wave has `baseline`. Reason: the writer must know which new spec file the plan names.
-- A planned tester brief lists one `Wave n of N: <plan path>` line for each wave of the chain under `## Source of truth for test cases`. It lists the approved-design line when one exists. It lists no contract text. Reason: the tester reads the plan files, and its own contracts appear once.
-- An unplanned tester brief keeps the head brief as its source of truth, clipped in the middle at 4,000 characters. Reason: no plan file exists.
 - For each kind, `admitDelegation` accepts and refuses exactly the same requests as before the brief change. Only the source list of a Spec Writer changes. Reason: the change affects text, not admission.
 
 A brief of a worker-kind thread or a planner thread keeps dynamic values and mode text only. No brief orders a skill load. The static rules live in the instructions of each role.
@@ -344,28 +286,14 @@ A brief of a worker-kind thread or a planner thread keeps dynamic values and mod
 - `bb.agents.configure` in `src/runtime/host.ts` sends these rules in the instructions on every turn. Reason: a rule that the agent must load by choice may never bind it.
 - Each role reads each rule once. A brief states only an exception or a mode. Reason: a repeated rule adds length and can drift.
 - The brief keeps these dynamic values: the branch in the sync and push commands, the `Local sync` or `Base commit` record name, the prior thread line, the issue and pull request URLs, the fold target branch of a side lane, `MAX_WAVES` and the Deviations line when a plan is linked. Reason: the instructions cannot know them.
-- The brief keeps one role-boundary line. A worker and a designer must not write tests or change `docs/`. A tester changes test files only. A Spec Writer changes `docs/` only and adds the `Chief-Spec-Writer` trailer to each commit. A planner stays read-only. Reason: a breach costs a full repair round.
+- The brief keeps one role-boundary line. A worker writes and runs the tests of its wave, and a designer does not write or run tests. Neither changes `docs/`. A Spec Writer changes `docs/` only, never writes, edits or runs tests, builds or linters, and adds the `Chief-Spec-Writer` trailer to each commit. A planner stays read-only. Reason: a breach costs a full repair round.
+- `WORKER_RULES` tell a worker to write and run the tests for its change in its wave, at the lowest level that would catch a break. They add an authoring gate, a ban on tests that assert the wording of a prose file, a filter on every test command, and the duty to fix a test that the change breaks. The plugin enforces none of this in code. Reason: the worker owns the test evidence, because the review gate has no tester.
+- `PLANNER_TEXT` and the plan-review checklist in `src/research/delegationBrief.ts` require that every implementation wave carries its own tests and Verify command. A test wave stays refused. A reshape wave may update the tests that its reshape breaks. Reason: no later role writes the tests of a wave.
 - `## Git workflow` keeps the dynamic lines only. It stays absent when the brief has no branch, issue or pull request. `## Fold` appears in a side brief only.
-- The evidence-only tester brief, the advisor brief, `reviewerBrief` and the stored copy of the brief have no change. Reason: they never held the working contract.
+- The advisor brief, `reviewerBrief` and the stored copy of the brief have no change. Reason: they never held the working contract.
 - The managed-thread instructions tell the agent to re-read the brief after a context compaction. Chief's own instructions have no change.
 
 The five role skills and `CAMPAIGN.md` no longer exist. The [decision on role rules in instructions](../decisions/2026-11-19-role-rules-in-instructions.md) records this trade-off.
-
-A tester brief has these rules:
-
-- It omits `## Success criteria` and `## Constraints` when the list is empty. Other kinds always render both. Reason: an empty section adds only the text "None stated."
-- `## Verify command` keeps the command fence and has one rule. The tester lists the exit status under Automated Verification and never changes product code to make the command pass. The wrapper fence of the [Heavy Command Slots](#heavy-command-slots) section also applies. Reason: the worker rule "Fix the work until it exits 0" contradicts the ban on product code.
-- A failure at the tester's Base commit is present before the tester's test edits, not proof the failure predates the feature. The tester lists it without changing product code. It does not waive an explicit exit-0 receipt. Reason: Base commit is the tester's starting checkout (after the feature commits), so a Base failure can be caused by the feature. A required exit-0 receipt still blocks ready.
-- The tester runs a command for the whole suite only when its mission or the `## Contracts to verify` of its plan file asks for it. Otherwise it lists the command as "not run: full suite not asked for". A failure is rechecked by rerunning only the failing files at the chain's base commit. Unplanned work keeps the request-only rule. Reason: the full suite is slow, and one run per plan covers the contracts. A contract such as `npx vitest run` exit 0 counts as a request.
-- It tells the tester to record the synced `git rev-parse HEAD` as `Base commit` one time. With a branch, the sync sentence holds the instruction. Without a branch, `## Test work` holds it. A worker brief records it as `Local sync`. Reason: one commit needs one record.
-- `## Test work` holds the one procedure for a test that fails because product code is wrong. It recommends `chief_delegate (... kind: worker)`. The `## Spec` block points to that procedure for code that contradicts the docs. Reason: two procedures for one failure conflict.
-- The `## Spec` block keeps the route for wrong docs: report blocked and recommend `kind: spec-writer`. Reason: only a Spec Writer changes docs.
-- `## Predecessor's last report` gives the Head commit of the prior row and the `git diff --name-only <base>..<head>` command when a Base commit is found. It also gives the path of the full report. It never quotes the summary, the blocker, or the recommendation. Reason: the tester needs the commit and the full report, not the narrative of the prior row.
-- When the prior report names no Head commit, the section says so and orders the tester to read the full report. Reason: the full report holds the facts that the section omits.
-- The tester rules come from the tester's instructions. The working contract keeps the test-files-only boundary: the tester never changes product code or `docs/`. It omits the user-journey wording, the `## Docs needed` route, and the re-plan line. Reason: those lines belong to workers.
-- No brief renders the refactor oracle rule. The tester's instructions hold it. Reason: the rule applies to the tester role, so the instructions own it once.
-- A tester delegated with `replaces:` gets no receipt section. Its brief renders only `## Predecessor's last report`, and the mission names every command and commit of its runs. Reason: a prior tester's stored commands could name stale coverage.
-- No brief quotes the `## Receipt` text of a prior tester. Reason: the review gate runs its one tester after every wave, so no tester inherits commands.
 
 ### Pull Request Pinning
 
@@ -438,14 +366,14 @@ A tester brief has these rules:
 - `parentOf` returns null when a wave has empty dependencies or index 1. Reason: head waves have no parent dependency.
 - `successorOf` returns the first non-absent wave that depends on the specified wave. Reason: graph traversal skips waves that have no execution.
 - `chainOf` traverses backward to the head and forward to the tip. Reason: callers require the complete sequence of linked waves.
-- A plan is 1 to 8 implementation waves (`checkPlan`). A `test` key is refused. Reason: the review gate runs the tests, so a test wave adds no work.
+- A plan is 1 to 8 implementation waves (`checkPlan`). A `test` key is refused. Reason: each implementation wave carries its own tests and Verify command, so a test wave adds no work.
 - A persisted legacy test wave without rows is `absent`. It is never pending, and its index is kept. With rows, it is an ordinary wave (`planWavesFor`). Reason: stored plans keep their indices and their rows.
 
 ### Heavy Command Slots
 
 A slot limits how many heavy commands run at once on one computer. The slot wrapper admits each heavy command into a slot. Reason: several threads on one computer can overload it.
 
-- `startWorker` publishes the slot wrapper and writes the `slots` file before it launches a worker, designer or tester. Reason: the brief must name a script that exists.
+- `startWorker` publishes the slot wrapper and writes the `slots` file before it launches a worker or designer. Reason: the brief must name a script that exists.
 - The `slots` file sits in `<BB data dir>/chief/heavy/`. It holds the `heavySlots` setting as one number. Reason: one host file gives one capacity for every script version.
 - `heavySlotCount` returns 1 to 8 for a valid setting. Any other value, or a missing value, returns 2. Reason: an invalid setting must not block delegation.
 - The wrapper reads the `slots` file at every admission round. A missing or invalid file means one slot. Reason: a lowered cap applies to new admissions at once.
@@ -459,7 +387,7 @@ A slot limits how many heavy commands run at once on one computer. The slot wrap
 - After 480 seconds of waiting, the wrapper exits 75 with a run-again line, and the command never runs. Reason: an agent tool call times out on a long wait, and the agent then runs the command again.
 - A call with `CHIEF_HEAVY_HELD` set runs its command directly and takes no slot. Reason: a command inside a slot must not wait for a second slot.
 - A usage error exits 2 and runs nothing. Reason: an unknown pool must never run a command.
-- Chief adds `## Heavy commands` to worker, designer, and tester briefs only when a published slot wrapper path is available. This rule includes evidence-only testers and briefs without a Verify block. Reason: those agents run builds and tests through the wrapper.
+- Chief adds `## Heavy commands` to worker and designer briefs only when a published slot wrapper path is available. This rule includes briefs without a Verify block. Reason: those agents run builds and tests through the wrapper.
 - Chief adds a wrapper fence under `## Verify command` only when the brief already includes that block and a wrapper path is available. The raw Verify fence stays unchanged. The wrapper fence wraps the exact Verify command. The agent fills in `<pool>`. Chief does not choose the pool from the command text. Reason: the plugin cannot know what a command does.
 - If Chief cannot read the heavy-slot setting or publish the wrapper, it logs a warning and continues delegation. The brief has neither `## Heavy commands` nor a wrapper fence. Any Verify block that the brief normally includes stays unchanged. Reason: heavy preparation must never block a delegation.
 - Spec Writers get neither `## Heavy commands` nor a wrapper fence. Reason: Spec Writers do not run builds or tests.

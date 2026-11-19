@@ -42,7 +42,6 @@ export const modelConfigurationSchema = z.object({
       planner: modelSelectionSchema.nullable(),
       worker: modelSelectionSchema.nullable(),
       designer: modelSelectionSchema.nullable(),
-      tester: modelSelectionSchema.nullable(),
       "spec-writer": modelSelectionSchema.nullable(),
       reviewer: modelSelectionSchema.nullable(),
       advisor: modelSelectionSchema.nullable(),
@@ -154,9 +153,6 @@ export const reportParams = z.object({
   recommendation: z.string().trim().optional().describe(`Required when state is blocked, at most ${REPORT_TEXT_MAX.toLocaleString("en-US")} characters: your recommended decision or next action.`),
   fails: failsParam,
   findings: findingsParam,
-  testsPassed: z.boolean().optional().describe(
-    "Ready only, review-gate tester only (required there): true when every test you ran passed on every branch head you pushed, false when any failed (list them under ## Failing tests). Every other role leaves this unset.",
-  ),
   waitingOnUser: z.boolean().optional().describe("Design researcher only, with state active or blocked: true while your design questions wait on the user."),
 });
 
@@ -228,8 +224,8 @@ export interface ManagedRow {
   report_path: string | null;
   /** Incremented when chief_complete replaces the result; guards the report_path publication in the report intake. */
   result_rev: number;
-  /** Worker row only: "designer" for design-tool work, "tester" for test work; null (pre-migration or plain) means worker. */
-  kind: "designer" | "tester" | "spec-writer" | null;
+  /** Worker row only: "designer" for design-tool work; null (pre-migration or plain) means worker. Legacy tester rows read as worker. */
+  kind: "designer" | "spec-writer" | null;
   /** legacy: workers delegated on the retired simple tag; read only by bb chief stats */
   simple: number | null;
   /** Worker row only: Chief's reason for completing it with skipReview, without a review; null otherwise. */
@@ -251,7 +247,7 @@ export interface ManagedRow {
   research_thread_id: string | null;
   /** Planner row: the bound researcher ready report's report_seq. */
   research_report_seq: number | null;
-  /** Worker row, kind tester: 1 for an evidence-only tester; NULL (every row from before the column) is not. */
+  /** legacy column: never written or read. */
   evidence_only: number | null;
   /** Design researcher: 1 while its design questions wait on the user. */
   waiting_on_user: number;
@@ -264,7 +260,7 @@ export interface ManagedRow {
   thread_errors: number;
   /** Busy-worker refusals of consult, replaces or review, counted for bb chief stats (since stats_since). */
   busy_rejections: number;
-  /** Gate tester row only: its latest ready report's testsPassed (1/0); null otherwise. */
+  /** legacy column: never written or read. */
   tests_passed: number | null;
   /** A fix run's origin: 'gate' or 'chat'; null on every other row. */
   fix_run: "gate" | "chat" | null;

@@ -9,15 +9,15 @@ import { isWriter } from "../plan/waveSchedule";
 
 export function createCompletion(ctx: Ctx) {
   const { bb, chainOwner, isDesignWave, ledger, planBaseOf, planWavesFor, progress, sideLane, store, taskWriters } = ctx;
-  /** Why a worker, or a gate's reviewer or tester, may not complete yet, or null when its review gate passed.
+  /** Why a worker, or a gate's reviewer, may not complete yet, or null when its review gate passed.
    * A design-wave worker needs the owner's recorded approval instead. Completion never needs a re-review or an approve on the latest head. */
   async function completionRefusal(row: ManagedRow): Promise<string | null> {
     if (isDesignWave(row)) {
       return row.owner_approval ? null : `${row.thread_id} is design-only work, which only the owner approves: show the user its artboards and record their decision with chief_owner_approval (workerThreadId: ${row.thread_id}), or pass override with a reason to complete anyway.`;
     }
-    // A chat fix run has no gate and no review: its own green run and a clean docs/ history complete it.
+    // A chat fix run has no gate and no review: its own ready report and a clean docs/ history complete it.
     if (row.fix_run === "chat") {
-      if (row.last_report_state !== "ready" || row.tests_passed !== 1) return `chat fix run ${row.thread_id} has no green ready report (testsPassed: true) yet: wait for it, or pass override with a reason.`;
+      if (row.last_report_state !== "ready") return `chat fix run ${row.thread_id} has no ready report yet: wait for it, or pass override with a reason.`;
       let docs: string | null = null;
       await docsGate(row, (why) => { docs = why; throw new Error(why); }).catch(() => undefined);
       return docs;
@@ -52,7 +52,7 @@ export function createCompletion(ctx: Ctx) {
     const chain = ledger.taskChain(row.thread_id);
     // A chat fix is unplanned: its provenance is the newest non-chat row it replaces (the original plan's target), whose writers stay authorized.
     const origin = row.fix_run === "chat" ? chain.map((id) => store.get(id)).find((other) => !!other && other.fix_run !== "chat") : undefined;
-    // A gate fixer or tester origin has no wave: use the gate's pinned target on this chat fix's PR or branch, never the whole plan.
+    // A gate fixer (or legacy tester) origin has no wave: use the gate's pinned target on this chat fix's PR or branch, never the whole plan.
     const gate = origin && store.isGateActor(origin.thread_id) ? store.gateFor(origin.thread_id) : undefined;
     const pinned = gate?.targets.find((target) => (row.pr_url && target.prUrl === row.pr_url) || (!!row.branch && target.branch === row.branch));
     const source = (pinned && store.get(pinned.threadId)) || (gate ? undefined : origin);
@@ -102,6 +102,7 @@ export function createCompletion(ctx: Ctx) {
       const busy = ledger.busyReview(threadId);
       if (busy) refuse(`review ${busy.thread_id} is still running; wait for its verdict.`);
       const gate = store.gateFor(threadId);
+      // tester_thread_id and corrector_thread_id are legacy columns, read only for old gates.
       const busyActor = gate && [gate.reviewer_thread_id, gate.tester_thread_id, gate.fixer_thread_id, gate.corrector_thread_id]
         .map((id) => (id ? store.get(id) : undefined)).find((actor) => actor && BUSY_STATUSES.has(actor.state));
       if (busyActor) refuse(`review gate ${gate!.gate_key} is still running ${busyActor.thread_id}; wait for its report.`);
@@ -125,7 +126,7 @@ export function createCompletion(ctx: Ctx) {
     const now = Date.now();
     store.markComplete({ status: live.status, result: replacement, note: overrideNote, now, threadId, cleanupApprovedAt: approved && ctx.state.cleanupActive ? now : null, reviewSkipped });
     const completed = store.get(threadId)!;
-    // The gate's last target completed: its idle actors complete with it, approved for cleanup like the targets.
+    // The gate's last target completed: its idle actors (legacy tester and corrector included) complete with it, approved for cleanup like the targets.
     const gate = store.gateFor(threadId);
     if (gate && approved && gate.targets.every((target) => store.get(target.threadId)?.state === "complete")) {
       for (const id of [gate.reviewer_thread_id, gate.tester_thread_id, gate.fixer_thread_id, gate.corrector_thread_id]) {

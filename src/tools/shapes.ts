@@ -12,9 +12,9 @@ import { z } from "zod";
 export const spawnMetadataSchema = z.object({
   role: roleSchema,
   chiefThreadId: z.string().nullable().optional(),
-  kind: workerKindSchema.optional(),
+  // Any string: a legacy seeded kind (tester) still parses and reads as worker.
+  kind: z.string().optional(),
   planThreadId: z.string().optional(),
-  evidenceOnly: z.boolean().optional(),
 });
 
 const delegateShape = z.object({
@@ -28,13 +28,12 @@ const delegateShape = z.object({
   ),
   issueUrl: z.string().trim().min(1).max(500).optional().describe("URL of the tracking issue Chief opened for this task, when the forge has issues."),
   prUrl: z.string().trim().min(1).max(500).optional().describe("URL of the draft pull request Chief opened from the task branch."),
-  replaces: z.string().trim().min(1).optional().describe("A finished worker's thread id to hand off from: the new worker starts in that worker's worktree and branch, and the old worker is marked complete. A gate fix run or corrector gets the gate's verdict file, findings and failing tests; a chat fix gets none."),
+  replaces: z.string().trim().min(1).optional().describe("A finished worker's thread id to hand off from: the new worker starts in that worker's worktree and branch, and the old worker is marked complete. A gate fix run gets the gate's verdict file and findings; a chat fix gets none."),
   planThreadId: z.string().trim().min(1).optional().describe("A planner thread that reported a wave schedule. Combined with wave, the plugin takes the plan file from that schedule."),
   wave: z.number().int().min(1).max(MAX_WAVES).optional().describe("1-based index into planThreadId's wave schedule."),
   unplannedReason: z.string().trim().min(1).max(300).optional().describe("Required when planning is on and this work skips chief_plan: your reason for skipping the plan (your judgment; see the core rules). Not needed with planThreadId/wave or replaces."),
-  kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker. tester: the review gate starts its own tester; delegate one only as the gate's corrector (replaces: a blocked fix run) or with evidenceOnly; on unplanned work a test-only tester may also start without replaces: given branch (and prUrl) of the existing work it tests. Replacing a tester needs an explicit kind: worker to change product code, tester to change tests. spec-writer changes docs/ only: on a plan's spec: true implementation wave a plan has one Spec Writer: delegate it with an explicit kind only after every wave is ready, on the last unbypassed spec wave the last ready alert names, in its own side worktree; a side Spec Writer's docs fix replaces that writer; on any other plan wave except a design-only one it replaces the chain's current implementation row (the call a refusal names) for a docs change; on unplanned work it is opt-in, with or without replaces:."),
-  evidenceOnly: z.boolean().optional().describe("Tester only: the brief asks for run evidence (commands on given commits, exit statuses, comparison) and no commits; name the commands and commits in the mission. Not inherited through replaces:."),
-  verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command the worker's brief tells it to run after its last commit and get exit 0 from before reporting ready: a build/lint check for a worker, e.g. `npx tsc --noEmit && bb plugin build`; a tester's may be a filtered test command. Inherited through replaces:."),
+  kind: workerKindSchema.optional().describe("designer when the agent decides or implements how the UI looks: drawing or editing in a design tool (Paper, Figma, …), implementing a design-tool artboard in code (design-to-code), or building UI with no approved design or explicit visual spec. worker (the default) only when an approved design or an explicit spec in the request, an issue, or a report already fixes the look. A replaces: successor keeps the prior worker's kind. Exception: a plan's design-only wave (design: true) defaults to designer and only draws; the wave that implements its approved artboards is a worker. spec-writer changes docs/ only: on a plan's spec: true implementation wave a plan has one Spec Writer: delegate it with an explicit kind only after every wave is ready, on the last unbypassed spec wave the last ready alert names, in its own side worktree; a side Spec Writer's docs fix replaces that writer; on any other plan wave except a design-only one it replaces the chain's current implementation row (the call a refusal names) for a docs change; on unplanned work it is opt-in, with or without replaces:."),
+  verifyCommand: z.string().trim().min(1).max(500).optional().describe("One shell command the worker's brief tells it to run after its last commit and get exit 0 from before reporting ready, tests included: e.g. `npx tsc --noEmit && bb plugin build`. Inherited through replaces:."),
 });
 
 /** Fills an omitted title from the first line of its source field. The title is display-only, so a missing one is not worth a refusal. */

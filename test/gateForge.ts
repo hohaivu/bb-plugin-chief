@@ -14,8 +14,8 @@ export function forgeAnswers(state: { db: any }) {
   });
 }
 
-/** chief_review on a forged worker: opens its gate and returns the reviewer and tester it started (a retry names only the side it launched). */
+/** chief_review on a forged worker: opens its gate and returns the reviewer it started. */
 export async function startGate(state: { harness: any }, chiefThreadId: string, workerThreadId: string) {
   const reply = (await state.harness.behavior.callAgentTool("chief_review", { workerThreadId }, { threadId: chiefThreadId, projectId: "proj_1" })) as string;
-  return { reply, reviewerId: /reviewer (thr_\w+)/.exec(reply)?.[1], testerId: /tester (thr_\w+)/.exec(reply)?.[1] };
+  return { reply, reviewerId: /reviewer (thr_\w+)/.exec(reply)?.[1] };
 }

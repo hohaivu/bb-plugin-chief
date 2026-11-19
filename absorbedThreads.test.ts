@@ -34,29 +34,22 @@ describe("auto-completing absorbed supporting threads", () => {
     (state.db.prepare(`SELECT state FROM managed_threads WHERE thread_id=?`).get(id) as { state: string }).state;
   const call = (state: Awaited<ReturnType<typeof setup>>, tool: string, params: object, threadId: string) =>
     state.harness.behavior.callAgentTool(tool, params, { threadId, ...P });
-  async function testerPasses(state: Awaited<ReturnType<typeof setup>>) {
-    const { thread_id } = state.db.prepare(`SELECT thread_id FROM managed_threads WHERE kind='tester' AND state<>'complete'`).get() as { thread_id: string };
-    await call(state, "chief_report", { state: "ready", result: `Tests ran${NO_DEVIATIONS}`, testsPassed: true }, thread_id);
-    return thread_id;
-  }
-  async function reviewed(state: Awaited<ReturnType<typeof setup>>, chiefId: string, workerId: string, verdict: "approve" | "request_changes", testerReports = true) {
+  async function reviewed(state: Awaited<ReturnType<typeof setup>>, chiefId: string, workerId: string, verdict: "approve" | "request_changes") {
     await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, workerId);
     await call(state, "chief_review", { workerThreadId: workerId }, chiefId);
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer" && row.workerThreadId === workerId && row.state !== "complete")!;
     const findings = verdict === "approve" ? [] : [{ file: "totals.ts", line: 3, severity: "blocking", message: "Wrong total", fix: "Fix it" }];
     await call(state, "chief_report", { state: "ready", result: "Checked", verdict, findings }, reviewer.threadId);
-    if (testerReports) await testerPasses(state);
     return reviewer.threadId;
   }
-  test("chief_complete on a worker whose gate passed completes its reviewer and tester, idempotently", async () => {
+  test("chief_complete on a worker whose gate passed completes its reviewer, idempotently", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve");
-    const tester = (state.db.prepare(`SELECT thread_id FROM managed_threads WHERE kind='tester'`).get() as { thread_id: string }).thread_id;
     await call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId);
     await settle();
-    expect([stateOf(state, reviewer), stateOf(state, tester)]).toEqual(["complete", "complete"]);
+    expect(stateOf(state, reviewer)).toBe("complete");
     const before = state.db.prepare(`SELECT thread_id, state, updated_at FROM managed_threads ORDER BY thread_id`).all();
     await call(state, "chief_roster", {}, chief.threadId);
     await expect(call(state, "chief_complete", { threadId: worker.threadId }, chief.threadId)).resolves.toBeDefined();
@@ -190,7 +183,7 @@ describe("auto-completing absorbed supporting threads", () => {
     const reviewer = (await status(state)).threads.find((row) => row.role === "reviewer")!.threadId;
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" });
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(reviewer)! });
-    await call(state, "chief_report", { state: "ready", result: "Checked", ...APPROVE }, reviewer);
+    await call(state, "chief_report", { state: "ready", result: "Checked", verdict: "request_changes", findings: [{ file: "totals.ts", line: 3, severity: "blocking", message: "Wrong total", fix: "Fix it" }] }, reviewer);
     await call(state, "chief_complete", { threadId: worker.threadId, override: OVERRIDE }, chief.threadId);
     await settle();
     expect(stateOf(state, reviewer)).toBe("ready");
@@ -204,11 +197,11 @@ describe("auto-completing absorbed supporting threads", () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    const reviewer = await reviewed(state, chief.threadId, worker.threadId, "approve", false);
+    const reviewer = await reviewed(state, chief.threadId, worker.threadId, "request_changes");
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: state.live.get(reviewer)!, lastAssistantText: "done" });
     state.live.set(reviewer, { ...state.live.get(reviewer)!, status: "active" }); // no lifecycle event
     const other = await delegate(state, chief.threadId, "Other");
-    const failing = await reviewed(state, chief.threadId, other.threadId, "approve", false);
+    const failing = await reviewed(state, chief.threadId, other.threadId, "request_changes");
     await call(state, "chief_complete", { threadId: worker.threadId, override: OVERRIDE }, chief.threadId);
     state.failNextGet(failing);
     await call(state, "chief_complete", { threadId: other.threadId, override: OVERRIDE }, chief.threadId);

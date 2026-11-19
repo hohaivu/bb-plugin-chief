@@ -2,7 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { vi } from "vitest";
 import { CLOSE_OUT, PLAN_FIXTURE, delegate, execFileMock, start, type setup } from "./harness";
-import { plan, report, setLive } from "./testerHelpers";
+import { plan, report, setLive } from "./flowHelpers";
 
 type State = Awaited<ReturnType<typeof setup>>;
 

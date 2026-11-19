@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { type State } from "./test/testerHelpers";
+import { type State } from "./test/flowHelpers";
 import { delegate, disposeAll, execFileMock, setup, start } from "./test/harness";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";

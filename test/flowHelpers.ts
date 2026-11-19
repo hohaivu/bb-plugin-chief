@@ -85,32 +85,26 @@ export const forgeAnswers = (prs: Record<string, string> = { [PR_URL]: "feature/
     const branch = url ? prs[url] : undefined;
     return Promise.resolve({ stdout: branch ? (state && args.includes("state,headRefOid") ? JSON.stringify({ state, headRefOid: HEAD_SHA }) : ghHead(branch)) : "", stderr: "" });
   });
-export type Gate = { gate_key: string; reviewer_thread_id: string; tester_thread_id: string; fixer_thread_id: string | null; corrector_thread_id: string | null; targets: string };
+export type Gate = { gate_key: string; reviewer_thread_id: string; fixer_thread_id: string | null; targets: string };
 /** The review gate that pinned `threadId`. */
 export const gateOf = (state: State, threadId: string) =>
   (state.db.prepare(`SELECT * FROM review_gates`).all() as Gate[]).find((gate) => (JSON.parse(gate.targets) as { threadId: string }[]).some((target) => target.threadId === threadId));
-/** Opens the review gate on `targetId` (chief_review) and returns it: one reviewer and one tester started. */
+/** Opens the review gate on `targetId` (chief_review) and returns it: one reviewer started. */
 export async function openGate(state: State, chiefThreadId: string, targetId: string) {
   await tool(state, "chief_review", { workerThreadId: targetId }, chiefThreadId);
   return gateOf(state, targetId)!;
 }
 /** The spawn record (prompt, environment) of thread `threadId`: thr_<n> is the n-th spawn. */
 export const spawnOf = (state: State, threadId: string) => state.spawned[Number(threadId.slice("thr_".length)) - 1];
-/** The gate tester reports ready (idle) with its test result. */
-export async function testerReady(state: State, gate: Gate, passed: boolean, result = passed ? "Every test passes." : "Tests fail.\n\n## Failing tests\n- totals.test.ts:3 — `npx vitest run totals.test.ts`, exit 1: totals go negative (totals.ts:4)") {
-  await report(state, gate.tester_thread_id, { state: "ready", result, testsPassed: passed });
-  setLive(state, gate.tester_thread_id, "idle");
-}
 /** The gate reviewer reports its verdict (idle). */
 export async function reviewerVerdict(state: State, gate: Gate, verdict: "approve" | "request_changes", findings: object[] = verdict === "approve" ? [] : [...REQUEST_CHANGES_FINDINGS]) {
   await report(state, gate.reviewer_thread_id, { state: "ready", result: verdict === "approve" ? "The change holds." : "Totals go negative.", verdict, findings });
   setLive(state, gate.reviewer_thread_id, "idle");
 }
 export const REQUEST_CHANGES_FINDINGS = [{ file: "totals.ts", line: 4, severity: "blocking", message: "Totals go negative.", fix: "Clamp at zero" }] as const;
-/** Opens the gate on `targetId` and passes it: green tester, approving reviewer. Chief can then chief_complete the target. */
+/** Opens the gate on `targetId` and passes it: an approving reviewer. Chief can then chief_complete the target. */
 export async function passGate(state: State, chiefThreadId: string, targetId: string) {
   const gate = await openGate(state, chiefThreadId, targetId);
-  await testerReady(state, gate, true);
   await reviewerVerdict(state, gate, "approve");
   return gate;
 }

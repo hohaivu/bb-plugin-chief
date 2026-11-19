@@ -85,7 +85,7 @@ describe("forge comments", () => {
       return {
         chief: chief.threadId, prefix: "verdict:", act: () => call(state, "chief_report", { state: "ready", result: "Reviewed", ...APPROVE }, review.threadId), result: "Report delivered to Chief.",
         row: { id: review.threadId, fields: { state: "ready", verdict: "approve", last_report_state: "ready", report_seq: 1, result: "Reviewed" } },
-        report: { from: review.threadId, text: `[Chief lifecycle alert]\nReviewer report from Review · Fix totals (${review.threadId})\nState: ready\nVerdict: approve\nVerdict file: ${join(state.storageRoot, "chief", "proj_1", review.threadId, "verdict-1.md")}\nThe review gate is waiting on tester ${review.testerThreadId} (starting). Wait for their reports.\nFull report and last output: bb chief inspect ${review.threadId}\nResult: Reviewed` },
+        report: { from: review.threadId, text: `[Chief lifecycle alert]\nReviewer report from Review · Fix totals (${review.threadId})\nState: ready\nVerdict: approve\nVerdict file: ${join(state.storageRoot, "chief", "proj_1", review.threadId, "verdict-1.md")}\nThe review gate passed. Complete it: chief_complete (threadId: ${worker.threadId}); each marks its pull request ready.\nFull report and last output: bb chief inspect ${review.threadId}\nResult: Reviewed` },
       };
     }],
     ["completion", async (state, pr) => {

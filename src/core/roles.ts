@@ -4,18 +4,18 @@ import { z } from "zod";
 export const roleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "researcher"]);
 export type Role = z.infer<typeof roleSchema>;
 
-/** A worker's kind: `designer` (design-tool work), `tester` (writes and runs tests) and `spec-writer` (changes docs/ only)
+/** A worker's kind: `designer` (design-tool work) and `spec-writer` (changes docs/ only)
  * are worker rows, not thread roles. */
-export const workerKindSchema = z.enum(["worker", "designer", "tester", "spec-writer"]);
+export const workerKindSchema = z.enum(["worker", "designer", "spec-writer"]);
 export type WorkerKind = z.infer<typeof workerKindSchema>;
 
 /** The role key chief_models stores a per-machine model pick under: the thread roles plus the worker kinds
- * `designer`, `tester` and `spec-writer`. Explicit, not derived from roleSchema: a worker kind is not a thread role. */
-export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "tester", "spec-writer", "researcher"]);
+ * `designer` and `spec-writer`. Explicit, not derived from roleSchema: a worker kind is not a thread role. */
+export const modelRoleSchema = z.enum(["chief", "planner", "worker", "reviewer", "advisor", "designer", "spec-writer", "researcher"]);
 export type ModelRole = z.infer<typeof modelRoleSchema>;
 
-/** A model role with no pick of its own reads another role's pick: no Designer, Tester or Spec Writer row inherits the Worker pick. */
-export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker", tester: "worker", "spec-writer": "worker" };
+/** A model role with no pick of its own reads another role's pick: no Designer or Spec Writer row inherits the Worker pick. */
+export const MODEL_FALLBACK: Partial<Record<ModelRole, ModelRole>> = { designer: "worker", "spec-writer": "worker" };
 
 /** The one read-only rule every non-implementing role shares. Untracked build/test output is not a change. */
 export const READ_ONLY = "do not create, modify, or delete any file the repository tracks, and do not commit or push";
@@ -39,7 +39,7 @@ export const CONTINUE_REMINDERS: Partial<Record<Role, string>> = {
 // A new role needs a NEW appended migration (never an edit to an existing one) that rebuilds both tables whose
 // role list is a CHECK constraint in MIGRATIONS (server.ts):
 //   - managed_threads: the latest rebuild is managed_threads_v4 (role IN chief, planner, worker, reviewer, advisor, researcher).
-//   - chief_models: the latest rebuild is chief_models_v9 (role IN chief, planner, worker, reviewer, advisor, designer, tester, spec-writer, researcher).
+//   - chief_models: the latest rebuild is chief_models_v9 (role IN chief, planner, worker, reviewer, advisor, designer, tester, spec-writer, researcher); its tester rows are legacy, never read.
 
 /** Planners whose plan is being published or whose consult is being admitted: each refuses the other before anything changes. */
 export const planAdmissions = new Set<string>();

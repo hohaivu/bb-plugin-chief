@@ -54,7 +54,6 @@ describe("Chief backend", () => {
 
     // The rest report a short result: only the total row count, not each one's
     // result text, is what needs to threaten the 6,000-char roster cap here.
-    // An unplanned ready worker's Pending line now carries the "delegate a tester" clause, so fewer rows fill the cap.
     let lastTitle = "First worker";
     for (let i = 0; i < 11; i += 1) {
       lastTitle = `Worker ${i}`;
@@ -285,19 +284,13 @@ describe("Chief backend", () => {
     expect(roster).toContain(`- worker “Fix checkout totals” (${worker.threadId}): ${workerAction}`);
 
     // With the gate open the worker stays in Pending and names the busy sides (gateDecision wait).
-    const { reviewerId, testerId } = await startGate(state, chief.threadId, worker.threadId);
+    const { reviewerId } = await startGate(state, chief.threadId, worker.threadId);
     const waiting = `- worker “Fix checkout totals” (${worker.threadId}): The review gate is waiting on reviewer ${reviewerId}`;
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain(waiting);
 
-    // An approve alone does not pass the gate: the alert and the roster still wait for the tester.
+    // The approve passes the gate: the alert and the roster name the same completion.
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Looks correct", ...APPROVE }, { threadId: reviewerId!, projectId: "proj_1" });
-    expect(state.sent.at(-1).input[0].text).toContain(`tester ${testerId}`);
-    roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
-    expect(roster).toContain(`(${worker.threadId}): The review gate is waiting on tester ${testerId}`);
-
-    // The green tester passes the gate: the alert and the roster name the same completion.
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Tests pass", testsPassed: true }, { threadId: testerId!, projectId: "proj_1" });
     const passAction = `chief_complete (threadId: ${worker.threadId})`;
     expect(state.sent.at(-1).input[0].text).toContain(passAction);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
@@ -324,13 +317,12 @@ describe("Chief backend", () => {
 
     const worker = await delegate(state, chief.threadId, "Fix checkout totals", forged());
     await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Done" }, { threadId: worker.threadId, projectId: "proj_1" });
-    const { reviewerId, testerId } = await startGate(state, chief.threadId, worker.threadId);
+    const { reviewerId } = await startGate(state, chief.threadId, worker.threadId);
     await state.harness.behavior.callAgentTool("chief_report", {
       state: "ready", result: "Off by one in the discount calc", ...REQUEST_CHANGES,
     }, { threadId: reviewerId!, projectId: "proj_1" });
-    await state.harness.behavior.callAgentTool("chief_report", { state: "ready", result: "Tests pass", testsPassed: true }, { threadId: testerId!, projectId: "proj_1" });
-    // A blocking code finding makes gateDecision fix: the one fix run replaces the tester.
-    const fixAction = `chief_delegate (replaces: ${testerId}, kind: worker)`;
+    // A blocking code finding makes gateDecision fix: the one fix run replaces the gate's first target.
+    const fixAction = `chief_delegate (replaces: ${worker.threadId}, kind: worker)`;
     expect(state.sent.at(-1).input[0].text).toContain(fixAction);
     roster = String(await state.harness.behavior.callAgentTool("chief_roster", {}, opts));
     expect(roster).toContain(`(${worker.threadId}): The review gate needs a fix`);

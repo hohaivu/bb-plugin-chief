@@ -84,7 +84,7 @@ The transaction runs these steps in order:
 3. A planner ready report with a plan sets the plan review to null only when the review is unset or `required`. A `required` review is stale when no advisor runs for the plan. A decided review (`approved` or `changes`) is kept. Reason: owner decision. The advisor is an opt-in consult that Chief starts, not a gate, so the plugin never requires a review. When the planner replaces a planner with review `changes`, the replaced planner completes.
    - The intake refuses a planner ready report while an advisor for that plan is running. It checks before the plan files are written and again before `reserveReport`. The advisor is running when its row has no advised report and its state is busy. The refusal says to wait for the advisor's report. Reason: a replacement plan must not drop the review gate of a running advisor. The intake checks again at the state write, because an advisor can launch while the plan files are written.
 4. An advisor or reviewer ready report with a `lesson` inserts one `chief_lessons` row. The row holds the project, the text, the reporting thread, the reviewed worker, the time, and the role. The row has the status `proposed`, so no prompt contains it until Chief accepts it. `observability.md` describes the lesson lifecycle.
-5. `ledger.recordVerdict` no longer changes `reject_streak`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head. A ready report of a gate tester, fix run, or corrector stores its `testsPassed` in `tests_passed`.
+5. `ledger.recordVerdict` no longer changes `reject_streak`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head. The plugin reads and writes no test field.
 6. A reviewer ready report with a verdict enqueues forge comments (one for each covered pull request). A worker blocked report enqueues one blocked comment. `forge-comments.md` describes them.
 7. When the row has a Chief, the code writes the pending alert. It has the title, the state, and the report number. It adds up to 300 characters of `summary` or `result`. The last line is `The full alert could not be built; run chief_inspect <id>.`
 8. A worker in a plan with `fails` appends one `FAIL` entry for each fail to the plan log.
@@ -98,9 +98,8 @@ The transaction runs these steps in order:
 | Worker or reviewer with `fails` | The merged `fails` JSON. A report without `fails` keeps the stored value. |
 | Reviewer | `findings` JSON. Every reviewer report replaces it. A report without findings clears it. |
 | Ready with `regression` true and verdict `request_changes` | `regression` is 1. |
-| Ready gate tester or corrector | `tests_passed` from `testsPassed`. `checkReport` refuses the ready report without `testsPassed`. A corrector's `false` makes the gate escalate. |
-| Ready fix run | `tests_passed` from `testsPassed`. `checkReport` refuses the ready report unless `testsPassed` is `true`, and the refusal says to keep fixing or report blocked with wrong-test evidence. |
-| Any other row | `checkReport` refuses `testsPassed`. |
+
+The `chief_report` input has no `testsPassed` field, and no rule reads one. The column `tests_passed` stays in the database as a legacy column that nothing writes. Reason: the gate passes on the fix run's ready report, so no test field decides. A chat fix completes on a ready report plus a clean docs inspection (`src/runtime/completion.ts`). Reason: the report is the worker's evidence.
 
 ### Alert and file rules
 
@@ -213,7 +212,7 @@ Each contract carries its reason.
 
 ### Test key refusal
 
-`checkPlan` refuses a plan wave whose `test` key is `true` or `false`. The refusal says: `plan wave N: test waves are gone; the tester runs once in the review gate after every wave. Drop test.` Reason: the review gate runs one tester after every wave, so a test wave adds no work.
+`checkPlan` refuses a plan wave whose `test` key is `true` or `false`. The refusal says: `plan wave N: test waves are gone; a wave carries its own tests and Verify command. Drop test.` Reason: each implementation wave carries its own tests, so a test wave adds no work.
 
 Invariants:
 

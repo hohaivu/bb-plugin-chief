@@ -19,7 +19,7 @@ const STRUCTURED: NonNullable<WorkerBriefInput["structured"]> = [
 export function briefMatrix(): [string, WorkerBriefInput][] {
   const cells: [string, WorkerBriefInput][] = [];
   const kinds: [string, Kind, "side" | "implementation"][] = [
-    ["worker", "worker", "implementation"], ["designer", "designer", "implementation"], ["tester", "tester", "implementation"],
+    ["worker", "worker", "implementation"], ["designer", "designer", "implementation"],
     ["spec-writer side", "spec-writer", "side"], ["spec-writer implementation", "spec-writer", "implementation"],
   ];
   for (const [name, kind, lane] of kinds) for (const planned of [false, true]) for (const withFindings of [false, true]) for (const withPrior of [false, true])
@@ -31,8 +31,8 @@ export function briefMatrix(): [string, WorkerBriefInput][] {
         contracts: planned ? "- [ ] Totals hold" : undefined, planContextLine: planned ? "Plan file (wave 2 of 3): /plans/plan-2.md" : undefined,
         kind, verifyCommand, branch: "feature/x", issueUrl: "https://example.test/issues/1", prUrl: "https://example.test/pull/2",
         prior: withPrior ? PRIOR : undefined, findings: withFindings ? FINDINGS : undefined, structured: withFindings ? STRUCTURED : undefined,
-        ruledOut: [{ scope: "api", text: "Do not rewrite", basis: "tried" }], specSources: kind === "tester" || kind === "spec-writer" ? ["Wave 1 of 3: /plans/plan-1.md"] : [],
-        specDocs, baseline, specWave: planned && kind !== "tester", lane,
+        ruledOut: [{ scope: "api", text: "Do not rewrite", basis: "tried" }], specSources: kind === "spec-writer" ? ["Wave 1 of 3: /plans/plan-1.md"] : [],
+        specDocs, baseline, specWave: planned, lane,
       }]);
     }
   return cells;

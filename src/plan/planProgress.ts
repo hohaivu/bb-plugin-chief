@@ -22,25 +22,20 @@ export interface ProgressRow {
   worker_thread_id: string | null;
   regression: number | null;
   findings: string | null;
-  tests_passed: number | null;
   blocker: string | null;
 }
 
-/** A blocked fix run's wrong-test evidence: its blocker names a test file and line (review-engine.md: file and line, contradicted text, command output). */
-export const wrongTestEvidence = (blocker: string | null | undefined) => /\S+\.(test|spec)\.[cm]?[jt]sx?:\d+/.test(blocker ?? "");
-
-/** A fix run or corrector that stopped before its first report: it no longer holds its gate slot. Never a live (starting/active/stopping) row. */
+/** A fix run that stopped before its first report: it no longer holds its gate slot. Never a live (starting/active/stopping) row. */
 export const neverReported = (row: Pick<ProgressRow, "last_report_state" | "state">) => row.last_report_state === null && ["idle", "blocked", "failed"].includes(row.state);
 
 /** What the review gate asks for next. First match wins (gateDecision). */
 export type GateDecision<Row> =
   | { kind: "start" }
   | { kind: "block"; refusal: string }
-  | { kind: "restart"; sides: ("reviewer" | "tester")[]; blocked: Row[] }
+  | { kind: "restart"; sides: "reviewer"[]; blocked: Row[] }
   | { kind: "wait"; who: Row[] }
-  | { kind: "fix"; redTests: boolean; codeFindings: number }
+  | { kind: "fix"; codeFindings: number }
   | { kind: "docsRepair"; writer: Row }
-  | { kind: "wrongTest"; fixer: Row }
   | { kind: "escalate"; why: string }
   | { kind: "pass" };
 
@@ -65,12 +60,9 @@ export function gateDecision<Row extends ProgressRow>(input: {
   const named = actor(gate.reviewer_thread_id);
   const advisoryOpen = !!gate.fixer_thread_id && !!input.settledReviewer && named?.thread_id !== input.settledReviewer.thread_id;
   const reviewer = advisoryOpen ? input.settledReviewer : named;
-  const tester = actor(gate.tester_thread_id);
-  const down = (side: Row | undefined) => !side || ["failed", "blocked", "archived", "deleted"].includes(side.state);
-  const sides = ([["reviewer", reviewer], ["tester", tester]] as const).filter(([, side]) => down(side));
-  if (sides.length) return { kind: "restart", sides: sides.map(([name]) => name), blocked: sides.flatMap(([, side]) => side?.state === "blocked" ? [side] : []) };
-  const busy = [reviewer!, tester!].filter((side) => !isReady(side) && side.state !== "complete");
-  if (busy.length) return { kind: "wait", who: busy };
+  // Legacy tester_thread_id and corrector_thread_id are never read: the reviewer alone holds the gate.
+  if (!reviewer || ["failed", "blocked", "archived", "deleted"].includes(reviewer.state)) return { kind: "restart", sides: ["reviewer"], blocked: reviewer?.state === "blocked" ? [reviewer] : [] };
+  if (!isReady(reviewer) && reviewer.state !== "complete") return { kind: "wait", who: [reviewer] };
   // Docs findings go only to a Spec Writer repair created after the verdict.
   const findings = (reviewer!.findings ? JSON.parse(reviewer!.findings) as ReportFinding[] : []).filter((entry) => entry.severity === "blocking");
   const docsFindings = findings.filter((entry) => entry.file.startsWith("docs/"));
@@ -86,29 +78,16 @@ export function gateDecision<Row extends ProgressRow>(input: {
   const docsSettled = !docsFindings.length || (!multiDocs && !!repairs.length && repairs.every(isSettled));
   const docsWait = !!docsFindings.length && !!repair && !isSettled(repair) && !input.terminal(repair.state);
   const done = (fixRow: Row) => isReady(fixRow) || fixRow.state === "complete";
-  const corrector = actor(gate.corrector_thread_id);
-  if (corrector && neverReported(corrector)) return { kind: "wrongTest", fixer: actor(gate.fixer_thread_id)! };
-  if (corrector) {
-    if (!done(corrector) && !["failed", "blocked"].includes(corrector.state)) return { kind: "wait", who: [corrector] };
-    if (done(corrector) && corrector.tests_passed === 1 && docsSettled) return { kind: "pass" };
-    if (docsWait) return { kind: "wait", who: [repair!] };
-    if (multiDocs && done(corrector) && corrector.tests_passed === 1) return multiEscalate;
-    return { kind: "escalate", why: `corrector ${corrector.thread_id} ended ${corrector.state}${corrector.tests_passed === 0 ? " with failing tests" : ""}` };
-  }
   // A fix run that stopped before it reported is absent: the gate asks for its fix run again.
   const fixer = [actor(gate.fixer_thread_id)].find((row) => row && !neverReported(row));
   if (fixer) {
-    if (fixer.state === "blocked") return wrongTestEvidence(fixer.blocker)
-      ? { kind: "wrongTest", fixer }
-      : { kind: "escalate", why: `fix run ${fixer.thread_id} is blocked without wrong-test evidence (a test file:line, the contradicted plan or docs text, the command output): answer its blocker with chief_continue (threadId: ${fixer.thread_id}), or escalate` };
+    if (fixer.state === "blocked") return { kind: "escalate", why: `fix run ${fixer.thread_id} is blocked: answer its blocker with chief_continue (threadId: ${fixer.thread_id}), or escalate` };
     if (fixer.state === "failed") return { kind: "escalate", why: `fix worker ${fixer.thread_id} failed: chief_continue (threadId: ${fixer.thread_id}) it, or escalate` };
     if (!done(fixer)) return { kind: "wait", who: [fixer] };
-    if (fixer.tests_passed === 1 && docsSettled) return { kind: "pass" };
-    if (docsWait) return { kind: "wait", who: [repair!] };
-    if (fixer.tests_passed !== 1) return { kind: "escalate", why: `fix worker ${fixer.thread_id} reported without passing tests` };
+    if (docsSettled) return { kind: "pass" };
   }
   const codeFindings = findings.length - docsFindings.length;
-  if (!fixer && (tester!.tests_passed !== 1 || codeFindings)) return { kind: "fix", redTests: tester!.tests_passed !== 1, codeFindings };
+  if (!fixer && codeFindings) return { kind: "fix", codeFindings };
   if (docsSettled) return { kind: "pass" };
   if (docsWait) return { kind: "wait", who: [repair!] };
   if (multiDocs) return multiEscalate;

@@ -211,7 +211,7 @@ export function checkPlan(plan: string | unknown[]): string[] {
       errors.push(`plan wave ${n} design is ${JSON.stringify(wave.design)} (${typeof wave.design}); allowed true or false. Send a boolean, or drop design.`);
     }
     designs.push(wave.design === true);
-    if ("test" in wave) errors.push(`plan wave ${n}: test waves are gone; the tester runs once in the review gate after every wave. Drop test.`);
+    if ("test" in wave) errors.push(`plan wave ${n}: test waves are gone; a wave carries its own tests and Verify command. Drop test.`);
     if (wave.spec !== undefined && typeof wave.spec !== "boolean") {
       errors.push(`plan wave ${n} spec is ${JSON.stringify(wave.spec)} (${typeof wave.spec}); allowed true or false. Send a boolean, or drop spec.`);
     } else if (wave.spec === true && wave.design === true) {
@@ -461,14 +461,6 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       try { reportFindings = JSON.parse(reportFindings); } catch { /* checkReport refuses the string */ }
     }
     const errors = checkReport(candidate, { ...params, fails: reportFails, findings: reportFindings }, plan);
-    // testsPassed belongs to the review gate's tester, corrector and every fix run; a fix run's ready report must carry true.
-    const gate = found.row ? store.gateFor(threadId) : undefined;
-    const fixRun = !!found.row?.fix_run;
-    const runsTests = fixRun || gate?.tester_thread_id === threadId || gate?.corrector_thread_id === threadId;
-    if (params.testsPassed !== undefined && !runsTests) errors.push("testsPassed is only for the review gate's tester, its corrector and a fix run; remove it.");
-    else if (params.testsPassed !== undefined && params.state !== "ready") errors.push(`testsPassed is only for a ready report (state is ${params.state}); remove it.`);
-    else if (runsTests && params.state === "ready" && params.testsPassed === undefined) errors.push("testsPassed is missing: send true when every test you ran passed on every branch head you pushed, false otherwise (list them under ## Failing tests).");
-    else if (fixRun && params.state === "ready" && params.testsPassed === false) errors.push("A fix run reports ready only with testsPassed: true. Keep fixing the product code until every failing test passes, or report blocked only with wrong-test evidence (test file:line, the plan or docs text it contradicts, command output).");
     if (errors.length) throw new Error(`chief_report was not saved; fix all of these and call it once more:\n${errors.map((line) => `- ${line}`).join("\n")}`);
     // The launch row may have landed while the lookup awaited; keep it, as a recovery candidate has no PR or branch.
     if (found.pending && !store.get(threadId)) store.insert(found.pending);
@@ -539,7 +531,6 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
         recommendation: params.recommendation ?? null, verdict,
         planWaves: scheduledWaves ? JSON.stringify(scheduledWaves) : null, regression: regressionFlag ? 1 : 0, fails,
         findings: row.role === "reviewer" && findingList ? JSON.stringify(findingList) : null,
-        testsPassed: params.testsPassed === undefined ? null : params.testsPassed ? 1 : 0,
         waitingOnUser: params.waitingOnUser ? 1 : 0, now,
       });
       if (row.role === "advisor" && (params.state === "ready" || params.state === "blocked")) {

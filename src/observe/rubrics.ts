@@ -12,8 +12,8 @@ export const NOT_APPLICABLE = "not_applicable";
 export interface RubricLabel { value: string; description: string; score: number | null }
 export interface Rubric {
   name: string;
-  /** all: every judged thread. tester: Tester workers only. handoff: one score per Chief↔child handoff, stored on the child. */
-  applies: "all" | "tester" | "handoff";
+  /** all: every judged thread. handoff: one score per Chief↔child handoff, stored on the child. */
+  applies: "all" | "handoff";
   weight: number;
   labels: RubricLabel[];
   assess: string[];
@@ -75,23 +75,6 @@ export const RUBRICS: Rubric[] = [
     reason: REASON,
   },
   {
-    name: "test-redundancy", applies: "tester", weight: 0.15,
-    labels: [
-      { value: "lean", description: "each test proves one contract; no duplicate coverage", score: 1 },
-      { value: "some_redundancy", description: "a few tests overlap or a heavier test was used where a lighter one proves the same thing", score: 0.6 },
-      { value: "redundant", description: "much duplicate coverage, or tests that only work around a problem", score: 0.2 },
-      ...extra("test redundancy"),
-    ],
-    assess: [
-      "Duplicate coverage: two tests that fail for the same reason.",
-      "An end-to-end test where a unit test proves the contract.",
-      "Several tests for one property.",
-      "A full-suite rerun where a filtered run would do.",
-      "Workaround-only tests: they pass by avoiding the behaviour instead of exercising it.",
-    ],
-    reason: REASON,
-  },
-  {
     name: "communication", applies: "handoff", weight: 0.25,
     labels: [
       { value: "clear", description: "the brief and alerts carried what the child needed; no avoidable block, question or round", score: 1 },
@@ -116,9 +99,9 @@ export const RUBRICS: Rubric[] = [
 
 export const rubricByName = (name: string) => RUBRICS.find((rubric) => rubric.name === name);
 
-/** The rubrics that score one judged thread (not the handoff one). A tester worker adds test-redundancy. */
+/** The rubrics that score one judged thread (not the handoff one). */
 export const applicableRubrics = (kind: string | null | undefined) =>
-  RUBRICS.filter((rubric) => rubric.applies === "all" || (rubric.applies === "tester" && kind === "tester")).map((rubric) => rubric.name);
+  RUBRICS.filter((rubric) => rubric.applies === "all").map((rubric) => rubric.name);
 
 /** The rubric in skill-doctor's format: a YAML labels block, the Assess bullets and the Reason rule. */
 export function renderRubric(rubric: Rubric): string {
@@ -176,7 +159,7 @@ export function aggregate(scores: readonly ScoreInput[], applicable?: readonly s
 /** Every surface a lesson may name: Chief's instructions (`chief`), every managed role's instructions (`role-instructions`), the prompt and brief surfaces, plugin code and other. */
 export const SURFACES = [
   "chief", "role-instructions",
-  "planner-prompt", "worker-brief", "reviewer-brief", "tester-brief", "chief-delegate-brief", "chief-plan-mission", "chief-alert-text", "chief-nudge", "chief-tell",
+  "planner-prompt", "worker-brief", "reviewer-brief", "chief-delegate-brief", "chief-plan-mission", "chief-alert-text", "chief-nudge", "chief-tell",
   "report-contract", "plugin-code", "other",
 ] as const;
 

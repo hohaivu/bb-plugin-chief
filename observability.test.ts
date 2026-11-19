@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./test/sdk";
 import { CLOSE_OUT, PLAN_FIXTURE, REQUEST_CHANGES, APPROVE, completeWorker, delegate, disposeAll, execFileMock, setup, start, status, wave } from "./test/harness";
-import { plan, report, tool, type State } from "./test/testerHelpers";
+import { plan, report, tool, type State } from "./test/flowHelpers";
 import { forgeAnswers, forged, startGate } from "./test/gateForge";
 import { skipSpecs, specPlan } from "./test/specWriterHelpers";
 import { createToolRegistry } from "./src/tools/register";

@@ -6,21 +6,18 @@ import type { Ctx } from "./context";
 import { isWriter } from "../plan/waveSchedule";
 
 export function createRoster(ctx: Ctx) {
-  const { bb, db, ledger, onSpecChain, planWavesFor, progress, sideLane, store, todosForProject } = ctx;
+  const { bb, db, ledger, planWavesFor, progress, sideLane, store, todosForProject } = ctx;
   function rosterFor(projectId: string, includeComplete = false) {
     return store.all().filter((row) => row.project_id === projectId && (includeComplete || row.state !== "complete"));
   }
 
-  /** A hand-off from a tester must name its kind (see explicitKind in startWorker). */
+  /** A hand-off from a Spec Writer must name its kind (see explicitKind in startWorker). */
   function replacesCall(row: ManagedRow): string {
     if (isWriter(row.kind)) {
       if (sideLane(row)) return `chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
       return `chief_delegate (replaces: ${row.thread_id}, kind: worker) once it reported ready, or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
     }
-    if (row.kind === "tester" && onSpecChain(row)) return `chief_delegate (replaces: ${row.thread_id}, kind: worker) for a product-code fix, chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test fix or chief_delegate (replaces: ${row.thread_id}, kind: spec-writer) for a docs fix`;
-    return row.kind === "tester"
-      ? `chief_delegate (replaces: ${row.thread_id}, kind: worker) for a product-code fix or chief_delegate (replaces: ${row.thread_id}, kind: tester) for a test fix`
-      : `chief_delegate (replaces: ${row.thread_id})`;
+    return `chief_delegate (replaces: ${row.thread_id})`;
   }
 
   /** Said the same way in chief_stop's reply and both stall alerts. */

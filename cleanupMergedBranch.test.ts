@@ -1,7 +1,7 @@
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
-import { type State, readyIdle, report, rowOf, tool } from "./test/testerHelpers";
+import { type State, readyIdle, report, rowOf, tool } from "./test/flowHelpers";
 import { APPROVE, disposeAll, execFileMock, setup, start } from "./test/harness";
 import { gitFixture } from "./test/gitFixture";
 import { provideSdk } from "./test/sdk";

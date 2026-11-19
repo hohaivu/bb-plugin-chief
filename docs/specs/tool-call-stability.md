@@ -43,9 +43,11 @@ Managed roles get this order: identity, compaction line, tool line, role rules, 
 
 A non-Coordinator Chief gets this order: identity, tool-schema line, roster, wait, planner, research, `# Chief core rules`, `# Chief procedure`, project rules, Chief lessons. `CHIEF_PROCEDURE` in `src/core/roleRules.ts` holds the procedure. The cut drops lessons and the `chief.md` tail first. Core rules and procedure always arrive. Reason: the Chief skill reached Chief in 2 of 414 sessions.
 
-### Evidence-only Tester
+### Spawn metadata
 
-`managed_threads.evidence_only` (`src/db/migrations.ts`) marks an evidence-only tester. The spawn seeds it as `pluginMetadata.evidenceOnly` (`src/research/managedSpawn.ts`, `spawnMetadataSchema` in `src/tools/shapes.ts`). Reason: `bb.agents.configure` may run before the row insert, so it reads the seed. An evidence-only tester gets no test-writing rules.
+`spawnMetadataSchema` in `src/tools/shapes.ts` parses the seed that `src/research/managedSpawn.ts` writes as `pluginMetadata`. Its `kind` accepts any string. Reason: `bb.agents.configure` may run before the row insert, so it reads the seed, and a stored `kind: "tester"` must still parse. `configure` gives such a row the worker rules.
+
+`managed_threads.evidence_only` (`src/db/migrations.ts`) is a legacy column. No code writes or reads it. No `evidenceOnly` input or `--evidence-only` flag exists.
 
 ### Brief Title Defaulting Flow
 

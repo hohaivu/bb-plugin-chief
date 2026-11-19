@@ -12,7 +12,7 @@ import { execFileMock } from "./execMock";
 export { execFileMock };
 
 // Every skill dir the plugin ships: managedSkills (roles.ts) selects from these, and the fake host throws on an unknown id.
-export const AGENT_SKILL_IDS = ["chief", "coordinator", "chief-worker", "chief-role-read-only", "chief-role-worker", "chief-role-reviewer", "chief-role-designer", "chief-role-tester", "chief-role-spec-writer"];
+export const AGENT_SKILL_IDS = ["chief", "coordinator", "chief-worker", "chief-role-read-only", "chief-role-worker", "chief-role-reviewer", "chief-role-designer", "chief-role-spec-writer"];
 
 // gh pr view --json headRefName,headRefOid,baseRefName: the pull request's head branch, pinned commit and base.
 export const HEAD_SHA = "a".repeat(40);
@@ -440,17 +440,17 @@ export async function legacyWave(state: Awaited<ReturnType<typeof setup>>, chief
 // chief_review answers `Started|Using existing “<title>” in thread <id>.` for a branch review; the retired `bb chief review` CLI answered JSON with these fields.
 export async function chiefReview(state: Awaited<ReturnType<typeof setup>>, chiefThreadId: string, params: { workerThreadId?: string; branch?: string; pullRequest?: string }) {
   const text = await state.harness.behavior.callAgentTool("chief_review", params, { threadId: chiefThreadId, projectId: "proj_1" }) as string;
-  // A worker's gate answers `Review gate <key> pinned ... Started reviewer <id> and tester <id>.` or `The review gate <key> already runs reviewer <id> and tester <id>; nothing started.`
-  // threadId is the gate's reviewer, testerThreadId its tester (null for a branch review); created is true when a reviewer was started.
-  const gate = /(?:Started reviewer (\S+?)(?: and tester (\S+?))?\.|already runs reviewer (\S+) and tester (\S+?);|Started tester (\S+?)\.)/.exec(text);
+  // A worker's gate answers `Review gate <key> pinned ... Started reviewer <id>.` or `The review gate <key> already runs reviewer <id>; nothing started.`
+  // threadId is the gate's reviewer; created is true when a reviewer was started.
+  const gate = /(?:Started reviewer (\S+?)\.|already runs reviewer (\S+?);)/.exec(text);
   if (gate) {
-    const reviewer = gate[1] ?? gate[3];
-    const threadId = reviewer ?? (state.db.prepare("SELECT reviewer_thread_id FROM review_gates WHERE chief_thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(chiefThreadId) as { reviewer_thread_id: string }).reviewer_thread_id;
+    const threadId = (gate[1] ?? gate[2])!;
     const title = (state.db.prepare("SELECT title FROM managed_threads WHERE thread_id=?").get(threadId) as { title: string }).title;
-    return { text, title, threadId, testerThreadId: gate[2] ?? gate[4] ?? gate[5] ?? null, created: gate[1] != null };
+    return { text, title, threadId, created: gate[1] != null };
   }
-  const [, title, threadId] = /^(?:Started|Using existing) “(.*)” in thread (\S+?)\./.exec(text)!;
-  return { text, title: title!, threadId: threadId!, testerThreadId: null as string | null, created: text.startsWith("Started") };
+  const match = /^(?:Started|Using existing) “(.*)” in thread (\S+?)\./.exec(text);
+  if (!match) throw new Error(`chief_review answered: ${text}`);
+  return { text, title: match[1]!, threadId: match[2]!, created: text.startsWith("Started") };
 }
 
 // A reviewer's ready report must carry findings: [] for an approve and a blocking entry for request_changes.
@@ -465,7 +465,7 @@ export const reviewContextOf = async (state: { spawned: { prompt?: string }[] },
 export const latestReviewContext = async (state: Awaited<ReturnType<typeof setup>>) =>
   reviewContextOf(state, (await status(state)).threads.filter((row) => row.role === "reviewer").at(-1)!.threadId);
 /** The Pending line a ready worker shows until Chief opens its review gate; the roster and the lifecycle alert carry it word for word. */
-export const readyAction = (id: string) => `Start the review gate: chief_review (workerThreadId: ${id}). It starts one reviewer and one tester in parallel.`;
+export const readyAction = (id: string) => `Start the review gate: chief_review (workerThreadId: ${id}). It starts one reviewer.`;
 export const APPROVE = { verdict: "approve", findings: [] } as const;
 export const REQUEST_CHANGES = { verdict: "request_changes", findings: [{ file: "totals.ts", line: 1, severity: "blocking", message: "Totals go negative." }] } as const;
 

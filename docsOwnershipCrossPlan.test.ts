@@ -3,7 +3,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { disposeAll } from "./test/harness";
 import { provideSdk } from "./test/sdk";
 import { type World, git, world } from "./test/docsGateWorld";
-import { delegateWave, openGate, plan, readyIdle, refusal, rowOf, tool, workerOn } from "./test/testerHelpers";
+import { delegateWave, openGate, plan, readyIdle, refusal, rowOf, tool, workerOn } from "./test/flowHelpers";
 import { putWriter, specImpl, writerOn } from "./test/specWriterHelpers";
 
 provideSdk(sdkTesting);

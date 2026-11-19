@@ -3,7 +3,7 @@ import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { configurationContext, delegate, disposeAll, setup, start, status } from "./test/harness";
 import { provideSdk } from "./test/sdk";
 import { forgeAnswers, forged } from "./test/gateForge";
-import { plan, planWave } from "./test/testerHelpers";
+import { plan, planWave } from "./test/flowHelpers";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./test/execMock")).childProcessMock());

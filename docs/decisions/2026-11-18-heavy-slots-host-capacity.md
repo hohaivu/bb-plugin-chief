@@ -2,7 +2,7 @@
 
 ## Context
 
-Several Chief workers and testers can run builds and test suites on one computer at once. Each run can use all cores and much memory. A slot count baked into a brief goes stale when the user lowers the `heavySlots` setting. A hook could enforce the wrapper, but the plugin does not own the agent's shell.
+Several Chief workers can run builds and test suites on one computer at once. Each run can use all cores and much memory. A slot count baked into a brief goes stale when the user lowers the `heavySlots` setting. A hook could enforce the wrapper, but the plugin does not own the agent's shell.
 
 ## Decision
 

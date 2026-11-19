@@ -81,12 +81,11 @@ describe("Chief backend", () => {
     await expect(state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts))
       .rejects.toThrow(/Provider codex model gpt-6-astra hit its usage limit/);
     await expect(state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts)).rejects.toThrow(ISO);
-    expect(state.spawned).toHaveLength(spawnedBefore + 1);
-    expect(state.spawned.slice(spawnedBefore).some((spawn) => spawn.pluginMetadata?.role === "reviewer")).toBe(false);
-    // The tester starts independently; once the cooldown expires, the one gate starts its reviewer and its tester.
+    expect(state.spawned).toHaveLength(spawnedBefore);
+    // Once the cooldown expires, the gate starts its reviewer.
     state.db.prepare("UPDATE provider_cooldowns SET until_at=0").run();
     await state.harness.behavior.callAgentTool("chief_review", { workerThreadId: worker.threadId }, opts);
-    expect(state.spawned).toHaveLength(spawnedBefore + 2);
+    expect(state.spawned.slice(spawnedBefore).map((spawn) => spawn.pluginMetadata?.role)).toEqual(["reviewer"]);
   });
 
   test("cooldown: a model limit blocks delegate, plan, consult and branch review on that model until it expires", async () => {

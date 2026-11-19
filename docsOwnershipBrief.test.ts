@@ -14,7 +14,7 @@ describe("docs ownership in the worker brief", () => {
     ["planned, no spec delta (or a waived one)", planned],
     ["planned spec wave", { ...planned, specWave: true, specDocs: [] }],
   ];
-  describe.each(["worker", "designer", "tester"] as const)("%s", (kind) => {
+  describe.each(["worker", "designer"] as const)("%s", (kind) => {
     test.each(worlds)("%s: does not render an Adopted docs commits section", (_label, extra) => {
       const { prompt } = workerBrief(base(kind, extra));
       expect(prompt).not.toMatch(/^## Adopted docs commits$/m);

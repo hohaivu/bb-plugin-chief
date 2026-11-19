@@ -87,12 +87,11 @@ describe("tracker integration", () => {
     expect(result.exitCode, result.stderr).toBe(0);
     return (JSON.parse(result.stdout!) as { threadId: string }).threadId;
   }
-  /** Ready report, then a passed gate (an approving reviewer and a green tester), then Chief completes the worker. The worker needs a branch and pull request to be pinned. */
+  /** Ready report, then a passed gate (an approving reviewer), then Chief completes the worker. The worker needs a branch and pull request to be pinned. */
   async function approveAndComplete(state: State, chief: string, worker: string) {
     await call(state, "chief_report", { state: "ready", result: `Done${NO_DEVIATIONS}` }, worker);
     const review = await chiefReview(state, chief, { workerThreadId: worker });
     await call(state, "chief_report", { state: "ready", result: "Checked", ...APPROVE }, review.threadId);
-    await call(state, "chief_report", { state: "ready", result: `Tests pass${NO_DEVIATIONS}`, testsPassed: true }, review.testerThreadId!);
     await call(state, "chief_complete", { threadId: worker }, chief);
   }
   const decisionBody = (n: number, request: string) =>
