@@ -68,4 +68,22 @@ describe("prMerged", () => {
     forges(replies);
     expect(await prMerged("#12", null)).toBeNull();
   });
+
+  test("an aborted signal starts no CLI at all, and one that aborts after the first lookup starts no fallback", async () => {
+    forges({ gh: { state: "MERGED", headRefOid: SHA } });
+    const stopped = new AbortController();
+    stopped.abort();
+    expect(await prMerged(GITHUB_PR, "/repo", stopped.signal)).toBeNull();
+    expect(await prMerged("#12", null, stopped.signal)).toBeNull();
+    expect(execFileMock).not.toHaveBeenCalled();
+
+    const late = new AbortController();
+    execFileMock.mockImplementation(async (file: string) => {
+      if (file === "gh") { late.abort(); throw new Error("gh failed"); }
+      return { stdout: JSON.stringify({ state: "merged", sha: SHA }), stderr: "" };
+    });
+    expect(await prMerged("#12", null, late.signal)).toBeNull();
+    expect(calls("gh")).toHaveLength(1);
+    expect(calls("glab")).toHaveLength(0);
+  });
 });

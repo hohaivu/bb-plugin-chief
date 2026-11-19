@@ -32,6 +32,8 @@ async function abandon(state: Awaited<ReturnType<typeof setup>>, hit: Promise<vo
   await service.done;
 }
 
+const absorbedResearcher = (db: any, id: string) => db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, created_at, updated_at) VALUES (?, 'researcher', 'proj_1', ?, 'ready', 'idle', 1, 1)").run(id, id);
+
 describe("an abandoned supervisor tick", () => {
   test("bounded never starts its call under an already aborted signal", async () => {
     const call = vi.fn(async () => 1);
@@ -216,7 +218,6 @@ describe("an abandoned supervisor tick", () => {
     expect(reads).toEqual(["thr_r1", "thr_r1"]);
   }, STOP_GRACE_MS + 5_000);
 
-  const absorbedResearcher = (db: any, id: string) => db.prepare("INSERT INTO managed_threads (thread_id, role, project_id, title, state, status, created_at, updated_at) VALUES (?, 'researcher', 'proj_1', ?, 'ready', 'idle', 1, 1)").run(id, id);
   const researcherStates = (state: Awaited<ReturnType<typeof setup>>) => state.db.prepare("SELECT thread_id, state FROM managed_threads WHERE role='researcher' ORDER BY thread_id").all();
 
   test("a sweep started by the tick's own reconcile write reads and completes nothing after abandonment", async () => {
@@ -518,4 +519,65 @@ describe("an abandoned supervisor tick's Chief spawn", () => {
     expect(pendingMarkers(state)).toEqual([]);
     for (const [chief, worker] of workers) expect(row(state, worker).chief_thread_id).toBe(chief);
   });
+});
+
+describe("an abandoned supervisor tick's host and notice lookups", () => {
+  test("starts no host lookup or spawn when the project read inside projectHostId returns after abandonment", async () => {
+    const state = await setup();
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1" });
+    await state.harness.behavior.setSettings({ chiefProject: "proj_1", autoSpawn: true });
+    const reading = parked();
+    let projectGets = 0;
+    let hostLists = 0;
+    // spawnChief reads the project twice: projectName first, then projectHostId (the second read), whose answer carries no source, so it would fall back to hosts.list.
+    state.harness.sdk.stub("projects.get", async ({ projectId }: { projectId: string }) => {
+      if (++projectGets === 2) await reading.hold();
+      return { id: projectId, name: "Project" };
+    });
+    state.harness.sdk.stub("hosts.list", async () => { hostLists += 1; return []; });
+    await abandon(state, reading.hit);
+    reading.release();
+    await pause();
+    expect(hostLists).toBe(0);
+    expect(state.spawned).toHaveLength(0);
+    expect(state.db.prepare("SELECT COUNT(*) AS n FROM managed_threads WHERE role='chief'").get()).toEqual({ n: 0 });
+
+    // A caller without a stop signal keeps the default-host fallback.
+    await state.supervisorCycle();
+    expect(hostLists).toBeGreaterThan(0);
+    expect(state.spawned).toHaveLength(1);
+  }, STOP_GRACE_MS + 5_000);
+
+  test("a Coordinator-gone notice is neither created nor sent by a sweep pass the abandoned tick owned, and is sent by the next live tick", async () => {
+    const first = parked();
+    const state = await setup({ seed: ({ db }) => absorbedResearcher(db, "thr_t") });
+    const base = state.live.values().next().value;
+    const coord = await makeCoordinator(state);
+    const child = await spawnChild(state, coord);
+    await archive(state, coord);
+    const key = `${child}:coordinator-gone:${coord}`;
+    const notices = () => state.sent.filter((sent) => sent.threadId === child && String(sent.input[0].text).includes("chief_attach"));
+    expect(notices()).toHaveLength(1);
+    // Forget the notice the archive sent, so only a sweep pass can send it again.
+    state.db.prepare("DELETE FROM alert_outbox WHERE dedupe_key=?").run(key);
+    state.sent.length = 0;
+    let tReads = 0;
+    // As in the reconcile-write test: live thr_t reports another parent, the write's reload starts the tick's sweep, and that sweep's first read is parked.
+    state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => {
+      if (threadId !== "thr_t") return state.live.get(threadId);
+      if (++tReads === 2) await first.hold();
+      return { ...base, id: threadId, status: "idle", archivedAt: null, deletedAt: null, parentThreadId: "thr_other_parent" };
+    });
+    await abandon(state, first.hit);
+    first.release();
+    await pause(100);
+    expect(notices()).toEqual([]);
+    expect(state.db.prepare("SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key=?").get(key)).toEqual({ n: 0 });
+
+    state.harness.sdk.stub("threads.get", async ({ threadId }: { threadId: string }) => state.live.get(threadId) ?? { ...base, id: threadId, status: "idle", archivedAt: null, deletedAt: null });
+    await state.supervisorCycle();
+    await pause(100);
+    expect(notices()).toHaveLength(1);
+    expect(state.db.prepare("SELECT attempts, delivered_at IS NOT NULL AS delivered FROM alert_outbox WHERE dedupe_key=?").get(key)).toEqual({ attempts: 1, delivered: 1 });
+  }, STOP_GRACE_MS + 5_000);
 });
