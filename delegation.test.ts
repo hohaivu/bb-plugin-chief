@@ -31,9 +31,8 @@ describe("Chief backend", () => {
 
     expect(state.spawned[0]).toMatchObject({ providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" });
     expect(state.spawned[1]).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
-    // The reviewer has no selection of its own and stays on the BB default; the tester is a worker and takes the worker's pick.
+    // The reviewer has no selection of its own and stays on the BB default.
     expect(state.spawned.find((spawn) => spawn.pluginMetadata?.role === "reviewer")).not.toHaveProperty("providerId");
-    expect(state.spawned.slice(2).find((spawn) => spawn.pluginMetadata?.role === "worker")).toMatchObject({ providerId: "codex", model: "gpt-6-astra", reasoningLevel: "high" });
   });
 
   test("falls back to the BB default when a picked model left the machine's catalog", async () => {
@@ -82,7 +81,6 @@ describe("Chief backend", () => {
         advisor: null,
         designer: null,
         "spec-writer": null,
-        tester: null,
         researcher: null,
       },
       unusable: [],
@@ -886,7 +884,7 @@ describe("Chief backend", () => {
 });
 
 // Contracts (docs/specs/plan-chains.md "Heavy Command Slots"): startWorker publishes the wrapper before it launches a worker, designer or
-// tester and the brief names it; no Spec Writer gets one; a failure of the preparation (publish or settings read) logs a warning and never fails the delegation.
+// designer and the brief names it; no Spec Writer gets one; a failure of the preparation (publish or settings read) logs a warning and never fails the delegation.
 describe("heavy-command slots in delegation", () => {
   const HEAVY_SECTION = "## Heavy commands";
   const heavyDir = (state: { storageRoot: string }) => join(state.storageRoot, "chief", "heavy");
