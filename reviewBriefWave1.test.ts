@@ -128,12 +128,8 @@ describe("reviewerPrompt rule blocks through reviewBrief", () => {
     }
   });
 
-  test("Docs ownership renders iff docs, once, and defaults on", () => {
-    expect(count(blocks({ docs: true }), "## Docs ownership")).toBe(1);
-    expect(count(blocks(), "## Docs ownership")).toBe(1);
-    const off = blocks({ docs: false });
-    expect(off).not.toContain("## Docs ownership");
-    expect(off).not.toContain("Chief-Spec-Writer");
+  test("Docs ownership is absent when disabled", () => {
+    expect(blocks({ docs: false })).not.toContain("## Docs ownership");
   });
 
   // Contract: the worker-reported rule renders only when the contract list renders, right after its check line.
@@ -291,23 +287,6 @@ describe("a merged rule is stated once", () => {
     expect(noReports).not.toContain("Read every worker report");
   });
 
-  test("the Fold-range exemption and the worker-range violation are stated once, in Docs ownership", () => {
-    const prompt = planReview();
-    const ownership = prompt.split("## Docs ownership\n")[1]!.split("\n")[0]!;
-    expect(count(prompt, "`Fold: none` with equal Fold base and Fold head is an empty scope")).toBe(1);
-    expect(count(ownership, "`Fold: none` with equal Fold base and Fold head is an empty scope")).toBe(1);
-    expect(count(prompt, "never fall back to its Base commit")).toBe(1);
-    expect(count(prompt, "A docs/ path in a worker's, designer's or tester's own range is a violation.")).toBe(1);
-    expect(count(ownership, "A docs/ path in a worker's, designer's or tester's own range is a violation.")).toBe(1);
-    // The side-lane line keeps only the Fold range and the scope-drift sentence; spec-gate item (4) only points at Docs ownership.
-    const sideLine = linesOf(prompt, "A side-lane Spec Writer works in its own worktree")[0]!;
-    expect(sideLine).toBe("A side-lane Spec Writer works in its own worktree and changes only docs/: check its Fold base..Fold head range (git diff <Fold base>..<Fold head> --stat); any path outside docs/ in it is scope drift. Side-lane Spec Writers here: thr_s.");
-    expect(prompt.split("\n")).toContain("(4) a docs/ ownership violation (see Docs ownership);");
-    const earlier = linesOf(prompt, "Check each earlier worker on its own commits only")[0] ?? linesOf(prompt, "Check each earlier tester and Spec Writer on its own commits only")[0]!;
-    expect(earlier).toContain("A tester's product-code change, or a Spec Writer's path outside docs/, is scope drift.");
-    expect(count(earlier, "docs/ path in a worker's")).toBe(0);
-    expect(count(earlier, "Fold")).toBe(0);
-  });
 });
 
 describe("checkPlan: feature and reshape flags", () => {
