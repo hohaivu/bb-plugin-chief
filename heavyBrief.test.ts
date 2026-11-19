@@ -8,7 +8,7 @@ import { type WorkerBriefInput, workerBrief } from "./src/research/delegationBri
 import { briefMatrix } from "./test/briefMatrix";
 
 const PATH = "/data/chief/heavy/chief-heavy-0123456789ab.sh";
-const cells = briefMatrix().flatMap(([label, input]): [string, WorkerBriefInput][] => [[label, input], ...(input.kind === "tester" ? [[`${label} evidenceOnly`, { ...input, evidenceOnly: true }] as [string, WorkerBriefInput]] : [])]);
+const cells = briefMatrix();
 const writers = cells.filter(([, input]) => input.kind === "spec-writer");
 const others = cells.filter(([, input]) => input.kind !== "spec-writer");
 const section = (text: string, heading: string) => text.split(`\n## ${heading}\n`)[1]?.split("\n## ")[0];
@@ -24,8 +24,8 @@ describe("wrapper path in briefs", () => {
     }
   });
 
-  test("a worker, designer, tester and evidence-only tester brief gets `## Heavy commands` naming the wrapper path, in every cell", () => {
-    expect(others).toHaveLength(256);
+  test("a worker and designer brief gets `## Heavy commands` naming the wrapper path, in every cell", () => {
+    expect(others).toHaveLength(128);
     for (const [label, input] of others) {
       const heavy = section(workerBrief({ ...input, heavyPath: PATH }).prompt, "Heavy commands");
       expect(heavy, label).toBeDefined();
@@ -34,7 +34,7 @@ describe("wrapper path in briefs", () => {
   });
 
   test("the raw Verify fence is unchanged and a second fence wraps the exact command with the literal <pool>", () => {
-    const withVerify = others.filter(([label, input]) => input.verifyCommand !== null && !label.endsWith("evidenceOnly"));
+    const withVerify = others.filter(([, input]) => input.verifyCommand !== null);
     expect(withVerify.length).toBeGreaterThan(0);
     for (const [label, input] of withVerify) {
       const before = section(workerBrief(input).prompt, "Verify command")!;
@@ -42,14 +42,6 @@ describe("wrapper path in briefs", () => {
       expect(after.startsWith(before), label).toBe(true);
       expect(after.slice(before.length), label).toContain(`bash '${PATH}' <pool> -- sh -c 'npm test'`);
     }
-  });
-
-  test("an evidence-only tester has the section but no Verify block, so no wrapper fence", () => {
-    const [, input] = others.find(([label]) => label.endsWith("evidenceOnly") && label.includes("verify=npm test"))!;
-    const prompt = workerBrief({ ...input, heavyPath: PATH }).prompt;
-    expect(prompt).toContain("## Heavy commands");
-    expect(prompt).not.toContain("## Verify command");
-    expect(prompt).not.toContain("<pool>");
   });
 
   test("a simulator verify command renders the same <pool> fence, with sim named as a pool choice and never substituted", () => {

@@ -35,8 +35,7 @@ describe("aggregate", () => {
     expect(aggregate([{ scorer: "efficiency", score: 0.2 }], ["efficiency", "verbosity"]).status).toBe("fail");
   });
 
-  test("only a Tester worker is judged on test-redundancy", () => {
-    expect(applicableRubrics("tester")).toContain("test-redundancy");
+  test("no worker kind is judged on test-redundancy", () => {
     expect(applicableRubrics(null)).not.toContain("test-redundancy");
     expect(applicableRubrics("worker")).not.toContain("communication");
   });
@@ -81,7 +80,7 @@ describe("evaluate", () => {
       { scorer: "procedure-compliance", label: "fully_compliant", reason: "   ", evidence: [] },
       { scorer: "verbosity", label: "proportionate", reason: "ok", evidence: [] },
       { scorer: "verbosity", label: "verbose", reason: "again", evidence: [] },
-      { scorer: "test-redundancy", label: "lean", reason: "not a tester", evidence: [] },
+      { scorer: "test-redundancy", label: "lean", reason: "retired scorer", evidence: [] },
     ];
     const result = evaluate(judged({ scores: given }), manifest());
     const lines = Object.fromEntries(result.threads[0]!.lines.map((line) => [line.scorer, line.label]));
