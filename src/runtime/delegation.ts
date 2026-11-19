@@ -397,8 +397,8 @@ export function createDelegation(ctx: Ctx) {
           : `Stopping that thread FAILED (${clip(stopFailure, 200)}): it may still be running without the work list, and it still holds the branch, so a retry is refused until you stop and archive it`}; ${prior ? `${prior.thread_id} stays the owner of the docs work` : "nothing else changed"}. Repeat this chief_delegate call${stopFailure === undefined ? "" : " after that"}.`);
       }
     }
-    // A gate fix run's target stays live: it completes with the gate.
-    if (prior && fix?.run !== "gate") store.completeSuperseded(prior.thread_id, Date.now());
+    // A gate's first target stays live: it completes with the gate. A replaced gate fix run is superseded like any other.
+    if (prior && !(fix?.run === "gate" && fix.gate.targets.some((target) => target.threadId === prior.thread_id))) store.completeSuperseded(prior.thread_id, Date.now());
     void (!prior && !planThreadId ? ctx.trackerSync.start(store.get(thread.id)!, params.mission) : ctx.trackerSync.join(store.get(thread.id)!));
     return { threadId: thread.id, title: params.title, projectId };
   }
