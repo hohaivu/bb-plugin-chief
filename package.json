@@ -28,10 +28,7 @@
       "icon": "Crown"
     },
     "server": "./server.ts",
-    "app": "./app.tsx",
-    "skills": [
-      "skills"
-    ]
+    "app": "./app.tsx"
   },
   "dependencies": {
     "zod": "^4.3.6"

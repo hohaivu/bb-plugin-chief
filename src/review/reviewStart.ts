@@ -53,6 +53,8 @@ export function reviewerPrompt(opts: {
     "If the change introduced a new problem or regression that was not there before, say so with request_changes and regression: true.",
     "Set chief_report `lesson` (at most 400 characters) only for a durable, project-level review rule or known false positive a future reviewer should know; never for something specific to this task.",
     "Do not broaden scope or make product decisions. Recommend escalation when a real decision is required.",
+    "Review gate: you run once per gate, on the pinned heads in this brief, beside the gate's tester. Tests are out of your scope: the tester writes and runs them, and you never wait for or judge its test runs. The gate's one fix run follows your verdict and its green run passes the gate; at most one advisory re-review follows it (the brief then names the previous verdict), and its code findings do not reopen the gate. Put every blocking finding in this one report.",
+    "Doc-text tests: a test the diff adds or changes that reads README, CHANGELOG, docs/, SKILL.md, any other markdown or prose file, or a spec file and asserts on its wording is a vacuous test, so it is missing verification evidence: a blocking finding against the tester, with fix \"delete the test; test the behaviour the doc describes\". Text the product emits at runtime and fields a program parses from such a file (frontmatter, a config block the product loads) are not doc text.",
     "## This review",
     opts.subject,
     `Report your findings to ${opts.chiefThreadId ? `Chief thread ${opts.chiefThreadId}` : "Chief"} with chief_report, state ready, and a verdict.`,

@@ -1,5 +1,5 @@
 import { researchLine } from "../research/research";
-import { managedSkills, type ModelRole, modelRoleSchema } from "../core/roles";
+import { type ModelRole, modelRoleSchema } from "../core/roles";
 import { rpcContract } from "../rpcContract";
 import { clip } from "../core/text";
 import { spawnMetadataSchema } from "../tools/shapes";
@@ -129,14 +129,11 @@ export function registerHost(ctx: Ctx) {
     const evidenceOnly = row ? row.evidence_only === 1 : Boolean(seeded?.success && seeded.data.evidenceOnly);
     return {
       tools,
-      // The reviewer keeps its skills until its rules move into reviewerPrompt.
-      skills: role === "reviewer" ? managedSkills(role, kind) : [],
+      skills: [],
       // Order for the SDK's 32768-char cut: header, role rules, then the variable chief.md and lessons last.
       instructions: [
         `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: its schema states the report contract; after reporting, end with one line.`,
-        role === "reviewer"
-          ? "After any context compaction, before acting, reload in full the chief-* skills your brief names (Skill tool, or read each SKILL.md in full) and re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names."
-          : "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
+        "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
         ...(claudeCode ? [toolSchemaLine(tools)] : []),
         "",
         roleRules(role, kind, evidenceOnly),
