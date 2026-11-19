@@ -6,7 +6,7 @@ BB waits 5 seconds for a plugin service to settle after an abort. If the service
 
 ## Decision
 
-The supervisor waits 3 seconds after an abort. It then abandons a tick that still runs. An abandoned tick starts no new operation: no further step, reconcile row, stall or orphan iteration, alert attempt, Chief spawn, cleanup job or read, or git command. A call dispatched before abandonment may finish. The tick writes no state from its result, except a Chief spawn already dispatched.
+The supervisor waits 3 seconds after an abort. It then abandons a tick that still runs. An abandoned tick starts no new operation: no further step, reconcile row, stall or orphan iteration, alert attempt, Chief spawn, cleanup job or read, or git command. A call dispatched before abandonment may finish. The tick writes no state from its result, except one exception: a dispatched Chief spawn records only its row and a pending-handover marker, and the next live tick does the handover.
 
 ## Consequence
 
@@ -14,3 +14,4 @@ The supervisor waits 3 seconds after an abort. It then abandons a tick that stil
 - Accepted limit: the recipient does not deduplicate. A late original send may duplicate one alert. Chief accepts this.
 - Generations overlap during reload, because BB runs the new factory before it disposes the old one. A dispatched archive may therefore finish beside a later pass of the next generation.
 - No new operation starts after abandonment, so the overlap is limited to calls already dispatched.
+- A tick-owned reload sweep stops with the tick, and an independent sweep never does.
