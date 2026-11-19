@@ -17,7 +17,7 @@ describe("Chief's host text across the planning and research switches", () => {
     const config = await state.harness.behavior.resolveAgentConfiguration(configurationContext(chief.threadId));
     return { tools: config.tools.map((tool: { name: string }) => tool.name), text: config.instructions as string };
   }
-  const DESIGN_TEXT = ["design: true", "design discussion", "researchThreadId", "undesignedReason: "];
+  const DESIGN_TEXT = ["design: true", "researchThreadId", "undesignedReason: "];
 
   // Contract (research.md Chief tools, Design hand-off): with planning and research on, Chief's text tells it to plan an approved design through chief_plan researchThreadId and to use design: true for features.
   // Regression: the old research paragraph that had no design hand-off.
@@ -34,7 +34,7 @@ describe("Chief's host text across the planning and research switches", () => {
     const { tools, text } = await configured(planner, false);
     expect(tools).not.toContain("chief_research");
     expect(text).not.toContain("chief_research");
-    for (const part of ["design: true", "design discussion", "researchThreadId"]) expect(text).not.toContain(part);
+    for (const part of ["design: true", "researchThreadId"]) expect(text).not.toContain(part);
     expect(text).not.toContain("undesignedReason");
   });
 

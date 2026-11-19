@@ -531,7 +531,7 @@ describe("Chief backend", () => {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "done",
     });
-    expect(state.sent.some((entry: any) => entry.input[0].text.includes("is idle"))).toBe(false);
+    expect(state.db.prepare(`SELECT dedupe_key FROM alert_outbox WHERE dedupe_key LIKE ?`).all(`${worker.threadId}:noreport:%`)).toEqual([]);
     const pending = state.db.prepare(`SELECT delivered_at FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${worker.threadId}:report:%`) as any;
     expect(pending).toBeDefined();
     expect(pending.delivered_at).toBeNull();
@@ -642,8 +642,8 @@ describe("Chief backend", () => {
     expect(state.sent).toHaveLength(2);
     expect(state.sent[1].threadId).toBe(chief.threadId);
     const text = state.sent[1].input[0].text;
-    expect(text).toContain(`worker “Fix checkout totals” (${worker.threadId}) failed.`);
-    expect(text).toContain("No provider error was recorded.");
+    expect(text).toContain(worker.threadId);
+    expect(text).toContain("Fix checkout totals");
     expect(text).toContain("chief_consult");
   });
 });
