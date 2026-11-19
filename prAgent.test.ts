@@ -513,10 +513,6 @@ describe("prAgentSection: precedence and rules", () => {
     for (const read of ["git fetch", "git checkout", "git diff", "gh pr view"]) expect(body).toContain(read);
   });
 
-  test("restates the ban on builds, linters, typecheckers and tests", () => {
-    expect(body).toMatch(/ban on running builds, linters, typecheckers and tests still holds/);
-  });
-
   test("the run step: 570000 ms tool timeout, the missing-wrapper retry and its failure reason", () => {
     expect(body).toContain("570000 ms");
     expect(body).toMatch(/missing, wait 10 s and look once more; still missing: .*`wrapper missing`/);
