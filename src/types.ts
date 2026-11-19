@@ -96,7 +96,7 @@ export const reportFinding = z.object({
 });
 export type ReportFinding = z.infer<typeof reportFinding>;
 export const findingsParam = z.union([z.string().trim(), z.array(reportFinding)]).optional().describe(
-  `Reviewer's ready report only, where required ([] allowed for an approve with nothing to note). At most ${MAX_FINDINGS}, one per finding. \`[AMBIGUOUS: …]\` items stay in result.`,
+  `Reviewer's ready report only: the reviewer workflow requires it on every ready report, [] for an approve with nothing to note (the schema leaves it optional). At most ${MAX_FINDINGS}, one per finding. \`[AMBIGUOUS: …]\` items stay in result.`,
 );
 
 /** One wave of a planner's plan array, published without limits; checkReport enforces them. */
@@ -109,7 +109,7 @@ export const waveShape = z.object({
     "Chain heads only (dependsOn: []): 1-based earlier implementation wave k on another chain; this chain's branch and PR stack on that chain's branch, and it starts once wave k is ready.",
   ),
   design: z.boolean().optional().describe(
-    "true only for a design-only wave: a Designer draws artboards, no app code; the wave building on it implements them as a worker after the owner approves. Never on a chain tip.",
+    "true only for a design-only wave: a Designer draws artboards in a design tool, no app code; the wave building on it implements them as a worker after the owner approves. Never on a chain tip.",
   ),
   test: z.boolean().optional().describe(
     "Removed: a wave with test is refused.",
@@ -135,7 +135,7 @@ export const reportParams = z.object({
     `Short summary Chief reads in the alert, at most ${SUMMARY_MAX} characters: outcome, changed files or verdict, verification commands with exit status, next action. Leave unset when \`result\` is that short.`,
   ),
   verdict: verdictSchema.optional().describe(
-    "Ready only; required in a review thread: approve when the change can ship as it stands, request_changes iff at least one blocking finding. Workers leave unset.",
+    "Ready only. The reviewer workflow requires it with findings, and a plan advisor's ready report requires it: approve when the change can ship as it stands, request_changes iff at least one blocking finding. Workers leave unset.",
   ),
   lesson: z.string().trim().optional().describe(
     `Ready only, advisor or reviewer, at most ${LESSON_MAX} characters. Advisor: one durable project-level rule for future workers. Reviewer: a durable review rule or known false positive, shown to future reviewers only. Omit when task-specific.`,
