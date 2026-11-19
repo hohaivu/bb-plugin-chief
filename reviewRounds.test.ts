@@ -102,7 +102,7 @@ describe("Chief backend", () => {
     expect(delivered.delivered_at).not.toBeNull();
   });
 
-  test("self-woken turn after a report sends no idle alert", async () => {
+  test("idle after a report sends nothing; a later self-woken turn without a report sends one noreport alert", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
@@ -114,12 +114,14 @@ describe("Chief backend", () => {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "done",
     });
+    expect(state.sent).toHaveLength(1);
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "done again",
     });
-    expect(state.sent).toHaveLength(1);
+    expect(state.sent).toHaveLength(2);
+    expect(state.db.prepare(`SELECT COUNT(*) AS n FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${worker.threadId}:noreport:%`)).toEqual({ n: 1 });
   });
 
   test("sends no idle alert after a delivered planner or blocked-worker report", async () => {

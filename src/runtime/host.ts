@@ -131,7 +131,7 @@ export function registerHost(ctx: Ctx) {
       skills: [],
       // Order for the SDK's 32768-char cut: header, role rules, then the variable chief.md and lessons last.
       instructions: [
-        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: its schema states the report contract; after reporting, end with one line.`,
+        `You are a managed ${role} reporting to Chief thread ${chiefThreadId}. chief_report: its schema states the report contract; after reporting, end with one line. Your results reach Chief only through chief_report: never also send them with \`bb thread tell\`, even when \`bb status\` shows \`Parent notifications: stuck\`.`,
         "After any context compaction, before acting, re-read your full brief at $BB_THREAD_STORAGE/brief.md and every plan, verdict or report file it names.",
         ...(claudeCode ? [toolSchemaLine(tools)] : []),
         "",

@@ -129,7 +129,7 @@ export function createLifecycle(ctx: Ctx) {
     for (const projectId of projects) await ctx.readRules(projectId);
   }
 
-  async function lifecycle(kind: string, thread: { id: string; status?: string }) {
+  async function lifecycle(kind: string, thread: { id: string; status?: string }, lastText?: string | null) {
     // Before the early returns: the blocker may be unmanaged, hidden, or already complete.
     if ((kind === "idle" || kind === "failed") && ctx.state.pendingReady) void ctx.sweep();
     const row = store.get(thread.id);
@@ -159,6 +159,16 @@ export function createLifecycle(ctx: Ctx) {
     const observed = kind === "idle" ? "idle" : kind === "failed" ? "failed" : kind === "archived" ? "archived" : "deleted";
     const state = observed === "idle" && ["ready", "blocked", "complete"].includes(row.state) ? row.state : observed;
     store.recordState(thread.id, state, thread.status ?? observed, now);
+    // Parent notifications are `stuck`, so BB no longer reports a turn that ended without chief_report: Chief hears it here, once per cycle.
+    if (kind === "idle" && state === "idle" && row.chief_thread_id
+      && !db.prepare(`SELECT 1 FROM alert_outbox WHERE dedupe_key LIKE ?`).get(`${row.thread_id}:report:${row.active_cycle}:%`)) {
+      const text = lastText || await ctx.lastOutput(row.thread_id);
+      await ctx.alertChief(row, `noreport:${row.active_cycle}`, [
+        `${row.role} “${row.title}” (${row.thread_id}) finished its turn without a chief_report.`,
+        `Last message: ${text ? clip(text, 400) : "(none available)"}`,
+        "Inspect it with chief_inspect, then chief_continue it asking for its chief_report, or decide yourself.",
+      ].join("\n"));
+    }
     if (kind !== "failed" || !row.chief_thread_id) return;
     const failure = await ctx.lastProviderError(thread.id);
     const transient = failure && transientFailure(failure.text);
@@ -200,7 +210,7 @@ export function createLifecycle(ctx: Ctx) {
 export function registerLifecycle(ctx: Ctx) {
   const { bb, settings, store } = ctx;
   bb.events.on("thread.active", ({ thread }) => ctx.lifecycle("active", thread));
-  bb.events.on("thread.idle", ({ thread }) => ctx.lifecycle("idle", thread));
+  bb.events.on("thread.idle", ({ thread, lastAssistantText }) => ctx.lifecycle("idle", thread, lastAssistantText));
   bb.events.on("thread.failed", ({ thread }) => ctx.lifecycle("failed", thread));
   bb.events.on("thread.archived", ({ thread }) => ctx.lifecycle("archived", thread));
   bb.events.on("thread.deleted", ({ thread }) => ctx.lifecycle("deleted", thread));

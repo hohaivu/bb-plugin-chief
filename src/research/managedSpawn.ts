@@ -88,6 +88,8 @@ export function createManagedSpawn<Input extends InsertBase>(deps: {
       ...prepared.execution,
       ...extra,
       ...(await lifecycleOwner(chiefThreadId)),
+      // Chief's own report alert replaces BB's completed notice; failures and needs-attention still come from BB. Set after the spreads so no caller can override it.
+      parentNotifications: "stuck",
       prompt,
       pluginMetadata: { role: row.role, chiefThreadId, ...(row.kind ? { kind: row.kind } : {}), ...(row.planThreadId ? { planThreadId: row.planThreadId } : {}) },
     });

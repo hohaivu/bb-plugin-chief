@@ -18,6 +18,9 @@ The report intake accepts every `chief_report` call from a managed thread and pu
 - **Report file**: `report-<seq>.md`. It holds the full text of a long or clipped report.
 - **Stamp**: the `Read at <sha>` text of a researcher or planner report. `checkout-freshness.md` defines it.
 - **Implementation wave**: a plan wave that is not `design: true`.
+- **Turn**: one active cycle of a managed row. `active_cycle` counts the turns of the row.
+- **No-report alert**: a lifecycle alert with the key `noreport:<cycle>`. It says that a turn ended without `chief_report`.
+- **Report signal**: an outbox row whose dedupe key starts with `<thread>:report:<cycle>:`. The intake writes it for each accepted report, of any state.
 
 ## Ownership and Entry Points
 
@@ -218,6 +221,41 @@ Invariants:
 
 - The refusal runs only at planner ready-report intake. Admitted plans are never checked again. Reason: plans already admitted stay valid.
 - A `test` value that is not a boolean, such as `null`, fails the report schema first. The schema refuses it before `checkPlan` runs, so this refusal never names it. Reason: the schema accepts only a boolean or no key.
+
+## Turn End and BB Notices
+
+This section covers what Chief hears when a managed thread ends a turn. The intake writes the report alert. The `lifecycle` handler in `src/runtime/lifecycle.ts` writes the no-report alert.
+
+### Parent notifications
+
+- `launch` in `src/research/managedSpawn.ts` starts each managed thread with BB parent notifications `stuck`. No caller setting overrides it. Reason: the report alert replaces BB's `completed` notice, which BB sent for each report, 26 of 26 in one Chief timeline.
+- BB still sends Chief the failed, interrupted and needs-attention notices. Reason: the plugin does not replace these notices.
+- Chief threads have no parent, so the setting does not apply to them. Reason: Chief spawns outside `launch`.
+- The pr-agent review helper keeps `--parent-notifications off`. Reason: its spawn in `src/review/prAgent.ts` is outside `launch`, and this change leaves it unchanged.
+- A thread spawned before this change keeps `auto`, and its `completed` notice, until it is replaced. Reason: the plugin does not update live threads.
+- Under `stuck`, the managed header says that results reach Chief only through `chief_report`. The header forbids `bb thread tell` for results, although BB's guide asks for it under `stuck`. Reason: a tell would duplicate the report alert, and the plugin does not process tells.
+
+### Finished-without-report alert
+
+The handler sends the alert in this order:
+
+1. BB sends `thread.idle` for a managed thread. `lifecycle` records the new state first.
+2. When the new state is `idle` and the row has a Chief, `lifecycle` checks the turn for a report signal.
+3. With no report signal, `lifecycle` sends Chief one no-report alert with the key `noreport:<cycle>`.
+4. The handler continues its existing path.
+
+Contracts:
+
+- A turn with a report signal sends no no-report alert. Reason: Chief already received the report alert. This includes an `active` report while the thread waits for the owner.
+- The alert needs the state `idle` after the event. Ready, blocked and complete rows keep their state and send nothing. Reason: a ready or blocked report answers the turn.
+- The alert names the role, title and thread id. Reason: Chief finds the thread from the alert alone.
+- The alert quotes the last assistant text, clipped to 400 characters. When the event has no text, the alert quotes the thread output. When the thread output is also empty, the alert shows `(none available)`. Reason: the last message shows Chief why the turn ended.
+- The alert tells Chief to inspect the thread with `chief_inspect`, then continue it for its report or decide. Reason: the next step needs the live evidence.
+- Repeated idle events in one turn send one alert. Reason: the key carries the cycle.
+- A new turn that ends without a report sends a new alert. Reason: the key carries the new cycle.
+- A Chief row, a row without a Chief, and an event other than `idle` send no no-report alert. Reason: only managed work of a Chief reports to it, and failure has its own alert.
+- `stillDue` in `src/runtime/alerts.ts` drops a retried no-report alert. It drops the alert when the row is not `idle` or its cycle changed. Reason: Chief must not hear about a turn that the thread continued or reported later.
+- The supervisor reconcile path sends no no-report alert. Reason: this change adds the alert to the idle event only.
 
 ## Out of Scope
 

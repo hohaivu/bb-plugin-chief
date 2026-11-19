@@ -622,25 +622,26 @@ describe("Chief backend", () => {
     expect(state.sent[0].senderThreadId).toBe(worker.threadId);
   });
 
-  test("stays silent on a plain idle event and alerts Chief once on a failed one", async () => {
+  test("alerts Chief once on an idle without a report and once on a failed one", async () => {
     const state = await setup();
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
-    // BB's own native parent notice already covers a plain idle thread; the
-    // plugin stays silent there. A failure with no transient cause is Chief's to reroute.
+    // An idle turn without chief_report gets one noreport alert (BB's completed notice is off under `stuck`).
+    // A failure with no transient cause is Chief's to reroute.
     await state.harness.behavior.emitThreadEvent("thread.idle", {
       thread: state.live.get(worker.threadId)!,
       lastAssistantText: "idle result",
     });
-    expect(state.sent).toHaveLength(0);
+    expect(state.sent).toHaveLength(1);
+    expect(state.sent[0].input[0].text).toContain("idle result");
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: state.live.get(worker.threadId)! });
     await state.harness.behavior.emitThreadEvent("thread.failed", {
       thread: state.live.get(worker.threadId)!,
       error: "boom",
     });
-    expect(state.sent).toHaveLength(1);
-    expect(state.sent[0].threadId).toBe(chief.threadId);
-    const text = state.sent[0].input[0].text;
+    expect(state.sent).toHaveLength(2);
+    expect(state.sent[1].threadId).toBe(chief.threadId);
+    const text = state.sent[1].input[0].text;
     expect(text).toContain(`worker “Fix checkout totals” (${worker.threadId}) failed.`);
     expect(text).toContain("No provider error was recorded.");
     expect(text).toContain("chief_consult");
