@@ -67,7 +67,6 @@ describe("chief_research design flag", () => {
     expect(rowOf(state, lightId).research_design).toBe(0);
   });
 
-  test("only a design researcher's brief carries the design stage, the waiting report and the AskUserQuestion exit", async () => {
   test("both research modes receive the supplied question in the brief", async () => {
     const { state, chief } = await newState();
     for (const design of [true, false]) {
