@@ -153,12 +153,12 @@ export function createResearch(deps: ResearchDeps) {
     return (await bb.sdk.projects.defaultExecutionOptions({ projectId }).catch(() => null))?.providerId;
   }
 
-  /** Whether the provider declares the permission mode. Fails open (true) when the provider or its capabilities are unknown, so a failed lookup keeps today's behaviour. */
+  /** Whether the provider explicitly declares the permission mode. Fails closed: an unresolved host or provider, failed discovery or an undeclared capability omits the mode. */
   async function providerOffersMode(hostId: string | null, providerId: string | undefined, mode: string) {
-    if (!hostId || !providerId) return true;
+    if (!hostId || !providerId) return false;
     const providers = await discover(async (signal) => bb.sdk.providers.list({ hostId, signal }), "Provider discovery").catch(() => null);
     const modes = providers?.find((provider) => provider.id === providerId)?.capabilities?.permissionModes as string[] | undefined;
-    return modes ? modes.includes(mode) : true;
+    return !!modes?.includes(mode);
   }
 
   async function research(params: ResearchParams, context: { threadId: string; projectId: string }) {

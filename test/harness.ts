@@ -81,7 +81,7 @@ export function catalogModel(model: string, reasoningEfforts = ["medium", "high"
   };
 }
 
-export async function setup(options: { /** projects.get rejects these ids, as the host does for a project that does not exist. */ missingProjects?: string[]; rules?: string; hostStatus?: string; providerAvailable?: boolean; /** The plugin build under test; defaults to this checkout (the base-preservation tests pass the 95aa7df build). */ module?: typeof plugin; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
+export async function setup(options: { /** projects.get rejects these ids, as the host does for a project that does not exist. */ missingProjects?: string[]; rules?: string; hostStatus?: string; providerAvailable?: boolean; /** providers.list rejects, as when discovery is down. */ providerListFails?: boolean; /** The plugin build under test; defaults to this checkout (the base-preservation tests pass the 95aa7df build). */ module?: typeof plugin; projectPath?: string; pluginId?: string; usageLimits?: (args: any) => unknown; system?: object;
   /** tabs.update fails this many times from the start, so a plugin start can meet it. */
   failTabsUpdates?: number;
   /** The host accepts writes and reads under <data dir>/chief/heavy/ on host_1, so heavy-command slots can be published; without it that publish fails, as for any other host_1 path. */
@@ -195,7 +195,7 @@ export async function setup(options: { /** projects.get rejects these ids, as th
         diffPatch: async () => ({ outcome: "available", patches: [{ patch, truncated: false }] }),
       },
       providers: {
-        list: async () => [
+        list: async () => options.providerListFails ? Promise.reject(new Error("provider discovery down")) : [
           { id: "codex", displayName: "Codex", available: options.providerAvailable ?? true, capabilities: { permissionModes: ["accept-edits", "auto", "full"] } },
           { id: "claude-code", displayName: "Claude Code", available: true, capabilities: { permissionModes: ["accept-edits", "auto", "full"] } },
           { id: "acp-antigravity", displayName: "Antigravity", available: true, capabilities: { permissionModes: ["accept-edits", "full"] } },

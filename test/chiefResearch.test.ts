@@ -103,18 +103,32 @@ describe("chief_research", () => {
     });
   });
 
-  test("the brief and its helper command carry Chief's permission mode", async () => {
+  // Contract: the mode is passed only to a provider that explicitly declares it. Regression: acp-agy-style providers failed the spawn on Chief's mode.
+  test("an unpinned researcher on a project default that declares Chief's permission mode gets the spawn mode and the helper flag", async () => {
     const state = await setup();
-    const chief = await roleThread(state, "chief");
-    await call(state, chief, ask());
-    expect(researcherSpawn(state)).toMatchObject({ permissionMode: "auto" });
-    expect(researcherSpawn(state).prompt).toContain("--permission-mode auto");
+    state.setProjectDefaults({ providerId: "claude-code", model: "claude-opus-5" });
+    await call(state, await roleThread(state, "chief"), ask());
+    const spawn = researcherSpawn(state);
+    expect(spawn).toMatchObject({ permissionMode: "auto" });
+    expect(spawn.prompt).toContain("--permission-mode auto");
   });
 
-  // Contract: the mode is passed only to a provider that declares it. Regression: acp-agy-style providers failed the spawn on Chief's mode.
-  test("a researcher provider that does not declare Chief's permission mode gets neither the spawn mode nor the helper flag", async () => {
+  test.each([
+    ["a pinned provider that does not declare it", async (state: State) => { await setResearcherPick(state, { providerId: "acp-antigravity", model: "gemini-3-pro", reasoningLevel: "high" }); }],
+    ["an unpinned project default that does not declare it", async (state: State) => { state.setProjectDefaults({ providerId: "acp-antigravity", model: "gemini-3-pro" }); }],
+    ["no provider resolvable", async (_state: State) => {}],
+  ])("%s: neither the spawn mode nor the helper flag", async (_name, arrange) => {
     const state = await setup();
-    await setResearcherPick(state, { providerId: "acp-antigravity", model: "gemini-3-pro", reasoningLevel: "high" });
+    await arrange(state);
+    await call(state, await roleThread(state, "chief"), ask());
+    const spawn = researcherSpawn(state);
+    expect(spawn).not.toHaveProperty("permissionMode");
+    expect(spawn.prompt).not.toContain("--permission-mode");
+  });
+
+  test("a failed provider discovery omits the mode even for a provider that would declare it", async () => {
+    const state = await setup({ providerListFails: true });
+    await setResearcherPick(state, { providerId: "claude-code", model: "claude-opus-5", reasoningLevel: "high" });
     await call(state, await roleThread(state, "chief"), ask());
     const spawn = researcherSpawn(state);
     expect(spawn).not.toHaveProperty("permissionMode");
