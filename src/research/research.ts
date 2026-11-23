@@ -148,6 +148,19 @@ export function createResearch(deps: ResearchDeps) {
     return full ? `${providerId} is out of quota (${full.label} window at ${full.usedPercent}%${full.resetsAt ? `, resets ${full.resetsAt}` : ""})` : null;
   }
 
+  /** The project's default provider, or undefined when BB reports none. */
+  async function projectDefaultProvider(projectId: string) {
+    return (await bb.sdk.projects.defaultExecutionOptions({ projectId }).catch(() => null))?.providerId;
+  }
+
+  /** Whether the provider declares the permission mode. Fails open (true) when the provider or its capabilities are unknown, so a failed lookup keeps today's behaviour. */
+  async function providerOffersMode(hostId: string | null, providerId: string | undefined, mode: string) {
+    if (!hostId || !providerId) return true;
+    const providers = await discover(async (signal) => bb.sdk.providers.list({ hostId, signal }), "Provider discovery").catch(() => null);
+    const modes = providers?.find((provider) => provider.id === providerId)?.capabilities?.permissionModes as string[] | undefined;
+    return modes ? modes.includes(mode) : true;
+  }
+
   async function research(params: ResearchParams, context: { threadId: string; projectId: string }) {
     const startedAt = Date.now();
     // Every exit, caller check and settings read included, thrown or returned, leaves exactly one chief_research_calls row.
@@ -174,11 +187,13 @@ export function createResearch(deps: ResearchDeps) {
   async function startResearcher(params: ResearchParams, chief: ManagedRow) {
     const live = await bb.sdk.threads.get({ threadId: chief.thread_id }).catch(() => null);
     const environmentId = live?.environmentId ?? null;
-    const permissionMode = (await bb.sdk.threads.defaultExecutionOptions({ threadId: chief.thread_id }).catch(() => null))?.permissionMode ?? null;
+    const chiefMode = (await bb.sdk.threads.defaultExecutionOptions({ threadId: chief.thread_id }).catch(() => null))?.permissionMode ?? null;
     const hostId = (environmentId ? await environmentHostId(environmentId) : null) ?? (await projectHostId(chief.project_id)) ?? null;
     // The shared role path: the researcher pick if usable, else BB's default; throws while the target cools down.
     const managed = await managedSpawn.prepare(chief.project_id, { role: "researcher", hostId });
     const { providerId } = managed.execution;
+    // The helpers run on the same model pick, so one provider check covers the researcher and its helpers.
+    const permissionMode = chiefMode && await providerOffersMode(hostId, providerId ?? await projectDefaultProvider(chief.project_id), chiefMode) ? chiefMode : null;
     const blocked = hostId && providerId ? await researchPreflight(hostId, providerId) : null;
     if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher model in Chief settings or retry after the reset.`);
     const { branch } = params;

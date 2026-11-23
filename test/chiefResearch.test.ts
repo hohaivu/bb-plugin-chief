@@ -111,6 +111,16 @@ describe("chief_research", () => {
     expect(researcherSpawn(state).prompt).toContain("--permission-mode auto");
   });
 
+  // Contract: the mode is passed only to a provider that declares it. Regression: acp-agy-style providers failed the spawn on Chief's mode.
+  test("a researcher provider that does not declare Chief's permission mode gets neither the spawn mode nor the helper flag", async () => {
+    const state = await setup();
+    await setResearcherPick(state, { providerId: "acp-antigravity", model: "gemini-3-pro", reasoningLevel: "high" });
+    await call(state, await roleThread(state, "chief"), ask());
+    const spawn = researcherSpawn(state);
+    expect(spawn).not.toHaveProperty("permissionMode");
+    expect(spawn.prompt).not.toContain("--permission-mode");
+  });
+
   describe("model", () => {
     test("a usable researcher pick runs the thread on it and the helper command carries the same flags", async () => {
       const state = await setup();
