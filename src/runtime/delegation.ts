@@ -6,7 +6,7 @@ import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
 import { isReady } from "../plan/waveSchedule";
 import type { ReviewGate } from "../db/threadStore";
-import { CONTINUE_REMINDERS, planAdmissions } from "../core/roles";
+import { CONTINUE_REMINDERS, planAdmissions, planOnly } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
 import { clip } from "../core/text";
 import { prMerged } from "../forge/forge";
@@ -136,10 +136,12 @@ export function createDelegation(ctx: Ctx) {
     if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId)) throw new Error(`No managed planner ${plannerId} for this Chief.`);
     if (planner.plan_review !== "changes") {
       if (!planner.plan_review && planner.replaces_thread_id) throw new Error(`${plannerId} is already the revision of ${planner.replaces_thread_id}; a revision gets no review — ${deliver(planner)}.`);
-      throw new Error(ctx.planReviewRefusal(planner) ?? `Plan ${plannerId} needs no revision: only a plan whose one advisor review asked for changes is revised. Delegate it.`);
+      throw new Error(ctx.planReviewRefusal(planner) ?? `Plan ${plannerId} needs no revision: only a plan whose one advisor review asked for changes is revised. ${planner.plan_epic ? (ctx.nextAction(planner) ?? "Wait for its ready report.") : "Delegate it."}`);
     }
     const revisions = ctx.revisionsOf(plannerId);
-    if (planner.state === "complete") throw new Error(`Plan ${plannerId} was revised by ${revisions.ready?.thread_id ?? "an earlier revision"}: ${revisions.ready && planner.plan_epic ? deliver(revisions.ready) : `delegate ${revisions.ready?.thread_id ?? "its"} waves`}.`);
+    // An epic's delivered revision closes it at once: the original stays in review changes until Chief completes both.
+    if (planner.plan_epic && revisions.ready) throw new Error(ctx.planReviewRefusal(planner)!);
+    if (planner.state === "complete") throw new Error(`Plan ${plannerId} was revised by ${revisions.ready?.thread_id ?? "an earlier revision"}: delegate ${revisions.ready?.thread_id ?? "its"} waves.`);
     if (revisions.busy) throw new Error(`Plan ${plannerId} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}.`);
     const decider = ctx.planAdvisors(plannerId).decider!;
     const blocked = decider.last_report_state === "blocked";
@@ -429,7 +431,10 @@ export function createDelegation(ctx: Ctx) {
     }
     // An unadvised advisor's gate ends when its plan is replaced or decided: resuming it would run ungated.
     if (row.role === "advisor" && row.plan_thread_id && row.advised_at == null && store.get(row.plan_thread_id)?.plan_review !== "required") {
-      throw new Error(`Advisor ${threadId} reviewed a plan revision that was since replaced or decided; it cannot be resumed. Start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or delegate the plan without it.`);
+      const reviewed = store.get(row.plan_thread_id);
+      throw new Error(`Advisor ${threadId} reviewed a plan revision that was since replaced or decided; it cannot be resumed. ${reviewed?.plan_epic
+        ? `The epic's review outcome stands: ${ctx.nextAction(reviewed) ?? `escalate to the user, or chief_consult (planThreadId: ${row.plan_thread_id}) again`}`
+        : `Start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or delegate the plan without it.`}`);
     }
     if (row.role !== "worker" && (row.state === "ready" || row.state === "complete")) {
       throw new Error(`${threadId} already reported; chief_continue is only a nudge to a thread still working. ${ctx.rerouteSteps(row)}`);
@@ -441,7 +446,7 @@ export function createDelegation(ctx: Ctx) {
     // edits. The instruction leads so the child reads what it says first, ahead of
     // the read-only reminder. steer-if-active steers a running turn instead of
     // waiting in BB's queue, and starts a turn when the thread is idle.
-    const reminder = CONTINUE_REMINDERS[row.role] ?? null;
+    const reminder = row.role === "planner" ? planOnly(!!row.plan_epic) : CONTINUE_REMINDERS[row.role] ?? null;
     const text = reminder ? `${instruction}\n\n${reminder}` : instruction;
     await bb.sdk.threads.send({
       threadId,

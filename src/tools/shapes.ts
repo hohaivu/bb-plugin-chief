@@ -56,7 +56,7 @@ export const planParams = delegateShape.pick({ title: true, mission: true, conte
   epic: z.boolean().optional().describe("true only when the user asks for an epic: the planner plans the whole epic as issues and implements nothing. Not with revises (a revision inherits the mode) or branch (an epic creates no branch)."),
 }).superRefine((value, ctx) => {
   if (value.epic !== undefined && value.revises) ctx.addIssue({ code: "custom", path: ["epic"], message: "A revision inherits its original plan's mode: omit epic." });
-  if (value.epic && value.branch) ctx.addIssue({ code: "custom", path: ["epic"], message: "An epic creates no branch: omit branch." });
+  if (value.epic !== undefined && value.branch) ctx.addIssue({ code: "custom", path: ["epic"], message: "An epic creates no branch: omit epic or branch, even epic: false." });
   if (value.researchThreadId && value.undesignedReason) ctx.addIssue({ code: "custom", path: ["undesignedReason"], message: "Pass researchThreadId or undesignedReason, not both." });
   if (value.revises && (value.researchThreadId || value.undesignedReason)) ctx.addIssue({ code: "custom", path: ["revises"], message: "A revision inherits its original plan's design: omit researchThreadId and undesignedReason." });
 }).transform(titled((v) => v.mission));

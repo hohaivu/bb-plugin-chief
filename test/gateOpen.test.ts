@@ -116,6 +116,18 @@ describe("a horizontal plan's gate", () => {
     await w.review.startReview(w.chief, "W3");
     expect(JSON.parse(gateRows(w)[0].targets).map((target: { threadId: string }) => target.threadId)).toEqual(["W4", "W1", "W3"]);
   });
+
+  // Contract: only the horizontal shape (two or more heads stacked on one wave) moves the integrate worker first; a stacked chain with a
+  // single stacked head keeps wave order, so a defect in wave 1 still gets its fix on wave 1.
+  // Regression: any stacked chain reorders, and the gate admits its one fix run on wave 3 instead of wave 1.
+  test("a plan with one stacked chain keeps wave order and its first target", async () => {
+    const waves: PlanWave[] = [{ path: "/p/plan-1.md" }, { path: "/p/plan-2.md", dependsOn: [], stackOn: 1 }, { path: "/p/plan-3.md", dependsOn: [2] }];
+    const w = world({ realPlan: true, waves, heads: Object.fromEntries([1, 2, 3].map((n) => [pr(n), headOf(`feature/w${n}`, SHA_A)])) });
+    for (const n of [1, 2, 3]) w.worker(`W${n}`, { prUrl: pr(n), branch: `feature/w${n}`, planWave: n });
+    w.setState("W2", "complete");
+    await w.review.startReview(w.chief, "W3");
+    expect(JSON.parse(gateRows(w)[0].targets).map((target: { threadId: string }) => target.threadId)).toEqual(["W1", "W3"]);
+  });
 });
 
 describe("retry launches the reviewer only when it is missing", () => {

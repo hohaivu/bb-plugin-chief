@@ -66,7 +66,19 @@ describe("epic input", () => {
     await expect(epicPlan(state, chief.threadId, { revises: planner.threadId })).rejects.toThrow(/epic/);
     await expect(epicPlan(state, chief.threadId, { revises: planner.threadId, epic: false })).rejects.toThrow(/epic/);
     await expect(epicPlan(state, chief.threadId, { branch: "feature/x" })).rejects.toThrow(/epic/);
+    await expect(epicPlan(state, chief.threadId, { branch: "feature/x", epic: false })).rejects.toThrow(/epic/);
     await tool(state, "chief_plan", { title: "Task", mission: "Plan it", undesignedReason: "small" }, chief.threadId);
+    expect((await status(state)).threads.filter((row) => row.role === "planner")).toHaveLength(2);
+  });
+
+  test("the CLI keeps an explicit --epic=false, so branch or revises still refuses it, and omitting --epic keeps a task plan valid", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await plan(state, chief.threadId);
+    const run = (args: string[]) => state.harness.behavior.runCli(["plan", "--title", "T", "--mission", "Plan it", ...args, "--json"], { threadId: chief.threadId, projectId: "proj_1" });
+    expect((await run(["--epic=false", "--branch", "feature/x", "--undesigned-reason", "small"])).exitCode).not.toBe(0);
+    expect((await run(["--epic=false", "--revises", planner.threadId])).exitCode).not.toBe(0);
+    expect((await run(["--undesigned-reason", "small"])).exitCode).toBe(0);
   });
 });
 
@@ -111,6 +123,58 @@ describe("epic consult and routing", () => {
     await report(state, second.threadId, { state: "blocked", blocker: "still no access", recommendation: "retry" });
     expect(lastText(state)).not.toMatch(/chief_complete/);
     expect(lastText(state)).not.toMatch(/chief_delegate \(|chief_forge_init \(/);
+    // The original's own Pending line still asks for a revision: two blocked attempts delivered nothing, so it must not offer to complete the first epic.
+    const pending = String(await tool(state, "chief_roster", {}, chief.threadId)).split("\n").find((line) => line.includes(`(${planner.threadId})`) && line.startsWith("- planner"));
+    expect(pending).toContain(`revises: ${planner.threadId}`);
+    expect(pending).not.toContain("chief_complete");
+  });
+
+  test("a delivered epic revision refuses another revision with the completion route and starts no planner", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await epicPlan(state, chief.threadId);
+    const planner = await READY_EPIC_ADVISOR(state, chief.threadId, "request_changes");
+    const revise = () => tool(state, "chief_plan", { title: "Checkout epic", mission: "Revise it", revises: planner.threadId }, chief.threadId);
+    await revise();
+    const revision = await latestPlanner(state);
+    await report(state, revision.threadId, epicReport);
+    const refusal = await revise().then(() => "", (error) => String(error));
+    expect(refusal).toContain("chief_complete");
+    expect(refusal).not.toMatch(/chief_delegate|delegate its waves/);
+    expect((await status(state)).threads.filter((row) => row.role === "planner")).toHaveLength(2);
+  });
+
+  test("a reviewed epic keeps its result and completion route: a later ready or blocked report is refused", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await epicPlan(state, chief.threadId);
+    const planner = await READY_EPIC_ADVISOR(state, chief.threadId, "approve");
+    const route = lastText(state);
+    expect(route).toContain("chief_complete");
+    await expect(report(state, planner.threadId, { state: "ready", result: "Epic: https://github.com/o/r/issues/2" })).rejects.toThrow(/review outcome/);
+    await expect(report(state, planner.threadId, { state: "blocked", blocker: "stuck", recommendation: "retry" })).rejects.toThrow(/review outcome/);
+    expect(rowOf(state, planner.threadId)).toMatchObject({ last_report_state: "ready", result: epicReport.result, plan_review: "approved" });
+    expect(lastText(state)).toBe(route);
+  });
+
+  test("an approved epic refuses chief_plan revises without a delegate line, and a stopped first advisor's continue points at the epic's outcome", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await epicPlan(state, chief.threadId);
+    const planner = await latestPlanner(state);
+    await report(state, planner.threadId, epicReport);
+    await consult(state, chief.threadId, planner.threadId);
+    const [first] = await advisors(state);
+    await report(state, first!.threadId, { state: "failed", result: "Provider failed." });
+    await consult(state, chief.threadId, planner.threadId);
+    const [, second] = await advisors(state);
+    await report(state, second!.threadId, { state: "ready", result: "Sound.", verdict: "approve" });
+    const revises = await tool(state, "chief_plan", { title: "Checkout epic", mission: "Revise it", revises: planner.threadId }, chief.threadId).then(() => "", (error) => String(error));
+    expect(revises).toContain("chief_complete");
+    expect(revises).not.toMatch(/Delegate it/);
+    const resumed = await tool(state, "chief_continue", { threadId: first!.threadId, instruction: "Keep going" }, chief.threadId).then(() => "", (error) => String(error));
+    expect(resumed).toContain("chief_complete");
+    expect(resumed).not.toMatch(/delegate the plan/);
   });
 
   test("an epic revision refuses a second consult without a delegation route, and an inherited epic refuses a branch", async () => {
