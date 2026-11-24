@@ -247,6 +247,8 @@ export interface ManagedRow {
   research_thread_id: string | null;
   /** Planner row: the bound researcher ready report's report_seq. */
   research_report_seq: number | null;
+  /** Planner row: 1 for an epic planner (no plan, no waves); NULL or 0 is a task planner. */
+  plan_epic: number | null;
   /** legacy column: never written or read. */
   evidence_only: number | null;
   /** Design researcher: 1 while its design questions wait on the user. */

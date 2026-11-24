@@ -32,7 +32,11 @@ export function createRoster(ctx: Ctx) {
     }
     if (row.role === "planner" && row.replaces_thread_id) return `Once it is idle, start a fresh chief_plan (revises: ${row.replaces_thread_id}) with a narrower brief; the review round is already used.`;
     if (row.role === "planner") return "Once it is idle, start a fresh chief_plan with a narrower brief.";
-    if (row.role === "advisor" && row.plan_thread_id) return `Once it is idle, start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or delegate the plan without it.`;
+    if (row.role === "advisor" && row.plan_thread_id) {
+      return store.get(row.plan_thread_id)?.plan_epic
+        ? `Once it is idle, start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or escalate to the user.`
+        : `Once it is idle, start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or delegate the plan without it.`;
+    }
     if (row.role === "researcher") return "Once it is idle, decide without it or start a fresh chief_research with a narrower question.";
     return "Once it is idle, decide without it or start a fresh chief_consult with a narrower question.";
   }
@@ -129,6 +133,7 @@ export function createRoster(ctx: Ctx) {
               projectId: live.projectId,
               chiefThreadId,
               parentThreadId: chiefThreadId,
+              planEpic: seeded.data.planEpic,
               title: live.title || "Managed thread",
               state: live.status === "active" ? "active" : "idle",
               status: live.status,

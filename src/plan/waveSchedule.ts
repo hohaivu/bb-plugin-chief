@@ -277,7 +277,7 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return { heads: chainHeads, undelegated: open.filter((head) => !blocked(head)), waiting: open.filter(blocked) };
   }
 
-  /** The rows one review of this chain tip covers, in wave order: the latest implementation row of every wave,
+  /** The rows one review of this chain tip covers, in wave order, except that the highest-wave row on a stacked chain leads: the latest implementation row of every wave,
    * minus design waves and rows already complete (the one passed in always stays), then the latest non-complete side-lane
    * Spec Writer of each spec wave. A replaces: chain's earlier waves are complete, so they drop out; a chain has one branch and PR
    * (only a legacy plan's stacked waves, each with its own PR, are covered wave by wave). A worker with no plan link covers
@@ -286,8 +286,12 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     const waves = planWavesFor(worker.plan_thread_id);
     if (!waves.length || worker.plan_wave == null) return [worker];
     const keep = (latest: Row | undefined) => latest && !isDesignWave(latest) && (latest.thread_id === worker.thread_id || latest.state !== "complete") ? [latest] : [];
+    const implementation = waves.flatMap((_, index) => keep(latestWorker(worker.plan_thread_id!, index + 1)));
+    // The gate's fix run belongs to its first target. With stacked blocks that is the highest-wave row on a stacked chain (the integrate
+    // worker, whose head carries its parent block's code), not the contract wave.
+    const owner = [...implementation].reverse().find((row) => waves[chainOf(waves, row.plan_wave!)[0]! - 1]?.stackOn !== undefined);
     return [
-      ...waves.flatMap((_, index) => keep(latestWorker(worker.plan_thread_id!, index + 1))),
+      ...(owner ? [owner, ...implementation.filter((row) => row !== owner)] : implementation),
       ...waves.flatMap((_, index) => keep(latestSideWriter(worker.plan_thread_id!, index + 1))),
     ];
   }

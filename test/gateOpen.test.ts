@@ -103,6 +103,21 @@ describe("one gate per plan", () => {
   });
 });
 
+describe("a horizontal plan's gate", () => {
+  // Contract: contract wave 1, blocks 2 and 3 stacked on it, integrate wave 4 on block 2 share one gate whose first target, the owner of its one
+  // fix run, is the integrate worker, whichever worker opened the gate; block 3 stays a pinned target and the completed block 2 drops out.
+  // Regression: wave order puts the contract worker first, so a wiring fix is admitted only on the contract branch.
+  test("the integrate worker leads the pinned targets, whoever opens the gate", async () => {
+    const waves: PlanWave[] = [{ path: "/p/plan-1.md" }, { path: "/p/plan-2.md", dependsOn: [], stackOn: 1 }, { path: "/p/plan-3.md", dependsOn: [], stackOn: 1 }, { path: "/p/plan-4.md", dependsOn: [2] }];
+    const w = world({ realPlan: true, waves, heads: Object.fromEntries([1, 2, 3, 4].map((n) => [pr(n), headOf(`feature/w${n}`, SHA_A)])) });
+    for (const n of [1, 2, 3, 4]) w.worker(`W${n}`, { prUrl: pr(n), branch: `feature/w${n}`, planWave: n });
+    w.setState("W2", "complete");
+    expect(w.schedule.reviewTargetsFor(w.store.get("W3")!).map((row) => row.thread_id)).toEqual(["W4", "W1", "W3"]);
+    await w.review.startReview(w.chief, "W3");
+    expect(JSON.parse(gateRows(w)[0].targets).map((target: { threadId: string }) => target.threadId)).toEqual(["W4", "W1", "W3"]);
+  });
+});
+
 describe("retry launches the reviewer only when it is missing", () => {
   // Contract: a failed (or blocked) reviewer is launched again.
   // Regression: the retry leaves the gate without a reviewer.
