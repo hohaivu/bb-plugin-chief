@@ -441,7 +441,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
     const found = await lookupRow(threadId, callerProjectId);
     // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
-    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null, research_design: null, plan_epic: null });
+    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null, research_design: null, plan_epic: found.pending.planEpic ? 1 : null });
     if (!candidate || candidate.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
     if (found.row && ["complete", "archived", "deleted"].includes(found.row.state)) {
       throw new Error(`Managed thread ${threadId} is ${found.row.state} and can no longer report.`);
@@ -471,16 +471,19 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     const planInput: string | WaveInput[] | undefined = waveList ?? (plan as string | undefined);
     const verdict = params.state === "ready" ? params.verdict ?? null : null;
     const plannerReady = row.role === "planner" && params.state === "ready";
-    // A replacement plan would drop the live advisor's gate: refuse it before the plan files or the state change.
+    // A replacement plan (or epic) would drop the live advisor's gate: refuse it before the plan files or the state change.
+    // An epic has no plan payload, so its ready report is the deliverable; any epic report mid-review would overwrite the reviewed state.
+    const epicReview = row.role === "planner" && !!row.plan_epic;
+    const deliverable = plannerReady && (!!planInput || epicReview);
     const advisorBusy = () => {
       // Same in-flight test as nextAction.ts planAdvisors.
-      const reviewing = plannerReady && planInput
+      const reviewing = deliverable || epicReview
         ? store.all().find((r) => r.role === "advisor" && r.plan_thread_id === threadId && r.advised_at == null && BUSY_STATUSES.has(r.state)) : undefined;
-      if (reviewing) throw new Error(`chief_report was not saved: plan ${threadId} is in its one advisor review (${reviewing.thread_id}); wait for its report before submitting a new plan.`);
+      if (reviewing) throw new Error(`chief_report was not saved: ${epicReview ? "epic" : "plan"} ${threadId} is in its one advisor review (${reviewing.thread_id}); wait for its report before submitting a new ${epicReview ? "report" : "plan"}.`);
     };
     advisorBusy();
-    const publishing = plannerReady && !!planInput;
-    if (publishing && planAdmissions.has(threadId)) throw new Error(`chief_report was not saved: an advisor review of plan ${threadId} is starting; wait for its report before submitting a new plan.`);
+    const publishing = deliverable;
+    if (publishing && planAdmissions.has(threadId)) throw new Error(`chief_report was not saved: an advisor review of ${epicReview ? "epic" : "plan"} ${threadId} is starting; wait for its report before submitting a new ${epicReview ? "report" : "plan"}.`);
     if (publishing) planAdmissions.add(threadId);
     try {
     const planWaves = plannerReady && planInput ? await writePlan(threadId, row.project_id, planInput) : null;

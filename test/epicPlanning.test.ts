@@ -64,12 +64,70 @@ describe("epic input", () => {
     const chief = await start(state);
     const planner = await plan(state, chief.threadId);
     await expect(epicPlan(state, chief.threadId, { revises: planner.threadId })).rejects.toThrow(/epic/);
+    await expect(epicPlan(state, chief.threadId, { revises: planner.threadId, epic: false })).rejects.toThrow(/epic/);
     await expect(epicPlan(state, chief.threadId, { branch: "feature/x" })).rejects.toThrow(/epic/);
     await tool(state, "chief_plan", { title: "Task", mission: "Plan it", undesignedReason: "small" }, chief.threadId);
   });
 });
 
 describe("epic consult and routing", () => {
+  test("chief_consult on a task planner with no published waves is refused and launches no advisor", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await tool(state, "chief_plan", { title: "Fix totals", mission: "Plan it", undesignedReason: "small" }, chief.threadId);
+    const planner = await latestPlanner(state);
+    await expect(consult(state, chief.threadId, planner.threadId)).rejects.toThrow();
+    expect(await advisors(state)).toHaveLength(0);
+  });
+
+  test("during the advisor review a second ready or a blocked epic report is refused and the reviewed result stays", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await epicPlan(state, chief.threadId);
+    const planner = await latestPlanner(state);
+    await report(state, planner.threadId, epicReport);
+    await consult(state, chief.threadId, planner.threadId);
+    await expect(report(state, planner.threadId, { state: "ready", result: "Epic: https://github.com/o/r/issues/2" })).rejects.toThrow(/advisor review/);
+    await expect(report(state, planner.threadId, { state: "blocked", blocker: "stuck", recommendation: "retry" })).rejects.toThrow(/advisor review/);
+    expect(rowOf(state, planner.threadId)).toMatchObject({ last_report_state: "ready", result: epicReport.result });
+    const [advisor] = await advisors(state);
+    await report(state, advisor!.threadId, { state: "ready", result: "Reviewed.", verdict: "approve" });
+    expect(lastText(state)).toContain("chief_complete");
+  });
+
+  test("a revision of an epic whose first revision blocked does not read as delivered, and nothing routes an epic to delegation", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await epicPlan(state, chief.threadId);
+    const planner = await READY_EPIC_ADVISOR(state, chief.threadId, "request_changes");
+    const revise = () => tool(state, "chief_plan", { title: "Checkout epic", mission: "Revise it", revises: planner.threadId }, chief.threadId);
+    await expect(epicPlan(state, chief.threadId, { revises: planner.threadId, epic: false })).rejects.toThrow(/epic/);
+    await revise();
+    const first = await latestPlanner(state);
+    await report(state, first.threadId, { state: "blocked", blocker: "no access to the forge", recommendation: "retry" });
+    await revise();
+    const second = await latestPlanner(state);
+    expect(second.threadId).not.toBe(first.threadId);
+    await report(state, second.threadId, { state: "blocked", blocker: "still no access", recommendation: "retry" });
+    expect(lastText(state)).not.toMatch(/chief_complete/);
+    expect(lastText(state)).not.toMatch(/chief_delegate \(|chief_forge_init \(/);
+  });
+
+  test("an epic revision refuses a second consult without a delegation route, and an inherited epic refuses a branch", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await epicPlan(state, chief.threadId);
+    const planner = await READY_EPIC_ADVISOR(state, chief.threadId, "request_changes");
+    await expect(tool(state, "chief_plan", { title: "Checkout epic", mission: "Revise it", revises: planner.threadId, branch: "feature/x" }, chief.threadId)).rejects.toThrow(/epic/);
+    expect((await status(state)).threads.filter((row) => row.role === "planner")).toHaveLength(1);
+    await tool(state, "chief_plan", { title: "Checkout epic", mission: "Revise it", revises: planner.threadId }, chief.threadId);
+    const revision = await latestPlanner(state);
+    await report(state, revision.threadId, epicReport);
+    const refusal = await consult(state, chief.threadId, revision.threadId).then(() => "", (error) => String(error));
+    expect(refusal).not.toBe("");
+    expect(refusal).not.toMatch(/chief_delegate|delegate its waves/);
+  });
+
   test("chief_consult starts one advisor on a ready epic planner; a second consult is refused", async () => {
     const state = await setup();
     const chief = await start(state);

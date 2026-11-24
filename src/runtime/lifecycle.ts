@@ -36,6 +36,7 @@ export function createLifecycle(ctx: Ctx) {
         role: seeded.data.role,
         projectId: live?.projectId ?? callerProjectId,
         chiefThreadId: seeded.data.chiefThreadId ?? null,
+        planEpic: seeded.data.planEpic,
         title: live?.title ?? live?.titleFallback ?? threadId,
         state: "active",
         status: live?.status ?? "active",

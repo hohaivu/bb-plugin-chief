@@ -282,6 +282,21 @@ describe("await order by role", () => {
     expect(w.count("alert_outbox")).toBe(0);
   });
 
+  test("a pre-insert epic planner reports ready with no plan and a wave plan is refused; a pre-insert task planner is unchanged", async () => {
+    const w = world();
+    w.pendingRows.set("e1", { threadId: "e1", role: "planner", projectId: "proj", chiefThreadId: "chief1", title: "e1", state: "active", planEpic: true });
+    w.pendingRows.set("t1", { threadId: "t1", role: "planner", projectId: "proj", chiefThreadId: "chief1", title: "t1", state: "active" });
+
+    await expect(w.intake.report("e1", { state: "ready", plan: PLAN, result: "Planned." }, "proj")).rejects.toThrow(/epic planner/);
+    expect(w.rowOf("e1")).toBeUndefined();
+    await w.intake.report("e1", { state: "ready", result: "Epic: https://github.com/o/r/issues/1" }, "proj");
+    expect(w.rowOf("e1")).toMatchObject({ plan_epic: 1, state: "ready" });
+
+    await expect(w.intake.report("t1", { state: "ready", result: "No plan." }, "proj")).rejects.toThrow(/plan is missing/);
+    await w.intake.report("t1", { state: "ready", plan: PLAN, result: "Planned." }, "proj");
+    expect(w.rowOf("t1").plan_epic).toBeNull();
+  });
+
   test("a planner's Chief mirror runs before the batch and its failure only warns; the stamp is read after the commit", async () => {
     let mirrors = 0;
     const w = world({

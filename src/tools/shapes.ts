@@ -15,6 +15,7 @@ export const spawnMetadataSchema = z.object({
   // Any string: a legacy seeded kind (tester) still parses and reads as worker.
   kind: z.string().optional(),
   planThreadId: z.string().optional(),
+  planEpic: z.boolean().optional(),
 });
 
 const delegateShape = z.object({
@@ -54,7 +55,7 @@ export const planParams = delegateShape.pick({ title: true, mission: true, conte
   undesignedReason: z.string().trim().min(1).max(300).optional().describe("Required when research is on and no researchThreadId: why no design discussion is needed (e.g. a small fix). Not with revises."),
   epic: z.boolean().optional().describe("true only when the user asks for an epic: the planner plans the whole epic as issues and implements nothing. Not with revises (a revision inherits the mode) or branch (an epic creates no branch)."),
 }).superRefine((value, ctx) => {
-  if (value.epic && value.revises) ctx.addIssue({ code: "custom", path: ["epic"], message: "A revision inherits its original plan's mode: omit epic." });
+  if (value.epic !== undefined && value.revises) ctx.addIssue({ code: "custom", path: ["epic"], message: "A revision inherits its original plan's mode: omit epic." });
   if (value.epic && value.branch) ctx.addIssue({ code: "custom", path: ["epic"], message: "An epic creates no branch: omit branch." });
   if (value.researchThreadId && value.undesignedReason) ctx.addIssue({ code: "custom", path: ["undesignedReason"], message: "Pass researchThreadId or undesignedReason, not both." });
   if (value.revises && (value.researchThreadId || value.undesignedReason)) ctx.addIssue({ code: "custom", path: ["revises"], message: "A revision inherits its original plan's design: omit researchThreadId and undesignedReason." });

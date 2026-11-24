@@ -60,8 +60,9 @@ export function createDelegation(ctx: Ctx) {
     }
     // A revision stays on the branch its original planner read.
     const branch = params.branch ?? revised?.branch ?? undefined;
-    // A revision inherits its original's mode; chief_plan refuses epic together with revises.
-    const epic = params.epic ?? !!revised?.plan_epic;
+    // A revision takes its original's mode only; chief_plan refuses any epic value together with revises.
+    const epic = revised ? !!revised.plan_epic : !!params.epic;
+    if (epic && params.branch) throw new Error("An epic creates no branch: omit branch.");
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: "planner", hostId: await ctx.projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = plannerBrief({
@@ -126,16 +127,19 @@ export function createDelegation(ctx: Ctx) {
     return { designPath: designSnap.path, factsPath: factsSnap.path, designText: designSnap.text };
   }
 
+  /** What follows a plan that needs no (more) review: an epic is told to the user and completed, a task plan's waves are delegated. */
+  const deliver = (planner: ManagedRow) => planner.plan_epic ? "tell the user its epic link and chief_complete it; delegate nothing" : "delegate its waves";
+
   /** chief_plan revises: P is allowed only once P's one review asked for changes and no revision is in or working; returns the revision brief input. */
   function revisionInput(plannerId: string, chiefThreadId: string): NonNullable<Parameters<typeof plannerBrief>[0]["revision"]> {
     const planner = store.get(plannerId);
     if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId)) throw new Error(`No managed planner ${plannerId} for this Chief.`);
     if (planner.plan_review !== "changes") {
-      if (!planner.plan_review && planner.replaces_thread_id) throw new Error(`${plannerId} is already the revision of ${planner.replaces_thread_id}; a revision gets no review — delegate its waves.`);
+      if (!planner.plan_review && planner.replaces_thread_id) throw new Error(`${plannerId} is already the revision of ${planner.replaces_thread_id}; a revision gets no review — ${deliver(planner)}.`);
       throw new Error(ctx.planReviewRefusal(planner) ?? `Plan ${plannerId} needs no revision: only a plan whose one advisor review asked for changes is revised. Delegate it.`);
     }
     const revisions = ctx.revisionsOf(plannerId);
-    if (planner.state === "complete") throw new Error(`Plan ${plannerId} was revised by ${revisions.ready?.thread_id ?? "an earlier revision"}: delegate ${revisions.ready?.thread_id ?? "its"} waves.`);
+    if (planner.state === "complete") throw new Error(`Plan ${plannerId} was revised by ${revisions.ready?.thread_id ?? "an earlier revision"}: ${revisions.ready && planner.plan_epic ? deliver(revisions.ready) : `delegate ${revisions.ready?.thread_id ?? "its"} waves`}.`);
     if (revisions.busy) throw new Error(`Plan ${plannerId} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}.`);
     const decider = ctx.planAdvisors(plannerId).decider!;
     const blocked = decider.last_report_state === "blocked";
@@ -162,10 +166,10 @@ export function createDelegation(ctx: Ctx) {
     if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId) || !(planner.plan_waves || (planner.plan_epic && planner.last_report_state === "ready")) || planner.state === "complete") {
       throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
     }
-    if (planner.replaces_thread_id) throw new Error(`${plannerId} is a revision; a revision gets no review: delegate its waves.`);
+    if (planner.replaces_thread_id) throw new Error(`${plannerId} is a revision; a revision gets no review: ${deliver(planner)}.`);
     if (planner.plan_review && planner.plan_review !== "required") {
       const { decider } = ctx.planAdvisors(plannerId);
-      throw new Error(`Plan ${plannerId} already had its one review (${decider?.thread_id ?? "?"}): ${ctx.planReviewRefusal(planner) ?? ctx.nextAction(planner) ?? "delegate its waves."}`);
+      throw new Error(`Plan ${plannerId} already had its one review (${decider?.thread_id ?? "?"}): ${ctx.planReviewRefusal(planner) ?? ctx.nextAction(planner) ?? `${deliver(planner)}.`}`);
     }
     const { inFlight } = ctx.planAdvisors(plannerId);
     if (inFlight) throw new Error(`Plan ${plannerId} is already in review by ${inFlight.thread_id}: wait for ${inFlight.thread_id}, or chief_stop it first.`);
