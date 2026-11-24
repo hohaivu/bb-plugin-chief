@@ -26,6 +26,7 @@ function parseArgs(argv: string[]) {
     one: (name: string) => flags.get(name)?.[0],
     all: (name: string) => flags.get(name) ?? [],
     bool: (name: string) => flags.get(name)?.[0] === "true",
+    has: (name: string) => flags.has(name),
   };
 }
 
@@ -152,8 +153,8 @@ export function registerCli(ctx: Ctx) {
             title: args.one("title"), mission: args.one("mission"), context: args.one("context"),
             revises: args.one("revises"), branch: args.one("branch"),
             researchThreadId: args.one("research-thread"), undesignedReason: args.one("undesigned-reason"),
-            // undefined, not false: an absent flag stays an absent param.
-            epic: args.bool("epic") || undefined,
+            // An absent flag stays an absent param; `--epic=false` stays false so the schema refuses it with branch or revises.
+            epic: args.has("epic") ? args.bool("epic") : undefined,
           });
           if (!parsed.success) return fail(`Invalid plan brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await ctx.startPlan(parsed.data, context.threadId);

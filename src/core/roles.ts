@@ -22,16 +22,18 @@ export const READ_ONLY = "do not create, modify, or delete any file the reposito
 /** One wording for the reviewer's read-only rule, said when the review starts and
  * again on every continuation — the two places an edit instruction could arrive. */
 export const REVIEW_ONLY = `Remain review-only: ${READ_ONLY}. A repair goes back to the worker, which then earns its own review.`;
-/** Said on every planner continuation; the planner brief states the same rules in its Working contract. */
-export const PLAN_ONLY = `Remain read-only: ${READ_ONLY}. Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.`;
+const TASK_REPORT = "Submit the plan itself through chief_report's plan field, not as a file write. A worker implements the plan in its own worktree.";
+const EPIC_REPORT = "Submit no plan field: report ready with the epic URL (or the named target's path) in result. The epic's issues are the deliverable; no worker implements them.";
+/** The one planner report contract. Said on every planner continuation with the row's mode (epic true or false), and in the planner rules
+ * with no mode (the brief's Mode line decides): a continuation never carries the other mode's instruction. */
+export const planOnly = (epic?: boolean) => `Remain read-only: ${READ_ONLY}. ${epic === undefined ? `Task mode: ${TASK_REPORT} Epic mode: ${EPIC_REPORT}` : epic ? EPIC_REPORT : TASK_REPORT}`;
 /** Same for an advisor: said when the consult starts and again on every continuation. */
 export const ADVISE_ONLY = `Remain advisory: ${READ_ONLY}. You may read code and run commands to reproduce the problem (a filtered test or build whose only side effects are untracked build or cache output). Report your advice to Chief; a worker makes the change.`;
 /** Same for a researcher: said when it starts and again on every continuation. It shares Chief's checkout. */
 export const RESEARCH_ONLY = `Remain read-only: ${READ_ONLY}, and run no command that changes tracked files or git state; you share Chief's checkout. Report the findings through chief_report; a worker makes any change.`;
-/** What chief_continue appends to a nudge so a read-only role stays read-only; a worker and Chief get none. */
+/** What chief_continue appends to a nudge so a read-only role stays read-only; a worker and Chief get none, a planner gets planOnly(its mode). */
 export const CONTINUE_REMINDERS: Partial<Record<Role, string>> = {
   reviewer: REVIEW_ONLY,
-  planner: PLAN_ONLY,
   advisor: ADVISE_ONLY,
   researcher: RESEARCH_ONLY,
 };

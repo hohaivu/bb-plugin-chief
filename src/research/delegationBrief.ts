@@ -413,9 +413,15 @@ export function plannerBrief(input: PlannerBriefInput): string {
     ...(epic ? [
       "", "## Epic mode",
       "- Plan the full epic and implement nothing: no code, branch, worktree or worker.",
-      "- The default target is one GitHub epic issue with a sub-issue per slice and native blocking between them. Context may name another target (for example a Markdown file): write it and never commit it.",
-      "- The epic is vertical thin slices. Each slice runs end to end and has a demo or E2E checkpoint. Each slice becomes its own task plan later.",
-      "- Create the issues with `gh issue create`. Link a slice: `gh api repos/{owner}/{repo}/issues/{n}/sub_issues -F sub_issue_id=<issue id>`. Block a slice: `gh api repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by -F issue_id=<issue id>`. If a call fails, fall back to a `Blocked by #n` line or a task list in the epic body, and say so in `result`.",
+      ...(revision ? [
+        "- The target is the one the epic result above names. Update that issue and its slice issues (or that file) in place, and return the same target in `result`. Create no new epic issue and never switch to GitHub for a file target.",
+        "- The epic is vertical thin slices. Each slice runs end to end and has a demo or E2E checkpoint. Each slice becomes its own task plan later.",
+        "- Edit with `gh issue edit`; add a missing slice with `gh issue create` and link it to that epic. If a call fails, fall back to a `Blocked by #n` line or a task list in the epic body, and say so in `result`.",
+      ] : [
+        "- The default target is one GitHub epic issue with a sub-issue per slice and native blocking between them. Context may name another target (for example a Markdown file): write it and never commit it.",
+        "- The epic is vertical thin slices. Each slice runs end to end and has a demo or E2E checkpoint. Each slice becomes its own task plan later.",
+        "- Create the issues with `gh issue create`. Link a slice: `gh api repos/{owner}/{repo}/issues/{n}/sub_issues -F sub_issue_id=<issue id>`. Block a slice: `gh api repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by -F issue_id=<issue id>`. If a call fails, fall back to a `Blocked by #n` line or a task list in the epic body, and say so in `result`.",
+      ]),
       "- Report ready with no `plan`. Put the epic issue URL (or the target path) in `result`.",
     ] : [
       "", "## Working contract",

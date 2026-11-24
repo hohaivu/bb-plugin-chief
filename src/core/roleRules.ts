@@ -1,4 +1,4 @@
-import { ADVISE_ONLY, PLAN_ONLY, RESEARCH_ONLY, type Role } from "./roles";
+import { ADVISE_ONLY, planOnly, RESEARCH_ONLY, type Role } from "./roles";
 
 /** Chief's operating procedure, sent every turn after the core rules and before the project rules. It holds only the
  * rules that no core rule, tool description or refusal text states, plus the Git workflow and forge-auth sections. */
@@ -233,7 +233,7 @@ ${COMMIT_CADENCE}
 ${BOUNDED_OUTPUT}`;
 
 /** The planner's contract: wave rules, Design and Reshape waves, helper threads. */
-const PLANNER_TEXT = `- ${PLAN_ONLY}
+const PLANNER_TEXT = `- ${planOnly()}
 - A task plan is one or more implementation waves; an epic has no plan payload (Epic mode below). Wave rules, \`plan\` submission and the short ready result are in the Planner working contract section below. A big feature's chain ends with one reshape wave (the make-native skill) after its last feature wave; the Reshape wave section below says what its body holds.
 - For a broad read-only scan, a planner may spawn up to 6 plain helper threads that share its checkout (\`bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID" --prompt-file - --json\`, with the read-only rule in each prompt), wait with \`bb thread wait <id> --status idle\`, and check their findings against the code before relying on them.
 
@@ -243,7 +243,7 @@ The brief's \`Mode:\` line decides; never pick the mode yourself. In epic mode y
 
 ## Horizontal shape
 
-Task plans only. Use it only when the blocks own disjoint files, the contract (types, API, schema, CLI shape) can be stated now, and there are at least 2 blocks; otherwise plan vertically. Wave 1 is the contract wave. Each block is a chain head with \`dependsOn: []\` and \`stackOn: 1\`, and its body says build and typecheck only (no tests). One integrate wave comes last with \`dependsOn: [one block]\`; its body tells the worker to run \`chief_log\` first and report blocked \`waiting on block waves N\` if any block wave is not ready, then merge the other block branches (each wave's branch shows in \`chief_log\`), wire the blocks, and write and run the system tests. One review gate follows the integrate wave, and its one fix run is on the integrate worker: a wiring bug goes there, a wrong contract to a fresh plan.
+Task plans only. Use it only when the blocks own disjoint files, the contract (types, API, schema, CLI shape) can be stated now, and there are at least 2 blocks; otherwise plan vertically. Wave 1 is the contract wave. Each block is a chain head with \`dependsOn: []\` and \`stackOn: 1\`, and its body says build and typecheck only (no tests). One integrate wave comes last with \`dependsOn: [one block]\`; its body tells the worker to run \`chief_log\` first and report blocked \`waiting on block waves N\` for each block wave not shown as \`delivered\` (a block that reported ready counts even when its turn ended; the block it replaces counts; a block completed without a ready report does not), then merge the other block branches (each wave's branch shows in \`chief_log\`), wire the blocks, and write and run the system tests. One review gate follows the integrate wave, and its one fix run is on the integrate worker: a wiring bug goes there, a wrong contract to a fresh plan.
 
 ## Design wave
 

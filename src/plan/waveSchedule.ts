@@ -277,7 +277,7 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     return { heads: chainHeads, undelegated: open.filter((head) => !blocked(head)), waiting: open.filter(blocked) };
   }
 
-  /** The rows one review of this chain tip covers, in wave order, except that the highest-wave row on a stacked chain leads: the latest implementation row of every wave,
+  /** The rows one review of this chain tip covers, in wave order, except that a horizontal plan's integrate row leads: the latest implementation row of every wave,
    * minus design waves and rows already complete (the one passed in always stays), then the latest non-complete side-lane
    * Spec Writer of each spec wave. A replaces: chain's earlier waves are complete, so they drop out; a chain has one branch and PR
    * (only a legacy plan's stacked waves, each with its own PR, are covered wave by wave). A worker with no plan link covers
@@ -287,9 +287,15 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     if (!waves.length || worker.plan_wave == null) return [worker];
     const keep = (latest: Row | undefined) => latest && !isDesignWave(latest) && (latest.thread_id === worker.thread_id || latest.state !== "complete") ? [latest] : [];
     const implementation = waves.flatMap((_, index) => keep(latestWorker(worker.plan_thread_id!, index + 1)));
-    // The gate's fix run belongs to its first target. With stacked blocks that is the highest-wave row on a stacked chain (the integrate
-    // worker, whose head carries its parent block's code), not the contract wave.
-    const owner = [...implementation].reverse().find((row) => waves[chainOf(waves, row.plan_wave!)[0]! - 1]?.stackOn !== undefined);
+    // The gate's fix run belongs to its first target. Only the horizontal shape leads with the integrate worker (its head carries its parent block's
+    // code): two or more heads stacked on one wave and exactly one wave continuing a stacked block. Any other plan keeps wave order.
+    const stackedOn = heads(waves).flatMap((head) => waves[head - 1]?.stackOn ?? []);
+    const continuations = waves.flatMap((_, index) => {
+      const [head] = chainOf(waves, index + 1);
+      return head !== index + 1 && waves[head! - 1]?.stackOn !== undefined ? [index + 1] : [];
+    });
+    const horizontal = stackedOn.some((target, index) => stackedOn.indexOf(target) !== index) && continuations.length === 1;
+    const owner = horizontal ? implementation.find((row) => row.plan_wave === continuations[0]) : undefined;
     return [
       ...(owner ? [owner, ...implementation.filter((row) => row !== owner)] : implementation),
       ...waves.flatMap((_, index) => keep(latestSideWriter(worker.plan_thread_id!, index + 1))),
