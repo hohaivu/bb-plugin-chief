@@ -58,7 +58,7 @@ This section covers acceptance and publication. It does not cover the alert layo
 
 ### Flow
 
-1. **Look up.** `report()` loads the row, or a pending row from spawn metadata.
+1. **Look up.** `report()` loads the row, or a pending row from spawn metadata. The pending row carries `plan_epic` when the spawn metadata marks an epic planner.
 2. **Check eligibility.** It refuses when no row exists, or the role is `chief`. The message is `chief_report is available only in managed worker, planner, reviewer, and advisor threads.`
 3. It refuses when the stored row state is `complete`, `archived`, or `deleted`. The message is `Managed thread <id> is <state> and can no longer report.`
 4. **Decode.** A `plan` string that starts with `[` and parses as an array becomes that array. A `fails` string and a `findings` string go through `JSON.parse`. A string that does not parse stays a string, and `checkReport` refuses it.
@@ -85,7 +85,7 @@ The transaction runs these steps in order:
 1. `reserveReport` stores the report columns, adds 1 to `report_seq`, and clears `report_path`.
 2. An advisor ready or blocked report marks the row advised. When the advisor has a plan thread, the first advice resolves the plan review. `approved` means a ready report with verdict `approve`. Any other advice means `changes`.
 3. A planner ready report with a plan sets the plan review to null only when the review is unset or `required`. A `required` review is stale when no advisor runs for the plan. A decided review (`approved` or `changes`) is kept. Reason: owner decision. The advisor is an opt-in consult that Chief starts, not a gate, so the plugin never requires a review. When the planner replaces a planner with review `changes`, the replaced planner completes.
-   - The intake refuses a planner ready report while an advisor for that plan is running. It checks before the plan files are written and again before `reserveReport`. The advisor is running when its row has no advised report and its state is busy. The refusal says to wait for the advisor's report. Reason: a replacement plan must not drop the review gate of a running advisor. The intake checks again at the state write, because an advisor can launch while the plan files are written.
+   - The intake refuses a planner ready report while an advisor for that plan is running. The epic planner has no plan files, so its guard covers its ready report and its blocked report. It checks before the plan files are written and again before `reserveReport`. The advisor is running when its row has no advised report and its state is busy. The refusal says to wait for the advisor's report. Reason: a replacement plan must not drop the review gate of a running advisor. The intake checks again at the state write, because an advisor can launch while the plan files are written.
 4. An advisor or reviewer ready report with a `lesson` inserts one `chief_lessons` row. The row holds the project, the text, the reporting thread, the reviewed worker, the time, and the role. The row has the status `proposed`, so no prompt contains it until Chief accepts it. `observability.md` describes the lesson lifecycle.
 5. `ledger.recordVerdict` no longer changes `reject_streak`. A reviewer report with a verdict also inserts one `reviewer_verdicts` row for each covered target. A reviewer without targets inserts one row from the row's own worker and head. The plugin reads and writes no test field.
 6. A reviewer ready report with a verdict enqueues forge comments (one for each covered pull request). A worker blocked report enqueues one blocked comment. `forge-comments.md` describes them.
@@ -156,7 +156,9 @@ Each contract carries its reason.
 
 - `checkReport` accepts a ready planner report with no `plan` only when the row has `plan_epic`. Reason: only an epic planner has no plan files.
 - `checkReport` refuses a `plan` from a row with `plan_epic`. Reason: an epic planner names its epic in `result`, not in plan files.
-- Known limit: a planner report that arrives before its row exists has no `plan_epic`. The intake refuses an epic planner's ready report in that gap. Upgrade when spawn metadata carries `plan_epic`.
+- A planner report that arrives before its row is inserted reads `plan_epic` from the origin-verified spawn metadata. Reason: the pending row is only a candidate until the report validates, so the metadata is the only source of the mode before the insert.
+- An epic planner's ready report and blocked report are refused while its advisor review runs. The reviewed result stays until the review ends. Reason: a second epic report would overwrite the result that the advisor approved.
+- A task planner's reports keep their existing admission. Reason: the epic guards cover only epic planners.
 - A report refused by validation or eligibility writes nothing. This covers every `checkReport` line, a `chief` caller, and a `complete`, `archived`, or `deleted` row. A pending row is not inserted. Reason: a refusal must change nothing.
 - The intake decodes JSON strings of `plan`, `fails`, and `findings` before validation. Reason: the validation reads the decoded value.
 - The intake stores accepted findings with `file`, `message`, and `fix` trimmed. Reason: not stated in the code.

@@ -107,7 +107,7 @@ A non-Coordinator Chief gets this order: identity, tool-schema line, roster, wai
 - `delegateParams` refuses input that combines `unplannedReason` and `planThreadId`. Reason: planned tasks do not use unplanned justification reasons.
 - `chief_forge_init` retains a required `title` parameter without default logic. Reason: pull requests and tracking issues require explicit forge titles.
 - `planParams` and `consultParams` accept an optional `branch`, with no default. The schema trims it and allows 1 to 300 characters. Reason: the thread reads the project default unless the caller names a branch.
-- `planParams` accepts an optional `epic` boolean, with no default. The schema refuses `epic` with `revises` or with `branch`. Reason: a revision inherits the mode of its original, and an epic creates no branch.
+- `planParams` accepts an optional `epic` boolean, with no default. The schema refuses any supplied `epic` with `revises`, including `false`. It refuses `epic: true` with `branch`. Reason: a revision inherits the mode of its original, and an epic creates no branch.
 
 ## Invariants
 

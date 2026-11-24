@@ -133,13 +133,16 @@ A designed plan binds its approved design before its first wave:
 
 An epic plan follows this sequence:
 
-1. Chief calls `chief_plan` with `epic: true`. The server stores it as `plan_epic` on the planner row.
-2. The epic planner writes one epic issue with one sub-issue for each slice. It links the slices with native blocking.
-3. Each slice is a vertical thin slice with a demo or E2E checkpoint.
-4. The planner reports ready with no `plan` and the epic URL in `result`.
-5. Chief runs `chief_consult` once. The advisor reads the epic.
-6. If the advisor asks for changes, the planner revises once. The revision inherits `plan_epic`.
-7. When the epic is approved, Chief tells the user the epic link and completes the planner. No wave is delegated.
+1. Chief calls `chief_plan` with `epic: true`. The server stores it as `plan_epic` on the planner row, and the brief states `Mode: epic`.
+2. The epic planner creates the epic with the commands its rules name. By default it runs `gh issue create` for one epic issue and one sub-issue for each slice. It links each slice with native blocking through `gh api`. If a link call fails, it writes `Blocked by #n` or a task list in the epic body and says so in `result`.
+3. If the Context names another target, such as a Markdown file, the planner writes the epic there and never commits it. It creates no issue.
+4. Each slice is a vertical thin slice with a demo or E2E checkpoint.
+5. The planner reports ready with no `plan` and the epic URL, or the file path, in `result`.
+6. Chief runs `chief_consult` once. The advisor reads the epic issue or the named file and checks the slices.
+7. If the advisor asks for changes, Chief starts one revision with `chief_plan` and `revises`. The revision inherits `plan_epic`, and it gets no review.
+8. When the epic is approved, or a revision is ready, Chief tells the user the epic link and completes the planner and the revision. No wave is delegated.
+
+The epic flow runs one advisor round. The owner chose one second opinion, not a review loop. The code adds no round protocol and no risk register.
 
 A horizontal plan runs in this order:
 
@@ -149,7 +152,9 @@ A horizontal plan runs in this order:
 4. Each block worker edits only its own files and runs build and typecheck only.
 5. Chief delegates the integrate wave with `dependsOn` that names one block wave.
 6. The integrate worker runs `chief_log`. If a block is not ready, it reports blocked with `waiting on block waves N`. Otherwise it merges the other block branches, wires the blocks and runs the system tests.
-7. One review gate follows the integrate wave. It covers the latest worker of every block.
+7. One review gate follows the integrate wave. Its targets are the latest worker of each wave that is not complete, plus the worker that opened the gate.
+8. The first target owns the gate's one fix run. The first target is the highest-wave target on a stacked chain, which is the integrate worker in a horizontal plan. A wiring defect goes to the integrate worker.
+9. A completed block is not a target. Its code is in the integrate head.
 
 The plugin adds no code guard against an early integrate wave. It may start before the other block waves are ready and then reports blocked.
 
@@ -216,15 +221,18 @@ Shared worktree cleanup coordinates action ownership:
 ### Epic Mode
 
 - `chief_plan` accepts an optional `epic` boolean. Reason: an epic is a planning mode that the user asks for.
-- `chief_plan` refuses `epic` with `revises`. Reason: a revision inherits the mode of its original planner.
-- `chief_plan` refuses `epic` with `branch`. Reason: an epic creates no branch.
-- A revision of an epic planner stores `plan_epic` from its original. Reason: the mode stays fixed across revisions.
+- `chief_plan` refuses any supplied `epic` with `revises`, including `epic: false`. Reason: a revision inherits the mode of its original planner, and a caller cannot override it.
+- `chief_plan` refuses `epic: true` with `branch`. Reason: an epic creates no branch.
+- A revision takes its mode from its original planner only. A revision of an epic planner starts in epic mode without `epic` in the call. Reason: the mode stays fixed across revisions.
+- At launch, an effective epic mode refuses `branch`, whether the caller set it or it was inherited. Reason: an inherited epic would otherwise start a named worktree.
 - The planner brief states `Mode: epic` and adds an `## Epic mode` section. Reason: the planner must plan the epic and implement nothing.
 - `checkReport` refuses a `plan` from an epic planner. Reason: an epic planner has no plan files. Its ready result stands in for them.
 - `checkReport` accepts a ready report with no `plan` from an epic planner only. See [report intake](report-intake.md).
 - `nextAction` gives an epic planner no forge-init line and no delegate line. Reason: an epic has no waves.
-- Chief runs one `chief_consult` on a ready epic. The advisor reads the epic. Reason: not stated in the code.
-- A revised epic gets no second review. Reason: not stated in the code.
+- A refusal or a stall line for an epic planner or epic advisor never offers delegation. An abandoned epic advisor gets a retry or an escalation. Reason: an epic has no waves to delegate.
+- `chief_consult` accepts a ready epic planner with no waves. It refuses a task planner with no waves. Reason: the advisor reviews the epic text, and a task planner has no waves to review yet.
+- A revision counts as delivered only after its own ready report. Reason: a blocked revision carries no epic to complete.
+- An epic that a review holds is not replaced by a second ready or blocked report until the review ends. Reason: the reviewed result must stay the one Chief completes.
 - When an epic is approved, Chief tells the user the epic link and completes the planner. Reason: the epic issue is the only output.
 
 ### Horizontal Shape
@@ -235,8 +243,10 @@ Shared worktree cleanup coordinates action ownership:
 - The brief of a block wave says build and typecheck only. Reason: the integrate wave runs the system tests. See [the decision](../decisions/2026-11-24-horizontal-block-test-waiver.md).
 - A horizontal plan has one integrate wave. Its `dependsOn` names one block wave. Reason: one parent gives the integrate wave one branch to continue.
 - `chief_log` shows the branch of each wave. Reason: the integrate worker merges the block branches by name.
-- `reviewTargetsFor` puts the latest worker of every block into the one review gate. Reason: the gate must review every block.
-- Chief routes a wiring bug to the integrate worker. Reason: the integrate worker owns the wiring.
+- `reviewTargetsFor` gives the one review gate the latest worker of each wave that is not complete, and the worker that opened the gate. Reason: the gate reviews every block that still has open code.
+- `reviewTargetsFor` puts the highest-wave target on a stacked chain first. Reason: the first target owns the gate's one fix run, and the integrate worker must own the wiring fix.
+- A completed block drops out of the targets. Its code is in the integrate head. The integrate branch continues one block, and the integrate worker merges the other blocks. Reason: the integrate head is the reviewed code for all blocks.
+- A wiring defect that the gate finds goes to the integrate worker as the fix run. Reason: the integrate worker owns the wiring.
 - Chief routes a wrong contract to a fresh plan. Reason: the contract wave sets the contract that the blocks share.
 
 ### Spec Writer Side Lane

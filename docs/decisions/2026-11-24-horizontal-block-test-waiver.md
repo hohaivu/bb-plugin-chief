@@ -6,8 +6,9 @@ A horizontal plan splits work into parallel block waves. Each block wave builds 
 
 ## Decision
 
-- A wave brief may waive tests for a horizontal block wave. The block worker runs build and typecheck only.
-- The integrate wave of the same plan keeps the test rule and runs system tests.
+- A wave brief may waive tests for a horizontal block wave. The block worker runs build and typecheck only. The block keeps a Verify command of build and typecheck.
+- The waiver holds only when the same plan's integrate wave requires system tests.
+- The integrate wave keeps the test rule and runs system tests.
 - The waiver is text only. The plugin adds no code guard.
 
 ## Consequence
