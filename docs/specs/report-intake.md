@@ -158,8 +158,9 @@ Each contract carries its reason.
 - `checkReport` refuses a `plan` from a row with `plan_epic`. Reason: an epic planner names its epic in `result`, not in plan files.
 - A planner report that arrives before its row is inserted reads `plan_epic` from the origin-verified spawn metadata. Reason: the pending row is only a candidate until the report validates, so the metadata is the only source of the mode before the insert.
 - An epic planner's ready report and blocked report are refused while its advisor review runs. The reviewed result stays until the review ends. Reason: a second epic report would overwrite the result that the advisor approved.
-- An epic planner's ready report and blocked report are refused after its plan review is `approved` or `changes`. Reason: a decided epic is final, and Chief completes it or revises it.
-- A delivered epic revision refuses later reports from its row. A blocked epic revision may still retry. Reason: a delivered revision holds the epic that Chief completes, and a blocked revision holds none.
+- An epic planner's ready report and blocked report are refused after its plan review is `approved` or `changes`. The plan review keeps that value after completion. Reason: a decided epic is final, and Chief completes it or revises it.
+- After Chief completes an epic planner, a later report gets the complete-row refusal. The eligibility check runs first, so the epic guards cover only an epic that is not complete. Reason: a complete row can no longer report.
+- A ready epic revision refuses later reports from its row while its last report state is `ready`. A blocked epic revision may still retry. Reason: a delivered revision holds the epic that Chief completes, and a blocked revision holds none.
 - A task planner's reports keep their existing admission. Reason: the epic guards cover only epic planners.
 - A report refused by validation or eligibility writes nothing. This covers every `checkReport` line, a `chief` caller, and a `complete`, `archived`, or `deleted` row. A pending row is not inserted. Reason: a refusal must change nothing.
 - The intake decodes JSON strings of `plan`, `fails`, and `findings` before validation. Reason: the validation reads the decoded value.

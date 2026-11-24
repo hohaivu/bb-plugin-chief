@@ -141,7 +141,7 @@ An epic plan follows this sequence:
 6. Chief runs `chief_consult` once. The advisor reads the epic issue or the named file and checks the slices.
 7. If the advisor asks for changes, Chief starts one revision with `chief_plan` and `revises`. The revision inherits `plan_epic`, and it gets no review.
 8. When the epic is approved, or a revision is ready, Chief tells the user the epic link and completes the planner and the revision. No wave is delegated.
-9. A revision reads the epic issue or target named in the original report, and the advisor report. A delivered revision refuses another report, and it refuses another `chief_plan revises`. Reason: its result stands, and Chief completes it.
+9. A revision reads the epic issue or target named in the original report, and the advisor report. A ready revision refuses later reports from its row, and the original planner refuses another `chief_plan revises`. Reason: its result stands, and Chief completes it. A blocked revision may retry.
 
 The epic flow runs one advisor round. The owner chose one second opinion, not a review loop. The code adds no round protocol and no risk register.
 
@@ -152,9 +152,9 @@ A horizontal plan runs in this order:
 3. When wave 1 is ready, each block chain head starts on its own branch, stacked on wave 1.
 4. Each block worker edits only its own files and runs build and typecheck only.
 5. Chief delegates the integrate wave with `dependsOn` that names one block wave.
-6. The integrate worker runs `chief_log`. A block counts as delivered when `chief_log` shows `delivered` for its wave. For each block wave that is not delivered, the integrate worker reports blocked with `waiting on block waves N`. Otherwise it merges the other block branches, wires the blocks and runs the system tests.
+6. The integrate worker runs `chief_log`. A block counts as delivered when `chief_log` shows `delivered` on its wave. That mark needs a latest worker that is ready, idle after a ready report, or complete, and whose last report is ready. For each block wave that is not delivered, the integrate worker reports blocked with `waiting on block waves N`. Otherwise it merges the other block branches, wires the blocks and runs the system tests.
 7. One review gate follows the integrate wave. Its targets are the latest worker of each wave that is not complete, plus the worker that opened the gate.
-8. The first target owns the gate's one fix run. In a horizontal plan, the first target is the integrate worker, because one wave stacks on two or more blocks. Otherwise the targets keep wave order. A wiring defect goes to the integrate worker.
+8. The first target owns the gate's one fix run. In a horizontal plan, the first target is the integrate worker (see Horizontal Shape). Otherwise the targets keep wave order. A wiring defect goes to the integrate worker.
 9. A completed block is not a target. Its code is in the integrate head.
 
 The plugin adds no code guard against an early integrate wave. It may start before the other block waves are ready and then reports blocked.
@@ -231,7 +231,10 @@ Shared worktree cleanup coordinates action ownership:
 - `checkReport` accepts a ready report with no `plan` from an epic planner only. See [report intake](report-intake.md).
 - `nextAction` gives an epic planner no forge-init line and no delegate line. Reason: an epic has no waves.
 - A refusal or a stall line for an epic planner or epic advisor never offers delegation. An abandoned epic advisor gets a retry or an escalation. Reason: an epic has no waves to delegate.
-- A completed epic refuses `chief_consult`, `chief_plan revises` and `chief_continue` with its review outcome. The refusal says the outcome stands and names the next step. Reason: the approved or changed result is final, so a second review or revision must not start.
+- A completed epic refuses `chief_plan revises` with its review outcome. The refusal says the outcome stands and names the next step. Reason: the approved or changed result is final, so a second revision must not start.
+- An epic advisor that never reported, on a completed epic, gets the same outcome refusal from `chief_continue`. Reason: the advisor reviewed a result that already stands.
+- `chief_consult` on a complete epic refuses with `No managed planner <id> with an open plan for this Chief.` Reason: the consult check reads an open plan, and a complete planner has none.
+- `chief_continue` on a complete epic planner refuses with `already reported`, and names the reroute steps. Reason: the planner already reported, so a nudge has no work to reach.
 - `chief_consult` accepts a ready epic planner with no waves. It refuses a task planner with no waves. Reason: the advisor reviews the epic text, and a task planner has no waves to review yet.
 - A revision counts as delivered only after its own ready report. Reason: a blocked revision carries no epic to complete.
 - A delivered epic revision refuses further reports from its row and further `chief_plan revises` on its original planner. A blocked revision may retry. Reason: the delivered result stands until Chief completes it.
@@ -246,8 +249,11 @@ Shared worktree cleanup coordinates action ownership:
 - The brief of a block wave says build and typecheck only. Reason: the integrate wave runs the system tests. See [the decision](../decisions/2026-11-24-horizontal-block-test-waiver.md).
 - A horizontal plan has one integrate wave. Its `dependsOn` names one block wave. Reason: one parent gives the integrate wave one branch to continue.
 - `chief_log` shows the branch of each wave. Reason: the integrate worker merges the block branches by name.
+- `chief_log` shows `delivered` on a block wave only when its latest worker is settled and its last report is ready. Settled means ready, idle after a ready report, or complete. Reason: the integrate worker merges only the code that a block reported ready.
 - `reviewTargetsFor` gives the one review gate the latest worker of each wave that is not complete, and the worker that opened the gate. Reason: the gate reviews every block that still has open code.
-- In a horizontal plan, `reviewTargetsFor` puts the integrate worker first. A horizontal plan has one continuation wave that stacks on two or more blocks. Otherwise `reviewTargetsFor` keeps wave order. Reason: the first target owns the gate's one fix run, and the integrate worker must own the wiring fix.
+- `reviewTargetsFor` treats a plan as horizontal when two or more chain heads stack on the same wave, and exactly one wave continues a stacked chain. Reason: that is the block shape, where the integrate wave merges the blocks.
+- In a horizontal plan, `reviewTargetsFor` puts the integrate worker first. Otherwise `reviewTargetsFor` keeps wave order. Reason: the first target owns the gate's one fix run, and the integrate worker must own the wiring fix.
+- The integrate worker is the one owner of the gate's first target in a horizontal plan. It is the latest worker of the integrate wave, and it stays a target while its wave is not complete or when it opened the gate. Reason: the integrate head carries the code of its parent block.
 - A completed block drops out of the targets. Its code is in the integrate head. The integrate branch continues one block, and the integrate worker merges the other blocks. Reason: the integrate head is the reviewed code for all blocks.
 - A wiring defect that the gate finds goes to the integrate worker as the fix run. Reason: the integrate worker owns the wiring.
 - Chief routes a wrong contract to a fresh plan. Reason: the contract wave sets the contract that the blocks share.
