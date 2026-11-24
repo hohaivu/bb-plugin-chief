@@ -72,7 +72,7 @@ export function hasSpecBaseline(body: string): boolean {
 }
 
 /** Every reason a report cannot be saved, one line per failing field: the field, its actual size or value, the limit, and the fix. */
-export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id" | "research_design"> & { plan_epic?: number | null }, params: ReportParams, plan: string | unknown[] | undefined): string[] {
+export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id" | "research_design" | "plan_epic">, params: ReportParams, plan: string | unknown[] | undefined): string[] {
   const errors: string[] = [];
   const num = (n: number) => n.toLocaleString("en-US");
   const ready = params.state === "ready";
@@ -441,7 +441,7 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
     const found = await lookupRow(threadId, callerProjectId);
     // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
-    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null, research_design: null });
+    const candidate = found.row ?? (found.pending && { role: found.pending.role, plan_thread_id: null, research_design: null, plan_epic: null });
     if (!candidate || candidate.role === "chief") throw new Error("chief_report is available only in managed worker, planner, reviewer, and advisor threads.");
     if (found.row && ["complete", "archived", "deleted"].includes(found.row.state)) {
       throw new Error(`Managed thread ${threadId} is ${found.row.state} and can no longer report.`);

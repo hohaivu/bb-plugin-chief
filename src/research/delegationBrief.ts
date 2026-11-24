@@ -432,14 +432,12 @@ export type AdvisorBriefInput = {
   /** An open branch the plan consult's worktree is based on. */
   branch?: string;
   /** The plan under review (chief_consult planThreadId): the planner, its plan files, result and report. */
-  plan: { plannerThreadId: string; paths: string[]; summary: string | null; reportPath: string | null };
-  /** An epic planner under review: it has no plan files; its ready result names the epic issue or target. */
-  epic?: { plannerThreadId: string; result: string | null; reportPath: string | null };
+  plan: { plannerThreadId: string; paths: string[]; summary: string | null; reportPath: string | null; epic?: boolean };
 };
 
 /** A plan advisor's prompt: the question, the plan files and the plan-review checklist. */
 export function advisorBrief(input: AdvisorBriefInput): string {
-  const { title, chiefThreadId, mission, context, plan, branch, epic } = input;
+  const { title, chiefThreadId, mission, context, plan, branch } = input;
   const head = [
     `You are the managed advisor for “${title}”. Report to Chief thread ${chiefThreadId}.`,
     ...(branch ? [branchLine(branch)] : []),
@@ -447,12 +445,12 @@ export function advisorBrief(input: AdvisorBriefInput): string {
     "", "## Question", mission,
     ...(context ? ["", "## Context", context] : []),
   ];
-  if (epic) return [
+  if (plan.epic) return [
     ...head,
     "", "## Epic to review",
-    `Planner ${epic.plannerThreadId} planned this epic and implemented nothing. Its ready result names the epic issue (or another target): read the epic and every sub-issue in full.`,
-    `Planner report: ${epic.reportPath ?? `bb chief inspect ${epic.plannerThreadId}`}`,
-    ...(epic.result ? [`Planner result: ${epic.result}`] : []),
+    `Planner ${plan.plannerThreadId} planned this epic and implemented nothing. Its ready result names the epic issue (or another target): read the epic and every sub-issue in full.`,
+    `Planner report: ${plan.reportPath ?? `bb chief inspect ${plan.plannerThreadId}`}`,
+    ...(plan.summary ? [`Planner result: ${plan.summary}`] : []),
     "", "## Epic-review checklist",
     "- Slices are vertical thin slices, each end to end, not horizontal layers.",
     "- Each slice has a demo or E2E checkpoint.",

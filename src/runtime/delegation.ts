@@ -178,10 +178,9 @@ export function createDelegation(ctx: Ctx) {
     const prompt = advisorBrief({
       title: params.title, chiefThreadId, mission: params.mission, context: params.context, branch,
       plan: {
-        plannerThreadId: plannerId, paths: planner.plan_epic ? [] : planWavesFor(plannerId).map((wave) => wave.path),
-        summary: planner.result ? clip(planner.result, 1_500) : null, reportPath: planner.report_path,
+        plannerThreadId: plannerId, paths: planWavesFor(plannerId).map((wave) => wave.path),
+        summary: planner.result ? clip(planner.result, 1_500) : null, reportPath: planner.report_path, epic: !!planner.plan_epic,
       },
-      ...(planner.plan_epic ? { epic: { plannerThreadId: plannerId, result: planner.result ? clip(planner.result, 1_500) : null, reportPath: planner.report_path } } : {}),
     });
     const thread = await ctx.managedSpawn.launch(prepared,
       { projectId, environment: await readerEnvironment(projectId, branch), title, prompt },

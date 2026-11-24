@@ -4,6 +4,8 @@ import { COORDINATOR_REFUSED, coordinatorRefusal } from "./prompts";
 import { consultParams, delegateParams, overrideSchema, planParams, stopParams, type TodoRow } from "../tools/shapes";
 import type { Ctx } from "./context";
 
+const BOOLEAN_FLAGS = new Set(["json", "epic"]);
+
 function parseArgs(argv: string[]) {
   const positional: string[] = [];
   const flags = new Map<string, string[]>();
@@ -16,7 +18,7 @@ function parseArgs(argv: string[]) {
     const [name, inline] = token.slice(2).split(/=(.*)/s);
     const next = argv[index + 1];
     // A boolean flag never takes a value: `--json thr_x` keeps thr_x positional.
-    const value = inline ?? (name !== "json" && name !== "epic" && next && !next.startsWith("--") ? (index++, next) : "true");
+    const value = inline ?? (!BOOLEAN_FLAGS.has(name!) && next && !next.startsWith("--") ? (index++, next) : "true");
     flags.set(name!, [...(flags.get(name!) ?? []), value]);
   }
   return {

@@ -171,7 +171,7 @@ export function createNextAction(ctx: Ctx) {
     return {
       all,
       busy: all.find((r) => BUSY_STATUSES.has(r.state)),
-      ready: all.find((r) => (r.state === "ready" || r.state === "complete") && (!!r.plan_waves || (!!r.plan_epic && r.last_report_state === "ready"))),
+      ready: all.find((r) => (r.state === "ready" || r.state === "complete") && (!!r.plan_waves || !!r.plan_epic)),
     };
   }
 
