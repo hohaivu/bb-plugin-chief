@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { disposeAll, setup, start, status } from "./harness";
-import { READY, type State, delegateWave, plan, report, rowOf, tool, workerOn } from "./flowHelpers";
+import { READY, type State, delegateWave, plan, report, rowOf, setLive, tool, workerOn } from "./flowHelpers";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
 
@@ -71,14 +71,20 @@ describe("epic input", () => {
     expect((await status(state)).threads.filter((row) => row.role === "planner")).toHaveLength(2);
   });
 
-  test("the CLI keeps an explicit --epic=false, so branch or revises still refuses it, and omitting --epic keeps a task plan valid", async () => {
+  test("the CLI keeps an explicit --epic=false: it refuses a revision and a branch, and the same revision with --epic omitted starts one", async () => {
     const state = await setup();
     const chief = await start(state);
-    const planner = await plan(state, chief.threadId);
-    const run = (args: string[]) => state.harness.behavior.runCli(["plan", "--title", "T", "--mission", "Plan it", ...args, "--json"], { threadId: chief.threadId, projectId: "proj_1" });
-    expect((await run(["--epic=false", "--branch", "feature/x", "--undesigned-reason", "small"])).exitCode).not.toBe(0);
+    await epicPlan(state, chief.threadId);
+    const planner = await READY_EPIC_ADVISOR(state, chief.threadId, "request_changes");
+    const planners = async () => (await status(state)).threads.filter((row) => row.role === "planner").length;
+    const run = (args: string[]) => state.harness.behavior.runCli(["plan", "--title", "T", "--mission", "Revise it", ...args, "--json"], { threadId: chief.threadId, projectId: "proj_1" });
+    // The advisor asked for changes, so the only reason the first call can fail is the explicit false.
     expect((await run(["--epic=false", "--revises", planner.threadId])).exitCode).not.toBe(0);
-    expect((await run(["--undesigned-reason", "small"])).exitCode).toBe(0);
+    expect(await planners()).toBe(1);
+    expect((await run(["--epic=false", "--branch", "feature/x", "--undesigned-reason", "small"])).exitCode).not.toBe(0);
+    expect(await planners()).toBe(1);
+    expect((await run(["--revises", planner.threadId])).exitCode).toBe(0);
+    expect(await planners()).toBe(2);
   });
 });
 
@@ -142,6 +148,45 @@ describe("epic consult and routing", () => {
     expect(refusal).toContain("chief_complete");
     expect(refusal).not.toMatch(/chief_delegate|delegate its waves/);
     expect((await status(state)).threads.filter((row) => row.role === "planner")).toHaveLength(2);
+  });
+
+  test("a revision that delivered keeps its result: a later blocked report is refused and a second revision starts no planner", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await epicPlan(state, chief.threadId);
+    const planner = await READY_EPIC_ADVISOR(state, chief.threadId, "request_changes");
+    const revise = () => tool(state, "chief_plan", { title: "Checkout epic", mission: "Revise it", revises: planner.threadId }, chief.threadId);
+    await revise();
+    const revision = await latestPlanner(state);
+    await report(state, revision.threadId, epicReport);
+    await expect(report(state, revision.threadId, { state: "blocked", blocker: "stuck", recommendation: "retry" })).rejects.toThrow(/delivered/);
+    await expect(report(state, revision.threadId, { state: "ready", result: "Epic: https://github.com/o/r/issues/9" })).rejects.toThrow(/delivered/);
+    expect(rowOf(state, revision.threadId)).toMatchObject({ last_report_state: "ready", result: epicReport.result });
+    await expect(revise()).rejects.toThrow(/chief_complete/);
+    expect((await status(state)).threads.filter((row) => row.role === "planner")).toHaveLength(2);
+  });
+
+  test("once the approved epic is complete, a stopped advisor's continue and chief_plan revises report the outcome, with no consult or report to wait for", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await epicPlan(state, chief.threadId);
+    const planner = await latestPlanner(state);
+    await report(state, planner.threadId, epicReport);
+    await consult(state, chief.threadId, planner.threadId);
+    const [first] = await advisors(state);
+    await report(state, first!.threadId, { state: "failed", result: "Provider failed." });
+    await consult(state, chief.threadId, planner.threadId);
+    const [, second] = await advisors(state);
+    await report(state, second!.threadId, { state: "ready", result: "Sound.", verdict: "approve" });
+    await tool(state, "chief_complete", { threadId: planner.threadId }, chief.threadId);
+    expect(rowOf(state, planner.threadId).state).toBe("complete");
+    const refuse = (call: Promise<unknown>) => call.then(() => "", (error) => String(error));
+    const resumed = await refuse(tool(state, "chief_continue", { threadId: first!.threadId, instruction: "Keep going" }, chief.threadId));
+    const revises = await refuse(tool(state, "chief_plan", { title: "Checkout epic", mission: "Revise it", revises: planner.threadId }, chief.threadId));
+    for (const refusal of [resumed, revises]) {
+      expect(refusal).toContain("complete");
+      expect(refusal).not.toMatch(/chief_consult|ready report|chief_complete \(/);
+    }
   });
 
   test("a reviewed epic keeps its result and completion route: a later ready or blocked report is refused", async () => {
@@ -254,5 +299,34 @@ describe("chief_log", () => {
     await report(state, worker.thread_id, { state: "ready", result: READY }); // a store write reloads the row cache
     const text = await state.harness.behavior.callAgentTool("chief_log", {}, { threadId: worker.thread_id, projectId: "proj_1" }) as string;
     expect(text).toContain("branch feature/block-a");
+  });
+
+  // Contract: a wave line marks a worker delivered by its ready report, not by its lifecycle state.
+  // Regression: a worker that reported ready and then completed reads as undelivered, or a completed one that only reported blocked reads as delivered.
+  const waveLine = async (state: State, workerId: string) => String(await state.harness.behavior.callAgentTool("chief_log", {}, { threadId: workerId, projectId: "proj_1" })).split("\n").find((line) => line.startsWith("- wave 1:"))!;
+  const wave1Worker = async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const planner = await plan(state, chief.threadId);
+    await delegateWave(state, chief.threadId, planner.threadId, 1);
+    return { state, chief, worker: workerOn(state, planner.threadId, 1) };
+  };
+
+  test("a wave line shows a ready or completed worker that reported ready as delivered", async () => {
+    const { state, chief, worker } = await wave1Worker();
+    await report(state, worker.thread_id, { state: "ready", result: READY });
+    expect(await waveLine(state, worker.thread_id)).toContain("delivered");
+    await tool(state, "chief_complete", { threadId: worker.thread_id, skipReview: "owner: test" }, chief.threadId);
+    expect(rowOf(state, worker.thread_id).state).toBe("complete");
+    expect(await waveLine(state, worker.thread_id)).toContain("delivered");
+  });
+
+  test("a wave line does not show a worker completed after only a blocked report as delivered", async () => {
+    const { state, chief, worker } = await wave1Worker();
+    await report(state, worker.thread_id, { state: "blocked", blocker: "stuck", recommendation: "retry" });
+    setLive(state, worker.thread_id, "idle");
+    await tool(state, "chief_complete", { threadId: worker.thread_id, override: "owner: block abandoned" }, chief.threadId);
+    expect(rowOf(state, worker.thread_id)).toMatchObject({ state: "complete", last_report_state: "blocked" });
+    expect(await waveLine(state, worker.thread_id)).not.toContain("delivered");
   });
 });

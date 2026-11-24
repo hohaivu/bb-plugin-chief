@@ -481,6 +481,8 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       // Same in-flight test as nextAction.ts planAdvisors.
       const reviewing = store.all().find((r) => r.role === "advisor" && r.plan_thread_id === threadId && r.advised_at == null && BUSY_STATUSES.has(r.state));
       if (reviewing) throw new Error(`chief_report was not saved: ${kind} ${threadId} is in its one advisor review (${reviewing.thread_id}); wait for its report before submitting a new ${epicReview ? "report" : "plan"}.`);
+      // A revision gets no review: its ready report is its delivery, so a later report must not replace it (a blocked attempt may still retry).
+      if (epicReview && row.replaces_thread_id && store.get(threadId)?.last_report_state === "ready") throw new Error(`chief_report was not saved: epic revision ${threadId} already delivered; its result stands. Chief completes it.`);
       const decided = epicReview ? store.get(threadId)?.plan_review : undefined;
       if (decided === "approved" || decided === "changes") throw new Error(`chief_report was not saved: epic ${threadId} already has its review outcome (${decided}); its result stands. Chief completes it, or revises it with chief_plan revises.`);
     };

@@ -287,14 +287,15 @@ export function createWaveSchedule<Row extends WaveRow>(rows: () => ReadonlyMap<
     if (!waves.length || worker.plan_wave == null) return [worker];
     const keep = (latest: Row | undefined) => latest && !isDesignWave(latest) && (latest.thread_id === worker.thread_id || latest.state !== "complete") ? [latest] : [];
     const implementation = waves.flatMap((_, index) => keep(latestWorker(worker.plan_thread_id!, index + 1)));
-    // The gate's fix run belongs to its first target. Only in the horizontal shape (two or more heads stacked on the same wave) that is the
-    // integrate worker (the highest row continuing a stacked block, its head carries the block's code), not the contract wave; any other plan keeps wave order.
+    // The gate's fix run belongs to its first target. Only the horizontal shape leads with the integrate worker (its head carries its parent block's
+    // code): two or more heads stacked on one wave and exactly one wave continuing a stacked block. Any other plan keeps wave order.
     const stackedOn = heads(waves).flatMap((head) => waves[head - 1]?.stackOn ?? []);
-    const horizontal = stackedOn.some((target, index) => stackedOn.indexOf(target) !== index);
-    const owner = horizontal ? [...implementation].reverse().find((row) => {
-      const [head] = chainOf(waves, row.plan_wave!);
-      return head !== row.plan_wave && waves[head! - 1]?.stackOn !== undefined;
-    }) : undefined;
+    const continuations = waves.flatMap((_, index) => {
+      const [head] = chainOf(waves, index + 1);
+      return head !== index + 1 && waves[head! - 1]?.stackOn !== undefined ? [index + 1] : [];
+    });
+    const horizontal = stackedOn.some((target, index) => stackedOn.indexOf(target) !== index) && continuations.length === 1;
+    const owner = horizontal ? implementation.find((row) => row.plan_wave === continuations[0]) : undefined;
     return [
       ...(owner ? [owner, ...implementation.filter((row) => row !== owner)] : implementation),
       ...waves.flatMap((_, index) => keep(latestSideWriter(worker.plan_thread_id!, index + 1))),

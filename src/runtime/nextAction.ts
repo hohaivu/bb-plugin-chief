@@ -179,6 +179,7 @@ export function createNextAction(ctx: Ctx) {
   /** Why a planner's waves may not be forge-initialised or delegated yet, naming the one next call; null when they may. */
   function planReviewRefusal(planner: ManagedRow): string | null {
     const P = planner.thread_id;
+    if (planner.plan_epic && planner.state === "complete") return `Epic ${P} is complete: its review outcome stands. Do not consult, revise, continue or complete it again.`;
     if (planner.plan_review === "required") {
       const { inFlight } = planAdvisors(P);
       if (inFlight) return `${planner.plan_epic ? "Epic" : "Plan"} ${P} is in its one advisor review (${inFlight.thread_id}): wait for ${inFlight.thread_id}'s report${planner.plan_epic ? "." : " before chief_forge_init or chief_delegate."}`;

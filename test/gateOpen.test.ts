@@ -128,6 +128,21 @@ describe("a horizontal plan's gate", () => {
     await w.review.startReview(w.chief, "W3");
     expect(JSON.parse(gateRows(w)[0].targets).map((target: { threadId: string }) => target.threadId)).toEqual(["W1", "W3"]);
   });
+
+  // Contract: a repeated stack base alone is not the horizontal shape: blocks 2 and 3 on wave 1 with wave 4 continuing block 2 and wave 5
+  // continuing block 3 have no single integrate wave, so wave order stands and the gate's one fix run is admitted on wave 1.
+  // Regression: the highest continuation (wave 5) leads, and a defect on wave 1 is refused its fix there.
+  test("two stacked blocks with their own continuations keep wave order", async () => {
+    const waves: PlanWave[] = [{ path: "/p/plan-1.md" }, { path: "/p/plan-2.md", dependsOn: [], stackOn: 1 }, { path: "/p/plan-3.md", dependsOn: [], stackOn: 1 }, { path: "/p/plan-4.md", dependsOn: [2] }, { path: "/p/plan-5.md", dependsOn: [3] }];
+    const w = world({ realPlan: true, waves, heads: Object.fromEntries([1, 2, 3, 4, 5].map((n) => [pr(n), headOf(`feature/w${n}`, SHA_A)])) });
+    for (const n of [1, 2, 3, 4, 5]) w.worker(`W${n}`, { prUrl: pr(n), branch: `feature/w${n}`, planWave: n });
+    w.setState("W2", "complete");
+    w.setState("W3", "complete");
+    await w.review.startReview(w.chief, "W5");
+    const targets = JSON.parse(gateRows(w)[0].targets).map((target: { threadId: string }) => target.threadId);
+    expect(targets).toEqual(["W1", "W4", "W5"]);
+    expect(w.store.gate(KEY)!.targets[0]!.threadId).toBe("W1");
+  });
 });
 
 describe("retry launches the reviewer only when it is missing", () => {

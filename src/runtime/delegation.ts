@@ -4,7 +4,7 @@ import { isWriter } from "../plan/waveSchedule";
 import { neverReported } from "../plan/planProgress";
 import { worktreeEnvironment } from "../research/managedSpawn";
 import { heavySlotCount } from "../research/heavySlots";
-import { isReady } from "../plan/waveSchedule";
+import { isReady, isSettled } from "../plan/waveSchedule";
 import type { ReviewGate } from "../db/threadStore";
 import { CONTINUE_REMINDERS, planAdmissions, planOnly } from "../core/roles";
 import { type FailEntry, type ManagedRow, type ReportFinding, terminal } from "../types";
@@ -134,6 +134,7 @@ export function createDelegation(ctx: Ctx) {
   function revisionInput(plannerId: string, chiefThreadId: string): NonNullable<Parameters<typeof plannerBrief>[0]["revision"]> {
     const planner = store.get(plannerId);
     if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId)) throw new Error(`No managed planner ${plannerId} for this Chief.`);
+    if (planner.plan_epic && planner.state === "complete") throw new Error(ctx.planReviewRefusal(planner)!);
     if (planner.plan_review !== "changes") {
       if (!planner.plan_review && planner.replaces_thread_id) throw new Error(`${plannerId} is already the revision of ${planner.replaces_thread_id}; a revision gets no review — ${deliver(planner)}.`);
       throw new Error(ctx.planReviewRefusal(planner) ?? `Plan ${plannerId} needs no revision: only a plan whose one advisor review asked for changes is revised. ${planner.plan_epic ? (ctx.nextAction(planner) ?? "Wait for its ready report.") : "Delegate it."}`);
@@ -433,7 +434,7 @@ export function createDelegation(ctx: Ctx) {
     if (row.role === "advisor" && row.plan_thread_id && row.advised_at == null && store.get(row.plan_thread_id)?.plan_review !== "required") {
       const reviewed = store.get(row.plan_thread_id);
       throw new Error(`Advisor ${threadId} reviewed a plan revision that was since replaced or decided; it cannot be resumed. ${reviewed?.plan_epic
-        ? `The epic's review outcome stands: ${ctx.nextAction(reviewed) ?? `escalate to the user, or chief_consult (planThreadId: ${row.plan_thread_id}) again`}`
+        ? `The epic's review outcome stands: ${(reviewed.state === "complete" ? ctx.planReviewRefusal(reviewed) : ctx.nextAction(reviewed)) ?? `escalate to the user, or chief_consult (planThreadId: ${row.plan_thread_id}) again`}`
         : `Start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or delegate the plan without it.`}`);
     }
     if (row.role !== "worker" && (row.state === "ready" || row.state === "complete")) {
@@ -504,7 +505,7 @@ export function createDelegation(ctx: Ctx) {
       ...waves.map((_, index) => {
         const line = (current: ManagedRow, label = "") => {
           const last = (current.result ?? current.status ?? "").split("\n").find((entry) => entry.trim()) ?? "";
-          return `${label}@thread:${current.thread_id} ${current.state}${current.branch ? ` branch ${current.branch}` : ""}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
+          return `${label}@thread:${current.thread_id} ${current.state}${isSettled(current) && current.last_report_state === "ready" ? " delivered" : ""}${current.branch ? ` branch ${current.branch}` : ""}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
         };
         const current = latestWorker(planThreadId, index + 1);
         const writer = latestSideWriter(planThreadId, index + 1);
