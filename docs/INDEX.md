@@ -22,7 +22,7 @@
 - [Coordinator stays a Chief row with two nullable columns](decisions/2026-11-10-coordinator-stays-chief-row.md)
 - [Spec Writer runs in parallel on a side worktree](decisions/2026-11-10-spec-writer-parallel-side-worktree.md) (parallel start superseded)
 - [One review gate per plan](decisions/2026-11-18-single-review-gate.md) (tester side superseded)
-- [Workers write and run their tests, no tester](decisions/2026-11-19-workers-write-tests.md)
+- [Workers write and run their tests, no tester](decisions/2026-11-19-workers-write-tests.md) (amended for block waves by [horizontal block test waiver](decisions/2026-11-24-horizontal-block-test-waiver.md))
 - [One Spec Writer per plan](decisions/2026-11-18-one-spec-writer-per-plan.md)
 - [One advisory re-review after a green fix run](decisions/2026-11-18-advisory-re-review.md)
 - [Only a Spec Writer changes docs](decisions/2026-11-10-docs-owned-by-spec-writer.md)
@@ -40,6 +40,7 @@
 - [Managed threads use BB stuck notices](decisions/2026-11-19-managed-threads-parent-notifications-stuck.md)
 - [Decisions file is the only store](decisions/2026-11-19-decisions-file-only-store.md)
 - [Abandon a stuck supervisor tick after a grace](decisions/2026-11-19-supervisor-abandon-tick-after-grace.md)
+- [Horizontal block waves may waive tests](decisions/2026-11-24-horizontal-block-test-waiver.md)
 
 ## Superseded decisions
 

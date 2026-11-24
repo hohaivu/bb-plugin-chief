@@ -98,6 +98,7 @@ The transaction runs these steps in order:
 | --- | --- |
 | Any ready report | `verdict` (null when the report sends none). Other states store a null verdict. |
 | Planner ready with a plan | `plan_waves`: path, contracts, title, and the flags `dependsOn`, `design`, `spec`, `baseline`, `feature`, `reshape` for each wave. An array plan stores `feature` and `reshape` as booleans on every wave. A string plan stores neither. `checkReport` refuses a non-boolean `design`, `spec`, `feature` or `reshape`, and refuses a `dependsOn` that is not an array of at most one earlier wave number. It also refuses `feature` or `reshape` true together with `design` true. |
+| Epic planner ready with no `plan` | No plan waves. The row stores `plan_epic`. See [plan chains](plan-chains.md). |
 | Worker or reviewer with `fails` | The merged `fails` JSON. A report without `fails` keeps the stored value. |
 | Reviewer | `findings` JSON. Every reviewer report replaces it. A report without findings clears it. |
 | Ready with `regression` true and verdict `request_changes` | `regression` is 1. |
@@ -153,6 +154,9 @@ The code of `report()` moves into `createReportIntake`. The behaviour stays the 
 
 Each contract carries its reason.
 
+- `checkReport` accepts a ready planner report with no `plan` only when the row has `plan_epic`. Reason: only an epic planner has no plan files.
+- `checkReport` refuses a `plan` from a row with `plan_epic`. Reason: an epic planner names its epic in `result`, not in plan files.
+- Known limit: a planner report that arrives before its row exists has no `plan_epic`. The intake refuses an epic planner's ready report in that gap. Upgrade when spawn metadata carries `plan_epic`.
 - A report refused by validation or eligibility writes nothing. This covers every `checkReport` line, a `chief` caller, and a `complete`, `archived`, or `deleted` row. A pending row is not inserted. Reason: a refusal must change nothing.
 - The intake decodes JSON strings of `plan`, `fails`, and `findings` before validation. Reason: the validation reads the decoded value.
 - The intake stores accepted findings with `file`, `message`, and `fix` trimmed. Reason: not stated in the code.
@@ -216,6 +220,8 @@ Each contract carries its reason.
 ### Test key refusal
 
 `checkPlan` refuses a plan wave whose `test` key is `true` or `false`. The refusal says: `plan wave N: test waves are gone; a wave carries its own tests and Verify command. Drop test.` Reason: each implementation wave carries its own tests, so a test wave adds no work.
+
+A horizontal block wave may waive its tests in its brief. The `test` key stays refused. See [plan chains](plan-chains.md).
 
 Invariants:
 

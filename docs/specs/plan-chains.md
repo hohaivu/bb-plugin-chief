@@ -14,6 +14,11 @@ The plan chains domain manages execution topology, branch allocation, pull reque
 - **Chain**: an ordered sequence of waves from a head wave to a tip wave.
 - **Chain head**: a plan wave with no parent dependency.
 - **Chain tip**: a plan wave that has no successor wave.
+- **Epic plan**: a plan that a planner makes with `epic: true`. The planner writes one epic issue and implements nothing.
+- **Horizontal plan**: a plan that has one contract wave, parallel block waves and one integrate wave.
+- **Contract wave**: wave 1 of a horizontal plan. It states the shared types, API, schema or CLI shape.
+- **Block wave**: a chain head of a horizontal plan with `dependsOn: []` and `stackOn: 1`. It owns files that no other block owns.
+- **Integrate wave**: the last wave of a horizontal plan. Its `dependsOn` names one block wave. It merges the other block branches and runs the system tests.
 - **Stacked chain**: a chain whose head has the optional `stackOn: k` field. Its task branch and pull request build on the task branch of wave `k`'s chain.
 - **Plan base**: the base branch that a stacked or branch-based chain is fixed to. The server derives it, and `null` means the project default.
 - **Task branch**: the Git branch created for a plan chain.
@@ -126,6 +131,28 @@ A designed plan binds its approved design before its first wave:
 3. The planner brief names both snapshot paths.
 4. Chief calls `chief_forge_init`, and the pull request body gets the design block.
 
+An epic plan follows this sequence:
+
+1. Chief calls `chief_plan` with `epic: true`. The server stores it as `plan_epic` on the planner row.
+2. The epic planner writes one epic issue with one sub-issue for each slice. It links the slices with native blocking.
+3. Each slice is a vertical thin slice with a demo or E2E checkpoint.
+4. The planner reports ready with no `plan` and the epic URL in `result`.
+5. Chief runs `chief_consult` once. The advisor reads the epic.
+6. If the advisor asks for changes, the planner revises once. The revision inherits `plan_epic`.
+7. When the epic is approved, Chief tells the user the epic link and completes the planner. No wave is delegated.
+
+A horizontal plan runs in this order:
+
+1. The planner writes wave 1 as the contract wave.
+2. Chief delegates wave 1. Its worker builds the shared contract.
+3. When wave 1 is ready, each block chain head starts on its own branch, stacked on wave 1.
+4. Each block worker edits only its own files and runs build and typecheck only.
+5. Chief delegates the integrate wave with `dependsOn` that names one block wave.
+6. The integrate worker runs `chief_log`. If a block is not ready, it reports blocked with `waiting on block waves N`. Otherwise it merges the other block branches, wires the blocks and runs the system tests.
+7. One review gate follows the integrate wave. It covers the latest worker of every block.
+
+The plugin adds no code guard against an early integrate wave. It may start before the other block waves are ready and then reports blocked.
+
 Reviewers never reuse a worktree. Each gate review gets a fresh managed worktree on the pinned commit. See [review-engine.md](review-engine.md) under Reviewer.
 
 Shared worktree cleanup coordinates action ownership:
@@ -185,6 +212,32 @@ Shared worktree cleanup coordinates action ownership:
 - `admitDelegation` refuses a fresh delegation (without `replaces:`) to a chain head with a plan base, while that base waits or is unresolved. Reason: the head must not build before its parent code exists.
 - `admitDelegation` refuses a fresh delegation to such a head without `branch`, and it never falls back to the project default. Reason: forge init cuts the branch from the plan base, so admission, forge and review agree on one value.
 - `undelegatedHeads` excludes the waiting and unresolved heads, and returns them as `waiting`. Reason: the planner must see why a head does not launch.
+
+### Epic Mode
+
+- `chief_plan` accepts an optional `epic` boolean. Reason: an epic is a planning mode that the user asks for.
+- `chief_plan` refuses `epic` with `revises`. Reason: a revision inherits the mode of its original planner.
+- `chief_plan` refuses `epic` with `branch`. Reason: an epic creates no branch.
+- A revision of an epic planner stores `plan_epic` from its original. Reason: the mode stays fixed across revisions.
+- The planner brief states `Mode: epic` and adds an `## Epic mode` section. Reason: the planner must plan the epic and implement nothing.
+- `checkReport` refuses a `plan` from an epic planner. Reason: an epic planner has no plan files. Its ready result stands in for them.
+- `checkReport` accepts a ready report with no `plan` from an epic planner only. See [report intake](report-intake.md).
+- `nextAction` gives an epic planner no forge-init line and no delegate line. Reason: an epic has no waves.
+- Chief runs one `chief_consult` on a ready epic. The advisor reads the epic. Reason: not stated in the code.
+- A revised epic gets no second review. Reason: not stated in the code.
+- When an epic is approved, Chief tells the user the epic link and completes the planner. Reason: the epic issue is the only output.
+
+### Horizontal Shape
+
+- A block chain head has `dependsOn: []` and `stackOn: 1`. Reason: block branches need the contract code of wave 1.
+- `planBase` stacks each block chain head on wave 1. Reason: the same rule as any stacked chain head applies (see Stacked Chain Base).
+- Block chain heads start together once wave 1 is ready. Reason: the blocks own disjoint files, so they need no order.
+- The brief of a block wave says build and typecheck only. Reason: the integrate wave runs the system tests. See [the decision](../decisions/2026-11-24-horizontal-block-test-waiver.md).
+- A horizontal plan has one integrate wave. Its `dependsOn` names one block wave. Reason: one parent gives the integrate wave one branch to continue.
+- `chief_log` shows the branch of each wave. Reason: the integrate worker merges the block branches by name.
+- `reviewTargetsFor` puts the latest worker of every block into the one review gate. Reason: the gate must review every block.
+- Chief routes a wiring bug to the integrate worker. Reason: the integrate worker owns the wiring.
+- Chief routes a wrong contract to a fresh plan. Reason: the contract wave sets the contract that the blocks share.
 
 ### Spec Writer Side Lane
 
@@ -286,9 +339,9 @@ A brief of a worker-kind thread or a planner thread keeps dynamic values and mod
 - `bb.agents.configure` in `src/runtime/host.ts` sends these rules in the instructions on every turn. Reason: a rule that the agent must load by choice may never bind it.
 - Each role reads each rule once. A brief states only an exception or a mode. Reason: a repeated rule adds length and can drift.
 - The brief keeps these dynamic values: the branch in the sync and push commands, the `Local sync` or `Base commit` record name, the prior thread line, the issue and pull request URLs, the fold target branch of a side lane, `MAX_WAVES` and the Deviations line when a plan is linked. Reason: the instructions cannot know them.
-- The brief keeps one role-boundary line. A worker writes and runs the tests of its wave, and a designer does not write or run tests. Neither changes `docs/`. A Spec Writer changes `docs/` only, never writes, edits or runs tests, builds or linters, and adds the `Chief-Spec-Writer` trailer to each commit. A planner stays read-only. Reason: a breach costs a full repair round.
+- The brief keeps one role-boundary line. A worker writes and runs the tests of its wave, unless the brief waives them for a horizontal block wave, and a designer does not write or run tests. Neither changes `docs/`. A Spec Writer changes `docs/` only, never writes, edits or runs tests, builds or linters, and adds the `Chief-Spec-Writer` trailer to each commit. A planner stays read-only. Reason: a breach costs a full repair round.
 - `WORKER_RULES` tell a worker to write and run the tests for its change in its wave, at the lowest level that would catch a break. They add an authoring gate, a ban on tests that assert the wording of a prose file, a filter on every test command, and the duty to fix a test that the change breaks. The plugin enforces none of this in code. Reason: the worker owns the test evidence, because the review gate has no tester.
-- `PLANNER_TEXT` and the plan-review checklist in `src/research/delegationBrief.ts` require that every implementation wave carries its own tests and Verify command. A test wave stays refused. A reshape wave may update the tests that its reshape breaks. Reason: no later role writes the tests of a wave.
+- `PLANNER_TEXT` and the plan-review checklist in `src/research/delegationBrief.ts` require that every implementation wave carries its own tests and Verify command, except a horizontal block wave that waives its tests. A test wave stays refused. A reshape wave may update the tests that its reshape breaks. Reason: no later role writes the tests of a wave.
 - `## Git workflow` keeps the dynamic lines only. It stays absent when the brief has no branch, issue or pull request. `## Fold` appears in a side brief only.
 - The advisor brief, `reviewerBrief` and the stored copy of the brief have no change. Reason: they never held the working contract.
 - The managed-thread instructions tell the agent to re-read the brief after a context compaction. Chief's own instructions have no change.
@@ -367,6 +420,7 @@ The five role skills and `CAMPAIGN.md` no longer exist. The [decision on role ru
 - `successorOf` returns the first non-absent wave that depends on the specified wave. Reason: graph traversal skips waves that have no execution.
 - `chainOf` traverses backward to the head and forward to the tip. Reason: callers require the complete sequence of linked waves.
 - A plan is 1 to 8 implementation waves (`checkPlan`). A `test` key is refused. Reason: each implementation wave carries its own tests and Verify command, so a test wave adds no work.
+- A horizontal block wave may waive its tests. Its Verify command runs build and typecheck only. The integrate wave runs the system tests. Reason: see [the decision](../decisions/2026-11-24-horizontal-block-test-waiver.md).
 - A persisted legacy test wave without rows is `absent`. It is never pending, and its index is kept. With rows, it is an ordinary wave (`planWavesFor`). Reason: stored plans keep their indices and their rows.
 
 ### Heavy Command Slots
@@ -439,3 +493,5 @@ Known limits:
 - [Stacked chains use a stackOn field](../decisions/2026-11-14-stacked-chains-stackon.md)
 - [Heavy commands run through a host slot wrapper](../decisions/2026-11-18-heavy-slots-host-capacity.md)
 - [One review gate per plan](../decisions/2026-11-18-single-review-gate.md)
+- [Workers write and run their tests, no tester](../decisions/2026-11-19-workers-write-tests.md)
+- [Horizontal block waves may waive tests](../decisions/2026-11-24-horizontal-block-test-waiver.md)

@@ -107,12 +107,13 @@ A non-Coordinator Chief gets this order: identity, tool-schema line, roster, wai
 - `delegateParams` refuses input that combines `unplannedReason` and `planThreadId`. Reason: planned tasks do not use unplanned justification reasons.
 - `chief_forge_init` retains a required `title` parameter without default logic. Reason: pull requests and tracking issues require explicit forge titles.
 - `planParams` and `consultParams` accept an optional `branch`, with no default. The schema trims it and allows 1 to 300 characters. Reason: the thread reads the project default unless the caller names a branch.
+- `planParams` accepts an optional `epic` boolean, with no default. The schema refuses `epic` with `revises` or with `branch`. Reason: a revision inherits the mode of its original, and an epic creates no branch.
 
 ## Invariants
 
 - For non-Claude providers, `bb.agents.configure` returns byte-identical instructions and skills relative to the base implementation. Reason: stability changes target Claude Code deferral issues exclusively.
 - For non-Claude providers, tool selection, names, and ordering remain identical to base behavior. Reason: provider changes must not alter tool catalogs.
-- Parameter schemas alter input schemas only by removing `title` from required properties and updating its description. Reason: validation rules must stay strict for all other fields. The optional parameters `projectId`, `threadId`, and `branch` (on `planParams` and `consultParams`) are the only other schema changes.
+- Parameter schemas alter input schemas only by removing `title` from required properties and updating its description. Reason: validation rules must stay strict for all other fields. The optional parameters `projectId`, `threadId`, and `branch` (on `planParams` and `consultParams`), and `epic` (on `planParams`), are the only other schema changes.
 - Only threads with verified plugin origin metadata receive seeded roles during initial configuration. Reason: untrusted metadata must not grant elevated capabilities.
 - Chief instructions place the preload line and core rules before the 32,768-character truncation boundary. Reason: truncation must never discard critical operational rules.
 
