@@ -60,16 +60,18 @@ export function createDelegation(ctx: Ctx) {
     }
     // A revision stays on the branch its original planner read.
     const branch = params.branch ?? revised?.branch ?? undefined;
+    // A revision inherits its original's mode; chief_plan refuses epic together with revises.
+    const epic = params.epic ?? !!revised?.plan_epic;
     const prepared = await ctx.managedSpawn.prepare(projectId, { role: "planner", hostId: await ctx.projectHostId(projectId) });
     const title = `Plan · ${params.title.replace(/^Plan · /, "")}`;
     const prompt = plannerBrief({
       title: params.title, chiefThreadId: chief.thread_id, mission: params.mission, context: params.context,
-      revision, branch, design, undesignedReason: params.undesignedReason,
+      revision, branch, design, undesignedReason: params.undesignedReason, epic,
     });
     const warning = branch ? null : await ctx.freshenChiefCheckout(chief, "planner");
     const thread = await ctx.managedSpawn.launch(prepared,
       { projectId, environment: await readerEnvironment(projectId, branch), title, prompt },
-      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null, researchThreadId: researchThreadId ?? null, researchReportSeq, ...(branch ? { branch } : {}) },
+      { role: "planner", chiefThreadId: chief.thread_id, replacesThreadId: params.revises ?? null, researchThreadId: researchThreadId ?? null, researchReportSeq, planEpic: epic, ...(branch ? { branch } : {}) },
       // Earlier revision attempts that failed or stopped are superseded atomically with the new one.
       params.revises ? (newId) => {
         const now = Date.now();
@@ -139,7 +141,9 @@ export function createDelegation(ctx: Ctx) {
     const blocked = decider.last_report_state === "blocked";
     return {
       plannerThreadId: plannerId,
-      planPaths: planWavesFor(plannerId).map((wave) => wave.path),
+      // An epic planner has no plan files: its report path and result stand in for them.
+      planPaths: planner.plan_epic ? (planner.report_path ? [planner.report_path] : []) : planWavesFor(plannerId).map((wave) => wave.path),
+      ...(planner.plan_epic && planner.result ? { epicResult: clip(planner.result, 1_500) } : {}),
       advisorThreadId: decider.thread_id,
       advisorReportPath: decider.report_path,
       advisorSummary: decider.summary ?? (decider.result ? clip(decider.result, 800) : null),
@@ -155,7 +159,7 @@ export function createDelegation(ctx: Ctx) {
   /** chief_consult planThreadId: an optional read-only advisor review of a plan, in the project's own checkout. */
   async function startPlanConsult(params: z.infer<typeof consultParams>, plannerId: string, chiefThreadId: string, projectId: string) {
     const planner = store.get(plannerId);
-    if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId) || !planner.plan_waves || planner.state === "complete") {
+    if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId) || !(planner.plan_waves || (planner.plan_epic && planner.last_report_state === "ready")) || planner.state === "complete") {
       throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
     }
     if (planner.replaces_thread_id) throw new Error(`${plannerId} is a revision; a revision gets no review: delegate its waves.`);
@@ -174,9 +178,10 @@ export function createDelegation(ctx: Ctx) {
     const prompt = advisorBrief({
       title: params.title, chiefThreadId, mission: params.mission, context: params.context, branch,
       plan: {
-        plannerThreadId: plannerId, paths: planWavesFor(plannerId).map((wave) => wave.path),
+        plannerThreadId: plannerId, paths: planner.plan_epic ? [] : planWavesFor(plannerId).map((wave) => wave.path),
         summary: planner.result ? clip(planner.result, 1_500) : null, reportPath: planner.report_path,
       },
+      ...(planner.plan_epic ? { epic: { plannerThreadId: plannerId, result: planner.result ? clip(planner.result, 1_500) : null, reportPath: planner.report_path } } : {}),
     });
     const thread = await ctx.managedSpawn.launch(prepared,
       { projectId, environment: await readerEnvironment(projectId, branch), title, prompt },
@@ -491,7 +496,7 @@ export function createDelegation(ctx: Ctx) {
       ...waves.map((_, index) => {
         const line = (current: ManagedRow, label = "") => {
           const last = (current.result ?? current.status ?? "").split("\n").find((entry) => entry.trim()) ?? "";
-          return `${label}@thread:${current.thread_id} ${current.state}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
+          return `${label}@thread:${current.thread_id} ${current.state}${current.branch ? ` branch ${current.branch}` : ""}${last ? ` | ${clip(last.trim(), 160)}` : ""}`;
         };
         const current = latestWorker(planThreadId, index + 1);
         const writer = latestSideWriter(planThreadId, index + 1);

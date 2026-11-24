@@ -52,7 +52,10 @@ export const planParams = delegateShape.pick({ title: true, mission: true, conte
   branch: z.string().trim().min(1).max(300).optional().describe("Open branch (e.g. a stacked pull request's head) to read instead of the project default; the thread runs in a fresh worktree based on it. A plan's chain heads stack on it."),
   researchThreadId: z.string().trim().min(1).optional().describe("Design researcher (chief_research design: true) whose design the user approved: its design and fact report become the planner's brief."),
   undesignedReason: z.string().trim().min(1).max(300).optional().describe("Required when research is on and no researchThreadId: why no design discussion is needed (e.g. a small fix). Not with revises."),
+  epic: z.boolean().optional().describe("true only when the user asks for an epic: the planner plans the whole epic as issues and implements nothing. Not with revises (a revision inherits the mode) or branch (an epic creates no branch)."),
 }).superRefine((value, ctx) => {
+  if (value.epic && value.revises) ctx.addIssue({ code: "custom", path: ["epic"], message: "A revision inherits its original plan's mode: omit epic." });
+  if (value.epic && value.branch) ctx.addIssue({ code: "custom", path: ["epic"], message: "An epic creates no branch: omit branch." });
   if (value.researchThreadId && value.undesignedReason) ctx.addIssue({ code: "custom", path: ["undesignedReason"], message: "Pass researchThreadId or undesignedReason, not both." });
   if (value.revises && (value.researchThreadId || value.undesignedReason)) ctx.addIssue({ code: "custom", path: ["revises"], message: "A revision inherits its original plan's design: omit researchThreadId and undesignedReason." });
 }).transform(titled((v) => v.mission));

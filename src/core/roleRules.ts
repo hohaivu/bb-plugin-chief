@@ -58,7 +58,7 @@ export const HEAVY = "- When your brief has `## Heavy commands`, run every build
 
 /** Worker: writes and runs the tests for its change; docs/ is the Spec Writer's. */
 export const TESTS_WORKER = [
-  "- Write and run the tests for your change in this wave, at the lowest level that would catch it breaking, following the project's test style. A test the change breaks is part of the change: fix it, never skip, delete or loosen it silently.",
+  "- Write and run the tests for your change in this wave, at the lowest level that would catch it breaking, following the project's test style. This is the default: your wave brief may waive it (a horizontal block wave: build and typecheck only) or extend it (the integrate wave: write and run system tests). A test the change breaks is part of the change: fix it, never skip, delete or loosen it silently.",
   "- Before adding a test, answer four questions, or do not add it: what behaviour or contract it protects; what credible regression makes it fail; why existing coverage does not catch that; whether it needs a production seam no production caller needs (then test at the real boundary).",
   "- Never write a test that reads README, CHANGELOG, docs/, a skill or other prose file and asserts its wording.",
   "- Every test command needs a filter (no filter = full suite), e.g. `npx vitest run <file> -t \"<name>\"`, `flutter test test/x_test.dart`, `swift test --filter Module.Class`, `xcodebuild test -only-testing:Target/Class`, one Maestro `.yaml` flow.",
@@ -236,6 +236,14 @@ ${BOUNDED_OUTPUT}`;
 const PLANNER_TEXT = `- ${PLAN_ONLY}
 - Every plan is one or more implementation waves. Wave rules, \`plan\` submission and the short ready result are in the Planner working contract section below. A big feature's chain ends with one reshape wave (the make-native skill) after its last feature wave; the Reshape wave section below says what its body holds.
 - For a broad read-only scan, a planner may spawn up to 6 plain helper threads that share its checkout (\`bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID" --prompt-file - --json\`, with the read-only rule in each prompt), wait with \`bb thread wait <id> --status idle\`, and check their findings against the code before relying on them.
+
+## Epic mode
+
+The brief's \`Mode:\` line decides; never pick the mode yourself. In epic mode you plan the whole epic and implement nothing: no code, branch, worktree or worker. The target is one GitHub epic issue with sub-issues and native blocking, unless Context names another target. Report ready with no \`plan\` and the epic URL in \`result\`. The brief's Epic mode section gives the steps. In task mode this section does not apply.
+
+## Horizontal shape
+
+Task plans only. Use it only when the blocks own disjoint files, the contract (types, API, schema, CLI shape) can be stated now, and there are at least 2 blocks; otherwise plan vertically. Wave 1 is the contract wave. Each block is a chain head with \`dependsOn: []\` and \`stackOn: 1\`, and its body says build and typecheck only (no tests). One integrate wave comes last with \`dependsOn: [one block]\`; its body tells the worker to run \`chief_log\` first and report blocked \`waiting on block waves N\` if any block wave is not ready, then merge the other block branches (each wave's branch shows in \`chief_log\`), wire the blocks, and write and run the system tests. One review gate follows the integrate wave: a wiring bug goes to the integrate worker, a wrong contract to a fresh plan.
 
 ## Design wave
 

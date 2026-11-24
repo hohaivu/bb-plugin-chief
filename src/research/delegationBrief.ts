@@ -366,6 +366,8 @@ export type PlannerBriefInput = {
   design?: { researcherThreadId: string; designPath: string; factsPath: string };
   /** Why this plan skipped the design discussion. */
   undesignedReason?: string;
+  /** chief_plan epic (or inherited by a revision): plan the whole epic as issues and implement nothing. */
+  epic: boolean;
   /** Set for chief_plan revises: the plan its one advisor review sent back, and that advice. */
   revision?: {
     plannerThreadId: string;
@@ -375,15 +377,18 @@ export type PlannerBriefInput = {
     advisorSummary: string | null;
     blocker?: string | null;
     recommendation?: string | null;
+    /** An epic planner has no plan files: its ready result stands in for them (the report path is in planPaths). */
+    epicResult?: string | null;
   };
 };
 
 /** A planner's prompt: the problem and the plan contract. */
 export function plannerBrief(input: PlannerBriefInput): string {
-  const { title, chiefThreadId, mission, context, revision, branch, design, undesignedReason } = input;
+  const { title, chiefThreadId, mission, context, revision, branch, design, undesignedReason, epic } = input;
   const contextLines = [...(context ? [context] : []), ...(undesignedReason ? [`Design discussion skipped: ${undesignedReason}`] : [])];
   return [
     `You are the managed planner for “${title}”. Report to Chief thread ${chiefThreadId}.`,
+    `Mode: ${epic ? "epic" : "task"}`,
     ...(branch ? [branchLine(branch), `Chain heads of this plan stack on ${branch}: chief_forge_init bases their branches and pull requests on it.`] : []),
     ...(design ? [
       "", "## Approved design",
@@ -395,8 +400,9 @@ export function plannerBrief(input: PlannerBriefInput): string {
     ...(contextLines.length ? ["", "## Context", ...contextLines] : []),
     ...(revision ? [
       "", "## Plan to revise",
-      `Planner ${revision.plannerThreadId} wrote this plan and its one advisor review (${revision.advisorThreadId}) sent it back. Read every plan file and the advisor's report in full:`,
+      `Planner ${revision.plannerThreadId} wrote this ${epic ? "epic" : "plan"} and its one advisor review (${revision.advisorThreadId}) sent it back. Read every ${epic ? "file below and the epic issue or target it names" : "plan file"} and the advisor's report in full:`,
       ...revision.planPaths.map((path) => `- ${path}`),
+      ...(revision.epicResult ? [`Epic result: ${revision.epicResult}`] : []),
       ...(revision.advisorReportPath ? [`- Advisor report: ${revision.advisorReportPath}`] : []),
       ...(revision.advisorSummary && !revision.advisorReportPath ? [`Advisor summary: ${revision.advisorSummary}`] : []),
       ...(revision.blocker ? [`The advisor reported blocked: ${revision.blocker}`, `Its recommendation: ${revision.recommendation ?? ""}`] : []),
@@ -404,8 +410,17 @@ export function plannerBrief(input: PlannerBriefInput): string {
       "- List each finding you reject under a `## Disputed findings` heading, with your evidence.",
       "- If the advisor named a decision, resolve it from the context above, or report blocked with it.",
     ] : []),
-    "", "## Working contract",
-    `- Split the work into at most ${MAX_WAVES} waves.`,
+    ...(epic ? [
+      "", "## Epic mode",
+      "- Plan the full epic and implement nothing: no code, branch, worktree or worker.",
+      "- The default target is one GitHub epic issue with a sub-issue per slice and native blocking between them. Context may name another target (for example a Markdown file): write it and never commit it.",
+      "- The epic is vertical thin slices. Each slice runs end to end and has a demo or E2E checkpoint. Each slice becomes its own task plan later.",
+      "- Create the issues with `gh issue create`. Link a slice: `gh api repos/{owner}/{repo}/issues/{n}/sub_issues -F sub_issue_id=<issue id>`. Block a slice: `gh api repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by -F issue_id=<issue id>`. If a call fails, fall back to a `Blocked by #n` line or a task list in the epic body, and say so in `result`.",
+      "- Report ready with no `plan`. Put the epic issue URL (or the target path) in `result`.",
+    ] : [
+      "", "## Working contract",
+      `- Split the work into at most ${MAX_WAVES} waves.`,
+    ]),
   ].join("\n");
 }
 
@@ -418,17 +433,36 @@ export type AdvisorBriefInput = {
   branch?: string;
   /** The plan under review (chief_consult planThreadId): the planner, its plan files, result and report. */
   plan: { plannerThreadId: string; paths: string[]; summary: string | null; reportPath: string | null };
+  /** An epic planner under review: it has no plan files; its ready result names the epic issue or target. */
+  epic?: { plannerThreadId: string; result: string | null; reportPath: string | null };
 };
 
 /** A plan advisor's prompt: the question, the plan files and the plan-review checklist. */
 export function advisorBrief(input: AdvisorBriefInput): string {
-  const { title, chiefThreadId, mission, context, plan, branch } = input;
-  return [
+  const { title, chiefThreadId, mission, context, plan, branch, epic } = input;
+  const head = [
     `You are the managed advisor for “${title}”. Report to Chief thread ${chiefThreadId}.`,
     ...(branch ? [branchLine(branch)] : []),
     "You are a strategic advisor and debugger of last resort: find the root cause and the smallest credible way forward.",
     "", "## Question", mission,
     ...(context ? ["", "## Context", context] : []),
+  ];
+  if (epic) return [
+    ...head,
+    "", "## Epic to review",
+    `Planner ${epic.plannerThreadId} planned this epic and implemented nothing. Its ready result names the epic issue (or another target): read the epic and every sub-issue in full.`,
+    `Planner report: ${epic.reportPath ?? `bb chief inspect ${epic.plannerThreadId}`}`,
+    ...(epic.result ? [`Planner result: ${epic.result}`] : []),
+    "", "## Epic-review checklist",
+    "- Slices are vertical thin slices, each end to end, not horizontal layers.",
+    "- Each slice has a demo or E2E checkpoint.",
+    "- The sub-issues together finish the epic: nothing missing, nothing outside the mission.",
+    "- Blocking between sub-issues is correct and acyclic.",
+    "- Nothing was implemented: no code, branch or pull request.",
+    "- One review round only: report approve, or changes with each blocking finding.",
+  ].join("\n");
+  return [
+    ...head,
     "", "## Plan to review",
     `Planner ${plan.plannerThreadId} wrote this plan. Read every plan file:`,
     ...plan.paths.map((path) => `- ${path}`),
@@ -443,7 +477,7 @@ export function advisorBrief(input: AdvisorBriefInput): string {
     "- Scope drift from the mission.",
     "- Migration or compatibility risk.",
     "- State transitions that are not total.",
-    "- A test wave, or an implementation wave without its own tests or Verify command where its change needs them.",
+    "- A test wave, or an implementation wave without its own tests or Verify command where its change needs them. A block wave whose brief waives tests (build and typecheck only) is fine when the integrate wave requires the system tests.",
     "- UI whose look no approved design or explicit visual spec fixes with no `design: true` wave before the wave that builds it, or app code inside a design wave.",
     "- A big feature (3+ modules or 10+ files of new behaviour) whose chain does not end with a reshape wave, a reshape wave on a bug fix, refactor or smaller change.",
     "- A chain that changes documented behaviour with no `spec: true` implementation wave, or a `## Spec delta` that names no docs file or restates test cases.",

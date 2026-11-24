@@ -72,7 +72,7 @@ export function hasSpecBaseline(body: string): boolean {
 }
 
 /** Every reason a report cannot be saved, one line per failing field: the field, its actual size or value, the limit, and the fix. */
-export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id" | "research_design">, params: ReportParams, plan: string | unknown[] | undefined): string[] {
+export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id" | "research_design"> & { plan_epic?: number | null }, params: ReportParams, plan: string | unknown[] | undefined): string[] {
   const errors: string[] = [];
   const num = (n: number) => n.toLocaleString("en-US");
   const ready = params.state === "ready";
@@ -170,8 +170,9 @@ export function checkReport(row: Pick<ManagedRow, "role" | "plan_thread_id" | "r
   // The plan's own shape and rules are checked whatever the state and role; those two have their own lines.
   if (plan !== undefined) {
     if (row.role !== "planner") errors.push(`plan is only for a planner's ready report (role is ${row.role}); remove it.`);
-    errors.push(...checkPlan(plan));
-  } else if (row.role === "planner" && ready) {
+    if (row.role === "planner" && row.plan_epic) errors.push("plan is not allowed from an epic planner; report ready with no plan and put the epic URL in result.");
+    else errors.push(...checkPlan(plan));
+  } else if (row.role === "planner" && ready && !row.plan_epic) {
     errors.push("plan is missing; a planner's ready report requires the full plan body, as a string or an array of {body, dependsOn?, design?}.");
   }
   return errors;

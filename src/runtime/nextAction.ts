@@ -171,7 +171,7 @@ export function createNextAction(ctx: Ctx) {
     return {
       all,
       busy: all.find((r) => BUSY_STATUSES.has(r.state)),
-      ready: all.find((r) => (r.state === "ready" || r.state === "complete") && !!r.plan_waves),
+      ready: all.find((r) => (r.state === "ready" || r.state === "complete") && (!!r.plan_waves || (!!r.plan_epic && r.last_report_state === "ready"))),
     };
   }
 
@@ -185,9 +185,31 @@ export function createNextAction(ctx: Ctx) {
     }
     if (planner.plan_review !== "changes") return null;
     const revisions = revisionsOf(P);
+    if (planner.plan_epic) {
+      if (revisions.ready) return `Epic ${P} was revised by ${revisions.ready.thread_id}: tell the user ${revisions.ready.thread_id}'s epic link (bb chief inspect ${revisions.ready.thread_id}), then chief_complete (threadId: ${revisions.ready.thread_id}) and chief_complete (threadId: ${P}). Delegate nothing.`;
+      if (revisions.busy) return `Epic ${P} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}'s ready alert.`;
+      return `The advisor requested changes to epic ${P}: chief_plan (revises: ${P}, title, mission: revise per the advisor) — the plugin attaches the planner's report and the advice; it gets no second review. Delegate nothing.`;
+    }
     if (planner.state === "complete" && revisions.ready) return `Plan ${P} was revised by ${revisions.ready.thread_id}: delegate ${revisions.ready.thread_id}'s waves instead.`;
     if (revisions.busy) return `Plan ${P} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}'s ready alert, then delegate ${revisions.busy.thread_id}'s waves.`;
     return `The advisor requested changes to plan ${P}: chief_plan (revises: ${P}, title, mission: revise per the advisor) — the plugin attaches the plan files and the advice; delegate the revision's waves when its ready alert arrives; it gets no second review.`;
+  }
+
+  /** A ready epic planner's single call: consult once, then tell the user and complete. Never a forge-init or delegate line: an epic has no waves. */
+  function epicPlannerAction(row: ManagedRow): string | null {
+    const P = row.thread_id;
+    const link = `the epic link from its result (bb chief inspect ${P})`;
+    const never = "Do not chief_forge_init or chief_delegate: a slice becomes a task plan only on a new order.";
+    if (row.replaces_thread_id) {
+      return `Epic revision ${P} is ready; it gets no review. Tell the user ${link}, then chief_complete (threadId: ${P}) and chief_complete (threadId: ${row.replaces_thread_id}). ${never}`;
+    }
+    if (row.plan_review === "approved") return `The epic is approved. Tell the user ${link}, then chief_complete (threadId: ${P}). ${never}`;
+    if (row.plan_review === "changes") return planReviewRefusal(row);
+    if (row.plan_review === "required") {
+      const { inFlight } = planAdvisors(P);
+      if (inFlight) return `Epic ${P} is in its one advisor review (${inFlight.thread_id}): wait for ${inFlight.thread_id}'s report.`;
+    }
+    return `Epic ${P} is ready. Run chief_consult (planThreadId: ${P}) once for the advisor's second opinion, then tell the user ${link}. ${never}`;
   }
 
   /** A plan advisor's line: only the deciding advisor renders one, from its planner's review outcome. */
@@ -233,6 +255,7 @@ export function createNextAction(ctx: Ctx) {
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     if (row.state !== "ready") return null;
     if (row.role === "planner") {
+      if (row.plan_epic) return epicPlannerAction(row);
       if (!row.plan_waves) return null;
       const refusal = planReviewRefusal(row);
       if (refusal) return refusal;

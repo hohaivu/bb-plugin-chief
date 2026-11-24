@@ -463,4 +463,6 @@ export const MIGRATIONS = [
     `ALTER TABLE managed_threads ADD COLUMN evidence_only INTEGER`,
     // Alert row: 1 when a send abandoned in flight may still arrive, so the retry probes for its marker even though its attempt was refunded.
     `ALTER TABLE alert_outbox ADD COLUMN uncertain INTEGER NOT NULL DEFAULT 0`,
+    // Planner row: 1 for an epic planner (plans the whole epic as issues, reports ready with no plan); revisions inherit it. NULL/0 is a task planner.
+    `ALTER TABLE managed_threads ADD COLUMN plan_epic INTEGER`,
 ];

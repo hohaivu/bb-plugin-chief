@@ -16,7 +16,7 @@ function parseArgs(argv: string[]) {
     const [name, inline] = token.slice(2).split(/=(.*)/s);
     const next = argv[index + 1];
     // A boolean flag never takes a value: `--json thr_x` keeps thr_x positional.
-    const value = inline ?? (name !== "json" && next && !next.startsWith("--") ? (index++, next) : "true");
+    const value = inline ?? (name !== "json" && name !== "epic" && next && !next.startsWith("--") ? (index++, next) : "true");
     flags.set(name!, [...(flags.get(name!) ?? []), value]);
   }
   return {
@@ -36,7 +36,7 @@ export function registerCli(ctx: Ctx) {
     "  bb chief start [--project proj_id] [--json]",
     "  bb chief create [--project proj_id] [--json]",
     "  bb chief adopt --thread thr_id [--json]",
-    "  bb chief plan [--title \"…\"] --mission \"…\" [--context \"…\"] [--revises thr_id] [--branch feature/…] [--research-thread thr_id | --undesigned-reason \"…\"] [--json]",
+    "  bb chief plan [--title \"…\"] --mission \"…\" [--context \"…\"] [--revises thr_id] [--branch feature/…] [--research-thread thr_id | --undesigned-reason \"…\"] [--epic] [--json]",
     "  bb chief consult [--title \"…\"] --mission \"…\" [--context \"…\"] --plan-thread thr_id [--branch feature/…] [--json]",
     "  bb chief delegate [--title \"…\"] --mission \"…\" [--criteria \"…\"]... [--constraint \"…\"]... [--context \"…\"] [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|spec-writer] [--json]",
     "  bb chief inspect <thread-id>",
@@ -56,7 +56,7 @@ export function registerCli(ctx: Ctx) {
       { name: "start", summary: "Start or return the latest Chief for a project", usage: "bb chief start [--project proj_id] [--json]" },
       { name: "create", summary: "Create another Chief for a project", usage: "bb chief create [--project proj_id] [--json]" },
       { name: "adopt", summary: "Adopt an existing ordinary thread as its project's Chief", usage: "bb chief adopt --thread thr_id [--json]" },
-      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan [--title \"…\"] --mission \"…\" [--revises thr_id] [--branch feature/…] [--research-thread thr_id | --undesigned-reason \"…\"] [--json]" },
+      { name: "plan", summary: "Start a read-only planner for work Chief has not delegated yet", usage: "bb chief plan [--title \"…\"] --mission \"…\" [--revises thr_id] [--branch feature/…] [--research-thread thr_id | --undesigned-reason \"…\"] [--epic] [--json]" },
       { name: "consult", summary: "Start a read-only advisor that reviews a plan", usage: "bb chief consult [--title \"…\"] --mission \"…\" --plan-thread thr_id [--branch feature/…] [--json]" },
       { name: "delegate", summary: "Start a clearly titled worker in a managed worktree", usage: "bb chief delegate [--title \"…\"] --mission \"…\" [--branch feature/…] [--issue-url …] [--pr-url …] [--replaces thr_id] [--plan-thread thr_id --wave N] [--unplanned-reason \"…\"] [--verify \"cmd\"] [--kind worker|designer|spec-writer] [--json]" },
       { name: "inspect", summary: "Inspect a managed thread's live and reported evidence", usage: "bb chief inspect <thread-id>" },
@@ -150,6 +150,8 @@ export function registerCli(ctx: Ctx) {
             title: args.one("title"), mission: args.one("mission"), context: args.one("context"),
             revises: args.one("revises"), branch: args.one("branch"),
             researchThreadId: args.one("research-thread"), undesignedReason: args.one("undesigned-reason"),
+            // undefined, not false: an absent flag stays an absent param.
+            epic: args.bool("epic") || undefined,
           });
           if (!parsed.success) return fail(`Invalid plan brief: ${parsed.error.issues[0]?.message ?? "check the arguments"}`);
           const result = await ctx.startPlan(parsed.data, context.threadId);
