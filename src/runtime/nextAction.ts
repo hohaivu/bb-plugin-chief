@@ -88,9 +88,13 @@ export function createNextAction(ctx: Ctx) {
     if (!step) return null;
     switch (step.kind) {
       case "designNext":
-        return `Design wave ${row.plan_wave} of ${step.waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, first record it: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words); then delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}); name the approved artboards in its mission. On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Never chief_review a design wave, and do not review between waves.`;
+        return `Design wave ${row.plan_wave} of ${step.waves.length} is ready: its artboards need the owner's approval before any code. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval, record it: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words); the reply then names the call that delegates wave ${step.next}. On requested changes, delegate a fresh designer with chief_delegate (replaces: ${row.thread_id}) and the owner's feedback as its mission; it stays on wave ${row.plan_wave}. Never chief_review a design wave, and do not review between waves.`;
       case "designDone":
         return `Design wave ${row.plan_wave} of ${step.waves.length} is ready and nothing builds on it: its artboards need the owner's approval. Show the user the artboard names and screenshots from its report in this thread and ask for explicit approval. On approval: chief_owner_approval (workerThreadId: ${row.thread_id}, approval: the user's exact words), then chief_complete (threadId: ${row.thread_id}). Never chief_review it.`;
+      case "designApproved":
+        return step.next !== null
+          ? `Design wave ${row.plan_wave} of ${step.waves.length} is approved by the owner. Delegate wave ${step.next}: ${step.waves[step.next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${step.next}, replaces: ${row.thread_id}); name the approved artboards in its mission. Never chief_review a design wave.`
+          : `Design wave ${row.plan_wave} of ${step.waves.length} is approved by the owner. Complete it with chief_complete (threadId: ${row.thread_id}). Never chief_review it.`;
       case "restack":
         return `Wave ${row.plan_wave} of ${step.waves.length} is ready after its fix. Wave ${step.next} is stacked on it and still builds on the old head: once this worker is idle, restack it — chief_delegate (replaces: ${step.successor.thread_id}), with a mission to rebase ${step.successor.branch ?? `wave ${step.next}'s branch`} onto ${row.branch ?? "this branch"} and fix what the rebase breaks; the review's findings are attached automatically. Do not review between waves.`;
       case "nextWave":
@@ -228,7 +232,8 @@ export function createNextAction(ctx: Ctx) {
       if (line) return line;
     }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
-    if (row.state !== "ready") return null;
+    // A design wave that went ready -> active -> idle without a new report still holds its ready report: chief_owner_approval admits it, so Pending shares its route.
+    if (row.state !== "ready" && !(row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row))) return null;
     if (row.role === "planner") {
       if (!planReview.hasPlan(row)) return null;
       const refusal = planReviewRefusal(row);
