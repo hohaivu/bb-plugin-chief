@@ -190,10 +190,16 @@ export function createNextAction(ctx: Ctx) {
     return `Epic ${P} is ready. Run chief_consult (planThreadId: ${P}) once for the advisor's second opinion, then tell the user ${link}. ${never}`;
   }
 
-  /** A plan advisor's line: only the deciding advisor renders one, from its planner's review outcome. */
+  const missingReportLine = (row: ManagedRow) => `Finished its turn without a chief_report. Inspect it with chief_inspect (threadId: ${row.thread_id}), then chief_continue it asking for its chief_report, or decide yourself.`;
+
+  /** A plan advisor's line: the deciding advisor renders its planner's review outcome. An advisor with no decision renders only the
+   * missing-Report recovery, and only while its planner still waits on it (a stale advisor cannot be continued). */
   function planAdvisorAction(row: ManagedRow, forAlert: boolean): string | null {
     const planner = store.get(row.plan_thread_id!);
-    if (!planner || planReview.advisors(planner.thread_id).decider?.thread_id !== row.thread_id) return null;
+    if (!planner) return null;
+    if (planReview.advisors(planner.thread_id).decider?.thread_id !== row.thread_id) {
+      return row.advised_at == null && !planReview.advisorStale(row) && ctx.turnMissingReport(row) ? missingReportLine(row) : null;
+    }
     const { review } = planReview.status(planner);
     if (review.kind === "approved") {
       // The missing-Report recovery line belongs to the idle planner's own row, not its ready advisor's.
@@ -236,9 +242,11 @@ export function createNextAction(ctx: Ctx) {
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     // A design wave that went ready -> active -> idle without a new report still holds its ready report: chief_owner_approval admits it, so Pending shares its route.
     // That approved-design route (#296) is authoritative and comes before the generic missing-Report recovery below.
+    // Likewise an idle epic planner whose intake refuses every report (decided, delivered or in review) keeps its decision/delivery action: a new chief_report could not be accepted.
     const heldDesign = row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row);
-    if (!heldDesign && ctx.turnMissingReport(row)) return `Finished its turn without a chief_report. Inspect it with chief_inspect (threadId: ${row.thread_id}), then chief_continue it asking for its chief_report, or decide yourself.`;
-    if (row.state !== "ready" && !heldDesign) return null;
+    const heldEpic = row.state === "idle" && row.role === "planner" && !!row.plan_epic && !!planReview.reportRefusal(row.thread_id);
+    if (!heldDesign && !heldEpic && ctx.turnMissingReport(row)) return missingReportLine(row);
+    if (row.state !== "ready" && !heldDesign && !heldEpic) return null;
     if (row.role === "planner") {
       if (!planReview.hasPlan(row)) return null;
       const refusal = planReviewRefusal(row);
