@@ -99,6 +99,23 @@ describe("Chief backend", () => {
     expect(() => insert.run("host_2", "junior", "codex", "gpt-6-mini", "low", 101)).toThrow();
   });
 
+  // Contract: the chief_models_v10 rebuild keeps every row and the role CHECK accepts "research-helper". Regression: a CHECK without it makes saving the pick throw.
+  test("chief_models_v10 migration keeps every row and accepts a research-helper pick", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "chief-upgrade-research-helper" });
+    disposals.push(() => harness.lifecycle.dispose());
+    const db = bb.storage.database();
+    bb.storage.migrate(db, MIGRATIONS.slice(0, MIGRATIONS.findIndex((statement) => statement.includes("chief_models_v10"))));
+    const insert = db.prepare(`INSERT INTO chief_models (host_id, role, provider_id, model, reasoning_level, updated_at) VALUES (?, ?, ?, ?, ?, ?)`);
+    expect(() => insert.run("host_1", "research-helper", "codex", "gpt-6-mini", "low", 0)).toThrow();
+    insert.run("host_1", "researcher", "claude-code", "claude-opus-5", "high", 1);
+    const before = db.prepare(`SELECT * FROM chief_models ORDER BY host_id, role`).all();
+
+    bb.storage.migrate(db, MIGRATIONS);
+
+    expect(db.prepare(`SELECT * FROM chief_models ORDER BY host_id, role`).all()).toEqual(before);
+    expect(() => insert.run("host_1", "research-helper", "codex", "gpt-6-mini", "low", 2)).not.toThrow();
+  });
+
   test("explains a machine with no signed-in provider instead of offering a model", async () => {
     const state = await setup({ providerAvailable: false });
     const configuration = await state.harness.behavior.callRpc("modelConfiguration", null);

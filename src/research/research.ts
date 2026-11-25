@@ -28,9 +28,10 @@ export function researchLine(role: string, settings: ResearchSettings | null) {
 
 /** A researcher's prompt: ticket-blind helper research (stages 1-2), and with design a user-approved design.md (stage 3). */
 export function researcherBrief(input: {
-  chiefThreadId: string; question: string; design: boolean; execution: Partial<ModelSelection>; permissionMode?: string | null; maxResultLength: number;
+  /** `helperExecution` and `helperPermissionMode` are what the helper spawn command carries: the Research helper pick, else the researcher's resolved execution. */
+  chiefThreadId: string; question: string; design: boolean; helperExecution: Partial<ModelSelection>; helperPermissionMode?: string | null; maxResultLength: number;
 }) {
-  const { chiefThreadId, question, design, execution, permissionMode, maxResultLength } = input;
+  const { chiefThreadId, question, design, helperExecution: execution, helperPermissionMode: permissionMode, maxResultLength } = input;
   const pinned = execution.providerId && execution.model;
   const spawn = [
     `bb thread spawn --project "$BB_PROJECT_ID" --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" --environment "$BB_ENVIRONMENT_ID"`,
@@ -47,7 +48,7 @@ export function researcherBrief(input: {
     "- Stage 1, Context: read the ticket, then write neutral research questions about how the code works today (for example \"how do endpoints work\", \"trace the flow for X\", \"find the workers that handle Y\"). A question never names the goal or the proposed change and never uses should, fix, add or better. Do not show the questions to the user.",
     `- Stage 2, Research: group the questions into vertical slices and spawn one helper per slice, at least 1 and at most ${RESEARCH_MAX_HELPERS}. Do not answer the questions yourself before the helpers report.`,
     `- Spawn a helper with: ${spawn}`,
-    ...(pinned ? [] : ["- Helpers run on BB's default model for this project, as you do: pass no --provider or --model."]),
+    ...(pinned ? [] : ["- Helpers run on BB's default model for this project: pass no --provider or --model."]),
     "- The helper id is `.id` of the output.",
     `- Each helper prompt contains only: the read-only rule (${READ_ONLY}; run no command that changes tracked files or git state; you share the caller's checkout), its questions, the fact format (per question, facts each with file:line evidence, then \`## Unconfirmed\`), \`Report facts only: no advice, no recommendations, no opinion on what should change.\`, and \`Do not spawn threads. Your final message is your answer.\` It never contains the ticket, its title, the goal or words from the ticket's proposed change.`,
     "- Wait for each helper with `bb thread wait <id> --status idle --timeout 540s` as a foreground call (tool timeout 570000 ms). Read its answer with `bb thread output <id>`. A helper that failed or is still not idle after a second wait: `bb thread stop <id>`, and list it as a failure. Never poll with sleep loops.",
@@ -102,6 +103,8 @@ export interface ResearchDeps {
   discover: <T>(run: (signal: AbortSignal) => Promise<T>, label: string) => Promise<T>;
   /** The shared start-up recipe (section, rules, model pick with cooldown check, spawn, row, brief). */
   managedSpawn: ManagedSpawn<ThreadInsert>;
+  /** The explicit Research helper pick, cooldown-checked (empty: BB's default when the stored pick is unusable); null when none is stored, so the helpers inherit the researcher's execution. */
+  helperExecution: (hostId: string | null, projectId: string) => Promise<Partial<ModelSelection> | null>;
   /** The machine a project's threads run on, and the host a fresh worktree is created on when Chief's own environment names none. */
   projectHost: (projectId: string) => Promise<string>;
   projectHostId: (projectId: string) => Promise<string | null | undefined>;
@@ -114,7 +117,7 @@ export interface ResearchDeps {
 /** One module owns the chief_research machinery: who may call it and the researcher thread it starts. */
 export function createResearch(deps: ResearchDeps) {
   const {
-    db, bb, managedRow, terminal, isActiveChief, researchSettings, environmentHostId, discover, managedSpawn,
+    db, bb, managedRow, terminal, isActiveChief, researchSettings, environmentHostId, discover, managedSpawn, helperExecution: pickHelperExecution,
     freshenCheckout, projectHost, projectHostId, clip, maxResultLength,
   } = deps;
 
@@ -192,10 +195,14 @@ export function createResearch(deps: ResearchDeps) {
     // The shared role path: the researcher pick if usable, else BB's default; throws while the target cools down.
     const managed = await managedSpawn.prepare(chief.project_id, { role: "researcher", hostId });
     const { providerId } = managed.execution;
-    // The helpers run on the same model pick, so one provider check covers the researcher and its helpers.
-    const permissionMode = chiefMode && await providerOffersMode(hostId, providerId ?? await projectDefaultProvider(chief.project_id), chiefMode) ? chiefMode : null;
-    const blocked = hostId && providerId ? await researchPreflight(hostId, providerId) : null;
-    if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher model in Chief settings or retry after the reset.`);
+    // No explicit helper pick: the helpers run on exactly what the researcher resolved, with no second catalog lookup.
+    const helperExecution = (await pickHelperExecution(hostId, chief.project_id)) ?? managed.execution;
+    const offersMode = async (provider: string | undefined) => chiefMode && await providerOffersMode(hostId, provider ?? await projectDefaultProvider(chief.project_id), chiefMode) ? chiefMode : null;
+    const permissionMode = await offersMode(providerId);
+    const helperPermissionMode = helperExecution.providerId === providerId ? permissionMode : await offersMode(helperExecution.providerId);
+    // A helper pick on another provider needs its own check.
+    const blocked = hostId ? (providerId && await researchPreflight(hostId, providerId)) || (helperExecution.providerId && helperExecution.providerId !== providerId && await researchPreflight(hostId, helperExecution.providerId)) || null : null;
+    if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher or research helper model in Chief settings or retry after the reset.`);
     const { branch } = params;
     // The researcher reads Chief's working tree, so it must reuse Chief's environment: no fresh worktree fallback.
     // With a branch it reads its own worktree on that branch instead.
@@ -203,7 +210,7 @@ export function createResearch(deps: ResearchDeps) {
       throw new Error("chief_research did not start: Chief's checkout cannot be shared with a researcher thread (this thread has no reusable environment).");
     }
     const title = `${params.design ? "Design" : "Research"} · ${clip(params.question, 60)}`;
-    const prompt = researcherBrief({ chiefThreadId: chief.thread_id, question: params.question, design: params.design, execution: managed.execution, permissionMode, maxResultLength });
+    const prompt = researcherBrief({ chiefThreadId: chief.thread_id, question: params.question, design: params.design, helperExecution, helperPermissionMode, maxResultLength });
     // After every refusal above: a refused call leaves Chief's checkout as it was.
     const warning = branch ? undefined : await freshenCheckout(chief);
     const thread = await managedSpawn.launch(managed, {

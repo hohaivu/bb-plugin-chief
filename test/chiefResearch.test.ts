@@ -16,6 +16,8 @@ describe("chief_research", () => {
   const researcherSpawn = (state: State) => state.spawned.findLast((args) => args.pluginMetadata?.role === "researcher");
   const researcherRows = (state: State) => state.db.prepare("SELECT thread_id, chief_thread_id, role, brief, branch FROM managed_threads WHERE role='researcher'").all() as { thread_id: string; chief_thread_id: string; role: string; brief: string; branch: string | null }[];
   const callRows = (state: State) => state.db.prepare("SELECT caller_thread_id, role, mode, run_id, outcome FROM chief_research_calls ORDER BY id").all() as { caller_thread_id: string; role: string | null; mode: string | null; run_id: string | null; outcome: string }[];
+  /** The helper spawn command, found by its executable and stable flags, never by the prose around it. */
+  const helperLine = (spawn: { prompt: unknown }) => (spawn.prompt as string).split("\n").find((line) => line.includes("bb thread spawn") && line.includes("--parent-self"))!;
   const setResearcherPick = (state: State, selection: object | null = PICK) => state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "researcher", selection } as never);
 
   /** A Chief (or a thread of another role under it) in the first project. Chief's own model is codex/gpt-6-astra, to prove the researcher never inherits it. */
@@ -142,8 +144,18 @@ describe("chief_research", () => {
       await call(state, await roleThread(state, "chief"), ask());
       const spawn = researcherSpawn(state);
       expect(spawn).toMatchObject(PICK);
-      expect(spawn.prompt).toContain("--provider codex --model gpt-6-astra --reasoning-level high");
+      expect(helperLine(spawn)).toContain("--provider codex --model gpt-6-astra --reasoning-level high");
       });
+
+    // Contract: with no Research helper pick the helpers reuse the execution already resolved for the researcher, with no second catalog lookup.
+    // Regression: a second lookup that fails or times out launches the researcher pinned while the helper command silently drops to BB's default.
+    test("no helper pick: one catalog lookup for the run, and the helper command carries the researcher's resolved flags", async () => {
+      const state = await setup();
+      await setResearcherPick(state);
+      await call(state, await roleThread(state, "chief"), ask());
+      expect(state.catalogReads.filter((id) => id === "codex")).toHaveLength(1);
+      expect(helperLine(researcherSpawn(state))).toContain("--provider codex --model gpt-6-astra --reasoning-level high");
+    });
 
     test.each([
       ["no pick", async (_state: State) => {}],
@@ -159,11 +171,38 @@ describe("chief_research", () => {
       const spawn = researcherSpawn(state);
       expect(spawn).not.toHaveProperty("providerId");
       expect(spawn).not.toHaveProperty("model");
-      const spawnLine = (spawn.prompt as string).split("\n").find((line) => line.startsWith("- Spawn a helper with:"))!;
+      const spawnLine = helperLine(spawn);
       expect(spawnLine).toContain("--parent-self");
       expect(spawnLine).not.toContain("--provider");
       expect(spawnLine).not.toContain("--model");
       });
+
+    // Contract: a Research helper pick moves only the helper spawn command; the researcher keeps its own pick, and a cooling helper model refuses before any spawn.
+    // Regression: helpers still inheriting the researcher's model, or the helper pick leaking onto the researcher thread.
+    describe("research helper pick", () => {
+      const HELPER = { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" };
+      const setHelperPick = (state: State) => state.harness.behavior.callRpc("setRoleModel", { hostId: "host_1", role: "research-helper", selection: HELPER } as never);
+
+      test.each([["a researcher pick", true], ["no researcher pick", false]])("%s: the helper command names the helper pick and the researcher thread does not", async (_name, researcherPick) => {
+        const state = await setup();
+        if (researcherPick) await setResearcherPick(state);
+        await setHelperPick(state);
+        await call(state, await roleThread(state, "chief"), ask());
+        expect(helperLine(researcherSpawn(state))).toContain("--provider codex --model gpt-6-mini --reasoning-level medium");
+        if (researcherPick) expect(researcherSpawn(state)).toMatchObject(PICK);
+        else expect(researcherSpawn(state)).not.toHaveProperty("providerId");
+      });
+
+      test("a cooling helper model refuses before any spawn", async () => {
+        const state = await setup();
+        await setResearcherPick(state);
+        await setHelperPick(state);
+        const chief = await roleThread(state, "chief");
+        state.db.prepare("INSERT INTO provider_cooldowns (provider_id, model, until_at, reason, updated_at) VALUES ('codex', 'gpt-6-mini', ?, 'x', 0)").run(Date.now() + 600_000);
+        await expect(call(state, chief, ask())).rejects.toThrow(/cooling down until \d{4}-/);
+        expect(researcherSpawn(state)).toBeUndefined();
+      });
+    });
 
     test("a cooling researcher pick refuses before any spawn and leaves one error row", async () => {
       const state = await setup();
@@ -191,7 +230,7 @@ describe("chief_research", () => {
       await setResearcherPick(state);
       const chief = await roleThread(state, "chief");
       usage = () => ({ codex: { status: "ok", windows: [{ label: "5h", usedPercent: 100, resetsAt: "2026-10-08T12:00:00Z" }] } });
-      await expect(call(state, chief, ask())).rejects.toThrow(/out of quota \(5h window at 100%, resets 2026-10-08T12:00:00Z\).*Pick another researcher model/);
+      await expect(call(state, chief, ask())).rejects.toThrow(/out of quota \(5h window at 100%, resets 2026-10-08T12:00:00Z\).*Pick another researcher/);
       usage = () => ({ codex: { status: "not_installed" } });
       await expect(call(state, chief, ask())).rejects.toThrow(/not_installed/);
       expect(researcherSpawn(state)).toBeUndefined();

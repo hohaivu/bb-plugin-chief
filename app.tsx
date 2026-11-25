@@ -22,7 +22,11 @@ const ROLES = [
   { role: "reviewer", label: "Reviewer", hint: "Reviews finished work." },
   { role: "advisor", label: "Advisor", hint: "Diagnoses work that keeps failing review." },
   { role: "researcher", label: "Researcher", hint: "Answers Chief's read-only research questions." },
+  { role: "research-helper", label: "Research helper", hint: "Reads code for the researcher; a cheaper model fits." },
 ] as const;
+
+/** A role with no pick of its own that runs on another role's pick. */
+const INHERITS = { designer: "worker", "spec-writer": "worker", "research-helper": "researcher" } as const;
 
 function Crown({ plus = false }: { plus?: boolean }) {
   return (
@@ -203,8 +207,9 @@ function ChiefModelSettings() {
           {host.error ? <p className="mt-1 text-xs text-muted-foreground">{host.error}</p> : null}
           {ROLES.map(({ role, label, hint }) => {
             const selection = host.selections[role];
-            const inheritsWorker = role === "designer" || role === "spec-writer";
-            const value = selection ?? (inheritsWorker ? host.selections.worker : null) ?? host.fallback;
+            const inherits = role in INHERITS ? INHERITS[role as keyof typeof INHERITS] : null;
+            const inheritsLabel = inherits === "worker" ? "Worker" : "Researcher";
+            const value = selection ?? (inherits ? host.selections[inherits] : null) ?? host.fallback;
             return (
               <div key={role} className="mt-3 flex flex-wrap items-center gap-3">
                 <div className="w-24 shrink-0">
@@ -233,12 +238,12 @@ function ChiefModelSettings() {
                       onClick={() => save(host.hostId, role, null)}
                       className="h-7 cursor-pointer rounded-md border border-input px-3 text-xs font-medium"
                     >
-                      {inheritsWorker ? "Use Worker model" : "Use BB default"}
+                      {inherits ? `Use ${inheritsLabel} model` : "Use BB default"}
                     </button>
                   </>
                 ) : (
                   <span className="text-xs text-muted-foreground">
-                    {inheritsWorker ? "Not set · uses the Worker model" : "Not set · BB picks the model"}
+                    {inherits ? `Not set · uses the ${inheritsLabel} model` : "Not set · BB picks the model"}
                   </span>
                 )}
               </div>

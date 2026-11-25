@@ -166,6 +166,7 @@ export function registerHost(ctx: Ctx) {
           reviewer: ctx.readRoleModel(host.id, "reviewer"),
           advisor: ctx.readRoleModel(host.id, "advisor"),
           researcher: ctx.readRoleModel(host.id, "researcher"),
+          "research-helper": ctx.readRoleModel(host.id, "research-helper"),
         };
         // A connected machine can answer for its own picks, so say which ones it
         // would refuse instead of showing a model the next spawn will ignore.

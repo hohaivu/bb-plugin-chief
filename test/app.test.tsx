@@ -253,6 +253,7 @@ test("picks a scanned model per role and clears back to the BB default", async (
         reviewer: null,
         advisor: null,
         researcher: null,
+        "research-helper": null,
       },
       unusable: [],
     }],
@@ -297,7 +298,7 @@ test("the Spec Writer row follows Designer, inherits the Worker model, and clear
     hosts: [{
       hostId: "host_1", hostName: "Local", connected: true, error: null,
       fallback: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": pick, reviewer: null, advisor: null, researcher: null },
+      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": pick, reviewer: null, advisor: null, researcher: null, "research-helper": null },
       unusable: [],
     }],
   };
@@ -333,7 +334,7 @@ test("a picker re-reporting a service tier saves no role model", async () => {
     hosts: [{
       hostId: "host_1", hostName: "Local", connected: true, error: null,
       fallback: { providerId: "codex", model: "gpt-6-astra", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": null, reviewer: null, advisor: null, researcher: null },
+      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": null, reviewer: null, advisor: null, researcher: null, "research-helper": null },
       unusable: [],
     }],
   };
@@ -358,7 +359,7 @@ test("the Researcher row follows Advisor, uses the BB default, and clears its ow
     hosts: [{
       hostId: "host_1", hostName: "Local", connected: true, error: null,
       fallback: { providerId: "codex", model: "gpt-6-mini", reasoningLevel: "medium" as const },
-      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": null, reviewer: null, advisor: null, researcher: pick },
+      selections: { chief: null, planner: null, worker: null, designer: null, "spec-writer": null, reviewer: null, advisor: null, researcher: pick, "research-helper": null },
       unusable: [],
     }],
   };
