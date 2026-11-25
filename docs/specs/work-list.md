@@ -150,7 +150,7 @@ A `chief_report` writes a `report:<active_cycle>:` key for a row with a Chief. T
 
 ### Pending line
 
-- A worker row with `turnMissingReport` true gets a recovery line from `nextAction` (`src/runtime/nextAction.ts`). `pendingLines` (`src/runtime/roster.ts`) prints that line in the Pending block.
+- A worker row with `turnMissingReport` true gets a recovery line from `nextAction` (`src/runtime/nextAction.ts`), unless the gate route applies first (see Precedence). `pendingLines` (`src/runtime/roster.ts`) prints that line in the Pending block.
 - The line tells Chief to inspect the thread, then continue it to ask for its `chief_report`, or decide itself.
 - The line stays on each read until the row reports or starts a new turn. Reason: The alert notifies Chief once. The Pending block must show open work until the cause ends.
 - A worker row with an earlier role-specific line shows that line, not the Missing-Report line. Reason: A role-specific line holds the recovery step for its own role.
@@ -167,6 +167,8 @@ A plan advisor row (one with `plan_thread_id`) takes its own route, `planAdvisor
 3. The ready-state routes of the row.
 
 An idle design wave whose latest report is `ready` skips step 2. It keeps the approved-design route in step 3. Reason: `chief_owner_approval` admits that report. The reply and the Pending line must name the same route.
+
+A gated row is a worker or reviewer row that is a gate target or actor. The gate route takes precedence for every gated row. This holds even where the route emits no line. Only the gate's display target renders the gate line. Other gated rows show no line and do not fall through to Missing-Report recovery (step 2).
 
 ### Plan threads
 
