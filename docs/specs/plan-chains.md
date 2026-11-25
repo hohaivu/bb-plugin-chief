@@ -480,7 +480,7 @@ The command guard refuses some shell commands that a Chief worker runs. It keeps
 
 Terms used in this section:
 
-- **Marker**: an empty-content file named after a thread ID, under `<BB data dir>/chief/guard/threads/`. It marks a Chief worker.
+- **Marker**: a file named after a thread ID, under `<BB data dir>/chief/guard/threads/`. Its content is that ID. It marks a Chief worker.
 - **Provider hook**: a hook that an agent provider runs before each Bash call.
 
 Publishing and marking:
@@ -513,7 +513,7 @@ Providers:
 - acp-agy has no known provider hook. The brief rules are its only enforcement.
 - The owner runs `install.sh` once per host. Reason: Chief does not edit the owner's global agent settings.
 - `install.sh` adds one `PreToolUse` entry unless a guard entry exists. It keeps every other key and hook. Reason: the owner's own hooks stay intact.
-- `install.sh` saves the original settings file as `settings.json.chief-guard.bak` before its first change. Reason: the owner can restore the original.
+- When the settings file exists, `install.sh` saves it as `settings.json.chief-guard.bak` before its first change. Reason: the owner can restore the original.
 - `install.sh` writes nothing when the settings file is not valid JSON. Reason: a parse failure must not drop the owner's hooks.
 - Running `install.sh` again changes nothing. Reason: the script is idempotent.
 
