@@ -1,5 +1,6 @@
 import { createPlanLifecycle } from "../plan/planLifecycle";
 import { createPlanProgress } from "../plan/planProgress";
+import { createPlanReview } from "../plan/planReview";
 import { PR_AGENT_DIR } from "../review/prAgent";
 import { createReviewLedger } from "../review/reviewLedger";
 import { MIGRATIONS } from "../db/migrations";
@@ -194,7 +195,8 @@ export function createCore(ctx: Ctx) {
 
   const progress = createPlanProgress<ManagedRow>(store.rows, schedule, ledger, { terminal, busy: (status) => BUSY_STATUSES.has(status) });
   const { onSpecChain } = progress;
+  const planReview = createPlanReview<ManagedRow>(store.all, store.get, (status) => BUSY_STATUSES.has(status));
   const plans = createPlanLifecycle<ManagedRow>(store, schedule, ledger, (planner: ManagedRow): string | null => ctx.planReviewRefusal(planner));
-  return { activeChiefForProject, anyCooldown, chainOwner, chainStarted, planBase, planBaseOf, chiefCountForProject, closedTodosForProject, coexists, cooldownFor, db, insertTodo, isDesignWave, latestChiefForProject, latestSideWriter, latestWorker, ledger, onSpecChain, pendingAlerts, planWavesFor, plans, progress, reviewTargetsFor, reviewerFails, roleModelRow, schedule, settings, sideLane, specWave, specWriters, store, taskWriters, todoById, todosForProject, updateTodo, upsertCooldown, writerPending };
+  return { activeChiefForProject, anyCooldown, chainOwner, chainStarted, planBase, planBaseOf, chiefCountForProject, closedTodosForProject, coexists, cooldownFor, db, insertTodo, isDesignWave, latestChiefForProject, latestSideWriter, latestWorker, ledger, onSpecChain, pendingAlerts, planReview, planWavesFor, plans, progress, reviewTargetsFor, reviewerFails, roleModelRow, schedule, settings, sideLane, specWave, specWriters, store, taskWriters, todoById, todosForProject, updateTodo, upsertCooldown, writerPending };
 }
 

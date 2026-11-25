@@ -76,7 +76,7 @@ export function createDelegation(ctx: Ctx) {
       // Earlier revision attempts that failed or stopped are superseded atomically with the new one.
       params.revises ? (newId) => {
         const now = Date.now();
-        for (const earlier of ctx.revisionsOf(params.revises!).all) {
+        for (const earlier of ctx.planReview.revisions(params.revises!).all) {
           if (earlier.thread_id !== newId && !BUSY_STATUSES.has(earlier.state) && !terminal(earlier.state)) store.completeSuperseded(earlier.thread_id, now);
         }
       } : undefined);
@@ -134,17 +134,18 @@ export function createDelegation(ctx: Ctx) {
   function revisionInput(plannerId: string, chiefThreadId: string): NonNullable<Parameters<typeof plannerBrief>[0]["revision"]> {
     const planner = store.get(plannerId);
     if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId)) throw new Error(`No managed planner ${plannerId} for this Chief.`);
-    if (planner.plan_epic && planner.state === "complete") throw new Error(ctx.planReviewRefusal(planner)!);
-    if (planner.plan_review !== "changes") {
-      if (!planner.plan_review && planner.replaces_thread_id) throw new Error(`${plannerId} is already the revision of ${planner.replaces_thread_id}; a revision gets no review — ${deliver(planner)}.`);
-      throw new Error(ctx.planReviewRefusal(planner) ?? `Plan ${plannerId} needs no revision: only a plan whose one advisor review asked for changes is revised. ${planner.plan_epic ? (ctx.nextAction(planner) ?? "Wait for its ready report.") : "Delegate it."}`);
+    const refusal = ctx.planReview.revisionRefusal(planner);
+    if (refusal.kind !== "ok") {
+      switch (refusal.kind) {
+        case "closed": throw new Error(ctx.planReviewRefusal(planner)!);
+        case "isRevision": throw new Error(`${plannerId} is already the revision of ${planner.replaces_thread_id}; a revision gets no review — ${deliver(planner)}.`);
+        case "notChanges": throw new Error(ctx.planReviewRefusal(planner) ?? `Plan ${plannerId} needs no revision: only a plan whose one advisor review asked for changes is revised. ${planner.plan_epic ? (ctx.nextAction(planner) ?? "Wait for its ready report.") : "Delegate it."}`);
+        // An epic's delivered revision closes it at once: the original stays in review changes until Chief completes both.
+        case "delivered": throw new Error(planner.plan_epic ? ctx.planReviewRefusal(planner)! : `Plan ${plannerId} was revised by ${refusal.by?.thread_id ?? "an earlier revision"}: delegate ${refusal.by?.thread_id ?? "its"} waves.`);
+        case "busy": throw new Error(`Plan ${plannerId} is being revised by ${refusal.by.thread_id}: wait for ${refusal.by.thread_id}.`);
+      }
     }
-    const revisions = ctx.revisionsOf(plannerId);
-    // An epic's delivered revision closes it at once: the original stays in review changes until Chief completes both.
-    if (planner.plan_epic && revisions.ready) throw new Error(ctx.planReviewRefusal(planner)!);
-    if (planner.state === "complete") throw new Error(`Plan ${plannerId} was revised by ${revisions.ready?.thread_id ?? "an earlier revision"}: delegate ${revisions.ready?.thread_id ?? "its"} waves.`);
-    if (revisions.busy) throw new Error(`Plan ${plannerId} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}.`);
-    const decider = ctx.planAdvisors(plannerId).decider!;
+    const { decider } = refusal;
     const blocked = decider.last_report_state === "blocked";
     return {
       plannerThreadId: plannerId,
@@ -166,16 +167,15 @@ export function createDelegation(ctx: Ctx) {
   /** chief_consult planThreadId: an optional read-only advisor review of a plan, in the project's own checkout. */
   async function startPlanConsult(params: z.infer<typeof consultParams>, plannerId: string, chiefThreadId: string, projectId: string) {
     const planner = store.get(plannerId);
-    if (!planner || planner.role !== "planner" || !ctx.controlsThread(planner, chiefThreadId) || !(planner.plan_waves || (planner.plan_epic && planner.last_report_state === "ready")) || planner.state === "complete") {
-      throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
+    const refusal = planner && planner.role === "planner" && ctx.controlsThread(planner, chiefThreadId) ? ctx.planReview.consultRefusal(planner) : { kind: "noOpenPlan" } as const;
+    if (!planner || refusal) {
+      switch (refusal?.kind) {
+        case "revision": throw new Error(`${plannerId} is a revision; a revision gets no review: ${deliver(planner!)}.`);
+        case "decided": throw new Error(`Plan ${plannerId} already had its one review (${refusal.decider?.thread_id ?? "?"}): ${ctx.planReviewRefusal(planner!) ?? ctx.nextAction(planner!) ?? `${deliver(planner!)}.`}`);
+        case "inReview": throw new Error(`Plan ${plannerId} is already in review by ${refusal.advisor.thread_id}: wait for ${refusal.advisor.thread_id}, or chief_stop it first.`);
+        default: throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
+      }
     }
-    if (planner.replaces_thread_id) throw new Error(`${plannerId} is a revision; a revision gets no review: ${deliver(planner)}.`);
-    if (planner.plan_review && planner.plan_review !== "required") {
-      const { decider } = ctx.planAdvisors(plannerId);
-      throw new Error(`Plan ${plannerId} already had its one review (${decider?.thread_id ?? "?"}): ${ctx.planReviewRefusal(planner) ?? ctx.nextAction(planner) ?? `${deliver(planner)}.`}`);
-    }
-    const { inFlight } = ctx.planAdvisors(plannerId);
-    if (inFlight) throw new Error(`Plan ${plannerId} is already in review by ${inFlight.thread_id}: wait for ${inFlight.thread_id}, or chief_stop it first.`);
     if (planAdmissions.has(plannerId)) throw new Error(`Plan ${plannerId} is being submitted or already entering review: retry chief_consult once its ready alert arrives.`);
     planAdmissions.add(plannerId);
     try {
@@ -431,8 +431,8 @@ export function createDelegation(ctx: Ctx) {
       throw new Error(`Worker ${threadId} already reported ${row.state}. chief_continue never reuses a finished worker for more work — deferred acceptance criteria, a rebase or restack, or a new task. ${handoff}`);
     }
     // An unadvised advisor's gate ends when its plan is replaced or decided: resuming it would run ungated.
-    if (row.role === "advisor" && row.plan_thread_id && row.advised_at == null && store.get(row.plan_thread_id)?.plan_review !== "required") {
-      const reviewed = store.get(row.plan_thread_id);
+    if (row.role === "advisor" && ctx.planReview.advisorStale(row)) {
+      const reviewed = store.get(row.plan_thread_id!);
       throw new Error(`Advisor ${threadId} reviewed a plan revision that was since replaced or decided; it cannot be resumed. ${reviewed?.plan_epic
         ? `The epic's review outcome stands: ${(reviewed.state === "complete" ? ctx.planReviewRefusal(reviewed) : ctx.nextAction(reviewed)) ?? `escalate to the user, or chief_consult (planThreadId: ${row.plan_thread_id}) again`}`
         : `Start a fresh chief_consult (planThreadId: ${row.plan_thread_id}), or delegate the plan without it.`}`);
