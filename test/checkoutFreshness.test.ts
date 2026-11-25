@@ -694,7 +694,7 @@ describe("checkout freshness", () => {
       ["CLI plan", async (w) => (await w.cliPlan("--branch", BRANCH)).stdout!, "planner"],
     ];
 
-    test.each(starts)("%s with a branch launches in a fresh managed worktree on it, records it, and neither fast-forwards nor runs any git in Chief's checkout", async (_name, start, role) => {
+    test.each(starts)("%s with a branch launches in a fresh managed worktree on it, records it, and does not fast-forward Chief's checkout", async (_name, start, role) => {
       const w = await world({ projectPath: "clone" });
       await w.r.push();
       const reply = await start(w);
@@ -702,7 +702,8 @@ describe("checkout freshness", () => {
       expect(w.spawnedRole(role)[0].environment).toEqual(BRANCH_ENV);
       expect(branchOf(w, w.rows(role)[0]!)).toBe(BRANCH);
       expect(reply.trim().split("\n")).toHaveLength(1);
-      expect(w.calls).toEqual([]);
+      // Only the task branch's ref sync runs here: no merge, and HEAD stays put.
+      expect(w.calls.filter((call) => call.args[0] === "merge")).toEqual([]);
       expect(await w.r.head()).toBe(w.r.c0);
     });
 
@@ -880,6 +881,8 @@ describe("checkout freshness", () => {
       await git(w.r.chief, "push", "-q", "origin", "HEAD:refs/heads/feature/stamp");
       const delegated = await w.state.harness.behavior.runCli(["delegate", "--title", "Fix totals", "--mission", "Do it", "--unplanned-reason", "stamp test", "--branch", "feature/stamp", "--json"], w.ctx);
       const worker = (JSON.parse(delegated.stdout!) as { threadId: string }).threadId;
+      // The delegate's own task-branch sync runs before this point; the reports and the gate read no git.
+      const afterDelegate = w.calls.length;
       await report(w, worker);
       expect(alertText(w)).toContain("State: blocked");
       expect(alertText(w)).not.toContain("Read at");
@@ -892,7 +895,7 @@ describe("checkout freshness", () => {
       const reviewer = w.rows("reviewer")[0]!;
       await report(w, reviewer, { state: "ready", result: "Reviewed", verdict: "approve", findings: [] });
       expect(alertText(w)).not.toContain("Read at");
-      expect([...w.calls.slice(0, beforeGate), ...w.calls.slice(afterGate)].filter((call) => ["ls-remote", "rev-parse"].includes(call.args[0]!))).toEqual([]);
+      expect([...w.calls.slice(afterDelegate, beforeGate), ...w.calls.slice(afterGate)].filter((call) => ["ls-remote", "rev-parse"].includes(call.args[0]!))).toEqual([]);
     });
   });
 
