@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { PLAN_FIXTURE, disposeAll, setup, start, status, wave } from "./harness";
+import { readFileSync } from "node:fs";
+import { PLAN_FIXTURE, disposeAll, planFile, setup, start, status, wave } from "./harness";
 import { type State, plan, report, rowOf, tool } from "./flowHelpers";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
@@ -88,6 +89,67 @@ describe("planner review status", () => {
     expect(rowOf(state, original.threadId).plan_waves).toBe(waves);
     expect(state.spawned.length).toBe(launched);
   });
+
+  const activeIdle = async (state: Awaited<ReturnType<typeof setup>>, id: string) => {
+    await state.harness.behavior.emitThreadEvent("thread.active", { thread: { ...state.live.get(id)!, status: "active" } });
+    await state.harness.behavior.emitThreadEvent("thread.idle", { thread: { ...state.live.get(id)!, status: "idle" }, lastAssistantText: "stopped" });
+  };
+
+  test("an advisor that ended its turn without advice still holds the review; archiving it frees chief_consult", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const original = await plan(state, chief.threadId);
+    await consult(state, chief.threadId, original.threadId);
+    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    await activeIdle(state, advisor.threadId);
+
+    const launched = state.spawned.length;
+    const refusal = await consult(state, chief.threadId, original.threadId).then(() => "", (error: Error) => error.message);
+    expect(refusal).toContain("chief_continue");
+    expect(refusal).toContain(advisor.threadId);
+    expect(state.spawned.length).toBe(launched);
+
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(advisor.threadId)! });
+    await consult(state, chief.threadId, original.threadId);
+    expect(state.spawned.length).toBe(launched + 1);
+  });
+
+  test("a delivered epic revision that went active and idle again still refuses another revision", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await tool(state, "chief_plan", { title: "Epic", mission: "Plan the epic", undesignedReason: "small", epic: true }, chief.threadId);
+    const original = (await planners(state)).at(-1)!;
+    await report(state, original.threadId, { state: "ready", result: "Epic: https://github.com/o/r/issues/1" });
+    await reviewed(state, chief.threadId, original.threadId);
+    await revise(state, chief.threadId, original.threadId);
+    const revision = (await planners(state)).at(-1)!;
+    await report(state, revision.threadId, { state: "ready", result: "Epic: https://github.com/o/r/issues/2" });
+    await activeIdle(state, revision.threadId);
+
+    const launched = state.spawned.length;
+    await expect(revise(state, chief.threadId, original.threadId)).rejects.toThrow();
+    expect(state.spawned.length).toBe(launched);
+  });
+
+  test("a task plan whose advisor ended its turn without advice refuses a new plan report", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const original = await plan(state, chief.threadId);
+    await consult(state, chief.threadId, original.threadId);
+    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    await activeIdle(state, advisor.threadId);
+
+    // A valid plan that differs from the stored one: only the idle-advisor guard can refuse it, and the same report lands once the advisor is archived.
+    const stored = () => readFileSync(planFile(state, original.threadId, 1), "utf8");
+    const before = stored();
+    const replacement = [{ body: `${PLAN_FIXTURE}\n- y` }];
+    await expect(report(state, original.threadId, { state: "ready", result: "Again.", plan: replacement })).rejects.toThrow(advisor.threadId);
+    expect(stored()).toBe(before);
+
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(advisor.threadId)! });
+    await report(state, original.threadId, { state: "ready", result: "Again.", plan: replacement });
+    expect(stored()).not.toBe(before);
+  });
 });
 
 // The module against bare rows: values the tools never write still read as main read them (baseline f639f4c).
@@ -111,11 +173,33 @@ describe("planner review over odd rows", () => {
     expect(m.hasResult(epic)).toBe(false);
   });
 
+  test("a ready task original whose review asked for changes and whose usable revision carries waves is delivered; a completed one stays delivered after its revision is archived", () => {
+    const original = row({ plan_waves: "[]", plan_review: "changes" });
+    const revision = row({ thread_id: "r", replaces_thread_id: "p", plan_waves: "[]", state: "idle" });
+    const m = review([original, advisor, revision]);
+    expect(m.revisionRefusal(original).kind).toBe("delivered");
+    expect(m.owner(original)).toMatchObject({ kind: "revised", owner: "r" });
+
+    const done = { ...original, state: "complete" };
+    const archived = { ...revision, state: "archived" };
+    const closed = review([done, advisor, archived]);
+    expect(closed.revisionRefusal(done).kind).toBe("delivered");
+    expect(closed.owner(done)).toEqual({ kind: "closed", owner: null });
+  });
+
+  test("a complete epic revision hands the chain back to its open original", () => {
+    const epic = row({ plan_epic: 1, plan_review: "changes", last_report_state: "ready" });
+    const revision = row({ thread_id: "r", replaces_thread_id: "p", plan_epic: 1, state: "complete", last_report_state: "ready" });
+    const m = review([epic, advisor, revision]);
+    expect(m.revisionRefusal(epic).kind).toBe("delivered");
+    expect(m.owner(epic)).toMatchObject({ kind: "revised", owner: "p" });
+  });
+
   test("a complete epic revision whose last report is blocked is not a delivered revision, even with waves", () => {
     const epic = row({ plan_epic: 1, plan_review: "changes", state: "ready", last_report_state: "ready" });
     const revision = row({ thread_id: "r", replaces_thread_id: "p", plan_epic: 1, plan_waves: "[]", state: "complete", last_report_state: "blocked" });
     const m = review([epic, advisor, revision]);
-    expect(m.revisions("p").ready).toBeUndefined();
+    expect(m.revisions("p").delivered).toBeUndefined();
     expect(m.revisionRefusal(epic).kind).toBe("ok");
   });
 });

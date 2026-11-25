@@ -129,8 +129,8 @@ describe("epic consult and routing", () => {
     await report(state, second.threadId, { state: "blocked", blocker: "still no access", recommendation: "retry" });
     expect(lastText(state)).not.toMatch(/chief_complete/);
     expect(lastText(state)).not.toMatch(/chief_delegate \(|chief_forge_init \(/);
-    // The original's own Pending line still asks for a revision: two blocked attempts delivered nothing, so it must not offer to complete the first epic.
-    const pending = String(await tool(state, "chief_roster", {}, chief.threadId)).split("\n").find((line) => line.includes(`(${planner.threadId})`) && line.startsWith("- planner"));
+    // The blocked second revision owns the chain's Pending line and asks for a revision: two blocked attempts delivered nothing, so it must not offer to complete the first epic.
+    const pending = String(await tool(state, "chief_roster", {}, chief.threadId)).split("\n").find((line) => line.includes(`(${second.threadId})`) && line.startsWith("- planner"));
     expect(pending).toContain(`revises: ${planner.threadId}`);
     expect(pending).not.toContain("chief_complete");
   });

@@ -172,7 +172,9 @@ export function createDelegation(ctx: Ctx) {
       switch (refusal?.kind) {
         case "revision": throw new Error(`${plannerId} is a revision; a revision gets no review: ${deliver(planner!)}.`);
         case "decided": throw new Error(`Plan ${plannerId} already had its one review (${refusal.decider?.thread_id ?? "?"}): ${ctx.planReviewRefusal(planner!) ?? ctx.nextAction(planner!) ?? `${deliver(planner!)}.`}`);
-        case "inReview": throw new Error(`Plan ${plannerId} is already in review by ${refusal.advisor.thread_id}: wait for ${refusal.advisor.thread_id}, or chief_stop it first.`);
+        case "inReview": throw new Error(BUSY_STATUSES.has(refusal.advisor.state)
+          ? `Plan ${plannerId} is already in review by ${refusal.advisor.thread_id}: wait for ${refusal.advisor.thread_id}, or chief_stop it first.`
+          : `Plan ${plannerId} is in review by ${refusal.advisor.thread_id}, which ended its turn without advice: chief_continue (threadId: ${refusal.advisor.thread_id}) asking for its chief_report, or chief_stop it first.`);
         default: throw new Error(`No managed planner ${plannerId} with an open plan for this Chief.`);
       }
     }

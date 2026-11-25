@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { delegate, disposeAll, planTwoWaves, setup, start, status } from "./harness";
+import { setLive } from "./flowHelpers";
 import { provideSdk } from "./sdk";
 
 provideSdk(sdkTesting);
@@ -79,9 +80,9 @@ describe("finished-without-report alert", () => {
   });
 });
 
-// Contract (src/runtime/nextAction.ts): missing-Report recovery in Pending covers worker rows only. A planner, plan advisor or epic revision that ends
-// a turn without a Report renders Pending exactly as it did before recovery existed: the whole block is compared by row and call shape, never prose.
-describe("plan threads keep their base Pending", () => {
+// Contract (src/plan/planReview.ts owner, src/runtime/nextAction.ts): a plan chain (planner, its advisors, its revisions) has one Pending owner. A planner,
+// advisor or revision that ends a turn without a Report is recovered on the owner row only: the whole block is compared by row and call shape, never prose.
+describe("a plan chain has one Pending owner", () => {
   type S = Awaited<ReturnType<typeof setup>>;
   const call = (state: S, tool: string, params: object, threadId: string) => state.harness.behavior.callAgentTool(tool, params, { threadId, projectId: "proj_1" });
   const activeIdle = async (state: S, id: string) => {
@@ -107,7 +108,7 @@ describe("plan threads keep their base Pending", () => {
     return (await planners(state)).at(-1)!;
   };
 
-  test.each(["epic", "task"])("a %s planner and its undecided advisor both idle without a Report", async (kind) => {
+  test.each(["epic", "task"])("a %s planner and its undecided advisor both idle without a Report: one line, on the advisor", async (kind) => {
     const state = await setup();
     const chief = await start(state);
     let planner, advisor;
@@ -119,10 +120,27 @@ describe("plan threads keep their base Pending", () => {
     }
     await activeIdle(state, advisor.threadId);
     await activeIdle(state, planner.threadId);
-    expect(await pending(state, chief.threadId, { [planner.threadId]: "planner", [advisor.threadId]: "advisor" })).toMatchInlineSnapshot(`[]`);
+    expect(await pending(state, chief.threadId, { [planner.threadId]: "planner", [advisor.threadId]: "advisor" })).toMatchInlineSnapshot(`
+      [
+        "advisor advisor: chief_continue chief_inspect chief_report",
+      ]
+    `);
   });
 
-  test("an epic revision idle without a Report, with its original idle too", async () => {
+  test("an epic planner idle without a Report: one line, on the planner", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    await call(state, "chief_plan", { title: "Epic", mission: "Plan the epic", undesignedReason: "small", epic: true }, chief.threadId);
+    const planner = (await planners(state)).at(-1)!;
+    await activeIdle(state, planner.threadId);
+    expect(await pending(state, chief.threadId, { [planner.threadId]: "planner" })).toMatchInlineSnapshot(`
+      [
+        "planner planner: chief_continue chief_inspect chief_report",
+      ]
+    `);
+  });
+
+  test("an epic revision idle without a Report, with its original idle too: one line, on the revision", async () => {
     const state = await setup();
     const chief = await start(state);
     const { planner } = await epicWithAdvisor(state, chief.threadId, "request_changes");
@@ -131,12 +149,12 @@ describe("plan threads keep their base Pending", () => {
     await activeIdle(state, revision.threadId);
     expect(await pending(state, chief.threadId, { [planner.threadId]: "original", [revision.threadId]: "revision" })).toMatchInlineSnapshot(`
       [
-        "advisor other: chief_plan revises=original",
+        "planner revision: chief_continue chief_inspect chief_report",
       ]
     `);
   });
 
-  test("an epic revision blocked, with its original idle", async () => {
+  test("an epic revision blocked, with its original idle: one line, on the revision", async () => {
     const state = await setup();
     const chief = await start(state);
     const { planner } = await epicWithAdvisor(state, chief.threadId, "request_changes");
@@ -148,12 +166,11 @@ describe("plan threads keep their base Pending", () => {
     expect(await pending(state, chief.threadId, { [planner.threadId]: "original", [revision.threadId]: "revision" })).toMatchInlineSnapshot(`
       [
         "planner revision: chief_plan revises=original",
-        "advisor other: chief_plan revises=original",
       ]
     `);
   });
 
-  test("a delivered epic revision that is busy again, and once idle", async () => {
+  test("a delivered epic revision that is busy again shows nothing; once idle one line on the revision", async () => {
     const state = await setup();
     const chief = await start(state);
     const { planner } = await epicWithAdvisor(state, chief.threadId, "request_changes");
@@ -161,17 +178,117 @@ describe("plan threads keep their base Pending", () => {
     await call(state, "chief_report", { state: "ready", result: "Epic: https://github.com/o/r/issues/2" }, revision.threadId);
     const labels = { [planner.threadId]: "original", [revision.threadId]: "revision" };
     await state.harness.behavior.emitThreadEvent("thread.active", { thread: { ...state.live.get(revision.threadId)!, status: "active" } });
-    expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`
-      [
-        "advisor other: ",
-        "planner original: ",
-      ]
-    `);
+    expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`[]`);
     await state.harness.behavior.emitThreadEvent("thread.idle", { thread: { ...state.live.get(revision.threadId)!, status: "idle" }, lastAssistantText: "done" });
     expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`
       [
-        "advisor other: chief_plan revises=original",
+        "planner revision: chief_complete chief_delegate chief_forge_init",
+      ]
+    `);
+  });
+
+  test("an advisor approval: only the planner row has a line", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner, advisor } = await epicWithAdvisor(state, chief.threadId, "approve");
+    expect(await pending(state, chief.threadId, { [planner.threadId]: "planner", [advisor.threadId]: "advisor" })).toMatchInlineSnapshot(`
+      [
+        "planner planner: chief_complete chief_delegate chief_forge_init",
+      ]
+    `);
+  });
+
+  test("a blocked advisor: only the planner row has a line, and it revises", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner, advisor } = await epicWithAdvisor(state, chief.threadId, null);
+    await call(state, "chief_report", { state: "blocked", blocker: "No repo access", recommendation: "Grant it" }, advisor.threadId);
+    await activeIdle(state, planner.threadId);
+    expect(await pending(state, chief.threadId, { [planner.threadId]: "planner", [advisor.threadId]: "advisor" })).toMatchInlineSnapshot(`
+      [
+        "planner planner: chief_plan revises=planner",
+      ]
+    `);
+  });
+
+  test("an archived delivered epic revision returns the chain to the original, which can revise again", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner } = await epicWithAdvisor(state, chief.threadId, "request_changes");
+    const revision = await revise(state, chief.threadId, planner.threadId);
+    await call(state, "chief_report", { state: "ready", result: "Epic: https://github.com/o/r/issues/2" }, revision.threadId);
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(revision.threadId)! });
+    expect(await pending(state, chief.threadId, { [planner.threadId]: "original", [revision.threadId]: "revision" })).toMatchInlineSnapshot(`
+      [
         "planner original: chief_plan revises=original",
+      ]
+    `);
+    const before = state.spawned.length;
+    await revise(state, chief.threadId, planner.threadId);
+    expect(state.spawned.length).toBe(before + 1);
+  });
+
+  // Each chief_complete target in the Pending block, as its row's label.
+  const completes = async (state: S, chiefId: string, labels: Record<string, string>) => String(await call(state, "chief_roster", {}, chiefId)).split("\n")
+    .filter((line) => line.startsWith("- ")).flatMap((line) => [...line.matchAll(/chief_complete \(threadId: (thr_\w+)\)/g)].map((m) => labels[m[1]] ?? "other"));
+  const deliveredRevision = async (state: S, chiefId: string) => {
+    const { planner } = await epicWithAdvisor(state, chiefId, "request_changes");
+    const revision = await revise(state, chiefId, planner.threadId);
+    await call(state, "chief_report", { state: "ready", result: "Epic: https://github.com/o/r/issues/2" }, revision.threadId);
+    return { planner, revision, labels: { [planner.threadId]: "original", [revision.threadId]: "revision" } };
+  };
+
+  test("a delivered epic revision completed first hands the chain to the original: one complete call after each step", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner, revision, labels } = await deliveredRevision(state, chief.threadId);
+    expect(await completes(state, chief.threadId, labels)).toEqual(["revision", "original"]);
+
+    await call(state, "chief_complete", { threadId: revision.threadId }, chief.threadId);
+    expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`
+      [
+        "planner original: chief_complete",
+      ]
+    `);
+    expect(await completes(state, chief.threadId, labels)).toEqual(["original"]);
+
+    await call(state, "chief_complete", { threadId: planner.threadId }, chief.threadId);
+    expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`[]`);
+  });
+
+  test.each(["failed", "stopped"])("a delivered epic revision that went active and then %s keeps one complete route and refuses another revision", async (how) => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner, revision, labels } = await deliveredRevision(state, chief.threadId);
+    setLive(state, revision.threadId, "active");
+    if (how === "failed") {
+      setLive(state, revision.threadId, "failed");
+      await state.harness.behavior.emitThreadEvent("thread.failed", { thread: state.live.get(revision.threadId)!, lastAssistantText: "boom" });
+    } else {
+      const reply = String(await call(state, "chief_stop", { threadId: revision.threadId, reason: "looping" }, chief.threadId));
+      expect(reply).not.toContain("revises");
+    }
+    expect(await pending(state, chief.threadId, labels)).toMatchInlineSnapshot(`
+      [
+        "planner revision: chief_complete chief_delegate chief_forge_init",
+      ]
+    `);
+    expect(await completes(state, chief.threadId, labels)).toEqual(["revision", "original"]);
+    const before = state.spawned.length;
+    await expect(revise(state, chief.threadId, planner.threadId)).rejects.toThrow();
+    expect(state.spawned.length).toBe(before);
+  });
+
+  test("a task plan whose only advisor was archived without advice: one line on the planner, consulting again, not delegating", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
+    await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan" }, chief.threadId);
+    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    await state.harness.behavior.emitThreadEvent("thread.archived", { thread: state.live.get(advisor.threadId)! });
+    expect(await pending(state, chief.threadId, { [planner.threadId]: "planner", [advisor.threadId]: "advisor" })).toMatchInlineSnapshot(`
+      [
+        "planner planner: chief_consult",
       ]
     `);
   });
