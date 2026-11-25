@@ -23,6 +23,7 @@ export interface ProgressRow {
   regression: number | null;
   findings: string | null;
   blocker: string | null;
+  owner_approval: string | null;
 }
 
 /** A fix run that stopped before its first report: it no longer holds its gate slot. Never a live (starting/active/stopping) row. */
@@ -186,6 +187,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     | null
     | { kind: "designNext"; waves: PlanWave[]; next: number }
     | { kind: "designDone"; waves: PlanWave[] }
+    | { kind: "designApproved"; waves: PlanWave[]; next: number | null }
     | { kind: "restack"; waves: PlanWave[]; next: number; successor: Row }
     | { kind: "nextWave"; waves: PlanWave[]; next: number }
     | { kind: "unplanned" }
@@ -216,6 +218,7 @@ export function createPlanProgress<Row extends ProgressRow>(
     }
     const next = planThreadId && row.plan_wave != null ? successorOf(waves, row.plan_wave) : null;
     const design = !!waves[row.plan_wave! - 1]?.design;
+    if (design && row.owner_approval) return { kind: "designApproved", waves, next };
     if (next !== null && design) return { kind: "designNext", waves, next };
     if (design) return { kind: "designDone", waves };
     // An unplanned Spec Writer hands off to its worker, after a ready report.
@@ -284,11 +287,5 @@ export function createPlanProgress<Row extends ProgressRow>(
       && linked.every((w) => states.terminal(w.state));
   }
 
-  /** The wave that builds on a worker's wave, or null for a chain tip. */
-  function nextWave(row: Row): { waves: PlanWave[]; next: number | null } {
-    const waves = planWavesFor(row.plan_thread_id);
-    return { waves, next: successorOf(waves, row.plan_wave!) };
-  }
-
-  return { reviewBlock, waitingOn, readyStep, onSpecChain, waveProgress, plannerAbsorbed, nextWave, onFinalWave };
+  return { reviewBlock, waitingOn, readyStep, onSpecChain, waveProgress, plannerAbsorbed, onFinalWave };
 }

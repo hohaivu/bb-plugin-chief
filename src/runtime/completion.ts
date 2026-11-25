@@ -8,7 +8,7 @@ import type { Ctx } from "./context";
 import { isWriter } from "../plan/waveSchedule";
 
 export function createCompletion(ctx: Ctx) {
-  const { bb, chainOwner, isDesignWave, ledger, planBaseOf, planWavesFor, progress, sideLane, store, taskWriters } = ctx;
+  const { bb, chainOwner, isDesignWave, ledger, planBaseOf, planWavesFor, sideLane, store, taskWriters } = ctx;
   /** Why a worker, or a gate's reviewer, may not complete yet, or null when its review gate passed.
    * A design-wave worker needs the owner's recorded approval instead. Completion never needs a re-review or an approve on the latest head. */
   async function completionRefusal(row: ManagedRow): Promise<string | null> {
@@ -154,10 +154,7 @@ export function createCompletion(ctx: Ctx) {
     if (live.deletedAt !== null || live.archivedAt !== null) throw new Error(`${row.thread_id} is not a live thread.`);
     if (row.last_report_state !== "ready") throw new Error(`${row.thread_id}'s latest report is ${row.last_report_state ?? "missing"}, not ready: wait for its ready report before asking the owner.`);
     store.recordOwnerApproval(row.thread_id, approval);
-    const { waves, next } = progress.nextWave(row);
-    return next !== null
-      ? `Recorded the owner's approval of wave ${row.plan_wave}. Delegate wave ${next}: ${waves[next - 1]!.path} — chief_delegate (planThreadId: ${row.plan_thread_id}, wave: ${next}, replaces: ${row.thread_id}); name the approved artboards in its mission.`
-      : `Recorded the owner's approval of wave ${row.plan_wave}. Complete it with chief_complete (threadId: ${row.thread_id}). Never chief_review.`;
+    return `Recorded the owner's approval of wave ${row.plan_wave}. ${ctx.workerReadyNextStep(store.get(row.thread_id)!) ?? ""}`.trim();
   }
 
   /** The line chief_complete and the CLI add for a worker's cleanup outcome; non-workers have none. */
