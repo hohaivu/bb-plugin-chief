@@ -204,7 +204,7 @@ export function createResearch(deps: ResearchDeps) {
     const helperPermissionMode = helperExecution.providerId === providerId ? permissionMode : await offersMode(helperExecution.providerId);
     // A helper pick on another provider needs its own check.
     const blocked = hostId ? (providerId && await researchPreflight(hostId, providerId)) || (helperExecution.providerId && helperExecution.providerId !== providerId && await researchPreflight(hostId, helperExecution.providerId)) || null : null;
-    if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher or research helper model in Chief settings or retry after the reset.`);
+    if (blocked) throw new Error(`chief_research did not start: ${blocked}. Pick another researcher or research helper model in Chief settings.`);
     const { branch } = params;
     // The researcher reads Chief's working tree, so it must reuse Chief's environment: no fresh worktree fallback.
     // With a branch it reads its own worktree on that branch instead.
