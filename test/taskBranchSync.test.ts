@@ -26,6 +26,19 @@ describe("syncTaskBranch lookups", () => {
   });
 
   test.each([
+    ["an empty error", new Error("")],
+    ["a multi-line error", new Error("first\nsecond\r\n  third")],
+    ["a very long error", new Error("x".repeat(5_000))],
+  ])("%s gives one bounded single-line warning", async (_name, error) => {
+    const { warn, sync } = setup({ get: async () => { throw error; } });
+    await sync();
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = String(warn.mock.calls[0][0]);
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(line.length).toBeLessThan(400);
+  });
+
+  test.each([
     ["a source on a remote host", { sources: [{ isDefault: true, hostId: "h2", path: "/x" }] }],
     ["a source with no path", { sources: [{ isDefault: true, hostId: "h1" }] }],
     ["no source", { sources: [] }],

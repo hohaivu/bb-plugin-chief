@@ -127,9 +127,10 @@ export function createCheckout(ctx: Ctx) {
         if ("skipped" in result) skip = result.skipped;
       }
     } catch (error) {
-      skip = clip(String((error as Error)?.message ?? error), 200);
+      skip = String((error as Error)?.message ?? error);
     }
-    if (skip) bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${skip}`);
+    // One line, bounded; an empty reason still warns.
+    if (skip !== null) bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${clip(skip.replace(/\s+/g, " ").trim() || "unknown error", 200)}`);
   }
   return { checkoutHostSkip, freshenChiefCheckout, reportStamp, syncChiefCheckout, syncTaskBranch };
 }

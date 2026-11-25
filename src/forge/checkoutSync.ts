@@ -40,8 +40,8 @@ export async function fastForward(opts: { cwd: string; env: NodeJS.ProcessEnv; b
 
 /** Points the local `refs/heads/<branch>` at a freshly fetched `origin/<branch>`, because BB cuts a named-branch worktree from the local ref.
  * It creates a missing ref, and moves one that is behind or whose commits since the merge base leave the tree unchanged (the forge's empty `Start:` commit).
- * It leaves a ref whose tree differs, one a worktree has checked out, one that changed since it was validated, and any failure as `{ skipped }`.
- * The move is `git update-ref` with the validated SHA as its old value, after an explicit checked-out check: `git branch -f` has no old-value guard.
+ * It leaves a ref whose tree differs, a symbolic ref, one that changed since it was validated, and any failure as `{ skipped }`.
+ * The move is `git branch -f`, so git itself refuses a branch that any worktree has checked out or is rebasing. It has no old-value guard, so the ref is read again just before it.
  * The fetch writes only the remote-tracking ref and FETCH_HEAD. Never throws, never touches HEAD, the index or the working tree of `cwd`, never pushes. `deadline` is absolute (epoch ms). */
 export async function pointBranchAtOrigin(opts: { cwd: string; env: NodeJS.ProcessEnv; branch: string; deadline: number }): Promise<FastForward> {
   const { branch, deadline } = opts;
@@ -56,6 +56,8 @@ export async function pointBranchAtOrigin(opts: { cwd: string; env: NodeJS.Proce
     // --refmap= ignores configured fetch mappings, so no other local ref (e.g. +refs/heads/*:refs/heads/*) is written by this fetch.
     await git(["fetch", "--no-tags", "--no-prune", "--no-recurse-submodules", "--refmap=", "origin", `+refs/heads/${branch}:${remote}`]);
     step = "";
+    // Exit 0 = symbolic: a move through it would change its target (e.g. main), so it is never touched.
+    if (await ok(["symbolic-ref", "-q", local])) return { skipped: `local ${branch} is a symbolic ref` };
     const to = (await git(["rev-parse", remote])).trim();
     const from = (await git(["rev-parse", "--verify", "-q", local], true)).trim();
     if (!from) {
@@ -69,10 +71,11 @@ export async function pointBranchAtOrigin(opts: { cwd: string; env: NodeJS.Proce
       const base = (await git(["merge-base", from, to])).trim();
       if ((await git(["rev-parse", `${base}^{tree}`])).trim() !== (await git(["rev-parse", `${from}^{tree}`])).trim()) return { skipped: `local ${branch} has file changes not on origin/${branch}` };
     }
-    step = "git worktree list failed";
-    if ((await git(["worktree", "list", "--porcelain"])).split("\n").includes(`branch ${local}`)) return { skipped: `a worktree has ${branch} checked out` };
-    step = `local ${branch} changed during the sync, or git update-ref failed`;
-    await git(["update-ref", "-m", "chief: sync to origin", local, to, from]);
+    step = "git rev-parse failed";
+    // A ref that moved, or became symbolic, after validation is left as the other writer set it. The window to the move below is one git call.
+    if ((await git(["rev-parse", "--verify", "-q", local], true)).trim() !== from || (await ok(["symbolic-ref", "-q", local]))) return { skipped: `local ${branch} changed during the sync` };
+    step = `git branch -f failed (a worktree may have ${branch} checked out or be rebasing it)`;
+    await git(["branch", "-f", branch, to]);
     return { from, to };
   } catch (error) {
     if ((error as Error)?.message === "deadline") return { skipped: "timed out" };

@@ -251,6 +251,27 @@ describe("pointBranchAtOrigin", () => {
     expect(w.local()).toBe(start);
   });
 
+  test("does not move a branch that a worktree is rebasing (its HEAD is detached)", async () => {
+    const w = world();
+    w.localCommit();
+    const start = w.local();
+    const wt = join(w.root, "wt");
+    sh(w.chief, "worktree", "add", wt, "feat");
+    // Stops after replaying the empty Start commit: HEAD is detached and the rebase state is on disk.
+    expect(() => sh(wt, "rebase", "--no-ff", "--empty=keep", "--exec", "false", w.c0)).toThrow();
+    expect(sh(wt, "branch", "--show-current")).toBe("");
+    expect(await w.call()).toHaveProperty("skipped");
+    expect(w.local()).toBe(start);
+  });
+
+  test("never moves a branch through a symbolic ref: the ref it points at stays put", async () => {
+    const w = world();
+    sh(w.chief, "symbolic-ref", "refs/heads/feat", "refs/heads/main");
+    expect(await w.call()).toHaveProperty("skipped");
+    expect(sh(w.chief, "symbolic-ref", "refs/heads/feat")).toBe("refs/heads/main");
+    expect(sh(w.chief, "rev-parse", "refs/heads/main")).toBe(w.c0);
+  });
+
   test("leaves the local ref and skips when origin has no such branch", async () => {
     const w = world();
     sh(w.chief, "branch", "nope", w.c0);
@@ -282,11 +303,11 @@ describe("pointBranchAtOrigin", () => {
   test("a local ref that moves between validation and the write is left as the other writer set it", async () => {
     const w = world();
     sh(w.chief, "branch", "feat", w.c0);
-    // A git wrapper on PATH: when the code checks worktrees (just before its write), another writer first adds an unpushed commit to local feat.
+    // A git wrapper on PATH: when the code checks ancestry (after reading local feat, before the move), another writer first adds an unpushed commit to local feat.
     const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
     const unpushed = sh(w.chief, "commit-tree", "-p", w.c0, "-m", "unpushed", `${w.c0}^{tree}`);
     const bin = mkdtempSync(join(w.root, "bin-"));
-    writeFileSync(join(bin, "git"), `#!/bin/sh\n[ "$1" = worktree ] && ${realGit} update-ref refs/heads/feat ${unpushed}\nexec ${realGit} "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, "git"), `#!/bin/sh\n[ "$1" = merge-base ] && ${realGit} update-ref refs/heads/feat ${unpushed}\nexec ${realGit} "$@"\n`, { mode: 0o755 });
     expect(await w.call("feat", { ...ENV, PATH: `${bin}:${ENV.PATH}` })).toHaveProperty("skipped");
     expect(w.local()).toBe(unpushed);
   });
