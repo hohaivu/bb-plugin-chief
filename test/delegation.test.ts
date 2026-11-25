@@ -954,8 +954,6 @@ describe("heavy-command slots in delegation", () => {
 describe("command guard in delegation", () => {
   const guardDir = (state: { storageRoot: string }) => join(state.storageRoot, "chief", "guard");
   const marked = async (state: { storageRoot: string }) => (await readdir(join(guardDir(state), "threads")).catch(() => [] as string[])).sort();
-  const warned = (state: Awaited<ReturnType<typeof setup>>, text: string) => state.harness.logEntries.some((entry: { level: string; message: string }) => entry.level === "warn" && entry.message.includes(text));
-
   test("a worker, a designer and a replacing spec-writer are marked; the chief is not", async () => {
     const state = await setup({ heavyFiles: true });
     const chief = await start(state);
@@ -970,25 +968,32 @@ describe("command guard in delegation", () => {
     expect((await readdir(guardDir(state))).sort()).toEqual(["guard.mjs", "guard.sh", "install.sh", "pi-extension.ts", "threads"]);
   });
 
-  test("a failed publish still delegates, with the heavy section in the brief, and warns", async () => {
+  /** The brief a delegation delivers, with thread-specific paths normalized, to compare an I/O failure run with a successful one. */
+  const briefOf = async (fail: RegExp | null) => {
     const state = await setup({ heavyFiles: true });
-    state.failWritesMatching(/\/chief\/guard\//);
+    if (fail) state.failWritesMatching(fail);
     const chief = await start(state);
     const worker = await delegate(state, chief.threadId);
     expect(worker.threadId).toBeTruthy();
     expect(state.spawned).toHaveLength(2);
-    expect(state.spawned[1].prompt).toContain("## Heavy commands");
-    expect(warned(state, "command guard is not published")).toBe(true);
+    return { state, brief: state.spawned[1].prompt.replaceAll(state.storageRoot, "<root>").replaceAll(worker.threadId, "<thread>") };
+  };
+  const warnings = (state: Awaited<ReturnType<typeof setup>>, text: string) => state.harness.logEntries.filter((entry: { level: string; message: string }) => entry.level === "warn" && entry.message.includes(text)).length;
+
+  test("a failed publish still delegates with the same brief and warns once", async () => {
+    const ok = await briefOf(null);
+    const failed = await briefOf(/\/chief\/guard\/[^/]+$/);
+    expect(failed.brief).toBe(ok.brief);
+    expect(warnings(failed.state, "command guard is not published")).toBe(1);
+    expect(warnings(failed.state, "for the command guard")).toBe(0);
   });
 
-  test("a failed marker write still delegates and warns", async () => {
-    const state = await setup({ heavyFiles: true });
-    state.failWritesMatching(/\/chief\/guard\/threads\//);
-    const chief = await start(state);
-    const worker = await delegate(state, chief.threadId);
-    expect(worker.threadId).toBeTruthy();
-    expect(state.spawned).toHaveLength(2);
-    expect(await marked(state)).toEqual([]);
-    expect(warned(state, "for the command guard")).toBe(true);
+  test("a failed marker write still delegates with the same brief and warns once", async () => {
+    const ok = await briefOf(null);
+    const failed = await briefOf(/\/chief\/guard\/threads\//);
+    expect(failed.brief).toBe(ok.brief);
+    expect(await marked(failed.state)).toEqual([]);
+    expect(warnings(failed.state, "for the command guard")).toBe(1);
+    expect(warnings(failed.state, "command guard is not published")).toBe(0);
   });
 });

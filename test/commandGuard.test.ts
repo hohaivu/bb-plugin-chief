@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -37,12 +37,15 @@ const REFUSED = [
   "npm test | tail -20", "git log|head", "x |& tail", "echo $(ls | head -1)", "cmd | /usr/bin/tail -n 5",
   "sleep 60 &", "npm run dev & curl localhost", "nohup npm start", "(build) & wait", "foo; disown", "setsid foo",
   "echo ok\nnpm test | tail", "cat <<EOF\nbody\nEOF\nls | head",
+  "echo '<<EOF'\nls | head", "echo \"<<EOF\"\nsleep 60 &", "# example <<EOF\nls | tail", "cat <<<x\nls | head", "echo $((1<<2))\nsleep 1 &",
+  "cat <<EOF | tail\nbody\nEOF", "true || x | /usr/bin/head", "ls |\n head",
 ];
 const ALLOWED = [
   "a || head -n 3 f", "head -n 50 file", "tail -n 20 log", "make 2>&1", "cmd &> out.log", "a && b", "echo x >&2",
   'git commit -m "fix | head & tail"', "grep 'a|tail' f", "# run | tail later", "ls # | tail", "cat nohup.out", "echo $# ${#x}",
   "bb thread tell --message-file - <<'EOF'\nsent | tail and & more\nEOF", "bb thread tell --message-file - <<-EOF\n\tx | head\n\tEOF\nls",
   "bash /Users/x/.bb/chief/heavy/chief-heavy-0123456789ab.sh test -- npm test", "cat <<<'a | tail'",
+  "true ||/usr/bin/head -n 3 f", "echo x >|head", "cat ./nohup", "ls >| setsid", "cat <<EOF\nsleep 1 &\nEOF\nls",
 ];
 
 describe("guard.sh with a marked thread", () => {
@@ -130,9 +133,16 @@ describe("pi extension", () => {
     expect(await handler(call(42))).toBeUndefined();
   });
 
-  test("fails open when guard.sh is missing", async () => {
+  test("fails open when guard.sh is missing, for a marked thread too", async () => {
+    vi.stubEnv("BB_THREAD_ID", "thr_x");
     const handler = load(join(temp("chief-missing-"), "guard.sh"));
     expect(await handler(call("ls | head"))).toBeUndefined();
+  });
+
+  test("a shell exit 2 without a [chief-guard] reason lets the command run", async () => {
+    const dir = guardDir();
+    writeFileSync(join(dir, "guard.sh"), "echo broken >&2\nexit 2\n");
+    expect(await load(join(dir, "guard.sh"))(call("ls | head"))).toBeUndefined();
   });
 });
 
@@ -182,6 +192,41 @@ describe("install.sh", () => {
     expect(hook(bash("ls | tail")).status).toBe(2);
     rmSync(join(dir, "guard.sh"));
     expect(hook(bash("ls | tail")).status).toBe(0);
+  });
+
+  test("an unrelated hook that mentions the guard path does not count as installed", () => {
+    const dir = guardDir();
+    const diagnostic = { matcher: "Bash", hooks: [{ type: "command", command: `echo ${join(dir, "guard.sh")} >> /tmp/log` }] };
+    const home = homeWith(JSON.stringify({ hooks: { PreToolUse: [diagnostic] } }));
+    expect(install(dir, home).status).toBe(0);
+    const entries = JSON.parse(readFileSync(settingsPath(home), "utf8")).hooks.PreToolUse;
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toEqual(diagnostic);
+    const first = readFileSync(settingsPath(home), "utf8");
+    expect(install(dir, home).status).toBe(0);
+    expect(readFileSync(settingsPath(home), "utf8")).toBe(first);
+  });
+
+  test("a symlinked, private settings file stays a link and keeps its mode; a new settings file is private", () => {
+    const dir = guardDir();
+    const home = homeWith(null);
+    const dotfiles = temp("chief-dotfiles-");
+    writeFileSync(join(dotfiles, "settings.json"), JSON.stringify({ model: "x" }), { mode: 0o600 });
+    chmodSync(join(dotfiles, "settings.json"), 0o600);
+    mkdirSync(join(home, ".claude"));
+    symlinkSync(join(dotfiles, "settings.json"), settingsPath(home));
+    for (let round = 0; round < 2; round++) {
+      expect(install(dir, home).status).toBe(0);
+      expect(lstatSync(settingsPath(home)).isSymbolicLink()).toBe(true);
+      expect(statSync(join(dotfiles, "settings.json")).mode & 0o777).toBe(0o600);
+    }
+    const settings = JSON.parse(readFileSync(join(dotfiles, "settings.json"), "utf8"));
+    expect(settings.model).toBe("x");
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+
+    const fresh = homeWith(null);
+    expect(install(dir, fresh).status).toBe(0);
+    expect(statSync(settingsPath(fresh)).mode & 0o777).toBe(0o600);
   });
 
   test.each([["invalid JSON", "{ nope"], ["a JSON list", "[]"], ["a hooks value that is not an object", '{"hooks":[]}']])("%s: the settings file is left untouched, exit 1, no backup, no extension", (_name, text) => {

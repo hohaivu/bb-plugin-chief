@@ -33,35 +33,70 @@ const PIPE = "Pipe into tail or head refused: it hides progress from the owner w
 if (args.run_in_background === true) refuse(BACKGROUND);
 if (typeof args.command !== "string") process.exit(0);
 
-// The command without heredoc bodies, quoted strings, escaped characters and comments.
-const kept = [];
-const ends = [];
-for (const line of args.command.split("\n")) {
-  if (ends.length) {
-    const end = ends[0];
-    if ((end.dash ? line.replace(/^\t+/, "") : line) === end.word) ends.shift();
-    continue;
+// One pass over the command as the shell reads it: quotes, escapes, comments, here-strings and heredoc bodies are skipped, operators are
+// whole tokens, and a command word counts only in command position (so "cat ./nohup" and "true ||/usr/bin/head" pass).
+const WORD_END = /[\s;&|<>()]/;
+const PREFIX = /^(?:[A-Za-z_][A-Za-z0-9_]*=.*|!|\{|if|then|else|elif|do|while|until|time|exec|command|env|sudo)$/;
+const text = args.command;
+const heredocs = [];
+let i = 0, word = "", inWord = false, cmdPos = true, afterPipe = false;
+const flush = () => {
+  if (!inWord) return;
+  const full = word, base = word.slice(word.lastIndexOf("/") + 1);
+  word = ""; inWord = false;
+  if (!cmdPos) return;
+  if (afterPipe && (base === "tail" || base === "head")) refuse(PIPE);
+  if (base === "nohup" || base === "disown" || base === "setsid") refuse(BACKGROUND);
+  if (!PREFIX.test(full)) { cmdPos = false; afterPipe = false; }
+};
+while (i < text.length) {
+  const c = text[i], n = text[i + 1];
+  if (c === "\\") { if (n === "\n") flush(); else { word += n ?? ""; inWord = true; } i += 2; }
+  else if (c === "'") { const e = text.indexOf("'", i + 1); if (e < 0) break; word += text.slice(i + 1, e); inWord = true; i = e + 1; }
+  else if (c === '"') { let e = i + 1; for (; e < text.length && text[e] !== '"'; e++) if (text[e] === "\\") e++; word += text.slice(i + 1, e); inWord = true; i = e + 1; }
+  else if (c === "#" && !inWord) { const e = text.indexOf("\n", i); if (e < 0) break; i = e; }
+  else if (c === "\n") {
+    flush(); i++; cmdPos = true;
+    for (const h of heredocs.splice(0)) while (i < text.length) {
+      let e = text.indexOf("\n", i); if (e < 0) e = text.length;
+      const line = text.slice(i, e); i = e + 1;
+      if ((h.dash ? line.replace(/^\t+/, "") : line) === h.word) break;
+    }
   }
-  kept.push(line);
-  for (const m of line.matchAll(/(?<!<)<<(-?)\s*(?:'([^']+)'|"([^"]+)"|\\?([A-Za-z_][A-Za-z0-9_]*))/g)) ends.push({ dash: m[1] === "-", word: m[2] ?? m[3] ?? m[4] });
+  else if (/\s/.test(c)) { flush(); i++; }
+  else if (c === "<" && text.startsWith("<<<", i)) { flush(); i += 3; }
+  else if (c === "<" && n === "<") {
+    flush(); i += 2;
+    const dash = text[i] === "-"; if (dash) i++;
+    while (text[i] === " " || text[i] === "\t") i++;
+    // A delimiter starts with a letter, underscore or quote: "$((1<<2))" is arithmetic, not a heredoc.
+    if (/[A-Za-z_'"\\]/.test(text[i] ?? "")) {
+      let w = "";
+      for (; i < text.length && !WORD_END.test(text[i]); i++) if (!/['"\\]/.test(text[i])) w += text[i];
+      heredocs.push({ dash, word: w });
+    }
+  }
+  else if (c === "|") {
+    flush(); cmdPos = true;
+    if (n === "|") { i += 2; afterPipe = false; } else { i += n === "&" ? 2 : 1; afterPipe = true; }
+  }
+  else if (c === "&") {
+    flush();
+    if (n === "&") { i += 2; cmdPos = true; afterPipe = false; }
+    else if (n === ">") i += text[i + 2] === ">" ? 3 : 2;
+    else refuse(BACKGROUND);
+  }
+  else if (c === ";") { flush(); i++; cmdPos = true; afterPipe = false; }
+  else if (c === "(") { flush(); i++; cmdPos = true; }
+  else if (c === ")") { flush(); i++; }
+  else if (c === "<" || c === ">") { flush(); i += n === "&" || (c === ">" && n === "|") ? 2 : 1; }
+  else { word += c; inWord = true; i++; }
 }
-const text = kept.join("\n");
-let bare = "";
-for (let i = 0; i < text.length; i++) {
-  const c = text[i];
-  if (c === "\\") { i++; bare += " "; }
-  else if (c === "'") { i = text.indexOf("'", i + 1); if (i < 0) break; bare += " "; }
-  else if (c === '"') { for (i++; i < text.length && text[i] !== '"'; i++) if (text[i] === "\\") i++; bare += " "; }
-  else if (c === "#" && (i === 0 || /[\s;&|(]/.test(text[i - 1]))) { const nl = text.indexOf("\n", i); if (nl < 0) break; i = nl - 1; }
-  else bare += c;
-}
-
-if (/(?<!\|)\|&?\s*(?:\S*\/)?(?:tail|head)(?![\w./-])/.test(bare)) refuse(PIPE);
-if (/(?<![&>|<])&(?![&>])/.test(bare) || /(?<![\w.-])(?:nohup|disown|setsid)(?![\w.-])/.test(bare)) refuse(BACKGROUND);
+flush();
 `;
 }
 
-/** `chief-guard.ts` for ~/.pi/agent/extensions/ (pi and OMP load it): runs guard.sh on every bash tool call and blocks on exit 2. Fails open. */
+/** `chief-guard.ts` for ~/.pi/agent/extensions/ (pi and OMP load it): runs guard.sh on every bash tool call and blocks only on exit 2 with a [chief-guard] reason. Fails open. */
 export function piExtension(guardShPath: string): string {
   return `// Chief command guard: refuses piped tail/head and background commands in Chief worker threads. Written by Chief's install.sh.
 import { spawnSync } from "node:child_process"
@@ -81,7 +116,8 @@ export default function (pi: ExtensionAPI) {
         encoding: "utf8",
         timeout: 5000,
       })
-      if (run.status === 2) return { block: true, reason: run.stderr }
+      // A shell failure (missing guard.sh exits 2 under dash) has no [chief-guard] reason and must let the command run.
+      if (run.status === 2 && run.stderr.startsWith("[chief-guard]")) return { block: true, reason: run.stderr }
     } catch {
       // fail open
     }
@@ -119,17 +155,22 @@ if (data.hooks === undefined) data.hooks = {};
 if (!data.hooks || typeof data.hooks !== "object" || Array.isArray(data.hooks)) stop("has a hooks value that is not an object");
 if (data.hooks.PreToolUse === undefined) data.hooks.PreToolUse = [];
 if (!Array.isArray(data.hooks.PreToolUse)) stop("has a hooks.PreToolUse value that is not a list");
-if (data.hooks.PreToolUse.some((entry) => { const text = JSON.stringify(entry); return text.includes(guardSh) || text.includes("chief/guard/guard.sh"); })) {
+const quote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
+const command = "/bin/sh -c '[ -f \"$0\" ] || exit 0; exec /bin/sh \"$0\"' " + quote(guardSh);
+const present = (entry) => entry && entry.matcher === "Bash" && Array.isArray(entry.hooks) && entry.hooks.some((hook) => hook && hook.type === "command" && hook.command === command);
+if (data.hooks.PreToolUse.some(present)) {
   console.log("settings.json: guard hook already present");
 } else {
-  const quote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
-  const command = "/bin/sh -c '[ -f \"$0\" ] || exit 0; exec /bin/sh \"$0\"' " + quote(guardSh);
   data.hooks.PreToolUse.push({ matcher: "Bash", hooks: [{ type: "command", command, timeout: 5 }] });
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  if (text !== null) fs.copyFileSync(file, file + ".chief-guard.bak");
-  const tmp = file + ".chief-guard.tmp";
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
-  fs.renameSync(tmp, file);
+  // Write the resolved file beside itself, so a symlinked settings.json (dotfiles checkout) stays a link; keep its mode, new files are private.
+  const target = text !== null ? fs.realpathSync(file) : file;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const mode = text !== null ? fs.statSync(target).mode & 0o777 : 0o600;
+  if (text !== null) fs.copyFileSync(target, target + ".chief-guard.bak");
+  const tmp = target + ".chief-guard.tmp";
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode });
+  fs.chmodSync(tmp, mode);
+  fs.renameSync(tmp, target);
   console.log("settings.json: added the guard hook to " + file);
 }
 JS
