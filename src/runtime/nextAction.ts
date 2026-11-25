@@ -192,37 +192,66 @@ export function createNextAction(ctx: Ctx) {
 
   const missingReportLine = (row: ManagedRow) => `Finished its turn without a chief_report. Inspect it with chief_inspect (threadId: ${row.thread_id}), then chief_continue it asking for its chief_report, or decide yourself.`;
 
-  /** A plan advisor's line: only the deciding advisor renders one, from its planner's review outcome. */
-  function planAdvisorAction(row: ManagedRow, forAlert: boolean): string | null {
-    const planner = store.get(row.plan_thread_id!);
-    if (!planner || planReview.advisors(planner.thread_id).decider?.thread_id !== row.thread_id) return null;
-    const { review } = planReview.status(planner);
-    if (review.kind === "approved") {
-      const next = nextAction(planner, forAlert);
-      return next ? `The advisor approves the plan. ${next}` : null;
+  /** A chain owner's held route: the plan's deliver, consult or complete call. A planner that went ready -> active -> idle without a new report still holds it. */
+  function plannerRoute(P: ManagedRow): string | null {
+    if (!planReview.hasPlan(P)) return null;
+    const refusal = planReviewRefusal(P);
+    if (refusal) return refusal;
+    if (P.plan_epic) return epicPlannerAction(P);
+    const waves = planWavesFor(P.thread_id);
+    const { heads, undelegated, waiting } = schedule.undelegatedHeads(P.thread_id, waves);
+    const waitingLine = waiting.length ? ` Waves ${waiting.join(", ")} are stacked and start once their parent wave is ready.` : "";
+    if (!undelegated.length) return waiting.length ? waitingLine.trim() : null;
+    if (heads.length === 1) {
+      return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${P.thread_id}, wave: 1), then chief_delegate (planThreadId: ${P.thread_id}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
     }
-    if (review.kind !== "changes") return null;
-    const line = planReviewRefusal(planner);
-    if (!line) return null;
-    return row.last_report_state === "blocked"
-      ? `Plan advisor blocked: ${clip(row.blocker ?? "", 200)}. That was the plan's one review: escalate to the user if it names a product decision, then ${line}`
-      : line;
+    return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${P.thread_id}, wave: N), then chief_delegate (planThreadId: ${P.thread_id}, wave: N), all in this turn. Each of these is an independent chain head and gets its own task title, branch, PR and worktree from its plan base (chief_forge_init derives it; omit base); its later waves continue that chain with replaces: the chain's latest worker, never a worker of another chain. The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
+  }
+
+  const blockedLine = (row: ManagedRow) => `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.`;
+
+  /** Every planner and plan-advisor row's line. planReview.owner names the chain's one owner: only it renders a line in Pending, any chain row renders the owner's line in an alert.
+   * A busy owner waits; a held result (deliver, consult or complete route) comes before the missing-Report recovery. */
+  function planChainAction(row: ManagedRow, forAlert: boolean): string | null {
+    const chain = planReview.owner(row);
+    if (!chain.owner || (!forAlert && chain.owner !== row.thread_id)) return null;
+    const owner = store.get(chain.owner);
+    if (!owner || BUSY_STATUSES.has(owner.state) || owner.state === "failed") return null;
+    switch (chain.kind) {
+      case "planning":
+      case "revising":
+      case "advising":
+        if (owner.state === "blocked") {
+          return chain.kind === "revising" ? `Blocked: ${clip(owner.blocker ?? "", 200)} — decide or escalate to the user, then chief_plan (revises: ${owner.replaces_thread_id}) with the decision in context; it gets no review.` : blockedLine(owner);
+        }
+        return ctx.turnMissingReport(owner) ? missingReportLine(owner) : null;
+      case "revise": {
+        const line = planReviewRefusal(owner);
+        const { decider } = chain;
+        if (!line) return null;
+        return decider?.last_report_state === "blocked"
+          ? `Plan advisor blocked: ${clip(decider.blocker ?? "", 200)}. That was the plan's one review: escalate to the user if it names a product decision, then ${line}`
+          : line;
+      }
+      case "consult":
+      case "approved":
+      case "plan":
+      case "revised":
+        return owner.state === "blocked" ? blockedLine(owner) : plannerRoute(owner);
+    }
   }
 
   /** A row's single pending call, reused identically in the report intake's alert and
    * chief_roster's Pending block so the two surfaces never disagree. Purely a
    * function of already-persisted row state — no new columns, no new tracking. */
   function nextAction(row: ManagedRow, forAlert = false): string | null {
-    if (row.role === "advisor" && row.plan_thread_id) return planAdvisorAction(row, forAlert);
+    if (row.role === "planner" || (row.role === "advisor" && row.plan_thread_id)) return planChainAction(row, forAlert);
     // A gate target or actor renders the gate's one line: on the gate's display target, and on any row in an alert.
     const gated = (row.role === "worker" || row.role === "reviewer") && row.state !== "complete" ? gateOf(row) : null;
     if (gated) return forAlert || displayTarget(gated.gate, (id) => store.get(id)?.state) === row.thread_id ? gateLine(gated.gate, gated.decision) : null;
     // A chat fix run gets no review: its own green run completes it.
     if (row.fix_run === "chat" && row.state === "blocked") return `Chat fix run ${row.thread_id} is blocked: ${clip(row.blocker ?? "", 200)}. Escalate to the user.`;
     if (row.fix_run === "chat" && row.state === "ready") return `Chat fix run ${row.thread_id} is ready. Complete it: chief_complete (threadId: ${row.thread_id}); it marks the pull request ready. No review.`;
-    if (row.role === "planner" && row.replaces_thread_id && row.state === "blocked") {
-      return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user, then chief_plan (revises: ${row.replaces_thread_id}) with the decision in context; it gets no review.`;
-    }
     if (row.state === "blocked" && row.role === "worker") {
       if (isWriter(row.kind)) {
         return `Spec Writer blocked: ${clip(row.blocker ?? "", 200)}. ${inPlaceLine(row)} Retry it with the fix: chief_delegate (replaces: ${row.thread_id}, kind: spec-writer); a docs/ fold conflict on the branch takes the same route${schedule.sideLane(row) ? ` (the retry gets a fresh worktree from ${row.branch})` : ""}. ${row.plan_thread_id && schedule.sideLane(row) ? "The retry gets this wave's `## Docs needed` items with the blocker; one repair per wave, not separate fix and fold writers. " : ""}If the Spec delta cannot be written: start a fresh chief_plan with ${row.plan_thread_id ? `the plan files (${planWavesFor(row.plan_thread_id).map((wave) => wave.path).join(", ")}), ` : ""}this blocked report (bb chief inspect ${row.thread_id}), branch ${row.branch ?? "none"} and the done work in context, then delegate its wave 1 with replaces: ${row.thread_id}, kind: spec-writer.`;
@@ -235,24 +264,10 @@ export function createNextAction(ctx: Ctx) {
     }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     // A design wave that went ready -> active -> idle without a new report still holds its ready report: chief_owner_approval admits it, so Pending shares its route.
-    // That approved-design route (#296) is authoritative and comes before the missing-Report recovery. Recovery covers worker rows only (Worker, Designer, Spec Writer).
+    // That approved-design route (#296) is authoritative and comes before the missing-Report recovery. Recovery here covers worker rows (Worker, Designer, Spec Writer); plan-chain rows recover in planChainAction.
     const heldDesign = row.state === "idle" && isReady(row) && schedule.isDesignWave(row);
     if (row.role === "worker" && !heldDesign && ctx.turnMissingReport(row)) return missingReportLine(row);
     if (row.state !== "ready" && !heldDesign) return null;
-    if (row.role === "planner") {
-      if (!planReview.hasPlan(row)) return null;
-      const refusal = planReviewRefusal(row);
-      if (refusal) return refusal;
-      if (row.plan_epic) return epicPlannerAction(row);
-      const waves = planWavesFor(row.thread_id);
-      const { heads, undelegated, waiting } = schedule.undelegatedHeads(row.thread_id, waves);
-      const waitingLine = waiting.length ? ` Waves ${waiting.join(", ")} are stacked and start once their parent wave is ready.` : "";
-      if (!undelegated.length) return waiting.length ? waitingLine.trim() : null;
-      if (heads.length === 1) {
-        return `Delegate wave 1 now: run chief_forge_init (planThreadId: ${row.thread_id}, wave: 1), then chief_delegate (planThreadId: ${row.thread_id}, wave: 1). The plugin supplies its plan file; do not read the plan. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
-      }
-      return `Delegate wave${undelegated.length > 1 ? "s" : ""} ${undelegated.join(", ")} now, in parallel — for each wave run chief_forge_init (planThreadId: ${row.thread_id}, wave: N), then chief_delegate (planThreadId: ${row.thread_id}, wave: N), all in this turn. Each of these is an independent chain head and gets its own task title, branch, PR and worktree from its plan base (chief_forge_init derives it; omit base); its later waves continue that chain with replaces: the chain's latest worker, never a worker of another chain. The plugin supplies each plan file; do not read the plans. Escalate to the user only for a genuine product or scope open question the planner named.${waitingLine}`;
-    }
     if (row.role === "worker") return workerReadyNextStep(row, forAlert);
     if (row.role === "advisor") {
       const advised = row.worker_thread_id ? store.get(row.worker_thread_id) : undefined;
