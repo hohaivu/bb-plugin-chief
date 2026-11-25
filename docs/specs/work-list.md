@@ -11,7 +11,7 @@ The work list is the one place where a Chief reads what is pending: the Pending 
 | Todo | A row of the `chief_todos` table. A Chief adds it with `chief_roster`'s `todo` parameter. |
 | Active Chief | A Chief row whose state is not `complete`, `archived` or `deleted` (`isActiveChief`). |
 | Sweep | The pass that completes absorbed supporting rows (`sweep`, `completeAbsorbed`). |
-| `pendingReady` | A flag in `server.ts`. The sweep starts on a store reload only after it is set. |
+| `pendingReady` | A flag in `ctx.state` (`src/runtime/context.ts`), set in `server.ts`. The sweep starts on a store reload only after it is set. |
 
 ## Baseline (behaviour at base 310043a)
 
@@ -142,21 +142,24 @@ A `chief_report` writes a `report:<active_cycle>:` key for a row with a Chief. T
 - The line tells Chief to inspect the thread, then continue it to ask for its `chief_report`, or decide itself.
 - The line stays on each read until the row reports or starts a new turn. Reason: The alert notifies Chief once. The Pending block must show open work until the cause ends.
 - A row with an earlier role-specific line shows that line, not the Missing-Report line. Reason: A role-specific line holds the recovery step for its own role.
-- A ready plan advisor shows no Missing-Report line when its planner has an approved plan and is idle without a Report. The planner's own row shows the line. Reason: The advisor's line shows the approval. The recovery step belongs to the planner's row.
+- A deciding advisor whose planner has an approved plan shows no line in Pending. The planner's own row shows the recovery step while the planner is idle without a Report. Reason: The planner's row holds the recovery step.
 - A row that reported shows no Missing-Report line. This covers `ready`, `blocked`, `complete` and an `active` report in the same cycle. Reason: An idle row that reported is not stuck.
 
 ### Precedence
 
-`nextAction` checks the rows in this order. The first route that applies wins.
+`nextAction` checks the routes of a row in this order. The first route that applies wins.
+
+A plan advisor row (one with `plan_thread_id`) takes its own route, `planAdvisorAction`. It skips the steps below.
 
 1. Earlier role-specific lines: a gate line, a chat fix run, a `blocked` row, and a researcher line. These come before the Missing-Report line.
 2. The Missing-Report line, when `turnMissingReport` is true.
 3. The ready-state routes of the row: the planner, worker, advisor and reviewer routes.
 
-Two idle rows skip step 2 and keep their route from step 3:
+Three idle rows skip step 2:
 
-- An idle design row whose latest report is `ready` keeps the approved-design route. Reason: `chief_owner_approval` admits that report. The reply and the Pending line must name the same route.
-- An idle epic planner whose report intake refuses every report keeps its decision or delivery line. The refusal covers a decided epic, a delivered revision, and a planner with an advisor in review. Reason: A new `chief_report` cannot be accepted, so a retry line would stall the epic.
+- An idle design row whose latest report is `ready` keeps the approved-design route in step 3. Reason: `chief_owner_approval` admits that report. The reply and the Pending line must name the same route.
+- An idle epic planner whose report intake refuses every report keeps its decision or delivery line in step 3. The refusal covers a decided epic, a delivered revision, and a planner with an advisor in review. Reason: A new `chief_report` cannot be accepted, so a retry line would stall the epic.
+- An idle task planner whose advisor asked for changes shows no line on its own row. Its advisor row holds the one revision call. Reason: Pending names one owner for the revision call.
 
 ### Delivered epic revision
 
@@ -172,8 +175,8 @@ An epic revision is delivered by its ready report. Reason: Report intake refuses
 A plan advisor has its own rule.
 
 - A deciding advisor shows its planner's review line, if one applies. It never shows the Missing-Report line.
-- For a `request_changes` decision, the advisor's row omits the line when the planner's own row shows the same call. The advisor's report alert and a blocked advisor's escalation keep the line. Reason: Pending names one owner for the revision call.
-- An approved plan's advisor shows the approval and the planner's next action. It shows no line while the planner is idle without a Report. Reason: The planner's row holds the recovery step.
+- For a `request_changes` decision, the advisor's row omits the line when the planner's own row shows the same call. The planner's row shows it only while the planner is ready. While the planner is idle without a Report, the advisor's row keeps the call. The advisor's report alert and a blocked advisor's escalation keep the line. Reason: Pending names one owner for the revision call.
+- An approved plan's advisor shows no line in Pending. Its report alert names the approval and the planner's next action, and shows no line while the planner is idle without a Report. Reason: The planner's own row holds the call in Pending and the recovery step while idle.
 - An advisor with no decision (`advised_at` null) shows the Missing-Report line on its own row, when its planner still waits on it. Reason: The advisor's row holds the `chief_continue` call for that advisor, so the line belongs there.
 - A stale advisor shows no line. A stale advisor is one whose planner is no longer `required` (`advisorStale` in `src/plan/planReview.ts`). Reason: `chief_continue` cannot resume a stale advisor.
 
@@ -187,9 +190,9 @@ A plan advisor has its own rule.
 
 | Item | Code |
 | --- | --- |
-| Roster Pending block | `server.ts`: `pendingBlock`, `pendingLines`, `todoLines`, `clipPendingBlock` |
+| Roster Pending block | `src/runtime/roster.ts`: `pendingBlock`, `pendingLines`, `todoLines`, `clipPendingBlock` |
 | Missing-Report line | `src/runtime/lifecycle.ts`: `turnMissingReport`. `src/runtime/nextAction.ts`: `nextAction`. `src/runtime/alerts.ts`: `stillDue` |
 | Decisions after-section | `src/runtime/decisions.ts`: `writeDecisions`. `src/tools/roster.ts` calls it for a todo-only change. |
-| Todo storage | `server.ts`: `chief_todos`, `todosForProject`, `closedTodosForProject` |
-| Chief to another Chief | `server.ts`: `handOver` |
-| Startup unpin | `server.ts`: `unpinPendingTab`, the place where `pendingReady` is set |
+| Todo storage | `src/runtime/core.ts`: `chief_todos`, `todosForProject`, `closedTodosForProject` |
+| Chief to another Chief | `src/runtime/chiefs.ts`: `handOver` |
+| Startup unpin | `src/runtime/chiefs.ts`: `unpinPendingTab`. `server.ts`: where `pendingReady` is set |
