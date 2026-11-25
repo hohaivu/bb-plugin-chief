@@ -1,5 +1,5 @@
 import { gateDecision, type GateDecision } from "../plan/planProgress";
-import { repairTarget, type ReviewGate } from "../db/threadStore";
+import { displayTarget, repairTarget, type ReviewGate } from "../db/threadStore";
 import { reviewEngine } from "../review/prAgent";
 import { createReviewStart } from "../review/reviewStart";
 import { terminal, type ManagedRow } from "../types";
@@ -231,9 +231,9 @@ export function createNextAction(ctx: Ctx) {
    * function of already-persisted row state — no new columns, no new tracking. */
   function nextAction(row: ManagedRow, forAlert = false): string | null {
     if (row.role === "advisor" && row.plan_thread_id) return planAdvisorAction(row, forAlert);
-    // A gate target or actor renders the gate's one line: on its repair target, and on any row in an alert.
+    // A gate target or actor renders the gate's one line: on the gate's display target, and on any row in an alert.
     const gated = (row.role === "worker" || row.role === "reviewer") && row.state !== "complete" ? gateOf(row) : null;
-    if (gated) return forAlert || repairTarget(gated.gate).threadId === row.thread_id ? gateLine(gated.gate, gated.decision) : null;
+    if (gated) return forAlert || displayTarget(gated.gate, (id) => store.get(id)?.state) === row.thread_id ? gateLine(gated.gate, gated.decision) : null;
     // A chat fix run gets no review: its own green run completes it.
     if (row.fix_run === "chat" && row.state === "blocked") return `Chat fix run ${row.thread_id} is blocked: ${clip(row.blocker ?? "", 200)}. Escalate to the user.`;
     if (row.fix_run === "chat" && row.state === "ready") return `Chat fix run ${row.thread_id} is ready. Complete it: chief_complete (threadId: ${row.thread_id}); it marks the pull request ready. No review.`;
