@@ -241,7 +241,7 @@ Chief can mirror its work to a task tracker. It is off by default.
 
 ## Coordinator
 
-Ask a Chief to run `/coordinator` to make it a Coordinator. The upgrade is one-way, and only a Chief that owns no open work can take it.
+Ask a Chief to make itself a Coordinator. It calls the `chief_coordinate` tool, then `chief_attach` to take child Chiefs. There is no slash command. The upgrade is one-way, and only a Chief that owns no open work can take it.
 
 - A Coordinator supervises child Chiefs in any project. It runs no planner, worker, reviewer, advisor or researcher, and `chief_plan`, `chief_delegate`, `chief_complete` and the other work tools refuse it.
 - Attach existing Chiefs the owner names with `chief_attach`. Start new ones with `chief_spawn` and `projectId`. `chief_roster` shows a Children block with each child's state and pending items.
