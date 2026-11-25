@@ -1,4 +1,4 @@
-import { commitStamp, fastForward, stampLine } from "../forge/checkoutSync";
+import { commitStamp, fastForward, pointBranchAtOrigin, stampLine } from "../forge/checkoutSync";
 import { type ManagedRow, terminal } from "../types";
 import { clip } from "../core/text";
 import { bounded } from "./exec";
@@ -109,6 +109,20 @@ export function createCheckout(ctx: Ctx) {
       return null;
     }
   }
-  return { checkoutHostSkip, freshenChiefCheckout, reportStamp, syncChiefCheckout };
+
+  /** Moves the project checkout's local `<branch>` to origin's tip before BB cuts a worktree from it. Never throws. */
+  async function syncTaskBranch(projectId: string, branch: string): Promise<void> {
+    try {
+      const skip = await checkoutHostSkip(projectId);
+      if (skip) return bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${skip}`);
+      const cwd = await ctx.projectPath(projectId);
+      if (!cwd) return bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: no checkout path`);
+      const result = await pointBranchAtOrigin({ cwd, env: forgeEnv(), branch, deadline: Date.now() + 30_000 });
+      if ("skipped" in result) bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${result.skipped}`);
+    } catch (error) {
+      bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${clip(String(error), 200)}`);
+    }
+  }
+  return { checkoutHostSkip, freshenChiefCheckout, reportStamp, syncChiefCheckout, syncTaskBranch };
 }
 

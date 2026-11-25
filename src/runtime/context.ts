@@ -166,6 +166,7 @@ export interface Ctx {
   freshenChiefCheckout: ReturnType<typeof createCheckout>["freshenChiefCheckout"];
   reportStamp: ReturnType<typeof createCheckout>["reportStamp"];
   syncChiefCheckout: ReturnType<typeof createCheckout>["syncChiefCheckout"];
+  syncTaskBranch: ReturnType<typeof createCheckout>["syncTaskBranch"];
   CLEANUP_READ_MS: ReturnType<typeof createCleanup>["CLEANUP_READ_MS"];
   observeCleanup: ReturnType<typeof createCleanup>["observeCleanup"];
   cleanupLine: ReturnType<typeof createCompletion>["cleanupLine"];

@@ -38,6 +38,42 @@ export async function fastForward(opts: { cwd: string; env: NodeJS.ProcessEnv; b
   }
 }
 
+/** Points the local `refs/heads/<branch>` at a freshly fetched `origin/<branch>`, because BB cuts a named-branch worktree from the local ref.
+ * It creates a missing ref, and moves one that is behind or that differs only by commits with no file changes (the forge's empty `Start:` commit).
+ * It leaves a ref that carries file changes, one a worktree has checked out (`git branch -f` refuses it), and any failure as `{ skipped }`.
+ * Never throws, never touches HEAD, the index or the working tree of `cwd`, never pushes. `deadline` is absolute (epoch ms). */
+export async function pointBranchAtOrigin(opts: { cwd: string; env: NodeJS.ProcessEnv; branch: string; deadline: number }): Promise<FastForward> {
+  const { branch, deadline } = opts;
+  const git = gitWithin(opts.cwd, opts.env, deadline);
+  const remote = `refs/remotes/origin/${branch}`;
+  // A non-zero exit is the answer false; only the deadline is an error.
+  const ok = (args: string[]) => git(args).then(() => true, (error: Error) => { if (error.message === "deadline") throw error; return false; });
+  let step = "";
+  try {
+    step = "git fetch failed";
+    await git(["fetch", "--no-tags", "origin", `+refs/heads/${branch}:${remote}`]);
+    step = "";
+    const to = (await git(["rev-parse", remote])).trim();
+    const from = (await git(["rev-parse", "--verify", "-q", `refs/heads/${branch}`], true)).trim();
+    if (!from) {
+      step = "git branch failed";
+      await git(["branch", branch, to]);
+      return { from: to, to };
+    }
+    if (from === to) return { from, to };
+    if (!(await ok(["merge-base", "--is-ancestor", from, to]))) {
+      const base = (await git(["merge-base", from, to])).trim();
+      if (!(await ok(["diff", "--quiet", base, from]))) return { skipped: `local ${branch} has file changes not on origin/${branch}` };
+    }
+    step = "git branch -f failed";
+    await git(["branch", "-f", branch, to]);
+    return { from, to };
+  } catch (error) {
+    if ((error as Error)?.message === "deadline") return { skipped: "timed out" };
+    return { skipped: step ? `${step}: ${oneLine(error)}` : oneLine(error) };
+  }
+}
+
 /** The commit the checkout is at and, when readable, the commit `origin/<branch>` points to now. Never throws, never changes a ref. */
 export async function commitStamp(opts: { cwd: string; env: NodeJS.ProcessEnv; branch: string; deadline: number }): Promise<{ read: string; head: string | null } | null> {
   const git = gitWithin(opts.cwd, opts.env, opts.deadline);

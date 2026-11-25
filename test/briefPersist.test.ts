@@ -298,6 +298,7 @@ describe("managedSpawn launch", () => {
       lifecycleOwner: async () => ({}),
       insertThread: () => { order.push("insert"); },
       persistBrief,
+      syncBranch: async () => undefined,
     });
     const thread = await launch(
       { execution: {}, sectionId: "sec_1" },

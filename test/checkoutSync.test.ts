@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { MERGE_MIN_MS, commitStamp, fastForward, stampLine } from "../src/forge/checkoutSync";
+import { MERGE_MIN_MS, commitStamp, fastForward, pointBranchAtOrigin, stampLine } from "../src/forge/checkoutSync";
 
 // Real git against local bare remotes in temp dirs: no network, no mocks.
 const ENV = process.env;
@@ -175,5 +175,87 @@ describe("stampLine", () => {
 
   test("an unknown head adds nothing", () => {
     expect(stampLine({ read: "a".repeat(40), head: null }, "main")).toBe(`Read at ${"a".repeat(12)}`);
+  });
+});
+
+describe("pointBranchAtOrigin", () => {
+  /** origin/feat is rewritten from c0 to a tip `tip` (one file change); the project checkout `chief` has no local feat yet. */
+  function world() {
+    const r = repos();
+    sh(r.other, "checkout", "-q", "-b", "feat", r.c0);
+    writeFileSync(join(r.other, "b.txt"), "tip\n");
+    sh(r.other, "add", "-A");
+    sh(r.other, "commit", "-q", "-m", "tip");
+    sh(r.other, "push", "-q", "origin", "HEAD:feat");
+    const tip = sh(r.other, "rev-parse", "HEAD");
+    const call = async () => {
+      const before = { head: r.head(), status: sh(r.chief, "status", "--porcelain") };
+      const result = await pointBranchAtOrigin(r.opts({ branch: "feat" } as never));
+      expect({ head: r.head(), status: sh(r.chief, "status", "--porcelain") }).toEqual(before);
+      return result;
+    };
+    const local = (branch = "feat") => sh(r.chief, "rev-parse", `refs/heads/${branch}`);
+    /** A local feat one commit past c0; `file` makes the commit change a file, else it is empty like the forge's Start commit. */
+    const localCommit = (file?: string) => {
+      sh(r.chief, "checkout", "-q", "-b", "feat", r.c0);
+      if (file) writeFileSync(join(r.chief, file), "local\n");
+      sh(r.chief, "add", "-A");
+      sh(r.chief, "commit", "-q", "--allow-empty", "-m", "Start");
+      sh(r.chief, "checkout", "-q", "main");
+    };
+    return { ...r, tip, call, local, localCommit };
+  }
+
+  test("moves a local ref that only has an empty Start commit (the observed bug) to the origin tip", async () => {
+    const w = world();
+    w.localCommit();
+    expect(w.local()).not.toBe(w.tip);
+    expect(await w.call()).toEqual({ from: expect.any(String), to: w.tip });
+    expect(w.local()).toBe(w.tip);
+  });
+
+  test("moves a local ref that is only behind", async () => {
+    const w = world();
+    sh(w.chief, "branch", "feat", w.c0);
+    expect(await w.call()).toEqual({ from: w.c0, to: w.tip });
+    expect(w.local()).toBe(w.tip);
+  });
+
+  test("creates a missing local ref at the origin tip", async () => {
+    const w = world();
+    expect(await w.call()).toEqual({ from: w.tip, to: w.tip });
+    expect(w.local()).toBe(w.tip);
+  });
+
+  test("is idempotent: a second call returns {from: T, to: T} and changes no ref", async () => {
+    const w = world();
+    await w.call();
+    expect(await w.call()).toEqual({ from: w.tip, to: w.tip });
+    expect(w.local()).toBe(w.tip);
+  });
+
+  test("leaves a local ref that carries a file change not on origin", async () => {
+    const w = world();
+    w.localCommit("mine.txt");
+    const mine = w.local();
+    expect(await w.call()).toHaveProperty("skipped");
+    expect(w.local()).toBe(mine);
+  });
+
+  test("does not move a branch that a worktree has checked out", async () => {
+    const w = world();
+    w.localCommit();
+    const start = w.local();
+    sh(w.chief, "worktree", "add", join(w.root, "wt"), "feat");
+    expect(await w.call()).toHaveProperty("skipped");
+    expect(w.local()).toBe(start);
+  });
+
+  test("leaves the local ref and skips when origin has no such branch", async () => {
+    const w = world();
+    sh(w.chief, "branch", "nope", w.c0);
+    const result = await pointBranchAtOrigin(w.opts({ branch: "nope" } as never));
+    expect(result).toHaveProperty("skipped");
+    expect(w.local("nope")).toBe(w.c0);
   });
 });
