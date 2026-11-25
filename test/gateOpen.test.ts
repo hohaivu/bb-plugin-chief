@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { repairTarget } from "../src/db/threadStore";
 import { disposals, headOf, pr, SHA_A, SHA_B, world } from "./reviewWorld";
 import { createWaveSchedule, type PlanWave } from "../src/plan/waveSchedule";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
@@ -117,6 +118,21 @@ describe("a horizontal plan's gate", () => {
     expect(JSON.parse(gateRows(w)[0].targets).map((target: { threadId: string }) => target.threadId)).toEqual(["W4", "W1", "W3"]);
   });
 
+  // Contract: the gate names the integrate worker as its repair target: the reviewer's worktree is cut from its branch, and W3, who opened the
+  // review, stays a pinned target.
+  // Regression: a caller reads the first stored target by position, or the reviewer is cut from the opener's or the contract branch.
+  test("the repair target is the integrate worker: the reviewer is cut from its branch and the opener stays pinned", async () => {
+    const waves: PlanWave[] = [{ path: "/p/plan-1.md" }, { path: "/p/plan-2.md", dependsOn: [], stackOn: 1 }, { path: "/p/plan-3.md", dependsOn: [], stackOn: 1 }, { path: "/p/plan-4.md", dependsOn: [2] }];
+    const w = world({ realPlan: true, waves, heads: Object.fromEntries([1, 2, 3, 4].map((n) => [pr(n), headOf(`feature/w${n}`, SHA_A)])) });
+    for (const n of [1, 2, 3, 4]) w.worker(`W${n}`, { prUrl: pr(n), branch: `feature/w${n}`, planWave: n });
+    w.setState("W2", "complete");
+    await w.review.startReview(w.chief, "W3");
+    const gate = w.store.gate(KEY)!;
+    expect(repairTarget(gate).threadId).toBe("W4");
+    expect(w.reviewerLaunch()!.args.environment.workspace.baseBranch).toEqual({ kind: "named", name: "feature/w4" });
+    expect(gate.targets.map((target) => target.threadId)).toEqual(expect.arrayContaining(["W3", "W1"]));
+  });
+
   // Contract: only the horizontal shape (two or more heads stacked on one wave) moves the integrate worker first; a stacked chain with a
   // single stacked head keeps wave order, so a defect in wave 1 still gets its fix on wave 1.
   // Regression: any stacked chain reorders, and the gate admits its one fix run on wave 3 instead of wave 1.
@@ -141,7 +157,7 @@ describe("a horizontal plan's gate", () => {
     await w.review.startReview(w.chief, "W5");
     const targets = JSON.parse(gateRows(w)[0].targets).map((target: { threadId: string }) => target.threadId);
     expect(targets).toEqual(["W1", "W4", "W5"]);
-    expect(w.store.gate(KEY)!.targets[0]!.threadId).toBe("W1");
+    expect(repairTarget(w.store.gate(KEY)!).threadId).toBe("W1");
   });
 });
 
