@@ -188,6 +188,40 @@ describe("missing-Report recovery precedence", () => {
     expect(refusal).toContain(revise);
   });
 
+  test("an approved epic has one Pending owner for its completion call; the advisor's alert and consult refusal keep it", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner, advisor } = await epicWithAdvisor(state, chief.threadId, "approve");
+    const complete = `chief_complete (threadId: ${planner.threadId})`;
+    const alert = state.db.prepare(`SELECT message FROM alert_outbox WHERE dedupe_key LIKE ?`).all(`${advisor.threadId}:report:%`) as { message: string }[];
+    expect(alert.some((row) => row.message.includes(complete))).toBe(true);
+    for (const idle of [false, true]) {
+      if (idle) await activeIdle(state, planner.threadId);
+      const pending = await pendingWith(state, chief.threadId, complete);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toContain(`(${planner.threadId}):`);
+    }
+    const refusal = await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Epic", mission: "Again" }, chief.threadId).then(() => "", (error: Error) => error.message);
+    expect(refusal).toContain(complete);
+  });
+
+  test("an idle task planner whose advisor requested changes has one Pending owner, the revision call; a planner with no advisor decision keeps its recovery line", async () => {
+    const state = await setup();
+    const chief = await start(state);
+    const { planner } = await planTwoWaves(state, chief.threadId);
+    await activeIdle(state, planner.threadId);
+    expect((await pendingWith(state, chief.threadId, "chief_continue")).filter((l) => recovers(l, planner.threadId))).toHaveLength(1);
+
+    await call(state, "chief_consult", { planThreadId: planner.threadId, title: "Plan", mission: "Review this plan" }, chief.threadId);
+    const advisor = (await status(state)).threads.find((row) => row.role === "advisor")!;
+    await call(state, "chief_report", { state: "ready", result: "Wave 2 is wrong.", verdict: "request_changes" }, advisor.threadId);
+    await activeIdle(state, planner.threadId);
+
+    const pending = String(await call(state, "chief_roster", {}, chief.threadId)).split("\n").filter((l) => l.startsWith("- "));
+    expect(pending.filter((l) => l.includes(`chief_plan (revises: ${planner.threadId}`))).toHaveLength(1);
+    expect(pending.filter((l) => recovers(l, planner.threadId))).toHaveLength(0);
+  });
+
   test("a delivered epic revision that goes active -> idle with no Report stays delivered in Pending, consult and revision admission", async () => {
     const state = await setup();
     const chief = await start(state);

@@ -202,8 +202,8 @@ export function createNextAction(ctx: Ctx) {
     }
     const { review } = planReview.status(planner);
     if (review.kind === "approved") {
-      // The missing-Report recovery line belongs to the idle planner's own row, not its ready advisor's.
-      if (ctx.turnMissingReport(planner)) return null;
+      // The planner's own row owns this call in Pending (and the missing-Report recovery line when idle); the advisor's report alert still carries it.
+      if (!forAlert || ctx.turnMissingReport(planner)) return null;
       const next = nextAction(planner, forAlert);
       return next ? `The advisor approves the plan. ${next}` : null;
     }
@@ -246,7 +246,9 @@ export function createNextAction(ctx: Ctx) {
     // Likewise an idle epic planner whose intake refuses every report (decided, delivered or in review) keeps its decision/delivery action: a new chief_report could not be accepted.
     const heldDesign = row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row);
     const heldEpic = row.state === "idle" && row.role === "planner" && !!row.plan_epic && !!planReview.reportRefusal(row.thread_id);
-    if (!heldDesign && !heldEpic && ctx.turnMissingReport(row)) return missingReportLine(row);
+    // A task plan whose advisor asked for changes is owned by the advisor row's chief_plan revises call, not the recovery line.
+    const reviewOwned = row.role === "planner" && !row.plan_epic && planReview.status(row).review.kind === "changes" && !!planReview.advisors(row.thread_id).decider;
+    if (!heldDesign && !heldEpic && !reviewOwned && ctx.turnMissingReport(row)) return missingReportLine(row);
     if (row.state !== "ready" && !heldDesign && !heldEpic) return null;
     if (row.role === "planner") {
       if (!planReview.hasPlan(row)) return null;
