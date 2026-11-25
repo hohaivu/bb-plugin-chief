@@ -7,7 +7,9 @@ The work list is the one place where a Chief reads what is pending: the Pending 
 | Term | Meaning |
 | --- | --- |
 | Pending block | The "Pending:" lines of `chief_roster`: threads with a next action, then open todos. |
-| Missing-Report line | The Pending line for a managed worker row (Worker, Designer or Spec Writer) whose current turn ended idle without a `chief_report`. |
+| Missing-Report line | The Pending line for a managed row whose current turn ended idle without a `chief_report`. A worker row or the owner of a plan chain can get it. |
+| Plan chain | An original planner, its plan advisors and its revisions. |
+| Owner | The one row of a plan chain that renders the chain's Pending line. |
 | Todo | A row of the `chief_todos` table. A Chief adds it with `chief_roster`'s `todo` parameter. |
 | Active Chief | A Chief row whose state is not `complete`, `archived` or `deleted` (`isActiveChief`). |
 | Sweep | The pass that completes absorbed supporting rows (`sweep`, `completeAbsorbed`). |
@@ -88,12 +90,12 @@ The work list is the one place where a Chief reads what is pending: the Pending 
 
 | Contract | Reason |
 | --- | --- |
-| The Pending block, the `todo #N` lines and the `after:` collapse line of `chief_roster` equal base for the same state, except the Missing-Report line of a worker row. With `includeOthers: true`, the "Other Chiefs' todos" section equals base too. | The roster is now the only work list. |
+| The Pending block, the `todo #N` lines and the `after:` collapse line of `chief_roster` equal base for the same state, except the Missing-Report lines and the plan-chain rules in `## Missing-Report line`. With `includeOthers: true`, the "Other Chiefs' todos" section equals base too. | The roster is now the only work list. |
 | The JSON of `bb chief status` equals base for the same state. The text of `bb chief status` equals base for the same state, except the Missing-Report line. | The CLI reads the same state. The text output prints the Pending block (`pendingLines`). The JSON output does not. |
 | `handOver` moves `chief_todos` and undelivered alerts as at base. | A successor must keep the open work. |
 | A Coordinator's roster renders a Children block. Each child entry holds that child's own Pending block. See `coordinator.md`. | A Coordinator owns no managed thread. It reads the work of its children. |
 | The Pending block of a plain Chief equals base for the same state. | The Coordinator change must not alter a plain Chief's work list. |
-| The Pending block of a planner, plan-advisor or epic-revision row equals base 37d959d for the same state. | The owner limited persistent recovery in Pending to worker rows. |
+| A plan-chain row renders a Pending line only as `### Plan chains: one owner` states. Its other Pending output equals a219693. | One owner per plan chain gives one line per chain. Reason: four selectors read the chain with different rules. |
 | `handOver` refuses to run when the previous or the next Chief is a Coordinator, and writes nothing. | A Coordinator never owns open work, todos or alerts of a superseded Chief. |
 | The sweep still runs on a store reload once `pendingReady` is set, and on `idle` and `failed` events. | The sweep completes absorbed rows. It does not depend on the panel. |
 | `pendingReady` stays, and gates the sweep only. | The sweep must not run before the plugin initialises its state. |
@@ -124,16 +126,27 @@ A Chief's decisions file lists its own open todos that wait on an `after:` condi
 
 ## Missing-Report line
 
-A managed worker row can end its turn while idle, without a `chief_report`. The Missing-Report line tells Chief that this happened. It appears in the Pending block of `chief_roster`, so Chief reads it on each roster read until the condition ends.
+A managed row can end its turn while idle, without a `chief_report`. The Missing-Report line tells Chief that this happened. It appears in the Pending block of `chief_roster`, so Chief reads it on each roster read until the condition ends.
 
-A worker row has role `worker`. Its kinds are `worker`, `designer` and `spec-writer`. Each kind can get the line.
+Two kinds of managed row can get the line:
+
+- A worker row. Its kinds are `worker`, `designer` and `spec-writer`. Each kind can get the line.
+- The owner row of a plan chain. See `### Plan chains: one owner`.
 
 ### Pending changes relative to base
 
-Base is commit 37d959d. The Missing-Report line of a worker row is the only Pending change relative to base. The contracts above that compare the Pending block with base exclude this line.
+Base for worker rows is commit 37d959d. Base for plan-chain rows is commit a219693. The contracts above that compare the Pending block with base exclude these changes.
 
 - A worker row gets the line from `nextAction` when `turnMissingReport` is true. See Pending line below.
-- Planner, plan-advisor and epic-revision rows render Pending exactly as at base 37d959d. They get no Missing-Report line. Reason: The owner limited persistent recovery in Pending to worker rows.
+- A plan-chain row changes relative to a219693 in these eight ways:
+  1. An advisor row never repeats the planner line. Only the chain owner renders a line.
+  2. A blocked advisor's text moves to the planner's `chief_plan revises` line.
+  3. An idle planner, advisor or revision without a Report gets the Missing-Report line, when it is the owner.
+  4. A reactivated delivered epic revision shows its "complete both" line when it is idle.
+  5. A busy delivered revision shows no line.
+  6. A blocked revision with an idle original shows one line, on the revision row.
+  7. An archived or deleted attempt drops out. The original owns the chain again.
+  8. `chief_consult` refuses while an idle usable advisor has no advice. This is the same rule that Pending uses.
 - The `noreport` alert and its retry check change. They are not Pending changes. See Alert below.
 - `bb chief status` prints the line in its text output, because the text output prints the same Pending block. Its JSON output does not print it.
 
@@ -160,7 +173,7 @@ A `chief_report` writes a `report:<active_cycle>:` key for a row with a Chief. T
 
 `nextAction` checks the routes of a row in this order. The first route that applies wins.
 
-A plan advisor row (one with `plan_thread_id`) takes its own route, `planAdvisorAction`. It skips the steps below.
+A plan-chain row (a planner, a plan advisor or a revision) takes `planChainAction` first. It skips the steps below.
 
 1. Earlier role-specific lines: a gate line, a chat fix run, a `blocked` row, and a researcher line.
 2. The Missing-Report line, for a worker row when `turnMissingReport` is true.
@@ -170,15 +183,75 @@ An idle design wave whose latest report is `ready` skips step 2. It keeps the ap
 
 A gated row is a worker or reviewer row that is a gate target or actor. The gate route takes precedence for every gated row. This holds even where the route emits no line. Only the gate's display target renders the gate line. Other gated rows show no line and do not fall through to Missing-Report recovery (step 2).
 
-### Plan threads
+### Plan chains: one owner
 
-Planner, plan-advisor and epic-revision rows keep the base 37d959d Pending for every state. These states show no Missing-Report line:
+A plan chain has one original planner P. Its plan advisors are the rows whose `plan_thread_id` is P. Its revisions are the planners whose `replaces_thread_id` is P. A chain is one level deep. Chief cannot consult a revision, and cannot revise a revision.
 
-- An idle planner and its idle advisor, both without a Report.
-- An idle epic revision without a Report, and its original planner.
-- A revision that became busy again after its ready report.
+`owner(row)` in `src/plan/planReview.ts` names one owner for each chain. Every row of a chain gets the same result. `planChainAction` in `src/runtime/nextAction.ts` renders the owner's line. Reason: four readers used different rules, and the advisor row repeated the planner line.
 
-The test file `test/noReportAlert.test.ts` (`plan threads keep their base Pending`) compares the whole Pending block of these states with base 37d959d. Reason: The review named these states.
+`owner`, `status`, `consultRefusal`, `revisionRefusal` and `reportRefusal` in `src/plan/planReview.ts` read the same attempts and delivered rule. Reason: one rule keeps the four readers in agreement.
+
+#### Terms
+
+| Term | Meaning |
+| --- | --- |
+| Usable row | A row whose state is not `archived` or `deleted`. |
+| Advisor attempt | The oldest usable busy advisor with no advice, else the newest usable `idle` advisor with no advice. |
+| Revision attempt | The newest usable revision that is `busy`, `idle` or `blocked` and does not deliver. |
+| Delivered revision | The newest usable revision that delivers. An epic revision delivers when its last report state is `ready`. A task revision delivers when it has stored plan waves. |
+
+- Live state never changes delivery. Reason: `last_report_state` does not change when a thread goes busy again.
+- A failed advisor, or one that `chief_stop` blocked with no advice, is not an attempt. Reason: it cannot report again, so it would hold the chain.
+
+#### Owner table
+
+The first row that matches wins.
+
+| Condition | Kind | Owner |
+| --- | --- | --- |
+| P missing or not usable | `closed` | none |
+| P complete, epic | `closed` | none |
+| P complete, task, usable delivered revision | `revised` | the delivered revision |
+| P complete, task, otherwise | `closed` | none |
+| P has no stored result | `planning` | P |
+| Review `required`, advisor attempt | `advising` | the advisor attempt |
+| Review `required`, no advisor attempt | `consult` | P |
+| Review `approved` | `approved` | P |
+| Review `changes`, delivered revision | `revised` | the delivered revision |
+| Review `changes`, revision attempt | `revising` | the revision attempt |
+| Review `changes`, no usable revision | `revise` | P, with the decider |
+| Review unset, or unrecognized | `plan` | P |
+
+#### Lines by kind
+
+Only the owner row renders a line in Pending. The lines are:
+
+- `planning`: a blocked P gets the generic blocked line. An idle P without a Report gets the Missing-Report line. Otherwise no line.
+- `advising`: an idle advisor without a Report gets the Missing-Report line. Otherwise no line.
+- `consult`, `approved`, `plan`: the planner route of P. This is the next call for P, as at a219693.
+- `revise`: the `chief_plan revises` line for P. When the decider is blocked, the line starts with the blocked advisor text.
+- `revising`: a blocked revision gets the `chief_plan revises` line for P. An idle revision without a Report gets the Missing-Report line. Otherwise no line.
+- `revised`: the planner route of the delivered revision. An epic revision gets the "complete both" line. A task revision gets the delegate-waves line.
+- `closed`: no line.
+
+#### Rules
+
+- A busy owner shows no line. Reason: Chief waits for a thread that is working.
+- A held result comes before recovery. An idle planner or delivered revision with a held result shows its route line, not the Missing-Report line. Reason: the held line names the next call.
+- An advisor row shows a line only as the `advising` owner. Reason: the advisor row would otherwise repeat the planner line.
+- A blocked advisor's text appears only in the planner's `chief_plan revises` line. Reason: the planner revises the plan.
+- In an alert, a chain row that is not the owner renders the owner's line. Reason: an advisor's ready alert still names the planner's next call.
+- A delivered revision keeps the chain when it goes busy or idle again. Reason: the delivered result stands until Chief completes it.
+- An archived or deleted row drops out. The original owns the chain again. Reason: Chief cannot act on a removed thread.
+- The planner row, not the advisor row, owns the approved or changes outcome. See [planner owns the plan outcome](../decisions/2026-11-25-planner-owns-plan-outcome.md).
+
+#### Consult and revision refusals
+
+- `chief_consult` refuses while the advisor attempt is busy or idle. For an idle attempt, the refusal names `chief_continue` for that advisor, which asks for its `chief_report`. Reason: not stated in the code.
+- `chief_plan` refuses a planner report while the advisor attempt exists. Reason: not stated in the code.
+- `chief_plan revises` refuses while a usable delivered revision exists, in any live state. Reason: the delivered result stands until Chief completes it.
+- After the delivered revision is archived or deleted, an epic original owns the chain again, and `chief_plan revises` admits a new revision. Reason: the removed revision no longer holds the result.
+- `chief_plan revises` still admits a new revision over an idle or blocked undelivered attempt. The new revision supersedes it, as at a219693. Reason: not stated in the code.
 
 ### Alert
 
@@ -189,14 +262,15 @@ The alert is separate from Pending. It reaches Chief once per turn.
 - `stillDue` in `src/runtime/alerts.ts` keeps a `noreport` retry due only while `turnMissingReport` is true for the same cycle. Reason: A retry must stop when its cause ends.
 - The retry check changed from base. At base it checked only the `idle` state. Now it also stops when the row reports in the same cycle.
 - Each cycle gets at most one `noreport` alert, because the outbox key dedupes it. Reading `chief_roster` sends no alert. Reason: The alert belongs to the end of a turn, not to a read.
-- The alert and Pending differ in scope. Every managed row with a Chief can get the alert. Only a worker row gets the Pending line.
+- The alert and Pending differ in scope. Every managed row with a Chief can get the alert. A worker row gets the Pending line. A plan-chain row gets both the alert and, as chain owner, the Pending line.
 
 ## Entry points
 
 | Item | Code |
 | --- | --- |
 | Roster Pending block | `src/runtime/roster.ts`: `pendingBlock`, `pendingLines`, `todoLines`, `clipPendingBlock` |
-| Missing-Report line | `src/runtime/lifecycle.ts`: `turnMissingReport`. `src/runtime/nextAction.ts`: `nextAction`, `missingReportLine`, `planAdvisorAction`. `src/runtime/alerts.ts`: `stillDue` |
+| Missing-Report line | `src/runtime/lifecycle.ts`: `turnMissingReport`. `src/runtime/nextAction.ts`: `nextAction`, `missingReportLine`, `planChainAction`. `src/runtime/alerts.ts`: `stillDue` |
+| Plan chain owner | `src/plan/planReview.ts`: `owner`, `status`, `advisors`, `revisions`, `consultRefusal`, `revisionRefusal`, `reportRefusal`. `src/runtime/delegation.ts`: `startPlanConsult` |
 | Decisions after-section | `src/runtime/decisions.ts`: `writeDecisions`. `src/tools/roster.ts` calls it for a todo-only change. |
 | Todo storage | `src/runtime/core.ts`: `chief_todos`, `todosForProject`, `closedTodosForProject` |
 | Chief to another Chief | `src/runtime/chiefs.ts`: `handOver` |
