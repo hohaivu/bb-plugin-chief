@@ -163,7 +163,7 @@ A `chief_report` writes a `report:<active_cycle>:` key for a row with a Chief. T
 
 ### Pending line
 
-- A worker row with `turnMissingReport` true gets a recovery line from `nextAction` (`src/runtime/nextAction.ts`), unless it is a gated row (see Precedence). A gated row gets only the gate route. `pendingLines` (`src/runtime/roster.ts`) prints that line in the Pending block.
+- A worker row with `turnMissingReport` true gets a recovery line from `nextAction` (`src/runtime/nextAction.ts`), unless it is a gated row (see Precedence). A gated row gets only the gate route, including a replacement row that inherits its chain's gate. `pendingLines` (`src/runtime/roster.ts`) prints that line in the Pending block.
 - The line tells Chief to inspect the thread, then continue it to ask for its `chief_report`, or decide itself.
 - The line stays on each read until the row reports or starts a new turn. Reason: The alert notifies Chief once. The Pending block must show open work until the cause ends.
 - A worker row with an earlier role-specific line shows that line, not the Missing-Report line. Reason: A role-specific line holds the recovery step for its own role.
@@ -181,7 +181,12 @@ A plan-chain row (a planner, a plan advisor or a revision) takes `planChainActio
 
 An idle design wave whose latest report is `ready` skips step 2. It keeps the approved-design route in step 3. Reason: `chief_owner_approval` admits that report. The reply and the Pending line must name the same route.
 
-A gated row is a worker or reviewer row that is a gate target or actor and is not `complete`. The gate route takes precedence for every gated row. This holds even where the route emits no line. In Pending, only the gate's display target renders the gate line. Other gated rows show no line and do not fall through to Missing-Report recovery (step 2). In an alert, every gated row renders the gate line.
+A gated row is a worker or reviewer row that is not `complete` and that has one of these gates:
+
+- A gate that names the row as a target or actor.
+- The newest gate of the row's replacement chain (its `replaces_thread_id` links), when that gate has no `plan_thread_id` and at least one target is not `complete`. An unplanned Spec Writer that replaces a gate target is an example. Reason: the replacement continues the gated work.
+
+The gate route takes precedence for every gated row. This holds even where the route emits no line. In Pending, only the gate's display target renders the gate line: the first target that is not `complete`. Reason: one line for each gate. Other gated rows, including replacement rows that inherit a gate, show no line and do not fall through to Missing-Report recovery (step 2). In an alert, every gated row renders the gate line, without the display-target filter.
 
 ### Plan chains: one owner
 
