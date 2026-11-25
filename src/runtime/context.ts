@@ -90,6 +90,7 @@ export interface Ctx {
   onSpecChain: ReturnType<typeof createCore>["onSpecChain"];
   pendingAlerts: ReturnType<typeof createCore>["pendingAlerts"];
   planWavesFor: ReturnType<typeof createCore>["planWavesFor"];
+  planReview: ReturnType<typeof createCore>["planReview"];
   plans: ReturnType<typeof createCore>["plans"];
   progress: ReturnType<typeof createCore>["progress"];
   reviewTargetsFor: ReturnType<typeof createCore>["reviewTargetsFor"];
@@ -155,9 +156,7 @@ export interface Ctx {
   nextAction: ReturnType<typeof createNextAction>["nextAction"];
   gateLine: ReturnType<typeof createNextAction>["gateLine"];
   gateOf: ReturnType<typeof createNextAction>["gateOf"];
-  planAdvisors: ReturnType<typeof createNextAction>["planAdvisors"];
   planReviewRefusal: ReturnType<typeof createNextAction>["planReviewRefusal"];
-  revisionsOf: ReturnType<typeof createNextAction>["revisionsOf"];
   startBranchReview: ReturnType<typeof createNextAction>["startBranchReview"];
   startReview: ReturnType<typeof createNextAction>["startReview"];
   waitIdleAfterReport: ReturnType<typeof createNextAction>["waitIdleAfterReport"];

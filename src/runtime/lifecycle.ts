@@ -55,7 +55,7 @@ export function createLifecycle(ctx: Ctx) {
   }
 
   const intake = createReportIntake({
-    db, store, ledger, lookupRow, writePlan: ctx.writePlan, writeArtifact: ctx.writeArtifact, writeAlert: ctx.writeAlert, alertChief: ctx.alertChief, enqueueVerdictComments: ctx.enqueueVerdictComments, enqueueBlockedComment: ctx.enqueueBlockedComment,
+    db, store, ledger, planReview: ctx.planReview, lookupRow, writePlan: ctx.writePlan, writeArtifact: ctx.writeArtifact, writeAlert: ctx.writeAlert, alertChief: ctx.alertChief, enqueueVerdictComments: ctx.enqueueVerdictComments, enqueueBlockedComment: ctx.enqueueBlockedComment,
     appendPlanLog: ctx.appendPlanLog, recordedCommands: (...a) => ctx.recordedCommands(...a), reportStamp: ctx.reportStamp,
     trackFiles: (row, files) => void ctx.trackerSync.attachFiles(row, files),
     actionLine: (current) => ctx.nextAction(current, true) ?? ctx.waveWaitLine(current)

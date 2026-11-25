@@ -181,13 +181,12 @@ export function createRoster(ctx: Ctx) {
     if (row.role === "advisor" && row.plan_thread_id) return [`reviews plan: ${row.plan_thread_id}`];
     if (row.role !== "planner") return [];
     const lines = row.replaces_thread_id ? [`revises: ${row.replaces_thread_id}`] : [];
-    if (!row.plan_review) return lines;
-    const { inFlight, decider } = ctx.planAdvisors(row.thread_id);
-    const revised = ctx.revisionsOf(row.thread_id).ready;
-    const status = row.plan_review === "required"
-      ? inFlight ? `in review (${inFlight.thread_id})` : "consulted, no advice"
-      : row.plan_review === "approved" ? `approved (${decider?.thread_id ?? "?"})`
-      : row.state === "complete" && revised ? `revised by ${revised.thread_id}` : `changes requested (${decider?.thread_id ?? "?"})`;
+    const { review } = ctx.planReview.status(row);
+    if (review.kind === "unreviewed") return lines;
+    const status = review.kind === "inReview" ? `in review (${review.advisor.thread_id})`
+      : review.kind === "unadvised" ? "consulted, no advice"
+      : review.kind === "approved" ? `approved (${review.decider?.thread_id ?? "?"})`
+      : row.state === "complete" && review.by ? `revised by ${review.by.thread_id}` : `changes requested (${review.decider?.thread_id ?? "?"})`;
     return [...lines, `plan review: ${status}`];
   }
 

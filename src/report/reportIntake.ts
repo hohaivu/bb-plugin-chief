@@ -8,7 +8,7 @@ import type { FailEntry, ManagedRow, ReportFinding, ReportParams } from "../type
 import type { ThreadInsert, ThreadStore } from "../db/threadStore";
 import { ALERT_MARKER_ROOM, COMMAND_EXCERPT, MAX_ALERT_LENGTH, clip, failedCommand, fitLines, recordedLines, type RecordedCommand } from "../core/text";
 import { waveTitle } from "../plan/waveSchedule";
-import { BUSY_STATUSES } from "../runtime/constants";
+import type { createPlanReview } from "../plan/planReview";
 
 type Database = ReturnType<BbPluginApi["storage"]["database"]>;
 
@@ -18,6 +18,7 @@ export interface ReportIntakeAdapters {
   db: Database;
   store: ThreadStore<ManagedRow>;
   ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets">;
+  planReview: Pick<ReturnType<typeof createPlanReview<ManagedRow>>, "reportGuard" | "reportRefusal">;
   lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInsert<ManagedRow["role"], ManagedRow["state"]> }>;
   writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string): Promise<{ path: string }[]>;
   writeArtifact(threadId: string, projectId: string, name: string, content: string): Promise<string>;
@@ -437,7 +438,7 @@ export function reportFileBody(input: {
 
 /** The one owner of chief_report acceptance and publication: required state commits first, then the optional files and the alert. */
 export function createReportIntake(adapters: ReportIntakeAdapters): { report(threadId: string, params: ReportParams, callerProjectId: string): Promise<boolean> } {
-  const { db, store, ledger, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, trackFiles, warn, event } = adapters;
+  const { db, store, ledger, planReview, lookupRow, writePlan, writeArtifact, writeAlert, alertChief, enqueueVerdictComments, enqueueBlockedComment, appendPlanLog, actionLine, recordedCommands, reportStamp, trackFiles, warn, event } = adapters;
   async function report(threadId: string, params: ReportParams, callerProjectId: string) {
     const found = await lookupRow(threadId, callerProjectId);
     // A row recovered from spawn metadata is only a candidate until the report validates: a rejection writes nothing.
@@ -474,17 +475,17 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
     // A replacement plan (or epic) would drop the live advisor's gate: refuse it before the plan files or the state change.
     // An epic has no plan payload, so any of its reports mid-review, or after the review decided it, would overwrite the reviewed result and its completion route.
     const epicReview = row.role === "planner" && !!row.plan_epic;
-    const guarded = epicReview || (plannerReady && !!planInput);
+    const guarded = planReview.reportGuard(row, plannerReady && !!planInput);
     const kind = epicReview ? "epic" : "plan";
     const advisorBusy = () => {
       if (!guarded) return;
-      // Same in-flight test as nextAction.ts planAdvisors.
-      const reviewing = store.all().find((r) => r.role === "advisor" && r.plan_thread_id === threadId && r.advised_at == null && BUSY_STATUSES.has(r.state));
-      if (reviewing) throw new Error(`chief_report was not saved: ${kind} ${threadId} is in its one advisor review (${reviewing.thread_id}); wait for its report before submitting a new ${epicReview ? "report" : "plan"}.`);
-      // A revision gets no review: its ready report is its delivery, so a later report must not replace it (a blocked attempt may still retry).
-      if (epicReview && row.replaces_thread_id && store.get(threadId)?.last_report_state === "ready") throw new Error(`chief_report was not saved: epic revision ${threadId} already delivered; its result stands. Chief completes it.`);
-      const decided = epicReview ? store.get(threadId)?.plan_review : undefined;
-      if (decided === "approved" || decided === "changes") throw new Error(`chief_report was not saved: epic ${threadId} already has its review outcome (${decided}); its result stands. Chief completes it, or revises it with chief_plan revises.`);
+      const refusal = planReview.reportRefusal(threadId);
+      if (!refusal) return;
+      switch (refusal.kind) {
+        case "inReview": throw new Error(`chief_report was not saved: ${kind} ${threadId} is in its one advisor review (${refusal.advisor.thread_id}); wait for its report before submitting a new ${epicReview ? "report" : "plan"}.`);
+        case "delivered": throw new Error(`chief_report was not saved: epic revision ${threadId} already delivered; its result stands. Chief completes it.`);
+        case "decided": throw new Error(`chief_report was not saved: epic ${threadId} already has its review outcome (${refusal.outcome}); its result stands. Chief completes it, or revises it with chief_plan revises.`);
+      }
     };
     advisorBusy();
     if (guarded && planAdmissions.has(threadId)) throw new Error(`chief_report was not saved: an advisor review of ${kind} ${threadId} is starting; wait for its report before submitting a new ${epicReview ? "report" : "plan"}.`);

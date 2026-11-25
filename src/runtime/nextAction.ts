@@ -18,7 +18,7 @@ const REVIEW_IDLE_POLL_MS = 2_000;
 const DESIGN_REVIEW_REFUSAL = "Design-only work is approved by the owner only: show the user the artboards and record their decision with chief_owner_approval.";
 
 export function createNextAction(ctx: Ctx) {
-  const { bb, db, ledger, onSpecChain, planWavesFor, progress, reviewTargetsFor, schedule, settings, specWriters, store } = ctx;
+  const { bb, db, ledger, onSpecChain, planReview, planWavesFor, progress, reviewTargetsFor, schedule, settings, specWriters, store } = ctx;
   /** The plan's Spec Writer entries still owed: delegate the one missing writer or wait for a delegated one; the review gate waits for it. */
   function writersLine(planThreadId: string | null, pending: { wave: number; writer?: ManagedRow | null }[]): string {
     return pending.map(({ wave, writer }) => writer
@@ -154,46 +154,21 @@ export function createNextAction(ctx: Ctx) {
     }
   }
 
-  /** The plan advisors of planner P, oldest first: the one in flight, the decider (first advice wins) and the newest abandoned attempt. */
-  function planAdvisors(plannerId: string) {
-    const all = store.all().filter((r) => r.role === "advisor" && r.plan_thread_id === plannerId)
-      .sort((a, b) => a.created_at - b.created_at);
-    const inFlight = all.find((r) => r.advised_at == null && BUSY_STATUSES.has(r.state));
-    const advised = all.filter((r) => r.advised_at != null);
-    const decider = advised.length ? advised.reduce((a, b) => (b.advised_at! < a.advised_at! ? b : a)) : undefined;
-    const abandoned = all.filter((r) => r.advised_at == null && r !== inFlight).at(-1);
-    return { inFlight, decider, abandoned };
-  }
-
-  /** The planners revising planner P, newest first: one still working, and the one whose plan is in. */
-  function revisionsOf(plannerId: string) {
-    const all = store.all().filter((r) => r.role === "planner" && r.replaces_thread_id === plannerId).reverse();
-    return {
-      all,
-      busy: all.find((r) => BUSY_STATUSES.has(r.state)),
-      // An epic revision delivered only with a ready report: a superseded blocked attempt is complete too.
-      ready: all.find((r) => (r.state === "ready" || r.state === "complete") && (r.plan_epic ? r.last_report_state === "ready" : !!r.plan_waves)),
-    };
-  }
-
   /** Why a planner's waves may not be forge-initialised or delegated yet, naming the one next call; null when they may. */
   function planReviewRefusal(planner: ManagedRow): string | null {
     const P = planner.thread_id;
-    if (planner.plan_epic && planner.state === "complete") return `Epic ${P} is complete: its review outcome stands. Do not consult, revise, continue or complete it again.`;
-    if (planner.plan_review === "required") {
-      const { inFlight } = planAdvisors(P);
-      if (inFlight) return `${planner.plan_epic ? "Epic" : "Plan"} ${P} is in its one advisor review (${inFlight.thread_id}): wait for ${inFlight.thread_id}'s report${planner.plan_epic ? "." : " before chief_forge_init or chief_delegate."}`;
-      return null;
-    }
-    if (planner.plan_review !== "changes") return null;
-    const revisions = revisionsOf(P);
-    if (planner.plan_epic) {
-      if (revisions.ready) return `Epic ${P} was revised by ${revisions.ready.thread_id}: tell the user ${revisions.ready.thread_id}'s epic link (bb chief inspect ${revisions.ready.thread_id}), then chief_complete (threadId: ${revisions.ready.thread_id}) and chief_complete (threadId: ${P}). Delegate nothing.`;
-      if (revisions.busy) return `Epic ${P} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}'s ready alert.`;
+    const { epic, closed, review } = planReview.status(planner);
+    if (closed) return `Epic ${P} is complete: its review outcome stands. Do not consult, revise, continue or complete it again.`;
+    if (review.kind === "inReview") return `${epic ? "Epic" : "Plan"} ${P} is in its one advisor review (${review.advisor.thread_id}): wait for ${review.advisor.thread_id}'s report${epic ? "." : " before chief_forge_init or chief_delegate."}`;
+    if (review.kind !== "changes") return null;
+    const { by, busy } = review;
+    if (epic) {
+      if (by) return `Epic ${P} was revised by ${by.thread_id}: tell the user ${by.thread_id}'s epic link (bb chief inspect ${by.thread_id}), then chief_complete (threadId: ${by.thread_id}) and chief_complete (threadId: ${P}). Delegate nothing.`;
+      if (busy) return `Epic ${P} is being revised by ${busy.thread_id}: wait for ${busy.thread_id}'s ready alert.`;
       return `The advisor requested changes to epic ${P}: chief_plan (revises: ${P}, title, mission: revise per the advisor) — the plugin attaches the planner's report and the advice; it gets no second review. Delegate nothing.`;
     }
-    if (planner.state === "complete" && revisions.ready) return `Plan ${P} was revised by ${revisions.ready.thread_id}: delegate ${revisions.ready.thread_id}'s waves instead.`;
-    if (revisions.busy) return `Plan ${P} is being revised by ${revisions.busy.thread_id}: wait for ${revisions.busy.thread_id}'s ready alert, then delegate ${revisions.busy.thread_id}'s waves.`;
+    if (review.delivered && by) return `Plan ${P} was revised by ${by.thread_id}: delegate ${by.thread_id}'s waves instead.`;
+    if (busy) return `Plan ${P} is being revised by ${busy.thread_id}: wait for ${busy.thread_id}'s ready alert, then delegate ${busy.thread_id}'s waves.`;
     return `The advisor requested changes to plan ${P}: chief_plan (revises: ${P}, title, mission: revise per the advisor) — the plugin attaches the plan files and the advice; delegate the revision's waves when its ready alert arrives; it gets no second review.`;
   }
 
@@ -202,23 +177,25 @@ export function createNextAction(ctx: Ctx) {
     const P = row.thread_id;
     const link = `the epic link from its result (bb chief inspect ${P})`;
     const never = "Do not chief_forge_init or chief_delegate: a slice becomes a task plan only on a new order.";
-    if (row.replaces_thread_id) {
-      return `Epic revision ${P} is ready; it gets no review. Tell the user ${link}, then chief_complete (threadId: ${P}) and chief_complete (threadId: ${row.replaces_thread_id}). ${never}`;
+    const { revises, review } = planReview.status(row);
+    if (revises) {
+      return `Epic revision ${P} is ready; it gets no review. Tell the user ${link}, then chief_complete (threadId: ${P}) and chief_complete (threadId: ${revises}). ${never}`;
     }
-    if (row.plan_review === "approved") return `The epic is approved. Tell the user ${link}, then chief_complete (threadId: ${P}). ${never}`;
-    if (row.plan_review === "required") return `The advisor review of epic ${P} did not report: chief_consult (planThreadId: ${P}) again, or escalate to the user.`;
+    if (review.kind === "approved") return `The epic is approved. Tell the user ${link}, then chief_complete (threadId: ${P}). ${never}`;
+    if (review.kind === "unadvised") return `The advisor review of epic ${P} did not report: chief_consult (planThreadId: ${P}) again, or escalate to the user.`;
     return `Epic ${P} is ready. Run chief_consult (planThreadId: ${P}) once for the advisor's second opinion, then tell the user ${link}. ${never}`;
   }
 
   /** A plan advisor's line: only the deciding advisor renders one, from its planner's review outcome. */
   function planAdvisorAction(row: ManagedRow, forAlert: boolean): string | null {
     const planner = store.get(row.plan_thread_id!);
-    if (!planner || planAdvisors(planner.thread_id).decider?.thread_id !== row.thread_id) return null;
-    if (planner.plan_review === "approved") {
+    if (!planner || planReview.advisors(planner.thread_id).decider?.thread_id !== row.thread_id) return null;
+    const { review } = planReview.status(planner);
+    if (review.kind === "approved") {
       const next = nextAction(planner, forAlert);
       return next ? `The advisor approves the plan. ${next}` : null;
     }
-    if (planner.plan_review !== "changes") return null;
+    if (review.kind !== "changes") return null;
     const line = planReviewRefusal(planner);
     if (!line) return null;
     return row.last_report_state === "blocked"
@@ -253,7 +230,7 @@ export function createNextAction(ctx: Ctx) {
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     if (row.state !== "ready") return null;
     if (row.role === "planner") {
-      if (!row.plan_waves && !row.plan_epic) return null;
+      if (!planReview.hasResult(row)) return null;
       const refusal = planReviewRefusal(row);
       if (refusal) return refusal;
       if (row.plan_epic) return epicPlannerAction(row);
@@ -331,6 +308,6 @@ export function createNextAction(ctx: Ctx) {
     git: { env: forgeEnv },
     engine: async () => reviewEngine(await settings.get()),
   });
-  return { busyRejection, gateLine, gateOf, gateStartLine, nextAction, planAdvisors, planReviewRefusal, revisionsOf, startBranchReview, startReview, waitIdleAfterReport, waveWaitLine, workerReadyNextStep };
+  return { busyRejection, gateLine, gateOf, gateStartLine, nextAction, planReviewRefusal, startBranchReview, startReview, waitIdleAfterReport, waveWaitLine, workerReadyNextStep };
 }
 
