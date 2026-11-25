@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { gitWithin } from "../review/impactSlice";
 
 // Node built-ins only and erasable types only, so `node` can import this file directly.
@@ -41,7 +43,8 @@ export async function fastForward(opts: { cwd: string; env: NodeJS.ProcessEnv; b
 /** Points the local `refs/heads/<branch>` at a freshly fetched `origin/<branch>`, because BB cuts a named-branch worktree from the local ref.
  * It creates a missing ref, and moves one that is behind or whose commits since the merge base leave the tree unchanged (the forge's empty `Start:` commit).
  * It leaves a ref whose tree differs, a symbolic ref, one that changed since it was validated, and any failure as `{ skipped }`.
- * The move is `git branch -f`, so git itself refuses a branch that any worktree has checked out or is rebasing. It has no old-value guard, so the ref is read again just before it.
+ * Before the write it refuses a branch that any worktree has checked out or is rebasing (the rebase state names it in head-name), because `update-ref` does not check that.
+ * The write is `git update-ref --no-deref <ref> <to> <from>`: atomic on the old value, never through a symbolic ref, and no submodule recursion (as `git branch` has).
  * The fetch writes only the remote-tracking ref and FETCH_HEAD. Never throws, never touches HEAD, the index or the working tree of `cwd`, never pushes. `deadline` is absolute (epoch ms). */
 export async function pointBranchAtOrigin(opts: { cwd: string; env: NodeJS.ProcessEnv; branch: string; deadline: number }): Promise<FastForward> {
   const { branch, deadline } = opts;
@@ -50,6 +53,19 @@ export async function pointBranchAtOrigin(opts: { cwd: string; env: NodeJS.Proce
   const local = `refs/heads/${branch}`;
   // A non-zero exit is the answer false; only the deadline is an error.
   const ok = (args: string[]) => git(args).then(() => true, (error: Error) => { if (error.message === "deadline") throw error; return false; });
+  /** Whether any worktree has the branch checked out or is mid-rebase on it (the rebase state's head-name). A worktree whose state cannot be read counts as not using it. */
+  const inUse = async () => {
+    const lines = (await git(["worktree", "list", "--porcelain"])).split("\n");
+    if (lines.includes(`branch ${local}`)) return true;
+    for (const path of lines.filter((line) => line.startsWith("worktree ")).map((line) => line.slice(9))) {
+      const inWorktree = gitWithin(path, opts.env, deadline);
+      for (const dir of ["rebase-merge", "rebase-apply"]) {
+        const file = (await inWorktree(["rev-parse", "--git-path", `${dir}/head-name`]).catch(() => "")).trim();
+        if (file && (await readFile(resolve(path, file), "utf8").catch(() => "")).trim() === local) return true;
+      }
+    }
+    return false;
+  };
   let step = "";
   try {
     step = "git fetch failed";
@@ -60,23 +76,17 @@ export async function pointBranchAtOrigin(opts: { cwd: string; env: NodeJS.Proce
     if (await ok(["symbolic-ref", "-q", local])) return { skipped: `local ${branch} is a symbolic ref` };
     const to = (await git(["rev-parse", remote])).trim();
     const from = (await git(["rev-parse", "--verify", "-q", local], true)).trim();
-    if (!from) {
-      step = "git branch failed";
-      await git(["branch", branch, to]);
-      return { from: to, to };
-    }
     if (from === to) return { from, to };
-    if (!(await ok(["merge-base", "--is-ancestor", from, to]))) {
+    if (from && !(await ok(["merge-base", "--is-ancestor", from, to]))) {
       // Tree IDs, not `git diff`: diff.ignoreSubmodules and similar config can hide a changed file or gitlink.
       const base = (await git(["merge-base", from, to])).trim();
       if ((await git(["rev-parse", `${base}^{tree}`])).trim() !== (await git(["rev-parse", `${from}^{tree}`])).trim()) return { skipped: `local ${branch} has file changes not on origin/${branch}` };
     }
-    step = "git rev-parse failed";
-    // A ref that moved, or became symbolic, after validation is left as the other writer set it. The window to the move below is one git call.
-    if ((await git(["rev-parse", "--verify", "-q", local], true)).trim() !== from || (await ok(["symbolic-ref", "-q", local]))) return { skipped: `local ${branch} changed during the sync` };
-    step = `git branch -f failed (a worktree may have ${branch} checked out or be rebasing it)`;
-    await git(["branch", "-f", branch, to]);
-    return { from, to };
+    if (from && await inUse()) return { skipped: `local ${branch} is checked out or being rebased in a worktree` };
+    step = "git update-ref failed";
+    // An empty old value means the ref must not exist yet. A ref that moved or became symbolic since validation fails the write and is left as the other writer set it.
+    await git(["update-ref", "--no-deref", local, to, from]);
+    return { from: from || to, to };
   } catch (error) {
     if ((error as Error)?.message === "deadline") return { skipped: "timed out" };
     return { skipped: step ? `${step}: ${oneLine(error)}` : oneLine(error) };

@@ -129,8 +129,8 @@ export function createCheckout(ctx: Ctx) {
     } catch (error) {
       skip = String((error as Error)?.message ?? error);
     }
-    // One line, bounded; an empty reason still warns.
-    if (skip !== null) bb.log.warn(`Task branch ${branch} not moved to origin before a worktree spawn: ${clip(skip.replace(/\s+/g, " ").trim() || "unknown error", 200)}`);
+    // The whole line (branch included) is one bounded line; an empty reason still warns.
+    if (skip !== null) bb.log.warn(clip(`Task branch ${branch} not moved to origin before a worktree spawn: ${skip.trim() || "unknown error"}`.replace(/\s+/g, " "), 400));
   }
   return { checkoutHostSkip, freshenChiefCheckout, reportStamp, syncChiefCheckout, syncTaskBranch };
 }
