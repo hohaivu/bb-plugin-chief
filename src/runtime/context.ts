@@ -209,6 +209,7 @@ export interface Ctx {
   managedRow: ReturnType<typeof createLifecycle>["managedRow"];
   reconcile: ReturnType<typeof createLifecycle>["reconcile"];
   reconcileThread: ReturnType<typeof createLifecycle>["reconcileThread"];
+  turnMissingReport: ReturnType<typeof createLifecycle>["turnMissingReport"];
   INACTIVE_CHIEF_STATES: ReturnType<typeof createRoster>["INACTIVE_CHIEF_STATES"];
   belongsToChief: ReturnType<typeof createRoster>["belongsToChief"];
   chiefStats: ReturnType<typeof createRoster>["chiefStats"];

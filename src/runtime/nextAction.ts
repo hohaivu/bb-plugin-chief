@@ -4,7 +4,7 @@ import { reviewEngine } from "../review/prAgent";
 import { createReviewStart } from "../review/reviewStart";
 import { terminal, type ManagedRow } from "../types";
 import { clip } from "../core/text";
-import { isWriter, type PlanWave } from "../plan/waveSchedule";
+import { isReady, isWriter, type PlanWave } from "../plan/waveSchedule";
 import { BUSY_STATUSES, MAX_NUDGE_LENGTH } from "./constants";
 import { bounded } from "./exec";
 import { forgeEnv, prHead } from "../forge/forge";
@@ -190,6 +190,8 @@ export function createNextAction(ctx: Ctx) {
     return `Epic ${P} is ready. Run chief_consult (planThreadId: ${P}) once for the advisor's second opinion, then tell the user ${link}. ${never}`;
   }
 
+  const missingReportLine = (row: ManagedRow) => `Finished its turn without a chief_report. Inspect it with chief_inspect (threadId: ${row.thread_id}), then chief_continue it asking for its chief_report, or decide yourself.`;
+
   /** A plan advisor's line: only the deciding advisor renders one, from its planner's review outcome. */
   function planAdvisorAction(row: ManagedRow, forAlert: boolean): string | null {
     const planner = store.get(row.plan_thread_id!);
@@ -233,7 +235,10 @@ export function createNextAction(ctx: Ctx) {
     }
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     // A design wave that went ready -> active -> idle without a new report still holds its ready report: chief_owner_approval admits it, so Pending shares its route.
-    if (row.state !== "ready" && !(row.state === "idle" && row.last_report_state === "ready" && schedule.isDesignWave(row))) return null;
+    // That approved-design route (#296) is authoritative and comes before the missing-Report recovery. Recovery covers worker rows only (Worker, Designer, Spec Writer).
+    const heldDesign = row.state === "idle" && isReady(row) && schedule.isDesignWave(row);
+    if (row.role === "worker" && !heldDesign && ctx.turnMissingReport(row)) return missingReportLine(row);
+    if (row.state !== "ready" && !heldDesign) return null;
     if (row.role === "planner") {
       if (!planReview.hasPlan(row)) return null;
       const refusal = planReviewRefusal(row);
