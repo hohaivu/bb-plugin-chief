@@ -18,7 +18,7 @@ export interface ReportIntakeAdapters {
   db: Database;
   store: ThreadStore<ManagedRow>;
   ledger: Pick<ReturnType<typeof createReviewLedger<ManagedRow>>, "recordVerdict" | "targets">;
-  planReview: Pick<ReturnType<typeof createPlanReview<ManagedRow>>, "reportGuard" | "reportRefusal">;
+  planReview: Pick<ReturnType<typeof createPlanReview<ManagedRow>>, "reportGuard" | "reportRefusal" | "clearsReview" | "completesOriginal">;
   lookupRow(threadId: string, callerProjectId: string): Promise<{ row?: ManagedRow; pending?: ThreadInsert<ManagedRow["role"], ManagedRow["state"]> }>;
   writePlan(threadId: string, projectId: string, plan: string | { body: string }[], mirrorFor?: string): Promise<{ path: string }[]>;
   writeArtifact(threadId: string, projectId: string, name: string, content: string): Promise<string>;
@@ -550,9 +550,9 @@ export function createReportIntake(adapters: ReportIntakeAdapters): { report(thr
       }
       if (plannerReady && scheduledWaves) {
         // Keep a decided review (approved/changes); reset only an unset or stale required one.
-        if (row.plan_review == null || row.plan_review === "required") store.setPlanReview(threadId, null);
+        if (planReview.clearsReview(row)) store.setPlanReview(threadId, null);
         const revised = row.replaces_thread_id ? store.get(row.replaces_thread_id) : undefined;
-        if (revised?.role === "planner" && revised.plan_review === "changes") store.completeSuperseded(revised.thread_id, now);
+        if (revised && planReview.completesOriginal(revised)) store.completeSuperseded(revised.thread_id, now);
       }
       if ((row.role === "advisor" || row.role === "reviewer") && params.state === "ready" && params.lesson) {
         // Proposed: no prompt carries it until Chief accepts it (bb chief lesson accept).

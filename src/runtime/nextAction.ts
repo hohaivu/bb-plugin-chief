@@ -230,7 +230,7 @@ export function createNextAction(ctx: Ctx) {
     if (row.state === "blocked") return `Blocked: ${clip(row.blocker ?? "", 200)} — decide or escalate to the user.${row.role === "worker" ? ` ${inPlaceLine(row)}` : ""}`;
     if (row.state !== "ready") return null;
     if (row.role === "planner") {
-      if (!planReview.hasResult(row)) return null;
+      if (!planReview.hasPlan(row)) return null;
       const refusal = planReviewRefusal(row);
       if (refusal) return refusal;
       if (row.plan_epic) return epicPlannerAction(row);

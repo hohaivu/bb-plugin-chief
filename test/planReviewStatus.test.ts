@@ -3,6 +3,7 @@ import { PLAN_FIXTURE, disposeAll, setup, start, status, wave } from "./harness"
 import { type State, plan, report, rowOf, tool } from "./flowHelpers";
 import * as sdkTesting from "@get-bb/plugin-sdk/testing";
 import { provideSdk } from "./sdk";
+import { createPlanReview } from "../src/plan/planReview";
 
 provideSdk(sdkTesting);
 vi.mock("node:child_process", async () => (await import("./execMock")).childProcessMock());
@@ -86,5 +87,35 @@ describe("planner review status", () => {
     await expect(report(state, original.threadId, { state: "ready", result: "Again.", plan: [{ body: wave(1) }] })).rejects.toThrow();
     expect(rowOf(state, original.threadId).plan_waves).toBe(waves);
     expect(state.spawned.length).toBe(launched);
+  });
+});
+
+// The module against bare rows: values the tools never write still read as main read them (baseline f639f4c).
+describe("planner review over odd rows", () => {
+  const row = (over: Record<string, unknown>) => ({ thread_id: "p", role: "planner", state: "ready", created_at: 1, plan_thread_id: null, plan_waves: null, plan_epic: null, plan_review: null, replaces_thread_id: null, last_report_state: null, advised_at: null, ...over });
+  const review = (rows: ReturnType<typeof row>[]) => createPlanReview(() => rows, (id) => rows.find((r) => r.thread_id === id), (s) => s === "active");
+  const advisor = row({ thread_id: "a", role: "advisor", state: "ready", plan_thread_id: "p", advised_at: 5 });
+
+  test("an unrecognized review value is no review outcome: no revision, no refusal line, roster keeps the changes fallback", () => {
+    const planner = row({ plan_waves: "[]", plan_review: "weird" });
+    const m = review([planner, advisor]);
+    expect(m.revisionRefusal(planner).kind).toBe("notChanges");
+    expect(m.status(planner).review.kind).toBe("unrecognized");
+    expect(m.revisionRefusal({ ...planner, plan_review: "changes" }).kind).toBe("ok");
+  });
+
+  test("an epic planner is worth a next action without a ready last report, though it has no reviewable result", () => {
+    const epic = row({ plan_epic: 1, last_report_state: null });
+    const m = review([epic]);
+    expect(m.hasPlan(epic)).toBe(true);
+    expect(m.hasResult(epic)).toBe(false);
+  });
+
+  test("a complete epic revision whose last report is blocked is not a delivered revision, even with waves", () => {
+    const epic = row({ plan_epic: 1, plan_review: "changes", state: "ready", last_report_state: "ready" });
+    const revision = row({ thread_id: "r", replaces_thread_id: "p", plan_epic: 1, plan_waves: "[]", state: "complete", last_report_state: "blocked" });
+    const m = review([epic, advisor, revision]);
+    expect(m.revisions("p").ready).toBeUndefined();
+    expect(m.revisionRefusal(epic).kind).toBe("ok");
   });
 });

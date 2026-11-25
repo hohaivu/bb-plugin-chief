@@ -31,6 +31,9 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
   /** A planner has a reviewable result: a task plan's waves, or an epic's ready report (an epic has no waves). */
   const hasResult = (planner: Row) => !!planner.plan_waves || (!!planner.plan_epic && planner.last_report_state === "ready");
 
+  /** A planner worth a next-action line: it carries a task plan's waves or is an epic, whatever its last report says. Wider than hasResult on purpose. */
+  const hasPlan = (planner: Row) => !!planner.plan_waves || !!planner.plan_epic;
+
   /** The planners revising planner P, newest first: one still working, and the one whose plan is in. */
   function revisions(plannerId: string) {
     const rows = all().filter((r) => r.role === "planner" && r.replaces_thread_id === plannerId).reverse();
@@ -38,7 +41,7 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
       all: rows,
       busy: rows.find((r) => busy(r.state)),
       // An epic revision delivered only with a ready report: a superseded blocked attempt is complete too.
-      ready: rows.find((r) => (r.state === "ready" || r.state === "complete") && hasResult(r)),
+      ready: rows.find((r) => (r.state === "ready" || r.state === "complete") && (r.plan_epic ? r.last_report_state === "ready" : !!r.plan_waves)),
     };
   }
 
@@ -47,7 +50,9 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
     | { kind: "inReview"; advisor: Row }
     | { kind: "unadvised" }
     | { kind: "approved"; decider?: Row }
-    | { kind: "changes"; decider?: Row; by?: Row; busy?: Row; delivered: boolean };
+    | { kind: "changes"; decider?: Row; by?: Row; busy?: Row; delivered: boolean }
+    // A stored value no tool writes: no refusal or next action, only the roster's changes-requested wording.
+    | { kind: "unrecognized"; decider?: Row; by?: Row };
 
   /** A planner's review state. `delivered` (changes only) is the one delivered-revision rule: an epic revision delivers with its ready report
    * and the original stays open until Chief completes both; a task revision's plan intake completes the original (completeSuperseded). */
@@ -58,6 +63,7 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
     if (!planner.plan_review) review = { kind: "unreviewed" };
     else if (planner.plan_review === "required") review = inFlight ? { kind: "inReview", advisor: inFlight } : { kind: "unadvised" };
     else if (planner.plan_review === "approved") review = { kind: "approved", decider };
+    else if (planner.plan_review !== "changes") review = { kind: "unrecognized", decider, by: revisions(planner.thread_id).ready };
     else {
       const { ready: by, busy: working } = revisions(planner.thread_id);
       review = { kind: "changes", decider, by, busy: working, delivered: epic ? !!by : planner.state === "complete" };
@@ -86,6 +92,12 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
     return { kind: "ok", decider: r.decider! } as const;
   }
 
+  /** A ready task plan clears an unset or stale `required` review; a decided one stays. */
+  const clearsReview = (planner: Row) => planner.plan_review == null || planner.plan_review === "required";
+
+  /** A task revision's ready plan completes its original only when the original's review asked for changes. */
+  const completesOriginal = (original: Row | undefined) => original?.role === "planner" && original.plan_review === "changes";
+
   /** A planner report the advisor review must guard: any epic report, or a ready report carrying a plan. */
   const reportGuard = (row: Row, readyWithPlan: boolean) => row.role === "planner" && (!!row.plan_epic || readyWithPlan);
 
@@ -104,5 +116,5 @@ export function createPlanReview<Row extends ReviewRow>(all: () => Row[], get: (
   /** An advisor whose planner no longer waits on its review (replaced or decided): it cannot be resumed. */
   const advisorStale = (advisor: Row) => !!advisor.plan_thread_id && advisor.advised_at == null && get(advisor.plan_thread_id)?.plan_review !== "required";
 
-  return { advisors, revisions, hasResult, status, consultRefusal, revisionRefusal, reportGuard, reportRefusal, advisorStale };
+  return { advisors, revisions, hasResult, hasPlan, clearsReview, completesOriginal, status, consultRefusal, revisionRefusal, reportGuard, reportRefusal, advisorStale };
 }
